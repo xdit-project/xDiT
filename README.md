@@ -4,7 +4,7 @@
 
 **[NEW!]** DistriFusion is accepted by CVPR 2024! Our code is publicly available!
 
-![teaser](./assets/teaser.jpg)
+![teaser](https://github.com/mit-han-lab/distrifuser/blob/main/assets/teaser.jpg)
 *We introduce DistriFusion, a training-free algorithm to harness multiple GPUs to accelerate diffusion model inference without sacrificing image quality. Naïve Patch (Overview (b)) suffers from the fragmentation issue due to the lack of patch interaction. The presented examples are generated with SDXL using a 50-step Euler sampler at 1280x1920 resolution, and latency is measured on A100 GPUs.*
 
 DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models</br>
@@ -13,20 +13,20 @@ MIT, Princeton, Lepton AI, and NVIDIA</br>
 In CVPR 2024.
 
 ## Overview
-![idea](./assets/idea.jpg)
+![idea](https://github.com/mit-han-lab/distrifuser/blob/main/assets/idea.jpg)
 **(a)** Original diffusion model running on a single device. **(b)** Naïvely splitting the image into 2 patches across 2 GPUs has an evident seam at the boundary due to the absence of interaction across patches. **(c)** Our DistriFusion employs synchronous communication for patch interaction at the first step. After that, we reuse the activations from the previous step via asynchronous communication. In this way, the communication overhead can be hidden into the computation pipeline.
 
 ## Performance
 ### Speedups
 
 <p align="center">
-  <img src="assets/speedups.jpg" width="80%"/>
+  <img src="https://github.com/mit-han-lab/distrifuser/blob/main/assets/speedups.jpg" width="80%"/>
 </p>Measured total latency of DistriFusion with SDXL using a 50-step DDIM sampler for generating a single image across on NVIDIA A100 GPUs. When scaling up the resolution, the GPU devices are better utilized. Remarkably, when generating 3840x3840 images, DistriFusion achieves 1.8x, 3.4x and 6.1x speedups with 2, 4, and 8 A100s, respectively.
 
 
 ### Quality
 
-![quality](./assets/quality.jpg)
+![quality](https://github.com/mit-han-lab/distrifuser/blob/main/assets/quality.jpg)
 Qualitative results of SDXL. FID is computed against the ground-truth images. Our DistriFusion can reduce the latency according to the number of used devices while preserving visual fidelity.
 
 References:
@@ -68,7 +68,7 @@ pip install -e .
 
 ### Usage Example
 
-In  [`scripts/sdxl_example.py`](./scripts/sdxl_example.py), we provide a minimal script for running [SDXL](https://huggingface.co/docs/diffusers/en/using-diffusers/sdxl) with DistriFusion. 
+In  [`scripts/sdxl_example.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/sdxl_example.py), we provide a minimal script for running [SDXL](https://huggingface.co/docs/diffusers/en/using-diffusers/sdxl) with DistriFusion. 
 
 ```python
 import torch
@@ -109,7 +109,7 @@ pip install git+https://github.com/zhijian-liu/torchprofile datasets torchmetric
 
 #### COCO Quality
 
-You can use [`scripts/generate_coco.py`](./scripts/generate_coco.py) to generate images with COCO captions. The command is
+You can use [`scripts/generate_coco.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/generate_coco.py) to generate images with COCO captions. The command is
 
 ```
 torchrun --nproc_per_node=$N_GPUS scripts/generate_coco.py --no_split_batch
@@ -124,23 +124,23 @@ where `$N_GPUS` is the number GPUs you want to use. By default, the generated re
 * `--sync_mode`: Different GroupNorm synchronization modes. By default, it is using our corrected asynchronous GroupNorm.
 * `--parallelism`: The parallelism paradigm you use. By default, it is patch parallelism. You can use `tensor` for tensor parallelism and `naive_patch` for naïve patch.
 
-After you generate all the images, you can use our script [`scripts/compute_metrics.py`](./scripts/compute_metrics.py) to calculate PSNR, LPIPS and FID. The usage is 
+After you generate all the images, you can use our script [`scripts/compute_metrics.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/compute_metrics.py) to calculate PSNR, LPIPS and FID. The usage is 
 
 ```shell
 python scripts/compute_metrics.py --input_root0 $IMAGE_ROOT0 --input_root1 $IMAGE_ROOT1
 ```
 
-where `$IMAGE_ROOT0` and `$IMAGE_ROOT1` are paths to the image folders you are trying to comparing. If `IMAGE_ROOT0` is the ground-truth foler, please add a `--is_gt` flag for resizing. We also provide a script [`scripts/dump_coco.py`](./scripts/dump_coco.py) to dump the ground-truth images.
+where `$IMAGE_ROOT0` and `$IMAGE_ROOT1` are paths to the image folders you are trying to comparing. If `IMAGE_ROOT0` is the ground-truth foler, please add a `--is_gt` flag for resizing. We also provide a script [`scripts/dump_coco.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/dump_coco.py) to dump the ground-truth images.
 
 #### Latency
 
-You can use  [`scripts/run_sdxl.py`](./scripts/run_sdxl.py) to benchmark the latency our different methods. The command is
+You can use  [`scripts/run_sdxl.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/run_sdxl.py) to benchmark the latency our different methods. The command is
 
 ```shell
 torchrun --nproc_per_node=$N_GPUS scripts/run_sdxl.py --mode benchmark --output_type latent
 ```
 
-where `$N_GPUS` is the number GPUs you want to use. Similar to [`scripts/generate_coco.py`](./scripts/generate_coco.py), you can also change some arguments:
+where `$N_GPUS` is the number GPUs you want to use. Similar to [`scripts/generate_coco.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/generate_coco.py), you can also change some arguments:
 
 * `--num_inference_steps`: The number of inference steps. We use 50 by default.
 * `--image_size`: The generated image size. By default, it is 1024x1024.

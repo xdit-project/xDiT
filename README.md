@@ -1,6 +1,6 @@
 # DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models
 
-### [Paper](https://arxiv.org/abs/2211.02048) | [Project](https://www.cs.cmu.edu/~sige/)
+### [Paper](https://arxiv.org/abs/2211.02048) | [Project](https://hanlab.mit.edu/projects/distrifusion) | [Blog](https://hanlab.mit.edu/blog/distrifusion)
 
 **[NEW!]** DistriFusion is accepted by CVPR 2024! Our code is publicly available!
 

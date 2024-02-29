@@ -21,7 +21,8 @@ In CVPR 2024.
 
 <p align="center">
   <img src="https://github.com/mit-han-lab/distrifuser/blob/main/assets/speedups.jpg" width="80%"/>
-</p>Measured total latency of DistriFusion with SDXL using a 50-step DDIM sampler for generating a single image across on NVIDIA A100 GPUs. When scaling up the resolution, the GPU devices are better utilized. Remarkably, when generating 3840x3840 images, DistriFusion achieves 1.8x, 3.4x and 6.1x speedups with 2, 4, and 8 A100s, respectively.
+</p>Measured total latency of DistriFusion with SDXL using a 50-step DDIM sampler for generating a single image across on NVIDIA A100 GPUs. When scaling up the resolution, the GPU devices are better utilized. Remarkably, when generating 3840×3840 images, DistriFusion achieves 1.8×, 3.4× and 6.1× speedups with 2, 4, and 8 A100s, respectively.
+
 
 
 ### Quality
@@ -143,7 +144,7 @@ torchrun --nproc_per_node=$N_GPUS scripts/run_sdxl.py --mode benchmark --output_
 where `$N_GPUS` is the number GPUs you want to use. Similar to [`scripts/generate_coco.py`](https://github.com/mit-han-lab/distrifuser/blob/main/scripts/generate_coco.py), you can also change some arguments:
 
 * `--num_inference_steps`: The number of inference steps. We use 50 by default.
-* `--image_size`: The generated image size. By default, it is 1024x1024.
+* `--image_size`: The generated image size. By default, it is 1024×1024.
 * `--no_split_batch`: Disable the batch splitting for classifier-free guidance.
 * `--warmup_steps`: The number of additional warmup steps (4 by default). 
 * `--sync_mode`: Different GroupNorm synchronization modes. By default, it is using our corrected asynchronous GroupNorm.

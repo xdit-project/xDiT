@@ -91,7 +91,6 @@ def main():
         use_safetensors=True,
         scheduler=scheduler,
     )
-    pipeline.prepare()
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0, position=1, leave=False)
 
     if args.output_root is None:

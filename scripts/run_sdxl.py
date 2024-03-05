@@ -109,7 +109,6 @@ def main():
         use_safetensors=True,
         scheduler=scheduler,
     )
-    pipeline.prepare()
 
     if args.mode == "generation":
         assert args.output_path is not None

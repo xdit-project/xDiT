@@ -14,6 +14,8 @@ class DistriSDXLPipeline:
 
         self.static_inputs = None
 
+        self.prepare()
+
     @staticmethod
     def from_pretrained(distri_config: DistriConfig, **kwargs):
         device = distri_config.device

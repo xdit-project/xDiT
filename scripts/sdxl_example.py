@@ -5,9 +5,11 @@ from distrifuser.utils import DistriConfig
 
 distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4)
 pipeline = DistriSDXLPipeline.from_pretrained(
-    distri_config=distri_config, pretrained_model_name_or_path="stabilityai/stable-diffusion-xl-base-1.0"
+    distri_config=distri_config,
+    pretrained_model_name_or_path="stabilityai/stable-diffusion-xl-base-1.0",
+    variant="fp16",
+    use_safetensors=True,
 )
-pipeline.prepare()
 
 pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
 image = pipeline(

@@ -1,3 +1,5 @@
 .idea
 .DS_Store
 build
+__pycache__
+distrifuser.egg-info

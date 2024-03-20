@@ -1,11 +1,13 @@
 import torch
 from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel
 
-from .models.distri_sdxl_unet_pp import DistriSDXLUNetPP
-from .models.distri_sdxl_unet_tp import DistriSDXLUNetTP
-from .models.naive_patch_sdxl import NaivePatchSDXL
-from .utils import DistriConfig, PatchParallelismCommManager
+from distrifuser.models.distri_sdxl_unet_pp import DistriSDXLUNetPP
+from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
+from distrifuser.models.naive_patch_sdxl import NaivePatchSDXL
+from distrifuser.utils import DistriConfig, PatchParallelismCommManager
+from distrifuser.logger import init_logger
 
+logger = init_logger(__name__)
 
 class DistriSDXLPipeline:
     def __init__(self, pipeline: StableDiffusionXLPipeline, module_config: DistriConfig):
@@ -22,6 +24,7 @@ class DistriSDXLPipeline:
         pretrained_model_name_or_path = kwargs.pop(
             "pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0"
         )
+        logger.info(f"Loading model from {pretrained_model_name_or_path}")
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         unet = UNet2DConditionModel.from_pretrained(
             pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="unet"

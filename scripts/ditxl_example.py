@@ -7,9 +7,13 @@ from distrifuser.utils import DistriConfig
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", default="facebook/DiT-XL-2-256", type=str, help="Path to the pretrained model.")
+    parser.add_argument("--parallelism", "-p", default="patch", type=str, choices=["patch", "naive_patch"],help="Parallelism to use.")
     args = parser.parse_args()
 
-    distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4, do_classifier_free_guidance=False, split_batch=False)
+    # for DiT the height and width are fixed according to the model
+    distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4, 
+                                 do_classifier_free_guidance=False, split_batch=False, 
+                                 parallelism=args.parallelism)
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,

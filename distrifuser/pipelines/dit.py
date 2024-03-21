@@ -4,7 +4,7 @@ from distrifuser.models.distri_transformer_2d import DistriTransformer2DModel
 
 # from distrifuser.models.distri_sdxl_unet_pp import DistriSDXLUNetPP
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
-from distrifuser.models.naive_patch_dit import NaivePatchDiT
+from distrifuser.models import NaivePatchDiT, DistriDiTPP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
 
@@ -35,18 +35,15 @@ class DistriDiTPipeline:
             pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="transformer"
         ).to(device)
 
-        transformer = NaivePatchDiT(transformer, distri_config)
-        # if distri_config.parallelism == "patch":
-        #     # unet = DistriSDXLUNetPP(unet, distri_config)
-        #     # raise ValueError("Patch parallelism is not supported for DiT")
-        #     pass
+        if distri_config.parallelism == "patch":
+            transformer = DistriDiTPP(transformer, distri_config)
         # elif distri_config.parallelism == "tensor":
         #     # unet = DistriSDXLUNetTP(unet, distri_config)
         #     raise ValueError("Tensor parallelism is not supported for DiT")
-        # elif distri_config.parallelism == "naive_patch":
-        #     unet = NaivePatchDiT(unet, distri_config)
-        # else:
-        #     raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
+        elif distri_config.parallelism == "naive_patch":
+            transformer = NaivePatchDiT(transformer, distri_config)
+        else:
+            raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
         pipeline = DiTPipeline.from_pretrained(
             pretrained_model_name_or_path, torch_dtype=torch_dtype, transformer=transformer, **kwargs

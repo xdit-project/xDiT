@@ -9,7 +9,7 @@ def main():
     parser.add_argument("--model_id", default="facebook/DiT-XL-2-256", type=str, help="Path to the pretrained model.")
     args = parser.parse_args()
 
-    distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4)
+    distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4, do_classifier_free_guidance=False, split_batch=False)
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,

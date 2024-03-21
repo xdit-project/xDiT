@@ -3,7 +3,7 @@ import torch
 from distrifuser.pipelines.dit import DistriDiTPipeline
 from distrifuser.utils import DistriConfig
 
-distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4)
+distri_config = DistriConfig(height=256, width=256, warmup_steps=4, do_classifier_free_guidance=False, split_batch=False)
 pipeline = DistriDiTPipeline.from_pretrained(
     distri_config=distri_config,
     pretrained_model_name_or_path="facebook/DiT-XL-2-256",

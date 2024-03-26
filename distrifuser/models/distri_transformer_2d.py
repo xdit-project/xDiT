@@ -1,7 +1,10 @@
+# Adapted from 
+# https://github.com/huggingface/diffusers/blob/3e1097cb63c724f5f063704df5ede8a18f472f29/src/diffusers/models/transformers/transformer_2d.py
+
 from distrifuser.logger import init_logger
 logger = init_logger(__name__)
 from diffusers import Transformer2DModel
-from diffusers.models.transformer_2d import Transformer2DModelOutput
+from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F

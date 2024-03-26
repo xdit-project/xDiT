@@ -7,6 +7,10 @@ from torch.nn import functional as F
 
 from distrifuser.modules.base_module import BaseModule
 from distrifuser.utils import DistriConfig
+from distrifuser.logger import init_logger
+logger = init_logger(__name__)
+
+from typing import Optional
 
 
 class DistriAttentionPP(BaseModule):
@@ -47,7 +51,7 @@ class DistriCrossAttentionPP(DistriAttentionPP):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor or None = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
         scale: float = 1.0,
         *args,
         **kwargs,
@@ -64,8 +68,8 @@ class DistriCrossAttentionPP(DistriAttentionPP):
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
-        args = () if USE_PEFT_BACKEND else (scale,)
-        query = attn.to_q(hidden_states, *args)
+        # args = () if USE_PEFT_BACKEND else (scale,)
+        query = attn.to_q(hidden_states)
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -109,6 +113,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         super(DistriSelfAttentionPP, self).__init__(module, distri_config)
 
     def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):
+        logger.info(f"DistriSelfAttentionPP._forward")
         attn = self.module
         distri_config = self.distri_config
         assert isinstance(attn, Attention)
@@ -117,8 +122,8 @@ class DistriSelfAttentionPP(DistriAttentionPP):
 
         batch_size, sequence_length, _ = hidden_states.shape
 
-        args = () if USE_PEFT_BACKEND else (scale,)
-        query = attn.to_q(hidden_states, *args)
+        # args = () if USE_PEFT_BACKEND else (scale,)
+        query = attn.to_q(hidden_states)
 
         encoder_hidden_states = hidden_states
 
@@ -127,6 +132,10 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         if distri_config.n_device_per_batch == 1:
             full_kv = kv
         else:
+            if self.buffer_list is None:  # buffer not created
+                logger.info(f"distri_config.mode {distri_config.mode}, self.buffer_list = None")
+            else:
+                logger.info(f"distri_config.mode {distri_config.mode}, len(self.buffer_list) {len(self.buffer_list)}")
             if self.buffer_list is None:  # buffer not created
                 full_kv = torch.cat([kv for _ in range(distri_config.n_device_per_batch)], dim=1)
             elif distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
@@ -156,7 +165,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         hidden_states = hidden_states.to(query.dtype)
 
         # linear proj
-        hidden_states = attn.to_out[0](hidden_states, *args)
+        hidden_states = attn.to_out[0](hidden_states)
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 
@@ -170,7 +179,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor or None = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
         scale: float = 1.0,
         *args,
         **kwargs,
@@ -183,7 +192,9 @@ class DistriSelfAttentionPP(DistriAttentionPP):
 
         b, l, c = hidden_states.shape
         if distri_config.n_device_per_batch > 1 and self.buffer_list is None:
+            logger.info(f"distri_config.n_device_per_batch {distri_config.n_device_per_batch}")
             if self.comm_manager.buffer_list is None:
+                logger.info(f"self.comm_manager.buffer_list is None")
                 self.idx = self.comm_manager.register_tensor(
                     shape=(b, l, self.to_kv.out_features), torch_dtype=hidden_states.dtype, layer_type="attn"
                 )

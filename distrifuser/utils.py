@@ -2,6 +2,10 @@ import torch
 from packaging import version
 from torch import distributed as dist
 
+from distrifuser.logger import init_logger
+logger = init_logger(__name__)
+
+from typing import Union, Optional
 
 def check_env():
     if version.parse(torch.version.cuda) < version.parse("11.3"):
@@ -18,7 +22,6 @@ def check_env():
 
 def is_power_of_2(n: int) -> bool:
     return (n & (n - 1) == 0) and n != 0
-
 
 class DistriConfig:
     def __init__(
@@ -95,7 +98,7 @@ class DistriConfig:
         self.batch_group = batch_group
         self.split_group = split_group
 
-    def batch_idx(self, rank: int or None = None) -> int:
+    def batch_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:
             rank = self.rank
         if self.do_classifier_free_guidance and self.split_batch:
@@ -103,7 +106,7 @@ class DistriConfig:
         else:
             return 0  # raise NotImplementedError
 
-    def split_idx(self, rank: int or None = None) -> int:
+    def split_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:
             rank = self.rank
         return rank % self.n_device_per_batch
@@ -128,7 +131,7 @@ class PatchParallelismCommManager:
         self.handles = None
 
     def register_tensor(
-        self, shape: tuple[int, ...] or list[int], torch_dtype: torch.dtype, layer_type: str = None
+        self, shape: Union[tuple[int, ...], list[int]], torch_dtype: torch.dtype, layer_type: str = None
     ) -> int:
         if self.torch_dtype is None:
             self.torch_dtype = torch_dtype
@@ -143,6 +146,7 @@ class PatchParallelismCommManager:
             if layer_type not in self.numel_dict:
                 self.numel_dict[layer_type] = 0
             self.numel_dict[layer_type] += numel
+        # logger.info(f"Register tensor with shape {shape} and numel {numel} for {layer_type}.")
 
         self.ends.append(self.numel)
         self.shapes.append(shape)

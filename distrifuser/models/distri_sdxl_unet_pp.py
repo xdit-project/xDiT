@@ -1,7 +1,7 @@
 import torch
 from diffusers import UNet2DConditionModel
 from diffusers.models.attention_processor import Attention
-from diffusers.models.unet_2d_condition import UNet2DConditionOutput
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from torch import distributed as dist, nn
 
 from .base_model import BaseModel
@@ -10,6 +10,9 @@ from distrifuser.modules.base_module import BaseModule
 from distrifuser.modules.pp.conv2d import DistriConv2dPP
 from distrifuser.modules.pp.groupnorm import DistriGroupNorm
 from ..utils import DistriConfig
+
+from distrifuser.logger import init_logger
+logger = init_logger(__name__)
 
 
 class DistriSDXLUNetPP(BaseModel):  # for Patch Parallelism

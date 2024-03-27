@@ -2,7 +2,7 @@ import torch
 from diffusers import UNet2DConditionModel
 from diffusers.models.attention import Attention, FeedForward
 from diffusers.models.resnet import ResnetBlock2D
-from diffusers.models.unet_2d_condition import UNet2DConditionOutput
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from torch import distributed as dist, nn
 
 from distrifuser.modules.base_module import BaseModule

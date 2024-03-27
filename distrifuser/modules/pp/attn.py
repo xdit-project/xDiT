@@ -7,6 +7,10 @@ from torch.nn import functional as F
 
 from distrifuser.modules.base_module import BaseModule
 from distrifuser.utils import DistriConfig
+from distrifuser.logger import init_logger
+logger = init_logger(__name__)
+
+from typing import Optional
 
 
 class DistriAttentionPP(BaseModule):
@@ -47,7 +51,7 @@ class DistriCrossAttentionPP(DistriAttentionPP):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor or None = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
         scale: float = 1.0,
         *args,
         **kwargs,
@@ -64,8 +68,8 @@ class DistriCrossAttentionPP(DistriAttentionPP):
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
-        args = () if USE_PEFT_BACKEND else (scale,)
-        query = attn.to_q(hidden_states, *args)
+        # args = () if USE_PEFT_BACKEND else (scale,)
+        query = attn.to_q(hidden_states)
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -117,11 +121,10 @@ class DistriSelfAttentionPP(DistriAttentionPP):
 
         batch_size, sequence_length, _ = hidden_states.shape
 
-        args = () if USE_PEFT_BACKEND else (scale,)
-        query = attn.to_q(hidden_states, *args)
+        # args = () if USE_PEFT_BACKEND else (scale,)
+        query = attn.to_q(hidden_states)
 
         encoder_hidden_states = hidden_states
-
         kv = self.to_kv(encoder_hidden_states)
 
         if distri_config.n_device_per_batch == 1:
@@ -156,7 +159,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         hidden_states = hidden_states.to(query.dtype)
 
         # linear proj
-        hidden_states = attn.to_out[0](hidden_states, *args)
+        hidden_states = attn.to_out[0](hidden_states)
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 
@@ -170,7 +173,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor or None = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
         scale: float = 1.0,
         *args,
         **kwargs,

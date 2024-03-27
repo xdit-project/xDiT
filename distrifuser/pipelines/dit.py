@@ -2,9 +2,8 @@ import torch
 from diffusers import DiTPipeline
 from distrifuser.models.distri_transformer_2d import DistriTransformer2DModel
 
-# from distrifuser.models.distri_sdxl_unet_pp import DistriSDXLUNetPP
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
-from distrifuser.models.naive_patch_dit import NaivePatchDiT
+from distrifuser.models import NaivePatchDiT, DistriDiTPP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
 
@@ -35,18 +34,16 @@ class DistriDiTPipeline:
             pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="transformer"
         ).to(device)
 
-        transformer = NaivePatchDiT(transformer, distri_config)
-        # if distri_config.parallelism == "patch":
-        #     # unet = DistriSDXLUNetPP(unet, distri_config)
-        #     # raise ValueError("Patch parallelism is not supported for DiT")
-        #     pass
+        if distri_config.parallelism == "patch":
+            transformer = DistriDiTPP(transformer, distri_config)
         # elif distri_config.parallelism == "tensor":
         #     # unet = DistriSDXLUNetTP(unet, distri_config)
         #     raise ValueError("Tensor parallelism is not supported for DiT")
-        # elif distri_config.parallelism == "naive_patch":
-        #     unet = NaivePatchDiT(unet, distri_config)
-        # else:
-        #     raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
+        elif distri_config.parallelism == "naive_patch":
+            logger.info("Using naive patch parallelism")
+            transformer = NaivePatchDiT(transformer, distri_config)
+        else:
+            raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
         pipeline = DiTPipeline.from_pretrained(
             pretrained_model_name_or_path, torch_dtype=torch_dtype, transformer=transformer, **kwargs
@@ -74,9 +71,9 @@ class DistriDiTPipeline:
         width = distri_config.width
         assert height % 8 == 0 and width % 8 == 0
 
-        original_size = (height, width)
-        target_size = (height, width)
-        crops_coords_top_left = (0, 0)
+        # original_size = (height, width)
+        # target_size = (height, width)
+        # crops_coords_top_left = (0, 0)
 
         device = distri_config.device
 
@@ -86,8 +83,21 @@ class DistriDiTPipeline:
 
         t = torch.zeros([batch_size], device=device, dtype=torch.long)
 
+        guidance_scale = 4.0
+        latent_size = pipeline.transformer.config.sample_size
+        latent_channels = pipeline.transformer.config.in_channels
+        latents = torch.zeros([batch_size, latent_channels, latent_size, latent_size], 
+                              device=device, dtype=pipeline.transformer.dtype)
+        class_labels = torch.tensor([0], device=device).reshape(-1)
+        class_null = torch.tensor([1000] * batch_size, device=device)
+        class_labels_input = torch.cat([class_labels, class_null], 0) if guidance_scale > 1 else class_labels
+        latent_model_input = torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
+        logger.info(f"latent_model_input.shape {latent_model_input.shape}")
+        logger.info(f"class_labels_input.shape {class_labels_input.shape}")
         # static_inputs["hidden_states"] = latents
-        # static_inputs["timestep"] = t
+        static_inputs["hidden_states"] = latent_model_input
+        static_inputs["timestep"] = t
+        static_inputs["class_labels"] = class_labels_input
         # static_inputs["encoder_hidden_states"] = prompt_embeds
         # static_inputs["added_cond_kwargs"] = added_cond_kwargs
 
@@ -99,12 +109,12 @@ class DistriDiTPipeline:
 
             # Only used for creating the communication buffer
             pipeline.transformer.set_counter(0)
-            # pipeline.transformer(**static_inputs, return_dict=False)
+            pipeline.transformer(**static_inputs, return_dict=False)
             if comm_manager.numel > 0:
                 comm_manager.create_buffer()
 
         # Pre-run
-        pipeline.transformer.set_counter(0)
+        # pipeline.transformer.set_counter(0)
         # pipeline.transformer(**static_inputs, return_dict=False)
 
         # self.static_inputs = static_inputs

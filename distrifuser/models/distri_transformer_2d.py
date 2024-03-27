@@ -1,13 +1,49 @@
+# Adapted from 
+# https://github.com/huggingface/diffusers/blob/3e1097cb63c724f5f063704df5ede8a18f472f29/src/diffusers/models/transformers/transformer_2d.py
+
 from distrifuser.logger import init_logger
 logger = init_logger(__name__)
 from diffusers import Transformer2DModel
-from diffusers.models.transformer_2d import Transformer2DModelOutput
+from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F
+from torch import distributed as dist
 from torch import nn
 
 class DistriTransformer2DModel(Transformer2DModel):
+    distri_config = None
+    output_buffer = None
+    buffer_list = None
+    def _forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+        cross_attention_kwargs: Dict[str, Any] = None,
+    ):
+        assert encoder_hidden_states is None
+        assert encoder_attention_mask is None
+        assert attention_mask is None
+        assert cross_attention_kwargs is None
+    
+
+
+        for block in self.transformer_blocks:
+            hidden_states = block(
+                hidden_states,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                cross_attention_kwargs=cross_attention_kwargs,
+                class_labels=class_labels,
+            )
+        return hidden_states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -121,40 +157,43 @@ class DistriTransformer2DModel(Transformer2DModel):
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
 
-        for block in self.transformer_blocks:
-            if self.training and self.gradient_checkpointing:
+        distri_config = self.distri_config
+        if distri_config is not None:
+            logger.debug(f"hidden_states.shape {hidden_states.shape}")
+            b, c, h = hidden_states.shape
+            sliced_hidden_states = hidden_states.view(b, distri_config.n_device_per_batch, -1, h)[
+                :, distri_config.split_idx()
+            ]
+            logger.debug(f"sliced_hidden_states.shape {sliced_hidden_states.shape}")
+            output = self._forward(
+                hidden_states=sliced_hidden_states,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                class_labels=class_labels,
+                cross_attention_kwargs=cross_attention_kwargs,
+            )
+            logger.debug(f"output.shape {output.shape}")
+            if self.output_buffer is None:
+                self.output_buffer = torch.empty((b, c, h), device=output.device, dtype=output.dtype)
+            if self.buffer_list is None:
+                self.buffer_list = [torch.empty_like(output.view(-1)) for _ in range(distri_config.world_size)]
+            dist.all_gather(self.buffer_list, output.contiguous().view(-1), async_op=False)
+            buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
+            torch.cat(buffer_list, dim=1, out=self.output_buffer)
+            hidden_states = self.output_buffer
 
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    attention_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    timestep,
-                    cross_attention_kwargs,
-                    class_labels,
-                    **ckpt_kwargs,
-                )
-            else:
-                hidden_states = block(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    timestep=timestep,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    class_labels=class_labels,
-                )
+        else:
+            hidden_states = self._forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                class_labels=class_labels,
+                cross_attention_kwargs=cross_attention_kwargs,
+            )
 
         # 3. Output
         if self.is_input_continuous:

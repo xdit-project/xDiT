@@ -8,9 +8,42 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F
+from torch import distributed as dist
 from torch import nn
 
 class DistriTransformer2DModel(Transformer2DModel):
+    distri_config = None
+    output_buffer = None
+    buffer_list = None
+    def _forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+        cross_attention_kwargs: Dict[str, Any] = None,
+    ):
+        assert encoder_hidden_states is None
+        assert encoder_attention_mask is None
+        assert attention_mask is None
+        assert cross_attention_kwargs is None
+    
+
+
+        for block in self.transformer_blocks:
+            hidden_states = block(
+                hidden_states,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                cross_attention_kwargs=cross_attention_kwargs,
+                class_labels=class_labels,
+            )
+        return hidden_states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -124,15 +157,42 @@ class DistriTransformer2DModel(Transformer2DModel):
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
 
-        for block in self.transformer_blocks:
-            hidden_states = block(
-                hidden_states,
+        distri_config = self.distri_config
+        if distri_config is not None:
+            logger.debug(f"hidden_states.shape {hidden_states.shape}")
+            b, c, h = hidden_states.shape
+            sliced_hidden_states = hidden_states.view(b, distri_config.n_device_per_batch, -1, h)[
+                :, distri_config.split_idx()
+            ]
+            logger.debug(f"sliced_hidden_states.shape {sliced_hidden_states.shape}")
+            output = self._forward(
+                hidden_states=sliced_hidden_states,
                 attention_mask=attention_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 timestep=timestep,
-                cross_attention_kwargs=cross_attention_kwargs,
                 class_labels=class_labels,
+                cross_attention_kwargs=cross_attention_kwargs,
+            )
+            logger.debug(f"output.shape {output.shape}")
+            if self.output_buffer is None:
+                self.output_buffer = torch.empty((b, c, h), device=output.device, dtype=output.dtype)
+            if self.buffer_list is None:
+                self.buffer_list = [torch.empty_like(output.view(-1)) for _ in range(distri_config.world_size)]
+            dist.all_gather(self.buffer_list, output.contiguous().view(-1), async_op=False)
+            buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
+            torch.cat(buffer_list, dim=1, out=self.output_buffer)
+            hidden_states = self.output_buffer
+
+        else:
+            hidden_states = self._forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                class_labels=class_labels,
+                cross_attention_kwargs=cross_attention_kwargs,
             )
 
         # 3. Output

@@ -16,24 +16,20 @@ logger = init_logger(__name__)
 
 from typing import Optional, Dict, Any
 
-
 class DistriDiTPP(BaseModel):  # for Patch Parallelism
     def __init__(self, model: DistriTransformer2DModel, distri_config: DistriConfig):
         assert isinstance(model, DistriTransformer2DModel)
-        logger.info(f"DistriDiTPP: distri_config {distri_config}")
         if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
-            logger.info("Wrapping model with DistriDiTPP")
             for name, module in model.named_modules():
                 if isinstance(module, BaseModule):
                     continue
                 for subname, submodule in module.named_children():
                     if isinstance(submodule, nn.Conv2d):
                         pass
-                        # kernel_size = submodule.kernel_size
                         # if kernel_size == (1, 1) or kernel_size == 1:
                         #     continue
                         # wrapped_submodule = DistriConv2dPP(
-                        #     submodule, distri_config, is_first_layer=subname == "conv_in"
+                        #     submodule, distri_config, is_first_layer=True
                         # )
                         # setattr(module, subname, wrapped_submodule)
                     elif isinstance(submodule, Attention):
@@ -43,9 +39,7 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                             assert subname == "attn2"
                             wrapped_submodule = DistriCrossAttentionPP(submodule, distri_config)
                         setattr(module, subname, wrapped_submodule)
-                    elif isinstance(submodule, nn.GroupNorm):
-                        wrapped_submodule = DistriGroupNorm(submodule, distri_config)
-                        setattr(module, subname, wrapped_submodule)
+        model.distri_config = distri_config
         super(DistriDiTPP, self).__init__(model, distri_config)
 
     def forward(
@@ -77,59 +71,17 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
             # and encoder_attention_mask is not None
         )
 
-        if distri_config.world_size == 1:
-            output = self.model(
-                hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                timestep=timestep,
-                added_cond_kwargs=added_cond_kwargs,
-                class_labels=class_labels,
-                cross_attention_kwargs=cross_attention_kwargs,
-                attention_mask=attention_mask,
-                encoder_attention_mask=encoder_attention_mask,
-                return_dict=False,
-            )[0] # [2, 8, 32, 32]
-        else:
-
-            if distri_config.split_scheme == "row":
-                split_dim = 2
-            elif distri_config.split_scheme == "col":
-                split_dim = 3
-            elif distri_config.split_scheme == "alternate":
-                split_dim = 2 if self.counter % 2 == 0 else 3
-            else:
-                raise NotImplementedError
-
-            if split_dim == 2:
-                sliced_hidden_states = hidden_states.view(b, c, distri_config.n_device_per_batch, -1, w)[
-                    :, :, distri_config.split_idx()
-                ]
-            else:
-                assert split_dim == 3
-                sliced_hidden_states = hidden_states.view(b, c, h, distri_config.n_device_per_batch, -1)[
-                    ..., distri_config.split_idx(), :
-                ]
-            # logger.info(f"sliced_hidden_states.shape {sliced_hidden_states.shape}") # [2, 4, 16, 32]
-            output = self.model(
-                hidden_states=sliced_hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                timestep=timestep,
-                added_cond_kwargs=added_cond_kwargs,
-                class_labels=class_labels,
-                cross_attention_kwargs=cross_attention_kwargs,
-                attention_mask=attention_mask,
-                encoder_attention_mask=encoder_attention_mask,
-                return_dict=False,
-            )[0]
-
-            if self.output_buffer is None:
-                self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
-            if self.buffer_list is None:
-                self.buffer_list = [torch.empty_like(output.view(-1)) for _ in range(distri_config.world_size)]
-            dist.all_gather(self.buffer_list, output.contiguous().view(-1), async_op=False)
-            buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
-            torch.cat(buffer_list, dim=split_dim, out=self.output_buffer)
-            output = self.output_buffer
+        output = self.model(
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            timestep=timestep,
+            added_cond_kwargs=added_cond_kwargs,
+            class_labels=class_labels,
+            cross_attention_kwargs=cross_attention_kwargs,
+            attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
+            return_dict=False,
+        )[0] # [2, 8, 32, 32]
 
         if return_dict:
             output = Transformer2DModelOutput(sample=output)

@@ -1,6 +1,6 @@
 import torch
-from distrifuser.models.distri_transformer_2d import DistriTransformer2DModel
-from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
+from distrifuser.modules.pp import DistriTransformer2DModel
+from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput, Transformer2DModel
 from torch import distributed as dist
 
 from .base_model import BaseModel
@@ -10,10 +10,9 @@ logger = init_logger(__name__)
 
 from typing import Optional, Dict, Any
 
-
 class NaivePatchDiT(BaseModel):  # for Patch Parallelism
-    def __init__(self, model: DistriTransformer2DModel, distri_config: DistriConfig):
-        assert isinstance(model, DistriTransformer2DModel)
+    def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
+        model = DistriTransformer2DModel(model, distri_config)
         super(NaivePatchDiT, self).__init__(model, distri_config)
 
     def forward(

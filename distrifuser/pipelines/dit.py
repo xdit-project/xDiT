@@ -1,6 +1,6 @@
 import torch
 from diffusers import DiTPipeline
-from distrifuser.models.distri_transformer_2d import DistriTransformer2DModel
+from diffusers.models.transformers.transformer_2d import Transformer2DModel
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
 from distrifuser.models import NaivePatchDiT, DistriDiTPP
@@ -13,8 +13,12 @@ class DistriDiTPipeline:
     def __init__(self, pipeline: DiTPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
 
-        assert module_config.do_classifier_free_guidance == False
-        assert module_config.split_batch == False
+        # assert module_config.do_classifier_free_guidance == False
+        # assert module_config.split_batch == False
+        if module_config.do_classifier_free_guidance or module_config.split_batch:
+            logger.warning("Setting do_classifier_free_guidance and split_batch to False")
+            module_config.do_classifier_free_guidance = False
+            module_config.split_batch = False
 
         self.distri_config = module_config
 
@@ -30,7 +34,7 @@ class DistriDiTPipeline:
         )
         logger.info(f"Loading model from {pretrained_model_name_or_path}")
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
-        transformer = DistriTransformer2DModel.from_pretrained(
+        transformer = Transformer2DModel.from_pretrained(
             pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="transformer"
         ).to(device)
 

@@ -3,3 +3,6 @@
 build
 __pycache__
 distrifuser.egg-info
+*.png
+*.log
+*.txt

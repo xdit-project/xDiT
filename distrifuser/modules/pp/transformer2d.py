@@ -9,12 +9,50 @@ from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F
 from torch import distributed as dist
-from torch import nn
+from distrifuser.modules.base_module import BaseModule 
+from distrifuser.utils import DistriConfig
 
-class DistriTransformer2DModel(Transformer2DModel):
-    distri_config = None
-    output_buffer = None
-    buffer_list = None
+class DistriTransformer2DModel(BaseModule):
+    def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
+        super().__init__(module, distri_config)
+        logger.info(f"config : {module.config}")
+        logger.info(f"module : {module.__dict__.keys()}")
+        # for k, v in module.__dict__.items():
+            # if not k.startswith("_"):
+                # setattr(self, k, v)
+                # logger.info(f"{k}")
+        # logger.info(f"module {module}")
+        # logger.info(f"module.__dict__ {module.__dict__.keys()}")
+        self.config = module.config
+        self.transformer_blocks = module.transformer_blocks
+        self.is_input_continuous = module.is_input_continuous
+        self.is_input_vectorized = module.is_input_vectorized
+        self.is_input_patches = module.is_input_patches
+        assert (self.is_input_continuous == False and 
+            self.is_input_vectorized == False and
+            self.is_input_patches == True)
+ 
+        self.norm = getattr(module, 'norm', None)
+        self.proj_in = getattr(module, 'proj_in', None)
+        self.proj_out = getattr(module, 'proj_out', None)
+        self.proj_out_1 = getattr(module, 'proj_out_1', None)
+        self.proj_out_2 = getattr(module, 'proj_out_2', None)
+        self.norm_out = getattr(module, 'norm_out', None)
+        self.out = getattr(module, 'out', None)
+        self.latent_image_embedding = getattr(module, 'latent_image_embedding', None)
+        self.caption_projection = module.caption_projection
+        self.pos_embed = module.pos_embed
+        self.adaln_single = module.adaln_single
+        self.use_additional_conditions = module.use_additional_conditions
+        logger.info(f"module.use_linear_projection {module.use_linear_projection}")
+        self.use_linear_projection = module.use_linear_projection
+        logger.info(f"module.is_input_continuous {module.is_input_continuous}")
+        
+        self.patch_size = module.patch_size
+        self.out_channels = module.out_channels
+        self.scale_shift_table = getattr(module, 'scale_shift_table', None)
+
+
     def _forward(
         self,
         hidden_states: torch.Tensor,
@@ -30,8 +68,6 @@ class DistriTransformer2DModel(Transformer2DModel):
         assert attention_mask is None
         assert cross_attention_kwargs is None
     
-
-
         for block in self.transformer_blocks:
             hidden_states = block(
                 hidden_states,
@@ -158,13 +194,11 @@ class DistriTransformer2DModel(Transformer2DModel):
             encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
 
         distri_config = self.distri_config
-        if distri_config is not None:
-            logger.debug(f"hidden_states.shape {hidden_states.shape}")
+        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1 and distri_config.parallelism == "patch":
             b, c, h = hidden_states.shape
             sliced_hidden_states = hidden_states.view(b, distri_config.n_device_per_batch, -1, h)[
                 :, distri_config.split_idx()
             ]
-            logger.debug(f"sliced_hidden_states.shape {sliced_hidden_states.shape}")
             output = self._forward(
                 hidden_states=sliced_hidden_states,
                 attention_mask=attention_mask,
@@ -174,16 +208,12 @@ class DistriTransformer2DModel(Transformer2DModel):
                 class_labels=class_labels,
                 cross_attention_kwargs=cross_attention_kwargs,
             )
-            logger.debug(f"output.shape {output.shape}")
-            if self.output_buffer is None:
-                self.output_buffer = torch.empty((b, c, h), device=output.device, dtype=output.dtype)
+            
             if self.buffer_list is None:
                 self.buffer_list = [torch.empty_like(output.view(-1)) for _ in range(distri_config.world_size)]
             dist.all_gather(self.buffer_list, output.contiguous().view(-1), async_op=False)
             buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
-            torch.cat(buffer_list, dim=1, out=self.output_buffer)
-            hidden_states = self.output_buffer
-
+            hidden_states = torch.cat(buffer_list, dim=1)
         else:
             hidden_states = self._forward(
                 hidden_states=hidden_states,

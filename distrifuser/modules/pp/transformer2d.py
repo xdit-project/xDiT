@@ -15,8 +15,6 @@ from distrifuser.utils import DistriConfig
 class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
         super().__init__(module, distri_config)
-        logger.info(f"config : {module.config}")
-        logger.info(f"module : {module.__dict__.keys()}")
         # for k, v in module.__dict__.items():
             # if not k.startswith("_"):
                 # setattr(self, k, v)
@@ -44,9 +42,7 @@ class DistriTransformer2DModel(BaseModule):
         self.pos_embed = module.pos_embed
         self.adaln_single = module.adaln_single
         self.use_additional_conditions = module.use_additional_conditions
-        logger.info(f"module.use_linear_projection {module.use_linear_projection}")
         self.use_linear_projection = module.use_linear_projection
-        logger.info(f"module.is_input_continuous {module.is_input_continuous}")
         
         self.patch_size = module.patch_size
         self.out_channels = module.out_channels

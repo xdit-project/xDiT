@@ -13,12 +13,12 @@ class DistriDiTPipeline:
     def __init__(self, pipeline: DiTPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
 
-        # assert module_config.do_classifier_free_guidance == False
-        # assert module_config.split_batch == False
-        if module_config.do_classifier_free_guidance or module_config.split_batch:
-            logger.warning("Setting do_classifier_free_guidance and split_batch to False")
-            module_config.do_classifier_free_guidance = False
-            module_config.split_batch = False
+        assert module_config.do_classifier_free_guidance == False
+        assert module_config.split_batch == False
+        # if module_config.do_classifier_free_guidance or module_config.split_batch:
+            # logger.warning("Setting do_classifier_free_guidance and split_batch to False")
+            # module_config.do_classifier_free_guidance = False
+            # module_config.split_batch = False
 
         self.distri_config = module_config
 
@@ -32,7 +32,6 @@ class DistriDiTPipeline:
         pretrained_model_name_or_path = kwargs.pop(
             "pretrained_model_name_or_path", "facebook/DiT-XL-2-256"
         )
-        logger.info(f"Loading model from {pretrained_model_name_or_path}")
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         transformer = Transformer2DModel.from_pretrained(
             pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="transformer"
@@ -96,8 +95,8 @@ class DistriDiTPipeline:
         class_null = torch.tensor([1000] * batch_size, device=device)
         class_labels_input = torch.cat([class_labels, class_null], 0) if guidance_scale > 1 else class_labels
         latent_model_input = torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
-        logger.info(f"latent_model_input.shape {latent_model_input.shape}")
-        logger.info(f"class_labels_input.shape {class_labels_input.shape}")
+        # logger.info(f"latent_model_input.shape {latent_model_input.shape}")
+        # logger.info(f"class_labels_input.shape {class_labels_input.shape}")
         # static_inputs["hidden_states"] = latents
         static_inputs["hidden_states"] = latent_model_input
         static_inputs["timestep"] = t

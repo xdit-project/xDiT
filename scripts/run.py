@@ -6,12 +6,14 @@ import torch
 from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from tqdm import trange
 
-from distrifuser.pipelines import DistriSDXLPipeline
+from distrifuser.pipelines import DistriSDXLPipeline, DistriDiTPipeline
 from distrifuser.utils import DistriConfig
 
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit"])
+    parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-256")
     parser.add_argument(
         "--mode",
         type=str,
@@ -24,12 +26,13 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt", type=str, default="Astronaut in a jungle, cold color palette, muted colors, detailed, 8k"
     )
+    parser.add_argument("--labels", type=str, nargs="+", default=['panda'])
     parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps")
     parser.add_argument("--image_size", type=int, nargs="*", default=1024, help="Image size of generation")
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument("--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"])
-    parser.add_argument("--seed", type=int, default=1234, help="Random seed")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     # DistriFuser specific arguments
     parser.add_argument(
@@ -84,16 +87,17 @@ def main():
     distri_config = DistriConfig(
         height=args.image_size[0],
         width=args.image_size[1],
-        do_classifier_free_guidance=args.guidance_scale > 1,
-        split_batch=not args.no_split_batch,
+        do_classifier_free_guidance=args.guidance_scale > 1 if args.pipeline != "dit" else False,
+        split_batch= not args.no_split_batch if args.pipeline != "dit" else False, 
         warmup_steps=args.warmup_steps,
         mode=args.sync_mode,
-        use_cuda_graph=not args.no_cuda_graph,
+        # use_cuda_graph=not args.no_cuda_graph,
         parallelism=args.parallelism,
         split_scheme=args.split_scheme,
     )
 
-    pretrained_model_name_or_path = "stabilityai/stable-diffusion-xl-base-1.0"
+    # pretrained_model_name_or_path = "stabilityai/stable-diffusion-xl-base-1.0"
+    pretrained_model_name_or_path = args.model_path
     if args.scheduler == "euler":
         scheduler = EulerDiscreteScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
     elif args.scheduler == "dpm-solver":
@@ -102,19 +106,32 @@ def main():
         scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
     else:
         raise NotImplementedError
-    pipeline = DistriSDXLPipeline.from_pretrained(
-        pretrained_model_name_or_path=pretrained_model_name_or_path,
-        distri_config=distri_config,
-        variant="fp16",
-        use_safetensors=True,
-        scheduler=scheduler,
-    )
+    
+    if args.pipeline == "dit":
+        pipeline = DistriDiTPipeline.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            distri_config=distri_config,
+            # variant="fp16",
+            # use_safetensors=True,
+            scheduler=scheduler,
+        ) 
+        input = {'words': args.labels}
+    
+    elif args.pipeline == "sdxl":
+        pipeline = DistriSDXLPipeline.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            distri_config=distri_config,
+            variant="fp16",
+            use_safetensors=True,
+            scheduler=scheduler,
+        )
+        input = {'prompt': args.prompt}
 
     if args.mode == "generation":
         assert args.output_path is not None
         pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
         image = pipeline(
-            prompt=args.prompt,
+            **input,
             generator=torch.Generator(device="cuda").manual_seed(args.seed),
             num_inference_steps=args.num_inference_steps,
             guidance_scale=args.guidance_scale,
@@ -125,7 +142,7 @@ def main():
         pipeline.set_progress_bar_config(position=1, desc="Generation", leave=False, disable=distri_config.rank != 0)
         for i in trange(args.warmup_times, position=0, desc="Warmup", leave=False, disable=distri_config.rank != 0):
             pipeline(
-                prompt=args.prompt,
+                **input,
                 generator=torch.Generator(device="cuda").manual_seed(args.seed),
                 num_inference_steps=args.num_inference_steps,
                 guidance_scale=args.guidance_scale,
@@ -136,7 +153,7 @@ def main():
         for i in trange(args.test_times, position=0, desc="Test", leave=False, disable=distri_config.rank != 0):
             start_time = time.time()
             pipeline(
-                prompt=args.prompt,
+                **input,
                 generator=torch.Generator(device="cuda").manual_seed(args.seed),
                 num_inference_steps=args.num_inference_steps,
                 guidance_scale=args.guidance_scale,

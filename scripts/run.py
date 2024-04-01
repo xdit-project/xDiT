@@ -115,7 +115,7 @@ def main():
             # use_safetensors=True,
             scheduler=scheduler,
         ) 
-        input = {'words': args.labels}
+        prompt = args.labels
     
     elif args.pipeline == "sdxl":
         pipeline = DistriSDXLPipeline.from_pretrained(
@@ -125,13 +125,13 @@ def main():
             use_safetensors=True,
             scheduler=scheduler,
         )
-        input = {'prompt': args.prompt}
+        prompt = args.prompt
 
     if args.mode == "generation":
         assert args.output_path is not None
         pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
         image = pipeline(
-            **input,
+            prompt,
             generator=torch.Generator(device="cuda").manual_seed(args.seed),
             num_inference_steps=args.num_inference_steps,
             guidance_scale=args.guidance_scale,

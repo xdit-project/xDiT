@@ -31,5 +31,5 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(args.output_root, "images"), exist_ok=True)
 
     # dataset = load_dataset("HuggingFaceM4/COCO", name="2014_captions", split="validation")
-    for i, image in enumerate(tqdm(dataset["image"][:1000])):
+    for i, image in enumerate(tqdm(dataset["image"][:10000])):
         image.save(os.path.join(args.output_root, "images", f"{i:04}.png"))

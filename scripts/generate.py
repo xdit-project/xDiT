@@ -23,7 +23,7 @@ def get_args() -> argparse.Namespace:
 
     # DistriFuser specific arguments
     parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit"])
-    parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-512")
+    parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-256")
     parser.add_argument(
         "--no_split_batch", action="store_true", help="Disable the batch splitting for classifier-free guidance"
     )
@@ -132,7 +132,7 @@ def main():
         start_idx = args.split[0] * chunk_size
         end_idx = min((args.split[0] + 1) * chunk_size, 5000)
     else:
-        start_idx = 500 
+        start_idx = 0 
         end_idx = 1000
 
     for i in trange(start_idx, end_idx, disable=distri_config.rank != 0, position=0, leave=False):
@@ -149,7 +149,6 @@ def main():
             guidance_scale=args.guidance_scale,
         ).images[0]
         if distri_config.rank == 0:
-            logger.info(f"Saving image {i}")
             output_path = os.path.join(args.output_root, f"{i:04d}.png")
             image.save(output_path)
 

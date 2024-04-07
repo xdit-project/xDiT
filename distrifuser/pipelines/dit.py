@@ -6,6 +6,7 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModel
 from distrifuser.models import NaivePatchDiT, DistriDiTPP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
+from typing import Union, List
 
 logger = init_logger(__name__)
 
@@ -54,12 +55,24 @@ class DistriDiTPipeline:
         return DistriDiTPipeline(pipeline, distri_config)
 
     def set_progress_bar_config(self, **kwargs):
-        pass
+        self.pipeline.set_progress_bar_config(**kwargs)
 
     @torch.no_grad()
-    def __call__(self, words, *args, **kwargs):
-        class_ids = self.pipeline.get_label_ids(words)
+    def __call__(self, prompt : Union[List[str], str, List[int], int], *args, **kwargs):
         self.pipeline.transformer.set_counter(0)
+        if isinstance(prompt, str):
+            class_ids = self.pipeline.get_label_ids([prompt])
+        elif isinstance(prompt, int):
+            class_ids = [prompt]
+        elif isinstance(prompt, list):
+            if isinstance(prompt[0], str):
+                class_ids = self.pipeline.get_label_ids(prompt)
+            elif isinstance(prompt[0], int):
+                class_ids = prompt
+            else:
+                raise ValueError("Invalid prompt type")
+        else:
+            raise ValueError("Invalid prompt type")
         return self.pipeline(class_labels=class_ids, *args, **kwargs)
 
     @torch.no_grad()

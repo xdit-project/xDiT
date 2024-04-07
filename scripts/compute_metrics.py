@@ -71,21 +71,21 @@ if __name__ == "__main__":
 
     # make a json file
 
-    progress_bar = tqdm(dataloader)
-    with torch.inference_mode():
-        for i, batch in enumerate(progress_bar):
-            # to cuda
-            batch = [img.to("cuda") for img in batch]
-            batch_size = batch[0].shape[0]
-            psnr_score = psnr(batch[0], batch[1])
-            if not torch.isnan(psnr_score) and not torch.isinf(psnr_score):
-                psnr_metric.update(psnr(batch[0], batch[1]).item(), batch_size)
-            else:
-                print(i)
-                print("PSNR is nan or inf")
-            lpips_metric.update(lpips(batch[0] / 255, batch[1] / 255).item(), batch_size)
+    # progress_bar = tqdm(dataloader)
+    # with torch.inference_mode():
+    #     for i, batch in enumerate(progress_bar):
+    #         # to cuda
+    #         batch = [img.to("cuda") for img in batch]
+    #         batch_size = batch[0].shape[0]
+    #         psnr_score = psnr(batch[0], batch[1])
+    #         if not torch.isnan(psnr_score) and not torch.isinf(psnr_score):
+    #             psnr_metric.update(psnr(batch[0], batch[1]).item(), batch_size)
+    #         else:
+    #             print(i)
+    #             print("PSNR is nan or inf")
+    #         lpips_metric.update(lpips(batch[0] / 255, batch[1] / 255).item(), batch_size)
     fid_score = fid.compute_fid(args.input_root0, args.input_root1)
 
-    print("PSNR:", psnr_metric.compute().item())
-    print("LPIPS:", lpips_metric.compute().item())
+    # print("PSNR:", psnr_metric.compute().item())
+    # print("LPIPS:", lpips_metric.compute().item())
     print("FID:", fid_score)

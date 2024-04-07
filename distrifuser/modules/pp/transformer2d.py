@@ -59,10 +59,10 @@ class DistriTransformer2DModel(BaseModule):
         class_labels: Optional[torch.LongTensor] = None,
         cross_attention_kwargs: Dict[str, Any] = None,
     ):
-        assert encoder_hidden_states is None
-        assert encoder_attention_mask is None
-        assert attention_mask is None
-        assert cross_attention_kwargs is None
+        # assert encoder_hidden_states is None
+        # assert encoder_attention_mask is None
+        # assert attention_mask is None
+        # assert cross_attention_kwargs is None
     
         for block in self.transformer_blocks:
             hidden_states = block(

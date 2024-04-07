@@ -15,39 +15,7 @@ from distrifuser.utils import DistriConfig
 class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
         super().__init__(module, distri_config)
-        # for k, v in module.__dict__.items():
-            # if not k.startswith("_"):
-                # setattr(self, k, v)
-                # logger.info(f"{k}")
-        # logger.info(f"module {module}")
-        # logger.info(f"module.__dict__ {module.__dict__.keys()}")
         self.config = module.config
-        self.transformer_blocks = module.transformer_blocks
-        self.is_input_continuous = module.is_input_continuous
-        self.is_input_vectorized = module.is_input_vectorized
-        self.is_input_patches = module.is_input_patches
-        assert (self.is_input_continuous == False and 
-            self.is_input_vectorized == False and
-            self.is_input_patches == True)
- 
-        self.norm = getattr(module, 'norm', None)
-        self.proj_in = getattr(module, 'proj_in', None)
-        self.proj_out = getattr(module, 'proj_out', None)
-        self.proj_out_1 = getattr(module, 'proj_out_1', None)
-        self.proj_out_2 = getattr(module, 'proj_out_2', None)
-        self.norm_out = getattr(module, 'norm_out', None)
-        self.out = getattr(module, 'out', None)
-        self.latent_image_embedding = getattr(module, 'latent_image_embedding', None)
-        self.caption_projection = module.caption_projection
-        self.pos_embed = module.pos_embed
-        self.adaln_single = module.adaln_single
-        self.use_additional_conditions = module.use_additional_conditions
-        self.use_linear_projection = module.use_linear_projection
-        
-        self.patch_size = module.patch_size
-        self.out_channels = module.out_channels
-        self.scale_shift_table = getattr(module, 'scale_shift_table', None)
-
 
     def _forward(
         self,
@@ -59,12 +27,9 @@ class DistriTransformer2DModel(BaseModule):
         class_labels: Optional[torch.LongTensor] = None,
         cross_attention_kwargs: Dict[str, Any] = None,
     ):
-        assert encoder_hidden_states is None
-        assert encoder_attention_mask is None
-        assert attention_mask is None
-        assert cross_attention_kwargs is None
-    
-        for block in self.transformer_blocks:
+        module = self.module
+
+        for block in module.transformer_blocks:
             hidden_states = block(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -126,6 +91,8 @@ class DistriTransformer2DModel(BaseModule):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+        module = self.module
+
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
                 logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
@@ -153,40 +120,40 @@ class DistriTransformer2DModel(BaseModule):
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
-        if self.is_input_continuous:
+        if module.is_input_continuous:
             batch, _, height, width = hidden_states.shape
             residual = hidden_states
 
-            hidden_states = self.norm(hidden_states)
-            if not self.use_linear_projection:
-                hidden_states = self.proj_in(hidden_states)
+            hidden_states = module.norm(hidden_states)
+            if not module.use_linear_projection:
+                hidden_states = module.proj_in(hidden_states)
                 inner_dim = hidden_states.shape[1]
                 hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
             else:
                 inner_dim = hidden_states.shape[1]
                 hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
-                hidden_states = self.proj_in(hidden_states)
+                hidden_states = module.proj_in(hidden_states)
 
-        elif self.is_input_vectorized:
-            hidden_states = self.latent_image_embedding(hidden_states)
-        elif self.is_input_patches:
-            height, width = hidden_states.shape[-2] // self.patch_size, hidden_states.shape[-1] // self.patch_size
-            hidden_states = self.pos_embed(hidden_states)
+        elif module.is_input_vectorized:
+            hidden_states = module.latent_image_embedding(hidden_states)
+        elif module.is_input_patches:
+            height, width = hidden_states.shape[-2] // module.patch_size, hidden_states.shape[-1] // module.patch_size
+            hidden_states = module.pos_embed(hidden_states)
 
-            if self.adaln_single is not None:
-                if self.use_additional_conditions and added_cond_kwargs is None:
+            if module.adaln_single is not None:
+                if module.use_additional_conditions and added_cond_kwargs is None:
                     raise ValueError(
                         "`added_cond_kwargs` cannot be None when using additional conditions for `adaln_single`."
                     )
                 batch_size = hidden_states.shape[0]
-                timestep, embedded_timestep = self.adaln_single(
+                timestep, embedded_timestep = module.adaln_single(
                     timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype
                 )
 
         # 2. Blocks
-        if self.caption_projection is not None:
+        if module.is_input_patches and module.caption_projection is not None:
             batch_size = hidden_states.shape[0]
-            encoder_hidden_states = self.caption_projection(encoder_hidden_states)
+            encoder_hidden_states = module.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
 
         distri_config = self.distri_config
@@ -222,54 +189,52 @@ class DistriTransformer2DModel(BaseModule):
             )
 
         # 3. Output
-        if self.is_input_continuous:
-            if not self.use_linear_projection:
+        if module.is_input_continuous:
+            if not module.use_linear_projection:
                 hidden_states = hidden_states.reshape(batch, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
-                hidden_states = self.proj_out(hidden_states)
+                hidden_states = module.proj_out(hidden_states)
             else:
-                hidden_states = self.proj_out(hidden_states)
+                hidden_states = module.proj_out(hidden_states)
                 hidden_states = hidden_states.reshape(batch, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
 
             output = hidden_states + residual
-        elif self.is_input_vectorized:
-            hidden_states = self.norm_out(hidden_states)
-            logits = self.out(hidden_states)
-            # (batch, self.num_vector_embeds - 1, self.num_latent_pixels)
+        elif module.is_input_vectorized:
+            hidden_states = module.norm_out(hidden_states)
+            logits = module.out(hidden_states)
+            # (batch, module.num_vector_embeds - 1, self.num_latent_pixels)
             logits = logits.permute(0, 2, 1)
 
             # log(p(x_0))
             output = F.log_softmax(logits.double(), dim=1).float()
 
-        if self.is_input_patches:
-            if self.config.norm_type != "ada_norm_single":
-                conditioning = self.transformer_blocks[0].norm1.emb(
+        if module.is_input_patches:
+            if module.config.norm_type != "ada_norm_single":
+                conditioning = module.transformer_blocks[0].norm1.emb(
                     timestep, class_labels, hidden_dtype=hidden_states.dtype
                 )
-                shift, scale = self.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
-                hidden_states = self.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
-                hidden_states = self.proj_out_2(hidden_states)
-            elif self.config.norm_type == "ada_norm_single":
-                shift, scale = (self.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, dim=1)
-                hidden_states = self.norm_out(hidden_states)
+                shift, scale = module.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
+                hidden_states = module.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
+                hidden_states = module.proj_out_2(hidden_states)
+            elif module.config.norm_type == "ada_norm_single":
+                shift, scale = (module.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, dim=1)
+                hidden_states = module.norm_out(hidden_states)
                 # Modulation
                 hidden_states = hidden_states * (1 + scale) + shift
-                hidden_states = self.proj_out(hidden_states)
+                hidden_states = module.proj_out(hidden_states)
                 hidden_states = hidden_states.squeeze(1)
 
             # unpatchify
-            # if self.adaln_single is None:
-                # height = width = int(hidden_states.shape[1] ** 0.5)
-            # logger.info(f"hidden_states.shape {hidden_states.shape}") # [2, 256, 32] => [2, 128, 32]
+            if module.adaln_single is None:
+                height = width = int(hidden_states.shape[1] ** 0.5)
             hidden_states = hidden_states.reshape(
-                shape=(-1, height, width, self.patch_size, self.patch_size, self.out_channels)
+                shape=(-1, height, width, module.patch_size, module.patch_size, module.out_channels)
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
-                shape=(-1, self.out_channels, height * self.patch_size, width * self.patch_size)
+                shape=(-1, module.out_channels, height * module.patch_size, width * module.patch_size)
             )
 
         if not return_dict:
             return (output,)
 
         return Transformer2DModelOutput(sample=output)
-    

@@ -3,7 +3,10 @@
 
 from distrifuser.logger import init_logger
 logger = init_logger(__name__)
-from diffusers import Transformer2DModel
+
+# from diffusers import Transformer2DModel
+from distrifuser.models.diffusers.transformers_2d import Transformer2DModel
+
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from typing import Optional, Dict, Any
 import torch

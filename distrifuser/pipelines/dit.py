@@ -1,6 +1,11 @@
 import torch
 from diffusers import DiTPipeline
-from diffusers.models.transformers.transformer_2d import Transformer2DModel
+# lib impl
+# from diffusers.models.transformers.transformer_2d import Transformer2DModel
+
+# customized impl
+from distrifuser.models.diffusers.transformers_2d import Transformer2DModel
+
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
 from distrifuser.models import NaivePatchDiT, DistriDiTPP
@@ -39,6 +44,7 @@ class DistriDiTPipeline:
         ).to(device)
 
         if distri_config.parallelism == "patch":
+            logger.info("Using patch parallelism")
             transformer = DistriDiTPP(transformer, distri_config)
         # elif distri_config.parallelism == "tensor":
         #     # unet = DistriSDXLUNetTP(unet, distri_config)

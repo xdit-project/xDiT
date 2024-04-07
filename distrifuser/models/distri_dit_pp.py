@@ -1,6 +1,7 @@
 import torch
 from diffusers.models.attention_processor import Attention
-from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput, Transformer2DModel
+from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
+from distrifuser.models.diffusers.transformers_2d import Transformer2DModel
 from torch import distributed as dist, nn
 
 from distrifuser.modules.base_module import BaseModule

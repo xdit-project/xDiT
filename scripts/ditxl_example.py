@@ -4,6 +4,8 @@ import torch
 from distrifuser.pipelines.dit import DistriDiTPipeline
 from distrifuser.utils import DistriConfig
 
+import time
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", default="facebook/DiT-XL-2-256", type=str, help="Path to the pretrained model.")
@@ -22,12 +24,20 @@ def main():
     )
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+
+    start_time = time.time()
+
     output = pipeline(
         # prompt="Emma Stone flying in the sky, cold color palette, muted colors, detailed, 8k",
         prompt=["panda"],
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
+
+    end_time = time.time()
+
     if distri_config.rank == 0:
+        elapsed_time = end_time - start_time
+        print(f"elapse: {elapsed_time} sec")
         output.images[0].save("panda.png")
 
 if __name__ == "__main__":

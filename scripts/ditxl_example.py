@@ -24,7 +24,7 @@ def main():
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     output = pipeline(
         # prompt="Emma Stone flying in the sky, cold color palette, muted colors, detailed, 8k",
-        prompt=["panda"],
+        words=["panda"],
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
     if distri_config.rank == 0:

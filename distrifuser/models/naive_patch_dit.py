@@ -1,6 +1,9 @@
 import torch
 from distrifuser.modules.pp import DistriTransformer2DModel
-from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput, Transformer2DModel
+from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
+# from diffusers.models.transformers.transformer_2d import Transformer2DModel
+from distrifuser.modules.diffusers.transformers_2d import Transformer2DModel
+
 from torch import distributed as dist
 
 from .base_model import BaseModel

@@ -4,7 +4,7 @@ from diffusers import DiTPipeline
 # from diffusers.models.transformers.transformer_2d import Transformer2DModel
 
 # customized impl
-from distrifuser.modules.diffusers.transformers_2d import Transformer2DModel
+from distrifuser.models.diffusers.transformers_2d import Transformer2DModel
 
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP

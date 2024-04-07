@@ -26,7 +26,7 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNormSingle
 
  
-from distrifuser.modules.diffusers.attention import BasicTransformerBlock
+from distrifuser.models.diffusers.attention import BasicTransformerBlock
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 

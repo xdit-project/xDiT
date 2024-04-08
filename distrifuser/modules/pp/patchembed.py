@@ -1,3 +1,4 @@
+# adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/embeddings.py
 import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
@@ -34,10 +35,8 @@ class DistriPatchEmbed(BaseModule):
             pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
         else:
             pos_embed = module.pos_embed
-        logger.info(f"pos_embed shape: {pos_embed.shape}, latent shape: {latent.shape}")
         b, c, h = pos_embed.shape
         pos_embed = pos_embed.view(
             b, distri_config.n_device_per_batch, -1, h)[
                 :, distri_config.split_idx()]
-        logger.info(f"pos_embed shape: {pos_embed.shape}, latent shape: {latent.shape}")
         return (latent + pos_embed).to(latent.dtype)

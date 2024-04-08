@@ -97,6 +97,10 @@ class DistriTransformer2DModel(BaseModule):
             `tuple` where the first element is the sample tensor.
         """
         module = self.module
+        distri_config = self.distri_config
+        assert (module.is_input_continuous == False and 
+            module.is_input_vectorized == False and
+            module.is_input_patches == True)
 
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
@@ -129,29 +133,9 @@ class DistriTransformer2DModel(BaseModule):
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
-        if module.is_input_continuous:
-            batch, _, height, width = hidden_states.shape
-            residual = hidden_states
-
-            hidden_states = module.norm(hidden_states)
-            if not module.use_linear_projection:
-                hidden_states = module.proj_in(hidden_states)
-                inner_dim = hidden_states.shape[1]
-                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(
-                    batch, height * width, inner_dim
-                )
-            else:
-                inner_dim = hidden_states.shape[1]
-                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(
-                    batch, height * width, inner_dim
-                )
-                hidden_states = module.proj_in(hidden_states)
-
-        elif module.is_input_vectorized:
-            hidden_states = module.latent_image_embedding(hidden_states)
-        elif module.is_input_patches:
+        if module.is_input_patches:
             height, width = (
-                hidden_states.shape[-2] // module.patch_size,
+                hidden_states.shape[-2] // module.patch_size // distri_config.n_device_per_batch,
                 hidden_states.shape[-1] // module.patch_size,
             )
             hidden_states = module.pos_embed(hidden_states)
@@ -177,11 +161,11 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
-        distri_config = self.distri_config
         if (
             distri_config.world_size > 1
             and distri_config.n_device_per_batch > 1
             and distri_config.parallelism == "patch"
+            and False
         ):
             b, c, h = hidden_states.shape
             sliced_hidden_states = hidden_states.view(
@@ -219,32 +203,6 @@ class DistriTransformer2DModel(BaseModule):
             )
 
         # 3. Output
-        if module.is_input_continuous:
-            if not module.use_linear_projection:
-                hidden_states = (
-                    hidden_states.reshape(batch, height, width, inner_dim)
-                    .permute(0, 3, 1, 2)
-                    .contiguous()
-                )
-                hidden_states = module.proj_out(hidden_states)
-            else:
-                hidden_states = module.proj_out(hidden_states)
-                hidden_states = (
-                    hidden_states.reshape(batch, height, width, inner_dim)
-                    .permute(0, 3, 1, 2)
-                    .contiguous()
-                )
-
-            output = hidden_states + residual
-        elif module.is_input_vectorized:
-            hidden_states = module.norm_out(hidden_states)
-            logits = module.out(hidden_states)
-            # (batch, module.num_vector_embeds - 1, self.num_latent_pixels)
-            logits = logits.permute(0, 2, 1)
-
-            # log(p(x_0))
-            output = F.log_softmax(logits.double(), dim=1).float()
-
         if module.is_input_patches:
             if module.config.norm_type != "ada_norm_single":
                 conditioning = module.transformer_blocks[0].norm1.emb(
@@ -265,7 +223,7 @@ class DistriTransformer2DModel(BaseModule):
                 hidden_states = hidden_states * (1 + scale) + shift
                 hidden_states = module.proj_out(hidden_states)
                 hidden_states = hidden_states.squeeze(1)
-
+            
             # unpatchify
             # if module.adaln_single is None:
                 # height = width = int(hidden_states.shape[1] ** 0.5)

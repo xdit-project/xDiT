@@ -1,16 +1,21 @@
-# Adapted from 
+# Adapted from
 # https://github.com/huggingface/diffusers/blob/3e1097cb63c724f5f063704df5ede8a18f472f29/src/diffusers/models/transformers/transformer_2d.py
 
 from distrifuser.logger import init_logger
+
 logger = init_logger(__name__)
-from diffusers import Transformer2DModel
+
+# from diffusers import Transformer2DModel
+from distrifuser.models.diffusers import Transformer2DModel
+
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F
 from torch import distributed as dist
-from distrifuser.modules.base_module import BaseModule 
+from distrifuser.modules.base_module import BaseModule
 from distrifuser.utils import DistriConfig
+
 
 class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
@@ -95,7 +100,9 @@ class DistriTransformer2DModel(BaseModule):
 
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
-                logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
+                logger.warning(
+                    "Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored."
+                )
         # ensure attention_mask is a bias, and give it a singleton query_tokens dimension.
         #   we may have done this conversion already, e.g. if we came here via UNet2DConditionModel#forward.
         #   we can tell by counting dims; if ndim == 2: it's a mask rather than a bias.
@@ -116,7 +123,9 @@ class DistriTransformer2DModel(BaseModule):
 
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
         if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
+            encoder_attention_mask = (
+                1 - encoder_attention_mask.to(hidden_states.dtype)
+            ) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
@@ -128,16 +137,23 @@ class DistriTransformer2DModel(BaseModule):
             if not module.use_linear_projection:
                 hidden_states = module.proj_in(hidden_states)
                 inner_dim = hidden_states.shape[1]
-                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
+                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(
+                    batch, height * width, inner_dim
+                )
             else:
                 inner_dim = hidden_states.shape[1]
-                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, inner_dim)
+                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(
+                    batch, height * width, inner_dim
+                )
                 hidden_states = module.proj_in(hidden_states)
 
         elif module.is_input_vectorized:
             hidden_states = module.latent_image_embedding(hidden_states)
         elif module.is_input_patches:
-            height, width = hidden_states.shape[-2] // module.patch_size, hidden_states.shape[-1] // module.patch_size
+            height, width = (
+                hidden_states.shape[-2] // module.patch_size,
+                hidden_states.shape[-1] // module.patch_size,
+            )
             hidden_states = module.pos_embed(hidden_states)
 
             if module.adaln_single is not None:
@@ -147,21 +163,30 @@ class DistriTransformer2DModel(BaseModule):
                     )
                 batch_size = hidden_states.shape[0]
                 timestep, embedded_timestep = module.adaln_single(
-                    timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype
+                    timestep,
+                    added_cond_kwargs,
+                    batch_size=batch_size,
+                    hidden_dtype=hidden_states.dtype,
                 )
 
         # 2. Blocks
         if module.is_input_patches and module.caption_projection is not None:
             batch_size = hidden_states.shape[0]
             encoder_hidden_states = module.caption_projection(encoder_hidden_states)
-            encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
+            encoder_hidden_states = encoder_hidden_states.view(
+                batch_size, -1, hidden_states.shape[-1]
+            )
 
         distri_config = self.distri_config
-        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1 and distri_config.parallelism == "patch":
+        if (
+            distri_config.world_size > 1
+            and distri_config.n_device_per_batch > 1
+            and distri_config.parallelism == "patch"
+        ):
             b, c, h = hidden_states.shape
-            sliced_hidden_states = hidden_states.view(b, distri_config.n_device_per_batch, -1, h)[
-                :, distri_config.split_idx()
-            ]
+            sliced_hidden_states = hidden_states.view(
+                b, distri_config.n_device_per_batch, -1, h
+            )[:, distri_config.split_idx()]
             output = self._forward(
                 hidden_states=sliced_hidden_states,
                 attention_mask=attention_mask,
@@ -171,10 +196,15 @@ class DistriTransformer2DModel(BaseModule):
                 class_labels=class_labels,
                 cross_attention_kwargs=cross_attention_kwargs,
             )
-            
+
             if self.buffer_list is None:
-                self.buffer_list = [torch.empty_like(output.view(-1)) for _ in range(distri_config.world_size)]
-            dist.all_gather(self.buffer_list, output.contiguous().view(-1), async_op=False)
+                self.buffer_list = [
+                    torch.empty_like(output.view(-1))
+                    for _ in range(distri_config.world_size)
+                ]
+            dist.all_gather(
+                self.buffer_list, output.contiguous().view(-1), async_op=False
+            )
             buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
             hidden_states = torch.cat(buffer_list, dim=1)
         else:
@@ -191,11 +221,19 @@ class DistriTransformer2DModel(BaseModule):
         # 3. Output
         if module.is_input_continuous:
             if not module.use_linear_projection:
-                hidden_states = hidden_states.reshape(batch, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
+                hidden_states = (
+                    hidden_states.reshape(batch, height, width, inner_dim)
+                    .permute(0, 3, 1, 2)
+                    .contiguous()
+                )
                 hidden_states = module.proj_out(hidden_states)
             else:
                 hidden_states = module.proj_out(hidden_states)
-                hidden_states = hidden_states.reshape(batch, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
+                hidden_states = (
+                    hidden_states.reshape(batch, height, width, inner_dim)
+                    .permute(0, 3, 1, 2)
+                    .contiguous()
+                )
 
             output = hidden_states + residual
         elif module.is_input_vectorized:
@@ -213,10 +251,15 @@ class DistriTransformer2DModel(BaseModule):
                     timestep, class_labels, hidden_dtype=hidden_states.dtype
                 )
                 shift, scale = module.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
-                hidden_states = module.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
+                hidden_states = (
+                    module.norm_out(hidden_states) * (1 + scale[:, None])
+                    + shift[:, None]
+                )
                 hidden_states = module.proj_out_2(hidden_states)
             elif module.config.norm_type == "ada_norm_single":
-                shift, scale = (module.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, dim=1)
+                shift, scale = (
+                    module.scale_shift_table[None] + embedded_timestep[:, None]
+                ).chunk(2, dim=1)
                 hidden_states = module.norm_out(hidden_states)
                 # Modulation
                 hidden_states = hidden_states * (1 + scale) + shift
@@ -224,14 +267,26 @@ class DistriTransformer2DModel(BaseModule):
                 hidden_states = hidden_states.squeeze(1)
 
             # unpatchify
-            if module.adaln_single is None:
-                height = width = int(hidden_states.shape[1] ** 0.5)
+            # if module.adaln_single is None:
+                # height = width = int(hidden_states.shape[1] ** 0.5)
             hidden_states = hidden_states.reshape(
-                shape=(-1, height, width, module.patch_size, module.patch_size, module.out_channels)
+                shape=(
+                    -1,
+                    height,
+                    width,
+                    module.patch_size,
+                    module.patch_size,
+                    module.out_channels,
+                )
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
-                shape=(-1, module.out_channels, height * module.patch_size, width * module.patch_size)
+                shape=(
+                    -1,
+                    module.out_channels,
+                    height * module.patch_size,
+                    width * module.patch_size,
+                )
             )
 
         if not return_dict:

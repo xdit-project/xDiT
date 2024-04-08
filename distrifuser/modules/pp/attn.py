@@ -1,5 +1,8 @@
 import torch
-from diffusers.models.attention import Attention
+
+# from diffusers.models.attention import Attention
+from distrifuser.models.diffusers import Attention
+
 from diffusers.utils import USE_PEFT_BACKEND
 from torch import distributed as dist
 from torch import nn
@@ -8,9 +11,19 @@ from torch.nn import functional as F
 from distrifuser.modules.base_module import BaseModule
 from distrifuser.utils import DistriConfig
 from distrifuser.logger import init_logger
+
 logger = init_logger(__name__)
 
+
+HAS_FLASH_ATTN = False
 from typing import Optional
+
+try:
+    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
 
 
 class DistriAttentionPP(BaseModule):
@@ -65,7 +78,9 @@ class DistriCrossAttentionPP(DistriAttentionPP):
         residual = hidden_states
 
         batch_size, sequence_length, _ = (
-            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
         )
 
         # args = () if USE_PEFT_BACKEND else (scale,)
@@ -88,9 +103,13 @@ class DistriCrossAttentionPP(DistriAttentionPP):
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-        hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=0.0, is_causal=False
+        )
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.transpose(1, 2).reshape(
+            batch_size, -1, attn.heads * head_dim
+        )
         hidden_states = hidden_states.to(query.dtype)
 
         # linear proj
@@ -109,8 +128,11 @@ class DistriCrossAttentionPP(DistriAttentionPP):
 
 
 class DistriSelfAttentionPP(DistriAttentionPP):
-    def __init__(self, module: Attention, distri_config: DistriConfig):
+    def __init__(
+        self, module: Attention, distri_config: DistriConfig, use_flash_attn=True
+    ):
         super(DistriSelfAttentionPP, self).__init__(module, distri_config)
+        self._use_flash_attn = use_flash_attn
 
     def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):
         attn = self.module
@@ -131,9 +153,19 @@ class DistriSelfAttentionPP(DistriAttentionPP):
             full_kv = kv
         else:
             if self.buffer_list is None:  # buffer not created
-                full_kv = torch.cat([kv for _ in range(distri_config.n_device_per_batch)], dim=1)
-            elif distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
-                dist.all_gather(self.buffer_list, kv, group=distri_config.batch_group, async_op=False)
+                full_kv = torch.cat(
+                    [kv for _ in range(distri_config.n_device_per_batch)], dim=1
+                )
+            elif (
+                distri_config.mode == "full_sync"
+                or self.counter <= distri_config.warmup_steps
+            ):
+                dist.all_gather(
+                    self.buffer_list,
+                    kv,
+                    group=distri_config.batch_group,
+                    async_op=False,
+                )
                 full_kv = torch.cat(self.buffer_list, dim=1)
             else:
                 new_buffer_list = [buffer for buffer in self.buffer_list]
@@ -142,21 +174,41 @@ class DistriSelfAttentionPP(DistriAttentionPP):
                 if distri_config.mode != "no_sync":
                     self.comm_manager.enqueue(self.idx, kv)
 
-        key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
+        if self._use_flash_attn and HAS_FLASH_ATTN:
+            # flash attn
+            key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
 
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim)
+            key = key.view(batch_size, -1, attn.heads, head_dim)
+            value = value.view(batch_size, -1, attn.heads, head_dim)
 
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            hidden_states = flash_attn_func(query, key, value)
+            hidden_states = hidden_states.reshape(
+                batch_size, -1, attn.heads * head_dim
+            ).to(query.dtype)
+        else:
+            # naive attn
+            key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
 
-        # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        # TODO: add support for attn.scale when we move to Torch 2.1
-        hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
+            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+            # the output of sdp = (batch, num_heads, seq_len, head_dim)
+            # TODO: add support for attn.scale when we move to Torch 2.1
+            hidden_states = F.scaled_dot_product_attention(
+                query, key, value, dropout_p=0.0, is_causal=False
+            )
+
+            hidden_states = hidden_states.transpose(1, 2).reshape(
+                batch_size, -1, attn.heads * head_dim
+            )
+            hidden_states = hidden_states.to(query.dtype)
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
@@ -179,7 +231,11 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         **kwargs,
     ) -> torch.FloatTensor:
         distri_config = self.distri_config
-        if self.comm_manager is not None and self.comm_manager.handles is not None and self.idx is not None:
+        if (
+            self.comm_manager is not None
+            and self.comm_manager.handles is not None
+            and self.idx is not None
+        ):
             if self.comm_manager.handles[self.idx] is not None:
                 self.comm_manager.handles[self.idx].wait()
                 self.comm_manager.handles[self.idx] = None
@@ -188,7 +244,9 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         if distri_config.n_device_per_batch > 1 and self.buffer_list is None:
             if self.comm_manager.buffer_list is None:
                 self.idx = self.comm_manager.register_tensor(
-                    shape=(b, l, self.to_kv.out_features), torch_dtype=hidden_states.dtype, layer_type="attn"
+                    shape=(b, l, self.to_kv.out_features),
+                    torch_dtype=hidden_states.dtype,
+                    layer_type="attn",
                 )
             else:
                 self.buffer_list = self.comm_manager.get_buffer_list(self.idx)

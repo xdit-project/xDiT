@@ -23,6 +23,20 @@ def main():
         choices=["patch", "naive_patch", "none"],
         help="Parallelism to use.",
     )
+    parser.add_argument(
+        "--sync_mode",
+        type=str,
+        default="corrected_async_gn",
+        choices=[
+            "separate_gn",
+            "async_gn",
+            "corrected_async_gn",
+            "sync_gn",
+            "full_sync",
+            "no_sync",
+        ],
+        help="Different GroupNorm synchronization modes",
+    )
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
@@ -33,6 +47,7 @@ def main():
         do_classifier_free_guidance=False,
         split_batch=False,
         parallelism=args.parallelism,
+        mode=args.sync_mode,
     )
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,

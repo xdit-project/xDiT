@@ -161,45 +161,15 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
-        if (
-            distri_config.world_size > 1
-            and distri_config.n_device_per_batch > 1
-            and distri_config.parallelism == "patch"
-            and False
-        ):
-            b, c, h = hidden_states.shape
-            sliced_hidden_states = hidden_states.view(
-                b, distri_config.n_device_per_batch, -1, h
-            )[:, distri_config.split_idx()]
-            output = self._forward(
-                hidden_states=sliced_hidden_states,
+        for block in module.transformer_blocks:
+            hidden_states = block(
+                hidden_states,
                 attention_mask=attention_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 timestep=timestep,
-                class_labels=class_labels,
                 cross_attention_kwargs=cross_attention_kwargs,
-            )
-
-            if self.buffer_list is None:
-                self.buffer_list = [
-                    torch.empty_like(output.view(-1))
-                    for _ in range(distri_config.world_size)
-                ]
-            dist.all_gather(
-                self.buffer_list, output.contiguous().view(-1), async_op=False
-            )
-            buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
-            hidden_states = torch.cat(buffer_list, dim=1)
-        else:
-            hidden_states = self._forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                timestep=timestep,
                 class_labels=class_labels,
-                cross_attention_kwargs=cross_attention_kwargs,
             )
 
         # 3. Output

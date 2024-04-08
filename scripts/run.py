@@ -13,7 +13,7 @@ from distrifuser.utils import DistriConfig
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit"])
-    parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-256")
+    parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-512")
     parser.add_argument(
         "--mode",
         type=str,
@@ -142,7 +142,7 @@ def main():
         pipeline.set_progress_bar_config(position=1, desc="Generation", leave=False, disable=distri_config.rank != 0)
         for i in trange(args.warmup_times, position=0, desc="Warmup", leave=False, disable=distri_config.rank != 0):
             pipeline(
-                **input,
+                prompt,
                 generator=torch.Generator(device="cuda").manual_seed(args.seed),
                 num_inference_steps=args.num_inference_steps,
                 guidance_scale=args.guidance_scale,
@@ -153,7 +153,7 @@ def main():
         for i in trange(args.test_times, position=0, desc="Test", leave=False, disable=distri_config.rank != 0):
             start_time = time.time()
             pipeline(
-                **input,
+                prompt,
                 generator=torch.Generator(device="cuda").manual_seed(args.seed),
                 num_inference_steps=args.num_inference_steps,
                 guidance_scale=args.guidance_scale,

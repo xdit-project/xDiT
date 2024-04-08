@@ -6,14 +6,14 @@ import torch
 from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from tqdm import trange
 
-from distrifuser.pipelines import DistriSDXLPipeline, DistriDiTPipeline
+from distrifuser.pipelines import DistriSDXLPipeline, DistriDiTPipeline, DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
 
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit"])
-    parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-512")
+    parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit", "pixartalpha"])
+    parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument(
         "--mode",
         type=str,
@@ -87,8 +87,8 @@ def main():
     distri_config = DistriConfig(
         height=args.image_size[0],
         width=args.image_size[1],
-        do_classifier_free_guidance=args.guidance_scale > 1 if args.pipeline != "dit" else False,
-        split_batch= not args.no_split_batch if args.pipeline != "dit" else False, 
+        do_classifier_free_guidance=args.guidance_scale > 1 if args.pipeline == "sdxl" else False,
+        split_batch= not args.no_split_batch if args.pipeline == "sdxl" else False, 
         warmup_steps=args.warmup_steps,
         mode=args.sync_mode,
         # use_cuda_graph=not args.no_cuda_graph,
@@ -96,20 +96,26 @@ def main():
         split_scheme=args.split_scheme,
     )
 
-    # pretrained_model_name_or_path = "stabilityai/stable-diffusion-xl-base-1.0"
-    pretrained_model_name_or_path = args.model_path
+    if args.model_path is None:
+        if args.pipeline == "dit":
+            args.model_path = "facebook/DiT-XL-2-256"
+        elif args.pipeline == "sdxl":
+            args.model_path = "stabilityai/stable-diffusion-xl-base-1.0"
+        elif args.pipeline == "pixartalpha":
+            args.model_path = "PixArt-alpha/PixArt-XL-2-1024-MS"
+
     if args.scheduler == "euler":
-        scheduler = EulerDiscreteScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = EulerDiscreteScheduler.from_pretrained(args.model_path, subfolder="scheduler")
     elif args.scheduler == "dpm-solver":
-        scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = DPMSolverMultistepScheduler.from_pretrained(args.model_path, subfolder="scheduler")
     elif args.scheduler == "ddim":
-        scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(args.model_path, subfolder="scheduler")
     else:
         raise NotImplementedError
     
     if args.pipeline == "dit":
         pipeline = DistriDiTPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            pretrained_model_name_or_path=args.model_path,
             distri_config=distri_config,
             # variant="fp16",
             # use_safetensors=True,
@@ -119,10 +125,18 @@ def main():
     
     elif args.pipeline == "sdxl":
         pipeline = DistriSDXLPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            pretrained_model_name_or_path=args.model_path,
             distri_config=distri_config,
             variant="fp16",
             use_safetensors=True,
+            scheduler=scheduler,
+        )
+        prompt = args.prompt
+    
+    elif args.pipeline == "pixartalpha":
+        pipeline = DistriPixArtAlphaPipeline.from_pretrained(
+            pretrained_model_name_or_path=args.model_path,
+            distri_config=distri_config,
             scheduler=scheduler,
         )
         prompt = args.prompt

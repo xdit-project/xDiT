@@ -1,10 +1,11 @@
 import torch
 from diffusers import DiTPipeline
+
 # lib impl
 # from diffusers.models.transformers.transformer_2d import Transformer2DModel
 
 # customized impl
-from distrifuser.models.diffusers.transformers_2d import Transformer2DModel
+from distrifuser.models.diffusers import Transformer2DModel
 
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
@@ -15,6 +16,7 @@ from typing import Union, List
 
 logger = init_logger(__name__)
 
+
 class DistriDiTPipeline:
     def __init__(self, pipeline: DiTPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
@@ -22,9 +24,9 @@ class DistriDiTPipeline:
         assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
         # if module_config.do_classifier_free_guidance or module_config.split_batch:
-            # logger.warning("Setting do_classifier_free_guidance and split_batch to False")
-            # module_config.do_classifier_free_guidance = False
-            # module_config.split_batch = False
+        # logger.warning("Setting do_classifier_free_guidance and split_batch to False")
+        # module_config.do_classifier_free_guidance = False
+        # module_config.split_batch = False
 
         self.distri_config = module_config
 
@@ -40,23 +42,26 @@ class DistriDiTPipeline:
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         transformer = Transformer2DModel.from_pretrained(
-            pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="transformer"
+            pretrained_model_name_or_path,
+            torch_dtype=torch_dtype,
+            subfolder="transformer",
         ).to(device)
 
+        logger.info(f"Using {distri_config.parallelism } parallelism")
         if distri_config.parallelism == "patch":
-            logger.info("Using patch parallelism")
             transformer = DistriDiTPP(transformer, distri_config)
-        # elif distri_config.parallelism == "tensor":
-        #     # unet = DistriSDXLUNetTP(unet, distri_config)
-        #     raise ValueError("Tensor parallelism is not supported for DiT")
+        elif distri_config.parallelism == "tensor":
+            raise NotImplementedError("Tensor parallelism is not supported for DiT")
         elif distri_config.parallelism == "naive_patch":
-            logger.info("Using naive patch parallelism")
             transformer = NaivePatchDiT(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
         pipeline = DiTPipeline.from_pretrained(
-            pretrained_model_name_or_path, torch_dtype=torch_dtype, transformer=transformer, **kwargs
+            pretrained_model_name_or_path,
+            torch_dtype=torch_dtype,
+            transformer=transformer,
+            **kwargs,
         ).to(device)
         return DistriDiTPipeline(pipeline, distri_config)
 
@@ -64,7 +69,7 @@ class DistriDiTPipeline:
         self.pipeline.set_progress_bar_config(**kwargs)
 
     @torch.no_grad()
-    def __call__(self, prompt : Union[List[str], str, List[int], int], *args, **kwargs):
+    def __call__(self, prompt: Union[List[str], str, List[int], int], *args, **kwargs):
         self.pipeline.transformer.set_counter(0)
         if isinstance(prompt, str):
             class_ids = self.pipeline.get_label_ids([prompt])
@@ -108,12 +113,21 @@ class DistriDiTPipeline:
         guidance_scale = 4.0
         latent_size = pipeline.transformer.config.sample_size
         latent_channels = pipeline.transformer.config.in_channels
-        latents = torch.zeros([batch_size, latent_channels, latent_size, latent_size], 
-                              device=device, dtype=pipeline.transformer.dtype)
+        latents = torch.zeros(
+            [batch_size, latent_channels, latent_size, latent_size],
+            device=device,
+            dtype=pipeline.transformer.dtype,
+        )
         class_labels = torch.tensor([0], device=device).reshape(-1)
         class_null = torch.tensor([1000] * batch_size, device=device)
-        class_labels_input = torch.cat([class_labels, class_null], 0) if guidance_scale > 1 else class_labels
-        latent_model_input = torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
+        class_labels_input = (
+            torch.cat([class_labels, class_null], 0)
+            if guidance_scale > 1
+            else class_labels
+        )
+        latent_model_input = (
+            torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
+        )
         # logger.info(f"latent_model_input.shape {latent_model_input.shape}")
         # logger.info(f"class_labels_input.shape {class_labels_input.shape}")
         # static_inputs["hidden_states"] = latents

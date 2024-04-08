@@ -21,16 +21,24 @@ from torch import nn
 from diffusers.utils import deprecate, logging
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 from diffusers.models.activations import GEGLU, GELU, ApproximateGELU
+
 # from diffusers.models.attention_processor import Attention
 from diffusers.models.embeddings import SinusoidalPositionalEmbedding
-from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm
+from diffusers.models.normalization import (
+    AdaLayerNorm,
+    AdaLayerNormContinuous,
+    AdaLayerNormZero,
+    RMSNorm,
+)
 
-from distrifuser.models.attention_processor import Attention
+from distrifuser.models.diffusers.attention_processor import Attention
 
 logger = logging.get_logger(__name__)
 
 
-def _chunked_feed_forward(ff: nn.Module, hidden_states: torch.Tensor, chunk_dim: int, chunk_size: int):
+def _chunked_feed_forward(
+    ff: nn.Module, hidden_states: torch.Tensor, chunk_dim: int, chunk_size: int
+):
     # "feed_forward_chunk_size" can be used to save memory
     if hidden_states.shape[chunk_dim] % chunk_size != 0:
         raise ValueError(
@@ -81,7 +89,11 @@ class GatedSelfAttentionDense(nn.Module):
         n_visual = x.shape[1]
         objs = self.linear(objs)
 
-        x = x + self.alpha_attn.tanh() * self.attn(self.norm1(torch.cat([x, objs], dim=1)))[:, :n_visual, :]
+        x = (
+            x
+            + self.alpha_attn.tanh()
+            * self.attn(self.norm1(torch.cat([x, objs], dim=1)))[:, :n_visual, :]
+        )
         x = x + self.alpha_dense.tanh() * self.ff(self.norm2(x))
 
         return x
@@ -153,8 +165,12 @@ class BasicTransformerBlock(nn.Module):
         self.only_cross_attention = only_cross_attention
 
         # We keep these boolean flags for backward-compatibility.
-        self.use_ada_layer_norm_zero = (num_embeds_ada_norm is not None) and norm_type == "ada_norm_zero"
-        self.use_ada_layer_norm = (num_embeds_ada_norm is not None) and norm_type == "ada_norm"
+        self.use_ada_layer_norm_zero = (
+            num_embeds_ada_norm is not None
+        ) and norm_type == "ada_norm_zero"
+        self.use_ada_layer_norm = (
+            num_embeds_ada_norm is not None
+        ) and norm_type == "ada_norm"
         self.use_ada_layer_norm_single = norm_type == "ada_norm_single"
         self.use_layer_norm = norm_type == "layer_norm"
         self.use_ada_layer_norm_continuous = norm_type == "ada_norm_continuous"
@@ -174,7 +190,9 @@ class BasicTransformerBlock(nn.Module):
             )
 
         if positional_embeddings == "sinusoidal":
-            self.pos_embed = SinusoidalPositionalEmbedding(dim, max_seq_length=num_positional_embeddings)
+            self.pos_embed = SinusoidalPositionalEmbedding(
+                dim, max_seq_length=num_positional_embeddings
+            )
         else:
             self.pos_embed = None
 
@@ -194,7 +212,9 @@ class BasicTransformerBlock(nn.Module):
                 "rms_norm",
             )
         else:
-            self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
+            self.norm1 = nn.LayerNorm(
+                dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps
+            )
 
         self.attn1 = Attention(
             query_dim=dim,
@@ -228,7 +248,9 @@ class BasicTransformerBlock(nn.Module):
 
             self.attn2 = Attention(
                 query_dim=dim,
-                cross_attention_dim=cross_attention_dim if not double_self_attention else None,
+                cross_attention_dim=(
+                    cross_attention_dim if not double_self_attention else None
+                ),
                 heads=num_attention_heads,
                 dim_head=attention_head_dim,
                 dropout=dropout,
@@ -251,7 +273,12 @@ class BasicTransformerBlock(nn.Module):
                 "layer_norm",
             )
 
-        elif norm_type in ["ada_norm_zero", "ada_norm", "layer_norm", "ada_norm_continuous"]:
+        elif norm_type in [
+            "ada_norm_zero",
+            "ada_norm",
+            "layer_norm",
+            "ada_norm_continuous",
+        ]:
             self.norm3 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
         elif norm_type == "layer_norm_i2vgen":
             self.norm3 = None
@@ -267,7 +294,9 @@ class BasicTransformerBlock(nn.Module):
 
         # 4. Fuser
         if attention_type == "gated" or attention_type == "gated-text-image":
-            self.fuser = GatedSelfAttentionDense(dim, cross_attention_dim, num_attention_heads, attention_head_dim)
+            self.fuser = GatedSelfAttentionDense(
+                dim, cross_attention_dim, num_attention_heads, attention_head_dim
+            )
 
         # 5. Scale-shift for PixArt-Alpha.
         if norm_type == "ada_norm_single":
@@ -295,7 +324,9 @@ class BasicTransformerBlock(nn.Module):
     ) -> torch.FloatTensor:
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
-                logger.warning("Passing `scale` to `cross_attention_kwargs` is depcrecated. `scale` will be ignored.")
+                logger.warning(
+                    "Passing `scale` to `cross_attention_kwargs` is depcrecated. `scale` will be ignored."
+                )
 
         # Notice that normalization is always applied before the real computation in the following blocks.
         # 0. Self-Attention
@@ -310,7 +341,9 @@ class BasicTransformerBlock(nn.Module):
         elif self.norm_type in ["layer_norm", "layer_norm_i2vgen"]:
             norm_hidden_states = self.norm1(hidden_states)
         elif self.norm_type == "ada_norm_continuous":
-            norm_hidden_states = self.norm1(hidden_states, added_cond_kwargs["pooled_text_emb"])
+            norm_hidden_states = self.norm1(
+                hidden_states, added_cond_kwargs["pooled_text_emb"]
+            )
         elif self.norm_type == "ada_norm_single":
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
                 self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
@@ -325,12 +358,16 @@ class BasicTransformerBlock(nn.Module):
             norm_hidden_states = self.pos_embed(norm_hidden_states)
 
         # 1. Prepare GLIGEN inputs
-        cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+        cross_attention_kwargs = (
+            cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+        )
         gligen_kwargs = cross_attention_kwargs.pop("gligen", None)
 
         attn_output = self.attn1(
             norm_hidden_states,
-            encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
+            encoder_hidden_states=(
+                encoder_hidden_states if self.only_cross_attention else None
+            ),
             attention_mask=attention_mask,
             **cross_attention_kwargs,
         )
@@ -358,7 +395,9 @@ class BasicTransformerBlock(nn.Module):
                 # https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L70C1-L76C103
                 norm_hidden_states = hidden_states
             elif self.norm_type == "ada_norm_continuous":
-                norm_hidden_states = self.norm2(hidden_states, added_cond_kwargs["pooled_text_emb"])
+                norm_hidden_states = self.norm2(
+                    hidden_states, added_cond_kwargs["pooled_text_emb"]
+                )
             else:
                 raise ValueError("Incorrect norm")
 
@@ -376,12 +415,16 @@ class BasicTransformerBlock(nn.Module):
         # 4. Feed-forward
         # i2vgen doesn't have this norm 🤷‍♂️
         if self.norm_type == "ada_norm_continuous":
-            norm_hidden_states = self.norm3(hidden_states, added_cond_kwargs["pooled_text_emb"])
+            norm_hidden_states = self.norm3(
+                hidden_states, added_cond_kwargs["pooled_text_emb"]
+            )
         elif not self.norm_type == "ada_norm_single":
             norm_hidden_states = self.norm3(hidden_states)
 
         if self.norm_type == "ada_norm_zero":
-            norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+            norm_hidden_states = (
+                norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+            )
 
         if self.norm_type == "ada_norm_single":
             norm_hidden_states = self.norm2(hidden_states)
@@ -389,7 +432,9 @@ class BasicTransformerBlock(nn.Module):
 
         if self._chunk_size is not None:
             # "feed_forward_chunk_size" can be used to save memory
-            ff_output = _chunked_feed_forward(self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size)
+            ff_output = _chunked_feed_forward(
+                self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size
+            )
         else:
             ff_output = self.ff(norm_hidden_states)
 
@@ -490,15 +535,21 @@ class TemporalBasicTransformerBlock(nn.Module):
         batch_frames, seq_length, channels = hidden_states.shape
         batch_size = batch_frames // num_frames
 
-        hidden_states = hidden_states[None, :].reshape(batch_size, num_frames, seq_length, channels)
+        hidden_states = hidden_states[None, :].reshape(
+            batch_size, num_frames, seq_length, channels
+        )
         hidden_states = hidden_states.permute(0, 2, 1, 3)
-        hidden_states = hidden_states.reshape(batch_size * seq_length, num_frames, channels)
+        hidden_states = hidden_states.reshape(
+            batch_size * seq_length, num_frames, channels
+        )
 
         residual = hidden_states
         hidden_states = self.norm_in(hidden_states)
 
         if self._chunk_size is not None:
-            hidden_states = _chunked_feed_forward(self.ff_in, hidden_states, self._chunk_dim, self._chunk_size)
+            hidden_states = _chunked_feed_forward(
+                self.ff_in, hidden_states, self._chunk_dim, self._chunk_size
+            )
         else:
             hidden_states = self.ff_in(hidden_states)
 
@@ -512,14 +563,18 @@ class TemporalBasicTransformerBlock(nn.Module):
         # 3. Cross-Attention
         if self.attn2 is not None:
             norm_hidden_states = self.norm2(hidden_states)
-            attn_output = self.attn2(norm_hidden_states, encoder_hidden_states=encoder_hidden_states)
+            attn_output = self.attn2(
+                norm_hidden_states, encoder_hidden_states=encoder_hidden_states
+            )
             hidden_states = attn_output + hidden_states
 
         # 4. Feed-forward
         norm_hidden_states = self.norm3(hidden_states)
 
         if self._chunk_size is not None:
-            ff_output = _chunked_feed_forward(self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size)
+            ff_output = _chunked_feed_forward(
+                self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size
+            )
         else:
             ff_output = self.ff(norm_hidden_states)
 
@@ -528,9 +583,13 @@ class TemporalBasicTransformerBlock(nn.Module):
         else:
             hidden_states = ff_output
 
-        hidden_states = hidden_states[None, :].reshape(batch_size, seq_length, num_frames, channels)
+        hidden_states = hidden_states[None, :].reshape(
+            batch_size, seq_length, num_frames, channels
+        )
         hidden_states = hidden_states.permute(0, 2, 1, 3)
-        hidden_states = hidden_states.reshape(batch_size * num_frames, seq_length, channels)
+        hidden_states = hidden_states.reshape(
+            batch_size * num_frames, seq_length, channels
+        )
 
         return hidden_states
 
@@ -579,7 +638,9 @@ class SkipFFTransformerBlock(nn.Module):
         )
 
     def forward(self, hidden_states, encoder_hidden_states, cross_attention_kwargs):
-        cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+        cross_attention_kwargs = (
+            cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+        )
 
         if self.kv_mapper is not None:
             encoder_hidden_states = self.kv_mapper(F.silu(encoder_hidden_states))

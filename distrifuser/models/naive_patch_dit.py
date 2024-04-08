@@ -43,7 +43,7 @@ class NaivePatchDiT(BaseModel):  # for Patch Parallelism
             # encoder_hidden_states is not None
             timestep is not None
             # and added_cond_kwargs is not None
-            and class_labels is not None
+            # and class_labels is not None
             # and cross_attention_kwargs is not None
             # and attention_mask is not None
             # and encoder_attention_mask is not None

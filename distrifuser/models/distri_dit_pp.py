@@ -44,12 +44,12 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                             wrapped_submodule = DistriSelfAttentionPP(
                                 submodule, distri_config
                             )
-                        else:  # cross attention
-                            assert subname == "attn2"
-                            wrapped_submodule = DistriCrossAttentionPP(
-                                submodule, distri_config
-                            )
-                        setattr(module, subname, wrapped_submodule)
+                        # else:  # cross attention
+                            # assert subname == "attn2"
+                            # wrapped_submodule = DistriCrossAttentionPP(
+                                # submodule, distri_config
+                            # )
+                            setattr(module, subname, wrapped_submodule)
             logger.info(
                 f"Using parallelism for DiT, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
             )
@@ -79,7 +79,7 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
             # encoder_hidden_states is not None
             timestep is not None
             # and added_cond_kwargs is not None
-            and class_labels is not None
+            # and class_labels is not None
             # and cross_attention_kwargs is not None
             # and attention_mask is not None
             # and encoder_attention_mask is not None

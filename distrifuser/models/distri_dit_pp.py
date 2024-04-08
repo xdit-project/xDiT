@@ -4,12 +4,17 @@ import torch
 from distrifuser.models.diffusers import Attention
 
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
+from diffusers.models.embeddings import PatchEmbed
 from distrifuser.models.diffusers import Transformer2DModel
 from torch import distributed as dist, nn
 
 from distrifuser.modules.base_module import BaseModule
-from distrifuser.modules.pp.transformer2d import DistriTransformer2DModel
-from distrifuser.modules.pp.attn import DistriCrossAttentionPP, DistriSelfAttentionPP
+from distrifuser.modules.pp import (
+    DistriConv2dPP, 
+    DistriSelfAttentionPP,
+    DistriPatchEmbed,
+    DistriTransformer2DModel
+)
 
 from .base_model import BaseModel
 from ..utils import DistriConfig
@@ -25,7 +30,8 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
         assert isinstance(model, Transformer2DModel)
         model = DistriTransformer2DModel(model, distri_config)
 
-        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
+        # if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
+        if True:
             for name, module in model.named_modules():
                 if isinstance(module, BaseModule):
                     continue
@@ -33,12 +39,16 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                     if isinstance(submodule, nn.Conv2d):
                         pass
                         # TODO(jiananwang): parallel conv2d
-                        # if kernel_size == (1, 1) or kernel_size == 1:
-                        #     continue
-                        # wrapped_submodule = DistriConv2dPP(
-                        #     submodule, distri_config, is_first_layer=True
-                        # )
-                        # setattr(module, subname, wrapped_submodule)
+                        kernel_size = submodule.kernel_size
+                        if kernel_size == (1, 1) or kernel_size == 1:
+                            continue
+                        wrapped_submodule = DistriConv2dPP(
+                            submodule, distri_config, is_first_layer=True
+                        )
+                        setattr(module, subname, wrapped_submodule)
+                    elif isinstance(submodule, PatchEmbed): 
+                        wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
+                        setattr(module, subname, wrapped_submodule)
                     elif isinstance(submodule, Attention):
                         if subname == "attn1":  # self attention
                             wrapped_submodule = DistriSelfAttentionPP(
@@ -98,6 +108,14 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
         )[
             0
         ]  # [2, 8, 32, 32]
+        if self.output_buffer is None:
+            self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
+        if self.buffer_list is None:
+            self.buffer_list = [torch.empty_like(output) for _ in range(distri_config.world_size)]
+        output = output.contiguous()
+        dist.all_gather(self.buffer_list, output, async_op=False)
+        torch.cat(self.buffer_list, dim=2, out=self.output_buffer)
+        output = self.output_buffer
 
         if return_dict:
             output = Transformer2DModelOutput(sample=output)

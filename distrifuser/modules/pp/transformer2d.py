@@ -227,8 +227,8 @@ class DistriTransformer2DModel(BaseModule):
                 hidden_states = hidden_states.squeeze(1)
 
             # unpatchify
-            if module.adaln_single is None:
-                height = width = int(hidden_states.shape[1] ** 0.5)
+            # if module.adaln_single is None:
+                # height = width = int(hidden_states.shape[1] ** 0.5)
             hidden_states = hidden_states.reshape(
                 shape=(-1, height, width, module.patch_size, module.patch_size, module.out_channels)
             )

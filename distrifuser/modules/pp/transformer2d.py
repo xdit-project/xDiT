@@ -111,7 +111,8 @@ class DistriTransformer2DModel(BaseModule):
         # 1. Input
         if module.is_input_patches:
             height, width = (
-                hidden_states.shape[-2] // module.patch_size // distri_config.n_device_per_batch,
+                hidden_states.shape[-2] // module.patch_size // 
+                    (distri_config.n_device_per_batch if distri_config.parallelism == "patch" else 1),
                 hidden_states.shape[-1] // module.patch_size,
             )
             hidden_states = module.pos_embed(hidden_states)

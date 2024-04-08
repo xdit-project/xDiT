@@ -22,30 +22,6 @@ class DistriTransformer2DModel(BaseModule):
         super().__init__(module, distri_config)
         self.config = module.config
 
-    def _forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        timestep: Optional[torch.LongTensor] = None,
-        class_labels: Optional[torch.LongTensor] = None,
-        cross_attention_kwargs: Dict[str, Any] = None,
-    ):
-        module = self.module
-
-        for block in module.transformer_blocks:
-            hidden_states = block(
-                hidden_states,
-                attention_mask=attention_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                timestep=timestep,
-                cross_attention_kwargs=cross_attention_kwargs,
-                class_labels=class_labels,
-            )
-        return hidden_states
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -135,7 +111,8 @@ class DistriTransformer2DModel(BaseModule):
         # 1. Input
         if module.is_input_patches:
             height, width = (
-                hidden_states.shape[-2] // module.patch_size // distri_config.n_device_per_batch,
+                hidden_states.shape[-2] // module.patch_size // 
+                    (distri_config.n_device_per_batch if distri_config.parallelism == "patch" else 1),
                 hidden_states.shape[-1] // module.patch_size,
             )
             hidden_states = module.pos_embed(hidden_states)
@@ -161,45 +138,15 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
-        if (
-            distri_config.world_size > 1
-            and distri_config.n_device_per_batch > 1
-            and distri_config.parallelism == "patch"
-            and False
-        ):
-            b, c, h = hidden_states.shape
-            sliced_hidden_states = hidden_states.view(
-                b, distri_config.n_device_per_batch, -1, h
-            )[:, distri_config.split_idx()]
-            output = self._forward(
-                hidden_states=sliced_hidden_states,
+        for block in module.transformer_blocks:
+            hidden_states = block(
+                hidden_states,
                 attention_mask=attention_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 timestep=timestep,
-                class_labels=class_labels,
                 cross_attention_kwargs=cross_attention_kwargs,
-            )
-
-            if self.buffer_list is None:
-                self.buffer_list = [
-                    torch.empty_like(output.view(-1))
-                    for _ in range(distri_config.world_size)
-                ]
-            dist.all_gather(
-                self.buffer_list, output.contiguous().view(-1), async_op=False
-            )
-            buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
-            hidden_states = torch.cat(buffer_list, dim=1)
-        else:
-            hidden_states = self._forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                timestep=timestep,
                 class_labels=class_labels,
-                cross_attention_kwargs=cross_attention_kwargs,
             )
 
         # 3. Output

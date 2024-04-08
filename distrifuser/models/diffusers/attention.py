@@ -21,10 +21,11 @@ from torch import nn
 from diffusers.utils import deprecate, logging
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 from diffusers.models.activations import GEGLU, GELU, ApproximateGELU
-from diffusers.models.attention_processor import Attention
+# from diffusers.models.attention_processor import Attention
 from diffusers.models.embeddings import SinusoidalPositionalEmbedding
 from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm
 
+from distrifuser.models.attention_processor import Attention
 
 logger = logging.get_logger(__name__)
 

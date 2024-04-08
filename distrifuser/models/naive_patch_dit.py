@@ -1,17 +1,20 @@
 import torch
-from distrifuser.modules.pp import DistriTransformer2DModel
+from distrifuser.modules.pp.transformer2d import DistriTransformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
+
 # from diffusers.models.transformers.transformer_2d import Transformer2DModel
-from distrifuser.models.diffusers.transformers_2d import Transformer2DModel
+from distrifuser.models.diffusers import Transformer2DModel
 
 from torch import distributed as dist
 
 from .base_model import BaseModel
 from ..utils import DistriConfig
 from distrifuser.logger import init_logger
+
 logger = init_logger(__name__)
 
 from typing import Optional, Dict, Any
+
 
 class NaivePatchDiT(BaseModel):  # for Patch Parallelism
     def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
@@ -57,7 +60,9 @@ class NaivePatchDiT(BaseModel):  # for Patch Parallelism
                 attention_mask=attention_mask,
                 encoder_attention_mask=encoder_attention_mask,
                 return_dict=False,
-            )[0] # [2, 8, 32, 32]
+            )[
+                0
+            ]  # [2, 8, 32, 32]
         else:
 
             if distri_config.split_scheme == "row":
@@ -70,14 +75,14 @@ class NaivePatchDiT(BaseModel):  # for Patch Parallelism
                 raise NotImplementedError
 
             if split_dim == 2:
-                sliced_hidden_states = hidden_states.view(b, c, distri_config.n_device_per_batch, -1, w)[
-                    :, :, distri_config.split_idx()
-                ]
+                sliced_hidden_states = hidden_states.view(
+                    b, c, distri_config.n_device_per_batch, -1, w
+                )[:, :, distri_config.split_idx()]
             else:
                 assert split_dim == 3
-                sliced_hidden_states = hidden_states.view(b, c, h, distri_config.n_device_per_batch, -1)[
-                    ..., distri_config.split_idx(), :
-                ]
+                sliced_hidden_states = hidden_states.view(
+                    b, c, h, distri_config.n_device_per_batch, -1
+                )[..., distri_config.split_idx(), :]
             # logger.info(f"sliced_hidden_states.shape {sliced_hidden_states.shape}") # [2, 4, 16, 32]
             output = self.model(
                 hidden_states=sliced_hidden_states,
@@ -94,10 +99,17 @@ class NaivePatchDiT(BaseModel):  # for Patch Parallelism
             # logger.info(f"world_size>1: output.shape {output.shape}")
 
             if self.output_buffer is None:
-                self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
+                self.output_buffer = torch.empty(
+                    (b, c, h, w), device=output.device, dtype=output.dtype
+                )
             if self.buffer_list is None:
-                self.buffer_list = [torch.empty_like(output.view(-1)) for _ in range(distri_config.world_size)]
-            dist.all_gather(self.buffer_list, output.contiguous().view(-1), async_op=False)
+                self.buffer_list = [
+                    torch.empty_like(output.view(-1))
+                    for _ in range(distri_config.world_size)
+                ]
+            dist.all_gather(
+                self.buffer_list, output.contiguous().view(-1), async_op=False
+            )
             buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
             torch.cat(buffer_list, dim=split_dim, out=self.output_buffer)
             output = self.output_buffer

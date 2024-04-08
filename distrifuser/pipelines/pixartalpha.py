@@ -1,3 +1,6 @@
+# Adapted from
+# https://github.com/huggingface/diffusers/blob/v0.27.2/src/diffusers/pipelines/pixart_alpha/pipeline_pixart_alpha.py#L218
+
 import torch
 from diffusers import PixArtAlphaPipeline
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
@@ -13,7 +16,7 @@ class DistriPixArtAlphaPipeline:
     def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
 
-        assert module_config.do_classifier_free_guidance == False
+        # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
 
         self.distri_config = module_config
@@ -59,20 +62,31 @@ class DistriPixArtAlphaPipeline:
         distri_config = self.distri_config
 
         static_inputs = {}
-        static_outputs = []
         pipeline = self.pipeline
 
         height = distri_config.height
         width = distri_config.width
         assert height % 8 == 0 and width % 8 == 0
 
-        # original_size = (height, width)
-        # target_size = (height, width)
-        # crops_coords_top_left = (0, 0)
-
         device = distri_config.device
 
-        batch_size = 2 if distri_config.do_classifier_free_guidance else 1
+        batch_size = 1
+        num_images_per_prompt = 1
+        # 3. Encode input prompt
+        (
+            prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_embeds,
+            negative_prompt_attention_mask,
+        ) = self.pipeline.encode_prompt(
+            prompt="",
+            do_classifier_free_guidance=distri_config.do_classifier_free_guidance,
+            device=device,
+        )
+
+        if distri_config.do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+            prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
 
         # 7. Prepare added time ids & embeddings
 
@@ -81,20 +95,28 @@ class DistriPixArtAlphaPipeline:
         guidance_scale = 4.0
         latent_size = pipeline.transformer.config.sample_size
         latent_channels = pipeline.transformer.config.in_channels
-        latents = torch.zeros([batch_size, latent_channels, latent_size, latent_size], 
+        latents = torch.zeros([batch_size * num_images_per_prompt, latent_channels, latent_size, latent_size], 
                               device=device, dtype=pipeline.transformer.dtype)
-        class_labels = torch.tensor([0], device=device).reshape(-1)
-        class_null = torch.tensor([1000] * batch_size, device=device)
-        class_labels_input = torch.cat([class_labels, class_null], 0) if guidance_scale > 1 else class_labels
+       
         latent_model_input = torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
         # logger.info(f"latent_model_input.shape {latent_model_input.shape}")
         # logger.info(f"class_labels_input.shape {class_labels_input.shape}")
-        # static_inputs["hidden_states"] = latents
+
         static_inputs["hidden_states"] = latent_model_input
         static_inputs["timestep"] = t
-        # static_inputs["class_labels"] = class_labels_input
-        # static_inputs["encoder_hidden_states"] = prompt_embeds
+        static_inputs["encoder_hidden_states"] = prompt_embeds
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+        if self.pipeline.transformer.config.sample_size == 128:
+            resolution = torch.tensor([latent_size, latent_size]).repeat(batch_size * num_images_per_prompt * 2, 1)
+            aspect_ratio = torch.tensor([float(latent_size / latent_size)]).repeat(batch_size * num_images_per_prompt * 2, 1)
+            resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
+            aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
+
+            if distri_config.do_classifier_free_guidance:
+                resolution = torch.cat([resolution, resolution], dim=0)
+                aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
+
+            added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
         static_inputs["added_cond_kwargs"] = added_cond_kwargs
 
         # Used to create communication buffer
@@ -105,7 +127,7 @@ class DistriPixArtAlphaPipeline:
 
             # Only used for creating the communication buffer
             pipeline.transformer.set_counter(0)
-            # pipeline.transformer(**static_inputs, return_dict=False)
+            pipeline.transformer(**static_inputs, return_dict=False)
             if comm_manager.numel > 0:
                 comm_manager.create_buffer()
 

@@ -48,6 +48,7 @@ def main():
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
+        use_seq_parallel_attn=False,
     )
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,

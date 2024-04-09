@@ -20,10 +20,10 @@ class TestDistriSelfAttentionPP(unittest.TestCase):
         self.distri_config = DistriConfig(height=self.height, width=self.width)
 
         self.attention_pp_true = DistriSelfAttentionPP(
-            self.attention, self.distri_config, use_flash_attn=True
+            self.attention, self.distri_config, use_seq_parallel_attn=True
         )
         self.attention_pp_false = DistriSelfAttentionPP(
-            self.attention, self.distri_config, use_flash_attn=False
+            self.attention, self.distri_config, use_seq_parallel_attn=False
         )
 
         self.hidden_states = torch.rand(

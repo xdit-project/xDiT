@@ -24,6 +24,15 @@ try:
     HAS_FLASH_ATTN = True
 except ImportError:
     HAS_FLASH_ATTN = False
+    logger.warning("flash attn not found")
+
+HAS_LONG_CTX_ATTN = False
+try:
+    from ring_flash_attn import ring_flash_attn_func
+
+    HAS_LONG_CTX_ATTN = True
+except ImportError:
+    logger.warning("ring flash attn not found")
 
 
 class DistriAttentionPP(BaseModule):
@@ -128,11 +137,8 @@ class DistriCrossAttentionPP(DistriAttentionPP):
 
 
 class DistriSelfAttentionPP(DistriAttentionPP):
-    def __init__(
-        self, module: Attention, distri_config: DistriConfig, use_flash_attn=True
-    ):
+    def __init__(self, module: Attention, distri_config: DistriConfig):
         super(DistriSelfAttentionPP, self).__init__(module, distri_config)
-        self._use_flash_attn = use_flash_attn
 
     def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):
         attn = self.module
@@ -149,34 +155,18 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         encoder_hidden_states = hidden_states
         kv = self.to_kv(encoder_hidden_states)
 
-        if distri_config.n_device_per_batch == 1:
-            full_kv = kv
-        else:
-            if self.buffer_list is None:  # buffer not created
-                full_kv = torch.cat(
-                    [kv for _ in range(distri_config.n_device_per_batch)], dim=1
-                )
-            elif (
+        use_seq_parallel_attn = self.distri_config.use_seq_parallel_attn
+
+        if (
+            HAS_LONG_CTX_ATTN
+            and use_seq_parallel_attn
+            and (
                 distri_config.mode == "full_sync"
                 or self.counter <= distri_config.warmup_steps
-            ):
-                dist.all_gather(
-                    self.buffer_list,
-                    kv,
-                    group=distri_config.batch_group,
-                    async_op=False,
-                )
-                full_kv = torch.cat(self.buffer_list, dim=1)
-            else:
-                new_buffer_list = [buffer for buffer in self.buffer_list]
-                new_buffer_list[distri_config.split_idx()] = kv
-                full_kv = torch.cat(new_buffer_list, dim=1)
-                if distri_config.mode != "no_sync":
-                    self.comm_manager.enqueue(self.idx, kv)
-
-        if self._use_flash_attn and HAS_FLASH_ATTN:
-            # flash attn
-            key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
+            )
+        ):
+            # the distributed sparse attention using ring-attention.
+            key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
             inner_dim = key.shape[-1]
             head_dim = inner_dim // attn.heads
 
@@ -184,11 +174,40 @@ class DistriSelfAttentionPP(DistriAttentionPP):
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
 
-            hidden_states = flash_attn_func(query, key, value)
+            # print(f"query: {query.shape}, key: {key.shape}, value: {value.shape}")
+
+            hidden_states = ring_flash_attn_func(query, key, value)
+
             hidden_states = hidden_states.reshape(
                 batch_size, -1, attn.heads * head_dim
             ).to(query.dtype)
         else:
+            # the distributed sparse attention from distrifuser
+            if distri_config.n_device_per_batch == 1:
+                full_kv = kv
+            else:
+                if self.buffer_list is None:  # buffer not created
+                    full_kv = torch.cat(
+                        [kv for _ in range(distri_config.n_device_per_batch)], dim=1
+                    )
+                elif (
+                    distri_config.mode == "full_sync"
+                    or self.counter <= distri_config.warmup_steps
+                ):
+                    dist.all_gather(
+                        self.buffer_list,
+                        kv,
+                        group=distri_config.batch_group,
+                        async_op=False,
+                    )
+                    full_kv = torch.cat(self.buffer_list, dim=1)
+                else:
+                    new_buffer_list = [buffer for buffer in self.buffer_list]
+                    new_buffer_list[distri_config.split_idx()] = kv
+                    full_kv = torch.cat(new_buffer_list, dim=1)
+                    if distri_config.mode != "no_sync":
+                        self.comm_manager.enqueue(self.idx, kv)
+
             # naive attn
             key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
 

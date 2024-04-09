@@ -11,8 +11,8 @@ def main():
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
-    distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4, 
-                                 do_classifier_free_guidance=False, split_batch=False, 
+    distri_config = DistriConfig(height=1024, width=1024, warmup_steps=2, 
+                                 do_classifier_free_guidance=True, split_batch=False, 
                                  parallelism=args.parallelism)
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
@@ -22,11 +22,19 @@ def main():
     )
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
-    output = pipeline(
-        prompt="An astronaut riding a green horse",
-        generator=torch.Generator(device="cuda").manual_seed(42),
-    )
+    with torch.profiler.profile(
+        # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+        # on_trace_ready=torch.profiler.tensorboard_trace_handler("log_dir"),
+        record_shapes=True,
+        # with_stack=True,
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    ) as prof: 
+        output = pipeline(
+            prompt="An astronaut riding a green horse",
+            generator=torch.Generator(device="cuda").manual_seed(42),
+        )
     if distri_config.rank == 0:
+        prof.export_chrome_trace("trace.json")
         output.images[0].save("astronaut.png")
 
 if __name__ == "__main__":

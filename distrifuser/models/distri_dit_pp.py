@@ -78,7 +78,7 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
-        # record: bool = False,
+        record: bool = False,
     ):
         distri_config = self.distri_config
 
@@ -86,36 +86,80 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
         b, c, h, w = hidden_states.shape
         # b, c, h, w = sample.shape
         assert (
-            # encoder_hidden_states is not None
-            timestep is not None
-            # and added_cond_kwargs is not None
-            # and class_labels is not None
-            # and cross_attention_kwargs is not None
-            # and attention_mask is not None
-            # and encoder_attention_mask is not None
+            hidden_states is not None
+            and cross_attention_kwargs is None
+            and attention_mask is None
+            # and encoder_attention_mask is None
         )
+        if distri_config.use_cuda_graph and not record:
+            # logger.info(f"encoder_hidden_states.shape {encoder_hidden_states.shape}")
+            # logger.info(f"encoder_attention_mask.shape {encoder_attention_mask.shape}")
+            # for k, v in added_cond_kwargs.items():
+                # logger.info(f"{k}.shape {v.shape}")
+            static_inputs = self.static_inputs
+            assert hidden_states.shape == static_inputs['hidden_states'].shape
+            static_inputs['hidden_states'].copy_(hidden_states)
+            if torch.is_tensor(timestep):
+                if timestep.ndim == 0:
+                    for b in range(static_inputs["timestep"].shape[0]):
+                        static_inputs["timestep"][b] = timestep.item()
+                else:
+                    assert static_inputs["timestep"].shape == timestep.shape
+                    static_inputs["timestep"].copy_(timestep)
+            else:
+                for b in range(static_inputs["timestep"].shape[0]):
+                    static_inputs["timestep"][b] = timestep
+            if encoder_hidden_states is not None:
+                assert static_inputs['encoder_hidden_states'].shape == encoder_hidden_states.shape
+                static_inputs['encoder_hidden_states'].copy_(encoder_hidden_states)
+            if class_labels is not None:
+                static_inputs['class_labels'].copy_(class_labels)
+            if added_cond_kwargs is not None:
+                for k in added_cond_kwargs:
+                    assert static_inputs["added_cond_kwargs"][k].shape == added_cond_kwargs[k].shape
+            if encoder_attention_mask is not None:
+                static_inputs['encoder_attention_mask'].copy_(encoder_attention_mask)
 
-        output = self.model(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            timestep=timestep,
-            added_cond_kwargs=added_cond_kwargs,
-            class_labels=class_labels,
-            cross_attention_kwargs=cross_attention_kwargs,
-            attention_mask=attention_mask,
-            encoder_attention_mask=encoder_attention_mask,
-            return_dict=False,
-        )[
-            0
-        ]  # [2, 8, 32, 32]
-        if self.output_buffer is None:
-            self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
-        if self.buffer_list is None:
-            self.buffer_list = [torch.empty_like(output) for _ in range(distri_config.world_size)]
-        output = output.contiguous()
-        dist.all_gather(self.buffer_list, output, async_op=False)
-        torch.cat(self.buffer_list, dim=2, out=self.output_buffer)
-        output = self.output_buffer
+            if self.counter <= distri_config.warmup_steps:
+                graph_idx = 0
+            elif self.counter == distri_config.warmup_steps + 1:
+                graph_idx = 1
+            else:
+                graph_idx = 2
+
+            self.cuda_graphs[graph_idx].replay()
+            output = self.static_outputs[graph_idx]
+        else:
+            output = self.model(
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                timestep=timestep,
+                added_cond_kwargs=added_cond_kwargs,
+                class_labels=class_labels,
+                cross_attention_kwargs=cross_attention_kwargs,
+                attention_mask=attention_mask,
+                encoder_attention_mask=encoder_attention_mask,
+                return_dict=False,
+            )[0] 
+            if self.output_buffer is None:
+                self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
+            if self.buffer_list is None:
+                self.buffer_list = [torch.empty_like(output) for _ in range(distri_config.world_size)]
+            output = output.contiguous()
+            dist.all_gather(self.buffer_list, output, async_op=False)
+            torch.cat(self.buffer_list, dim=2, out=self.output_buffer)
+            output = self.output_buffer
+            if record:
+                if self.static_inputs is None:
+                    self.static_inputs = {
+                        "hidden_states": hidden_states,
+                        "class_labels": class_labels,
+                        "timestep": timestep,
+                        "encoder_hidden_states": encoder_hidden_states,
+                        "encoder_attention_mask": encoder_attention_mask,
+                        "added_cond_kwargs": added_cond_kwargs,
+                    }
+                self.synchronize()
 
         if return_dict:
             output = Transformer2DModelOutput(sample=output)

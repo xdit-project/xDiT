@@ -37,6 +37,12 @@ def main():
         ],
         help="Different GroupNorm synchronization modes",
     )
+    parser.add_argument(
+        "--use_seq_parallel_attn",
+        action="store_true",
+        default=False,
+        help="Enable sequence parallel attention.",
+    )
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
@@ -48,7 +54,7 @@ def main():
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
-        use_seq_parallel_attn=False,
+        use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,

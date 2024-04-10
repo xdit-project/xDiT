@@ -87,7 +87,7 @@ def main():
     distri_config = DistriConfig(
         height=args.image_size[0],
         width=args.image_size[1],
-        do_classifier_free_guidance=args.guidance_scale > 1 if args.pipeline == "sdxl" else False,
+        do_classifier_free_guidance=args.guidance_scale > 1, 
         split_batch= not args.no_split_batch if args.pipeline == "sdxl" else False, 
         warmup_steps=args.warmup_steps,
         mode=args.sync_mode,

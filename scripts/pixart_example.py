@@ -49,13 +49,12 @@ def main():
         height=1024,
         width=1024,
         warmup_steps=4,
-        do_classifier_free_guidance=False,
+        do_classifier_free_guidance=True,
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
-
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,

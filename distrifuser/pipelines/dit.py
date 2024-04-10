@@ -21,12 +21,8 @@ class DistriDiTPipeline:
     def __init__(self, pipeline: DiTPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
 
-        assert module_config.do_classifier_free_guidance == False
+        # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
-        # if module_config.do_classifier_free_guidance or module_config.split_batch:
-        # logger.warning("Setting do_classifier_free_guidance and split_batch to False")
-        # module_config.do_classifier_free_guidance = False
-        # module_config.split_batch = False
 
         self.distri_config = module_config
 
@@ -92,6 +88,7 @@ class DistriDiTPipeline:
 
         static_inputs = {}
         static_outputs = []
+        cuda_graphs = []
         pipeline = self.pipeline
 
         height = distri_config.height
@@ -103,12 +100,11 @@ class DistriDiTPipeline:
         # crops_coords_top_left = (0, 0)
 
         device = distri_config.device
-
-        batch_size = 2 if distri_config.do_classifier_free_guidance else 1
+        batch_size = 1 if distri_config.batch_size is None else distri_config.batch_size
 
         # 7. Prepare added time ids & embeddings
 
-        t = torch.zeros([batch_size], device=device, dtype=torch.long)
+        t = torch.zeros(2, device=device, dtype=torch.long)
 
         guidance_scale = 4.0
         latent_size = pipeline.transformer.config.sample_size
@@ -118,7 +114,8 @@ class DistriDiTPipeline:
             device=device,
             dtype=pipeline.transformer.dtype,
         )
-        class_labels = torch.tensor([0], device=device).reshape(-1)
+        batch_size = 1
+        class_labels = torch.tensor([0] * batch_size, device=device).reshape(-1)
         class_null = torch.tensor([1000] * batch_size, device=device)
         class_labels_input = (
             torch.cat([class_labels, class_null], 0)
@@ -128,14 +125,9 @@ class DistriDiTPipeline:
         latent_model_input = (
             torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
         )
-        # logger.info(f"latent_model_input.shape {latent_model_input.shape}")
-        # logger.info(f"class_labels_input.shape {class_labels_input.shape}")
-        # static_inputs["hidden_states"] = latents
         static_inputs["hidden_states"] = latent_model_input
         static_inputs["timestep"] = t
         static_inputs["class_labels"] = class_labels_input
-        # static_inputs["encoder_hidden_states"] = prompt_embeds
-        # static_inputs["added_cond_kwargs"] = added_cond_kwargs
 
         # Used to create communication buffer
         comm_manager = None
@@ -145,12 +137,30 @@ class DistriDiTPipeline:
 
             # Only used for creating the communication buffer
             pipeline.transformer.set_counter(0)
-            pipeline.transformer(**static_inputs, return_dict=False)
+            pipeline.transformer(**static_inputs, return_dict=False, record=True)
             if comm_manager.numel > 0:
                 comm_manager.create_buffer()
 
         # Pre-run
-        # pipeline.transformer.set_counter(0)
-        # pipeline.transformer(**static_inputs, return_dict=False)
+        pipeline.transformer.set_counter(0)
+        pipeline.transformer(**static_inputs, return_dict=False, record=True)
 
-        # self.static_inputs = static_inputs
+        if distri_config.use_cuda_graph:
+            if comm_manager is not None:
+                comm_manager.clear()
+            if distri_config.parallelism == "naive_patch":
+                counters = [0, 1]
+            elif distri_config.parallelism == "patch":
+                counters = [0, distri_config.warmup_steps + 1, distri_config.warmup_steps + 2]
+            else:
+                raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
+            for counter in counters:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    pipeline.transformer.set_counter(counter)
+                    output = pipeline.transformer(**static_inputs, return_dict=False, record=True)[0]
+                    static_outputs.append(output)
+                cuda_graphs.append(graph)
+            pipeline.transformer.setup_cuda_graph(static_outputs, cuda_graphs)
+
+        self.static_inputs = static_inputs

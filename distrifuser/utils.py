@@ -42,6 +42,7 @@ class DistriConfig:
         parallelism: str = "patch",
         split_scheme: str = "row",
         use_seq_parallel_attn: bool = False,
+        batch_size: Optional[int] = None,
         verbose: bool = False,
     ):
         try:
@@ -70,6 +71,7 @@ class DistriConfig:
         self.comm_checkpoint = comm_checkpoint
         self.mode = mode
         self.use_cuda_graph = use_cuda_graph
+        self.batch_size = batch_size
 
         self.parallelism = parallelism
         self.split_scheme = split_scheme

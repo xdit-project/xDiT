@@ -18,17 +18,14 @@ logger = init_logger(__name__)
 HAS_FLASH_ATTN = False
 from typing import Optional
 
-try:
-    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
-
-    HAS_FLASH_ATTN = True
-except ImportError:
-    HAS_FLASH_ATTN = False
-    logger.warning("flash attn not found")
-
 HAS_LONG_CTX_ATTN = False
 try:
-    from ring_flash_attn import ring_flash_attn_func
+    from yunchang import (
+        ring_flash_attn_func,
+        UlyssesAttention,
+        LongContextAttention,
+        LongContextAttentionQKVPacked,
+    )
 
     HAS_LONG_CTX_ATTN = True
 except ImportError:
@@ -140,6 +137,10 @@ class DistriSelfAttentionPP(DistriAttentionPP):
     def __init__(self, module: Attention, distri_config: DistriConfig):
         super(DistriSelfAttentionPP, self).__init__(module, distri_config)
 
+        if HAS_LONG_CTX_ATTN and distri_config.use_seq_parallel_attn:
+            self.hybrid_seq_parallel_attn = LongContextAttention()
+            # self.hybrid_seq_parallel_attn = ring_flash_attn_func
+
     def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):
         attn = self.module
         distri_config = self.distri_config
@@ -174,9 +175,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
 
-            # print(f"query: {query.shape}, key: {key.shape}, value: {value.shape}")
-
-            hidden_states = ring_flash_attn_func(query, key, value)
+            hidden_states = self.hybrid_seq_parallel_attn(query, key, value)
 
             hidden_states = hidden_states.reshape(
                 batch_size, -1, attn.heads * head_dim

@@ -4,6 +4,7 @@ import torch
 from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
 import time
+from yunchang import set_seq_parallel_pg
 
 
 def main():
@@ -42,6 +43,7 @@ def main():
         ],
         help="Different GroupNorm synchronization modes",
     )
+
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
@@ -55,6 +57,14 @@ def main():
         mode=args.sync_mode,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
+
+    if distri_config.use_seq_parallel_attn:
+        ulysses_degree = distri_config.world_size
+        ring_degree = distri_config.world_size // ulysses_degree
+        set_seq_parallel_pg(
+            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size
+        )
+
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,

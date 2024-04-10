@@ -3,8 +3,16 @@ import torch
 
 from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
+
+HAS_LONG_CTX_ATTN = False
 import time
-from yunchang import set_seq_parallel_pg
+
+try:
+    from yunchang import set_seq_parallel_pg
+
+    HAS_LONG_CTX_ATTN = True
+except ImportError:
+    print("yunchang not found")
 
 
 def main():
@@ -43,13 +51,19 @@ def main():
         ],
         help="Different GroupNorm synchronization modes",
     )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=1024,
+        help="The height of image",
+    )
 
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
-        height=1024,
-        width=1024,
+        height=args.height,
+        width=args.height,
         warmup_steps=4,
         do_classifier_free_guidance=True,
         split_batch=False,
@@ -58,7 +72,7 @@ def main():
         use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
 
-    if distri_config.use_seq_parallel_attn:
+    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
         ulysses_degree = distri_config.world_size
         ring_degree = distri_config.world_size // ulysses_degree
         set_seq_parallel_pg(

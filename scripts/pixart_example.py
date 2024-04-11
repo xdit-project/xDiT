@@ -4,9 +4,9 @@ import torch
 from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
 
-HAS_LONG_CTX_ATTN = False
 import time
 
+HAS_LONG_CTX_ATTN = False
 try:
     from yunchang import set_seq_parallel_pg
 

@@ -6,13 +6,28 @@ import torch
 from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from tqdm import trange
 
-from distrifuser.pipelines import DistriSDXLPipeline, DistriDiTPipeline, DistriPixArtAlphaPipeline
+from distrifuser.pipelines import (
+    DistriSDXLPipeline,
+    DistriDiTPipeline,
+    DistriPixArtAlphaPipeline,
+)
 from distrifuser.utils import DistriConfig
+
+
+HAS_LONG_CTX_ATTN = False
+try:
+    from yunchang import set_seq_parallel_pg
+
+    HAS_LONG_CTX_ATTN = True
+except ImportError:
+    print("yunchang not found")
 
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit", "pixartalpha"])
+    parser.add_argument(
+        "--pipeline", type=str, default="dit", choices=["sdxl", "dit", "pixartalpha"]
+    )
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument(
         "--mode",
@@ -24,26 +39,49 @@ def get_args() -> argparse.Namespace:
 
     # Diffuser specific arguments
     parser.add_argument(
-        "--prompt", type=str, default="Astronaut in a jungle, cold color palette, muted colors, detailed, 8k"
+        "--prompt",
+        type=str,
+        default="Astronaut in a jungle, cold color palette, muted colors, detailed, 8k",
     )
-    parser.add_argument("--labels", type=str, nargs="+", default=['panda'])
+    parser.add_argument("--labels", type=str, nargs="+", default=["panda"])
     parser.add_argument("--output_path", type=str, default=None)
-    parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps")
-    parser.add_argument("--image_size", type=int, nargs="*", default=1024, help="Image size of generation")
+    parser.add_argument(
+        "--num_inference_steps", type=int, default=50, help="Number of inference steps"
+    )
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        nargs="*",
+        default=1024,
+        help="Image size of generation",
+    )
     parser.add_argument("--guidance_scale", type=float, default=5.0)
-    parser.add_argument("--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"])
+    parser.add_argument(
+        "--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"]
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     # DistriFuser specific arguments
     parser.add_argument(
-        "--no_split_batch", action="store_true", help="Disable the batch splitting for classifier-free guidance"
+        "--no_split_batch",
+        action="store_true",
+        help="Disable the batch splitting for classifier-free guidance",
     )
-    parser.add_argument("--warmup_steps", type=int, default=4, help="Number of warmup steps")
+    parser.add_argument(
+        "--warmup_steps", type=int, default=4, help="Number of warmup steps"
+    )
     parser.add_argument(
         "--sync_mode",
         type=str,
         default="corrected_async_gn",
-        choices=["separate_gn", "async_gn", "corrected_async_gn", "sync_gn", "full_sync", "no_sync"],
+        choices=[
+            "separate_gn",
+            "async_gn",
+            "corrected_async_gn",
+            "sync_gn",
+            "full_sync",
+            "no_sync",
+        ],
         help="Different GroupNorm synchronization modes",
     )
     parser.add_argument(
@@ -53,7 +91,9 @@ def get_args() -> argparse.Namespace:
         choices=["patch", "tensor", "naive_patch"],
         help="patch parallelism, tensor parallelism or naive patch",
     )
-    parser.add_argument("--no_cuda_graph", action="store_true", help="Disable CUDA graph")
+    parser.add_argument(
+        "--no_cuda_graph", action="store_true", help="Disable CUDA graph"
+    )
     parser.add_argument(
         "--split_scheme",
         type=str,
@@ -63,11 +103,27 @@ def get_args() -> argparse.Namespace:
     )
 
     # Benchmark specific arguments
-    parser.add_argument("--output_type", type=str, default="pil", choices=["latent", "pil"])
-    parser.add_argument("--warmup_times", type=int, default=5, help="Number of warmup times")
-    parser.add_argument("--test_times", type=int, default=20, help="Number of test times")
     parser.add_argument(
-        "--ignore_ratio", type=float, default=0.2, help="Ignored ratio of the slowest and fastest steps"
+        "--output_type", type=str, default="pil", choices=["latent", "pil"]
+    )
+    parser.add_argument(
+        "--warmup_times", type=int, default=5, help="Number of warmup times"
+    )
+    parser.add_argument(
+        "--test_times", type=int, default=20, help="Number of test times"
+    )
+    parser.add_argument(
+        "--ignore_ratio",
+        type=float,
+        default=0.2,
+        help="Ignored ratio of the slowest and fastest steps",
+    )
+
+    parser.add_argument(
+        "--use_seq_parallel_attn",
+        action="store_true",
+        default=False,
+        help="Enable sequence parallel attention.",
     )
 
     args = parser.parse_args()
@@ -87,14 +143,22 @@ def main():
     distri_config = DistriConfig(
         height=args.image_size[0],
         width=args.image_size[1],
-        do_classifier_free_guidance=args.guidance_scale > 1, 
-        split_batch= not args.no_split_batch if args.pipeline == "sdxl" else False, 
+        do_classifier_free_guidance=args.guidance_scale > 1,
+        split_batch=not args.no_split_batch if args.pipeline == "sdxl" else False,
         warmup_steps=args.warmup_steps,
         mode=args.sync_mode,
         # use_cuda_graph=not args.no_cuda_graph,
         parallelism=args.parallelism,
         split_scheme=args.split_scheme,
+        use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
+
+    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
+        ulysses_degree = distri_config.world_size
+        ring_degree = distri_config.world_size // ulysses_degree
+        set_seq_parallel_pg(
+            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size
+        )
 
     if args.model_path is None:
         if args.pipeline == "dit":
@@ -105,14 +169,20 @@ def main():
             args.model_path = "PixArt-alpha/PixArt-XL-2-1024-MS"
 
     if args.scheduler == "euler":
-        scheduler = EulerDiscreteScheduler.from_pretrained(args.model_path, subfolder="scheduler")
+        scheduler = EulerDiscreteScheduler.from_pretrained(
+            args.model_path, subfolder="scheduler"
+        )
     elif args.scheduler == "dpm-solver":
-        scheduler = DPMSolverMultistepScheduler.from_pretrained(args.model_path, subfolder="scheduler")
+        scheduler = DPMSolverMultistepScheduler.from_pretrained(
+            args.model_path, subfolder="scheduler"
+        )
     elif args.scheduler == "ddim":
-        scheduler = DDIMScheduler.from_pretrained(args.model_path, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(
+            args.model_path, subfolder="scheduler"
+        )
     else:
         raise NotImplementedError
-    
+
     if args.pipeline == "dit":
         pipeline = DistriDiTPipeline.from_pretrained(
             pretrained_model_name_or_path=args.model_path,
@@ -120,9 +190,9 @@ def main():
             # variant="fp16",
             # use_safetensors=True,
             scheduler=scheduler,
-        ) 
+        )
         prompt = args.labels
-    
+
     elif args.pipeline == "sdxl":
         pipeline = DistriSDXLPipeline.from_pretrained(
             pretrained_model_name_or_path=args.model_path,
@@ -132,7 +202,7 @@ def main():
             scheduler=scheduler,
         )
         prompt = args.prompt
-    
+
     elif args.pipeline == "pixartalpha":
         pipeline = DistriPixArtAlphaPipeline.from_pretrained(
             pretrained_model_name_or_path=args.model_path,
@@ -153,8 +223,16 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
         image.save(args.output_path)
     elif args.mode == "benchmark":
-        pipeline.set_progress_bar_config(position=1, desc="Generation", leave=False, disable=distri_config.rank != 0)
-        for i in trange(args.warmup_times, position=0, desc="Warmup", leave=False, disable=distri_config.rank != 0):
+        pipeline.set_progress_bar_config(
+            position=1, desc="Generation", leave=False, disable=distri_config.rank != 0
+        )
+        for i in trange(
+            args.warmup_times,
+            position=0,
+            desc="Warmup",
+            leave=False,
+            disable=distri_config.rank != 0,
+        ):
             pipeline(
                 prompt,
                 generator=torch.Generator(device="cuda").manual_seed(args.seed),
@@ -164,7 +242,13 @@ def main():
             )
             torch.cuda.synchronize()
         latency_list = []
-        for i in trange(args.test_times, position=0, desc="Test", leave=False, disable=distri_config.rank != 0):
+        for i in trange(
+            args.test_times,
+            position=0,
+            desc="Test",
+            leave=False,
+            disable=distri_config.rank != 0,
+        ):
             start_time = time.time()
             pipeline(
                 prompt,

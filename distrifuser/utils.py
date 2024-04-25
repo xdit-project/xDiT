@@ -55,7 +55,7 @@ class DistriConfig:
         except Exception as e:
             rank = 0
             world_size = 1
-            print(
+            logger.warning(
                 f"Failed to initialize process group: {e}, falling back to single GPU"
             )
 
@@ -166,7 +166,6 @@ class PatchParallelismCommManager:
             if layer_type not in self.numel_dict:
                 self.numel_dict[layer_type] = 0
             self.numel_dict[layer_type] += numel
-        # logger.info(f"Register tensor with shape {shape} and numel {numel} for {layer_type}.")
 
         self.ends.append(self.numel)
         self.shapes.append(shape)

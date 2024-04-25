@@ -28,7 +28,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch"],
+        choices=["patch", "naive_patch", "pipeline"],
         help="Parallelism to use.",
     )
     parser.add_argument(

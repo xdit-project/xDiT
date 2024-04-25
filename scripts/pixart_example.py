@@ -57,19 +57,31 @@ def main():
         default=1024,
         help="The height of image",
     )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=1024,
+        help="The width of image",
+    )
+    parser.add_argument(
+        "--no_use_resolution_binning",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
         height=args.height,
-        width=args.height,
+        width=args.width,
         warmup_steps=4,
         do_classifier_free_guidance=True,
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
+        use_resolution_binning=not args.no_use_resolution_binning,
+        use_cuda_graph=False,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:

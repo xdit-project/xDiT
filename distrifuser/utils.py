@@ -44,6 +44,7 @@ class DistriConfig:
         use_seq_parallel_attn: bool = False,
         batch_size: Optional[int] = None,
         verbose: bool = False,
+        use_resolution_binning: bool = True,
     ):
         try:
             # Initialize the process group
@@ -78,6 +79,7 @@ class DistriConfig:
         self.use_seq_parallel_attn = use_seq_parallel_attn
 
         self.verbose = verbose
+        self.use_resolution_binning = use_resolution_binning
 
         if do_classifier_free_guidance and split_batch:
             n_device_per_batch = world_size // 2

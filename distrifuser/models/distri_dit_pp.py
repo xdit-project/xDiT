@@ -37,8 +37,6 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                     continue
                 for subname, submodule in module.named_children():
                     if isinstance(submodule, nn.Conv2d):
-                        pass
-                        # TODO(jiananwang): parallel conv2d
                         kernel_size = submodule.kernel_size
                         if kernel_size == (1, 1) or kernel_size == 1:
                             continue
@@ -54,11 +52,6 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                             wrapped_submodule = DistriSelfAttentionPP(
                                 submodule, distri_config
                             )
-                        # else:  # cross attention
-                            # assert subname == "attn2"
-                            # wrapped_submodule = DistriCrossAttentionPP(
-                                # submodule, distri_config
-                            # )
                             setattr(module, subname, wrapped_submodule)
             logger.info(
                 f"Using parallelism for DiT, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
@@ -92,10 +85,6 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
             # and encoder_attention_mask is None
         )
         if distri_config.use_cuda_graph and not record:
-            # logger.info(f"encoder_hidden_states.shape {encoder_hidden_states.shape}")
-            # logger.info(f"encoder_attention_mask.shape {encoder_attention_mask.shape}")
-            # for k, v in added_cond_kwargs.items():
-                # logger.info(f"{k}.shape {v.shape}")
             static_inputs = self.static_inputs
             assert hidden_states.shape == static_inputs['hidden_states'].shape
             static_inputs['hidden_states'].copy_(hidden_states)
@@ -142,7 +131,8 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                 return_dict=False,
             )[0] 
             if self.output_buffer is None:
-                self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
+                # self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
+                self.output_buffer = torch.empty_like(output) # , device=output.device, dtype=output.dtype)
             if self.buffer_list is None:
                 self.buffer_list = [torch.empty_like(output) for _ in range(distri_config.world_size)]
             output = output.contiguous()

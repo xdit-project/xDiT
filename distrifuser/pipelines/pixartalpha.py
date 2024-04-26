@@ -10,8 +10,6 @@ from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
 
-from torch.profiler import profile, record_function, ProfilerActivity
-
 logger = init_logger(__name__)
 
 ASPECT_RATIO_1024_BIN = {
@@ -165,25 +163,13 @@ class DistriPixArtAlphaPipeline:
     def set_progress_bar_config(self, **kwargs):
         pass
 
-    cnt = 0
     @torch.no_grad()
     def __call__(self, prompt, *args, **kwargs):
         assert "height" not in kwargs, "height should not be in kwargs"
         assert "width" not in kwargs, "width should not be in kwargs"
         self.pipeline.transformer.set_counter(0)
         config = self.distri_config
-
-        self.cnt += 1
-        if config.parallelism == "patch" and self.cnt == 2:
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
-                         on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
-                         profile_memory=True, 
-                         record_shapes=True) as prof:
-                output = self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, *args, **kwargs)
-            
-            return output
-        else:
-            return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, *args, **kwargs)
+        return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, *args, **kwargs)
 
     @torch.no_grad()
     def prepare(self, **kwargs):

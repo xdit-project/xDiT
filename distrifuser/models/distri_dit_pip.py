@@ -7,12 +7,9 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 from diffusers.models.embeddings import PatchEmbed
 from distrifuser.models.diffusers import Transformer2DModel
 from torch import distributed as dist, nn
+import torch
 
 from distrifuser.modules.base_module import BaseModule
-from distrifuser.modules.pp import (
-    DistriConv2dPP, 
-    DistriPatchEmbed,
-)
 from distrifuser.modules.pip import (
     DistriSelfAttentionPiP,
     DistriTransformer2DModel
@@ -38,18 +35,18 @@ class DistriDiTPiP(BaseModel):  # for Patch Parallelism
                 if isinstance(module, BaseModule):
                     continue
                 for subname, submodule in module.named_children():
-                    if isinstance(submodule, nn.Conv2d):
-                        kernel_size = submodule.kernel_size
-                        if kernel_size == (1, 1) or kernel_size == 1:
-                            continue
-                        wrapped_submodule = DistriConv2dPP(
-                            submodule, distri_config, is_first_layer=True
-                        )
-                        setattr(module, subname, wrapped_submodule)
-                    elif isinstance(submodule, PatchEmbed): 
-                        wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
-                        setattr(module, subname, wrapped_submodule)
-                    elif isinstance(submodule, Attention):
+                    # if isinstance(submodule, nn.Conv2d):
+                    #     kernel_size = submodule.kernel_size
+                    #     if kernel_size == (1, 1) or kernel_size == 1:
+                    #         continue
+                    #     wrapped_submodule = DistriConv2dPP(
+                    #         submodule, distri_config, is_first_layer=True
+                    #     )
+                    #     setattr(module, subname, wrapped_submodule)
+                    # elif isinstance(submodule, PatchEmbed): 
+                        # wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
+                        # setattr(module, subname, wrapped_submodule)
+                    if isinstance(submodule, Attention):
                         if subname == "attn1":  # self attention
                             wrapped_submodule = DistriSelfAttentionPiP(
                                 submodule, distri_config
@@ -132,15 +129,8 @@ class DistriDiTPiP(BaseModel):  # for Patch Parallelism
                 encoder_attention_mask=encoder_attention_mask,
                 return_dict=False,
             )[0] 
-            if self.output_buffer is None:
-                # self.output_buffer = torch.empty((b, c, h, w), device=output.device, dtype=output.dtype)
-                self.output_buffer = torch.empty_like(output) # , device=output.device, dtype=output.dtype)
-            if self.buffer_list is None:
-                self.buffer_list = [torch.empty_like(output) for _ in range(distri_config.world_size)]
-            output = output.contiguous()
-            dist.all_gather(self.buffer_list, output, async_op=False)
-            torch.cat(self.buffer_list, dim=2, out=self.output_buffer)
-            output = self.output_buffer
+            torch.cuda.synchronize()
+            logger.info(f"output.shape = {output.shape} count {self.counter}")
             if record:
                 if self.static_inputs is None:
                     self.static_inputs = {
@@ -158,6 +148,7 @@ class DistriDiTPiP(BaseModel):  # for Patch Parallelism
         else:
             output = (output,)
 
+        logger.info(f"rank {distri_config.rank} counter {self.counter}")
         self.counter += 1
         return output
 

@@ -162,16 +162,14 @@ class DistriPixArtAlphaPipeline:
     def set_progress_bar_config(self, **kwargs):
         pass
 
-    cnt = 0 
     @torch.no_grad()
-    def __call__(self, prompt, *args, **kwargs):
+    def __call__(self, prompt, use_profiler=False, *args, **kwargs):
         assert "height" not in kwargs, "height should not be in kwargs"
         assert "width" not in kwargs, "width should not be in kwargs"
         self.pipeline.transformer.set_counter(0)
         config = self.distri_config
 
-        self.cnt += 1
-        if config.parallelism == "patch" and self.cnt == 2:
+        if use_profiler:
             with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
                          on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
                          profile_memory=True, 

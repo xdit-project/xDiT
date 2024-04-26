@@ -109,7 +109,7 @@ def main():
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
 
-    if use_profiler:
+    if args.use_profiler:
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
                     on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
                     profile_memory=True, 

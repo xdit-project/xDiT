@@ -170,7 +170,7 @@ class DistriPixArtAlphaPipeline:
         self.pipeline.transformer.set_counter(0)
         config = self.distri_config
 
-        cnt += 1
+        self.cnt += 1
         if config.parallelism == "patch" and self.cnt == 2:
             torch.cuda.synchronize(device=device)
             with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 

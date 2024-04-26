@@ -151,10 +151,13 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         batch_size, sequence_length, _ = hidden_states.shape
 
         # args = () if USE_PEFT_BACKEND else (scale,)
+        logger.info(f"rank {distri_config.rank} before query {self.counter} hidden_states.shape = {hidden_states.shape}")
         query = attn.to_q(hidden_states)
 
         encoder_hidden_states = hidden_states
+        logger.info(f"rank {distri_config.rank} before kv {self.counter}")
         kv = self.to_kv(encoder_hidden_states)
+        logger.info(f"rank {distri_config.rank} after kv {self.counter}")
 
         use_seq_parallel_attn = self.distri_config.use_seq_parallel_attn
 
@@ -185,6 +188,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
             if distri_config.n_device_per_batch == 1:
                 full_kv = kv
             else:
+                logger.info(f"rank {distri_config.rank} start buffer {self.counter}")
                 if self.buffer_list is None:  # buffer not created
                     full_kv = torch.cat(
                         [kv for _ in range(distri_config.n_device_per_batch)], dim=1
@@ -204,8 +208,6 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
                     new_buffer_list = [buffer for buffer in self.buffer_list]
                     new_buffer_list[distri_config.split_idx()] = kv
                     full_kv = torch.cat(new_buffer_list, dim=1)
-                    if distri_config.mode != "no_sync":
-                        self.comm_manager.enqueue(self.idx, kv)
 
             # naive attn
             key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
@@ -269,6 +271,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
             else:
                 self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
         output = self._forward(hidden_states, scale=scale)
+
 
         self.counter += 1
         return output

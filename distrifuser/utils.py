@@ -36,7 +36,7 @@ class DistriConfig:
         do_classifier_free_guidance: bool = True,
         split_batch: bool = True,
         warmup_steps: int = 4,
-        comm_checkpoint: int = 60,
+        comm_checkpoint: int = 1,
         mode: str = "corrected_async_gn",
         use_cuda_graph: bool = True,
         parallelism: str = "patch",

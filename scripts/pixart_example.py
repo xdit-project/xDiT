@@ -126,7 +126,7 @@ def main():
         )
         end_time = time.time()
 
-    if distri_config.rank == 0:
+    if distri_config.rank == 0 and not args.use_profiler:
         elapsed_time = end_time - start_time
         print(f"epoch time: {elapsed_time:.2f}s")
         output.images[0].save("astronaut.png")

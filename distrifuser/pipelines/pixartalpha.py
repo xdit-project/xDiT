@@ -172,7 +172,6 @@ class DistriPixArtAlphaPipeline:
 
         self.cnt += 1
         if config.parallelism == "patch" and self.cnt == 2:
-            torch.cuda.synchronize(device=device)
             with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
                          on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
                          profile_memory=True, 

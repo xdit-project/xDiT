@@ -3,6 +3,7 @@ import torch
 
 from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
+from torch.profiler import profile, record_function, ProfilerActivity
 
 import time
 
@@ -67,6 +68,10 @@ def main():
         "--no_use_resolution_binning",
         action="store_true",
     )
+    parser.add_argument(
+        "--use_profiler",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
@@ -104,16 +109,24 @@ def main():
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
 
-    start_time = time.time()
+    if args.use_profiler:
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
+                    profile_memory=True, 
+                    record_shapes=True) as prof:
+            output = pipeline(
+                prompt="An astronaut riding a green horse",
+                generator=torch.Generator(device="cuda").manual_seed(42),
+            )
+    else:
+        start_time = time.time()
+        output = pipeline(
+            prompt="An astronaut riding a green horse",
+            generator=torch.Generator(device="cuda").manual_seed(42),
+        )
+        end_time = time.time()
 
-    output = pipeline(
-        prompt="An astronaut riding a green horse",
-        generator=torch.Generator(device="cuda").manual_seed(42),
-    )
-
-    end_time = time.time()
-
-    if distri_config.rank == 0:
+    if distri_config.rank == 0 and not args.use_profiler:
         elapsed_time = end_time - start_time
         print(f"epoch time: {elapsed_time:.2f}s")
         output.images[0].save("astronaut.png")

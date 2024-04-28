@@ -90,10 +90,10 @@ def main():
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = distri_config.world_size
+        ulysses_degree = 2 #distri_config.world_size
         ring_degree = distri_config.world_size // ulysses_degree
         set_seq_parallel_pg(
-            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size
+            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size, use_ulysses_low = True 
         )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
@@ -113,11 +113,14 @@ def main():
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
                     on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
                     profile_memory=True, 
+                    with_stack=True,
                     record_shapes=True) as prof:
             output = pipeline(
                 prompt="An astronaut riding a green horse",
                 generator=torch.Generator(device="cuda").manual_seed(42),
             )
+        if distri_config.rank == 0:
+            prof.export_memory_timeline(f"{distri_config.mode}_{distri_config.world_size}_mem.html")
     else:
         start_time = time.time()
         output = pipeline(

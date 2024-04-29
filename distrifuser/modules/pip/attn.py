@@ -151,84 +151,46 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         batch_size, sequence_length, _ = hidden_states.shape
 
         # args = () if USE_PEFT_BACKEND else (scale,)
-        logger.info(f"rank {distri_config.rank} before query {self.counter} hidden_states.shape = {hidden_states.shape}")
         query = attn.to_q(hidden_states)
 
         encoder_hidden_states = hidden_states
-        logger.info(f"rank {distri_config.rank} before kv {self.counter}")
         kv = self.to_kv(encoder_hidden_states)
-        logger.info(f"rank {distri_config.rank} after kv {self.counter}")
 
         use_seq_parallel_attn = self.distri_config.use_seq_parallel_attn
 
-        if (
-            HAS_LONG_CTX_ATTN
-            and use_seq_parallel_attn
-            and (
-                distri_config.mode == "full_sync"
-                or self.counter <= distri_config.warmup_steps
-            )
-        ):
-            # the distributed sparse attention using ring-attention.
-            key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
-            inner_dim = key.shape[-1]
-            head_dim = inner_dim // attn.heads
-
-            query = query.view(batch_size, -1, attn.heads, head_dim)
-            key = key.view(batch_size, -1, attn.heads, head_dim)
-            value = value.view(batch_size, -1, attn.heads, head_dim)
-
-            hidden_states = self.hybrid_seq_parallel_attn(query, key, value)
-
-            hidden_states = hidden_states.reshape(
-                batch_size, -1, attn.heads * head_dim
-            ).to(query.dtype)
+        # the distributed sparse attention from distrifuser
+        if distri_config.n_device_per_batch == 1:
+            full_kv = kv
         else:
-            # the distributed sparse attention from distrifuser
-            if distri_config.n_device_per_batch == 1:
-                full_kv = kv
+            if self.buffer_list is None:  # buffer not created
+                full_kv = torch.cat(
+                    [kv for _ in range(distri_config.n_device_per_batch)], dim=1
+                )
             else:
-                logger.info(f"rank {distri_config.rank} start buffer {self.counter}")
-                if self.buffer_list is None:  # buffer not created
-                    full_kv = torch.cat(
-                        [kv for _ in range(distri_config.n_device_per_batch)], dim=1
-                    )
-                elif (
-                    distri_config.mode == "full_sync"
-                    or self.counter <= distri_config.warmup_steps
-                ):
-                    dist.all_gather(
-                        self.buffer_list,
-                        kv,
-                        group=distri_config.batch_group,
-                        async_op=False,
-                    )
-                    full_kv = torch.cat(self.buffer_list, dim=1)
-                else:
-                    new_buffer_list = [buffer for buffer in self.buffer_list]
-                    new_buffer_list[distri_config.split_idx()] = kv
-                    full_kv = torch.cat(new_buffer_list, dim=1)
+                new_buffer_list = [buffer for buffer in self.buffer_list]
+                new_buffer_list[distri_config.split_idx()] = kv
+                full_kv = torch.cat(new_buffer_list, dim=1)
 
-            # naive attn
-            key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
+        # naive attn
+        key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
 
-            inner_dim = key.shape[-1]
-            head_dim = inner_dim // attn.heads
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
 
-            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-            # the output of sdp = (batch, num_heads, seq_len, head_dim)
-            # TODO: add support for attn.scale when we move to Torch 2.1
-            hidden_states = F.scaled_dot_product_attention(
-                query, key, value, dropout_p=0.0, is_causal=False
-            )
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        # TODO: add support for attn.scale when we move to Torch 2.1
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=0.0, is_causal=False
+        )
 
-            hidden_states = hidden_states.transpose(1, 2).reshape(
-                batch_size, -1, attn.heads * head_dim
-            )
-            hidden_states = hidden_states.to(query.dtype)
+        hidden_states = hidden_states.transpose(1, 2).reshape(
+            batch_size, -1, attn.heads * head_dim
+        )
+        hidden_states = hidden_states.to(query.dtype)
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)

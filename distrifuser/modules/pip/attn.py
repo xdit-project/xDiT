@@ -156,8 +156,6 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         encoder_hidden_states = hidden_states
         kv = self.to_kv(encoder_hidden_states)
 
-        use_seq_parallel_attn = self.distri_config.use_seq_parallel_attn
-
         # the distributed sparse attention from distrifuser
         if distri_config.n_device_per_batch == 1:
             full_kv = kv

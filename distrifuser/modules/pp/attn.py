@@ -204,7 +204,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
                     new_buffer_list = [buffer for buffer in self.buffer_list]
                     new_buffer_list[distri_config.split_idx()] = kv
                     full_kv = torch.cat(new_buffer_list, dim=1)
-                    if distri_config.mode != "no_sync":
+                    if distri_config.mode != "no_sync" and self.counter < 19:
                         self.comm_manager.enqueue(self.idx, kv)
 
             # naive attn

@@ -167,7 +167,7 @@ class DistriPixArtAlphaPipeline:
         self.distri_config.inference_step = inference_step
         self.pipeline.transformer.set_counter(0)
         config = self.distri_config
-        return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, *args, **kwargs)
+        return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, num_inference_steps=inference_step, *args, **kwargs)
 
     @torch.no_grad()
     def prepare(self, **kwargs):

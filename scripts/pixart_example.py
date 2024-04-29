@@ -53,6 +53,11 @@ def main():
         help="Different GroupNorm synchronization modes",
     )
     parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=20,
+    )
+    parser.add_argument(
         "--height",
         type=int,
         default=1024,
@@ -118,6 +123,7 @@ def main():
             output = pipeline(
                 prompt="An astronaut riding a green horse",
                 generator=torch.Generator(device="cuda").manual_seed(42),
+                num_inference_steps = args.num_inference_steps
             )
         if distri_config.rank == 0:
             prof.export_memory_timeline(f"{distri_config.mode}_{distri_config.world_size}_mem.html")
@@ -126,6 +132,7 @@ def main():
         output = pipeline(
             prompt="An astronaut riding a green horse",
             generator=torch.Generator(device="cuda").manual_seed(42),
+            num_inference_steps = args.num_inference_steps
         )
         end_time = time.time()
 

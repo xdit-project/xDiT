@@ -116,7 +116,7 @@ class DistriConfig:
         self.split_group = split_group
 
         # pipeline variance
-        self.inference_step = None
+        self.num_inference_steps = None
 
     def batch_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:

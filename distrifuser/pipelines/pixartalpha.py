@@ -161,13 +161,13 @@ class DistriPixArtAlphaPipeline:
         pass
 
     @torch.no_grad()
-    def __call__(self, prompt, inference_step = 20, *args, **kwargs):
+    def __call__(self, prompt, num_inference_steps = 20, *args, **kwargs):
         assert "height" not in kwargs, "height should not be in kwargs"
         assert "width" not in kwargs, "width should not be in kwargs"
-        self.distri_config.inference_step = inference_step
+        self.distri_config.num_inference_steps = num_inference_steps
         self.pipeline.transformer.set_counter(0)
         config = self.distri_config
-        return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, num_inference_steps=inference_step, *args, **kwargs)
+        return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, num_inference_steps=num_inference_steps, *args, **kwargs)
 
     @torch.no_grad()
     def prepare(self, **kwargs):

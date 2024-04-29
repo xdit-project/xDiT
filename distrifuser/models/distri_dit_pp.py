@@ -30,8 +30,7 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
         assert isinstance(model, Transformer2DModel)
         model = DistriTransformer2DModel(model, distri_config)
 
-        # if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
-        if True:
+        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
             for name, module in model.named_modules():
                 if isinstance(module, BaseModule):
                     continue
@@ -149,6 +148,7 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                         "encoder_attention_mask": encoder_attention_mask,
                         "added_cond_kwargs": added_cond_kwargs,
                     }
+                logger.info(f"Recording cuda graph at step {self.counter}")
                 self.synchronize()
 
         if return_dict:

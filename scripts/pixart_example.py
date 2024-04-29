@@ -3,6 +3,7 @@ import torch
 
 from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
+from torch.profiler import profile, record_function, ProfilerActivity
 
 import time
 
@@ -52,6 +53,11 @@ def main():
         help="Different GroupNorm synchronization modes",
     )
     parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=20,
+    )
+    parser.add_argument(
         "--height",
         type=int,
         default=1024,
@@ -65,6 +71,10 @@ def main():
     )
     parser.add_argument(
         "--no_use_resolution_binning",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--use_profiler",
         action="store_true",
     )
 
@@ -85,10 +95,10 @@ def main():
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = distri_config.world_size
+        ulysses_degree = 2 #distri_config.world_size
         ring_degree = distri_config.world_size // ulysses_degree
         set_seq_parallel_pg(
-            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size
+            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size, use_ulysses_low = True 
         )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
@@ -104,16 +114,29 @@ def main():
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
 
-    start_time = time.time()
+    if args.use_profiler:
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
+                    profile_memory=True, 
+                    with_stack=True,
+                    record_shapes=True) as prof:
+            output = pipeline(
+                prompt="An astronaut riding a green horse",
+                generator=torch.Generator(device="cuda").manual_seed(42),
+                num_inference_steps = args.num_inference_steps
+            )
+        if distri_config.rank == 0:
+            prof.export_memory_timeline(f"{distri_config.mode}_{distri_config.world_size}_mem.html")
+    else:
+        start_time = time.time()
+        output = pipeline(
+            prompt="An astronaut riding a green horse",
+            generator=torch.Generator(device="cuda").manual_seed(42),
+            num_inference_steps = args.num_inference_steps
+        )
+        end_time = time.time()
 
-    output = pipeline(
-        prompt="An astronaut riding a green horse",
-        generator=torch.Generator(device="cuda").manual_seed(42),
-    )
-
-    end_time = time.time()
-
-    if distri_config.rank == 0:
+    if distri_config.rank == 0 and not args.use_profiler:
         elapsed_time = end_time - start_time
         print(f"epoch time: {elapsed_time:.2f}s")
         output.images[0].save("astronaut.png")

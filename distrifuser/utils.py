@@ -36,7 +36,7 @@ class DistriConfig:
         do_classifier_free_guidance: bool = True,
         split_batch: bool = True,
         warmup_steps: int = 4,
-        comm_checkpoint: int = 60,
+        comm_checkpoint: int = 1,
         mode: str = "corrected_async_gn",
         use_cuda_graph: bool = True,
         parallelism: str = "patch",
@@ -114,6 +114,9 @@ class DistriConfig:
             split_group = split_groups[self.split_idx()]
         self.batch_group = batch_group
         self.split_group = split_group
+
+        # pipeline variance
+        self.num_inference_steps = None
 
     def batch_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:

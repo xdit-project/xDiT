@@ -74,6 +74,15 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+        "--ulysses_degree",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--use_use_ulysses_low",
+        action="store_true",
+    )
+    parser.add_argument(
         "--use_profiler",
         action="store_true",
     )
@@ -95,10 +104,14 @@ def main():
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = 2 #distri_config.world_size
+        ulysses_degree = args.ulysses_degree
         ring_degree = distri_config.world_size // ulysses_degree
         set_seq_parallel_pg(
-            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size, use_ulysses_low = True 
+            ulysses_degree,
+            ring_degree,
+            distri_config.rank,
+            distri_config.world_size,
+            use_ulysses_low=args.use_use_ulysses_low,
         )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
@@ -108,38 +121,52 @@ def main():
         # use_safetensors=True,
     )
 
-    pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    # pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    # warmup
     output = pipeline(
         prompt="An astronaut riding a green horse",
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
 
+    torch.cuda.reset_peak_memory_stats()
+
+    start_time = time.time()
     if args.use_profiler:
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
-                    profile_memory=True, 
-                    with_stack=True,
-                    record_shapes=True) as prof:
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
+            profile_memory=True,
+            with_stack=True,
+            record_shapes=True,
+        ) as prof:
             output = pipeline(
                 prompt="An astronaut riding a green horse",
                 generator=torch.Generator(device="cuda").manual_seed(42),
-                num_inference_steps = args.num_inference_steps
+                num_inference_steps=args.num_inference_steps,
             )
         if distri_config.rank == 0:
-            prof.export_memory_timeline(f"{distri_config.mode}_{distri_config.world_size}_mem.html")
+            prof.export_memory_timeline(
+                f"{distri_config.mode}_{args.height}_{distri_config.world_size}_mem.html"
+            )
     else:
-        start_time = time.time()
         output = pipeline(
             prompt="An astronaut riding a green horse",
             generator=torch.Generator(device="cuda").manual_seed(42),
-            num_inference_steps = args.num_inference_steps
+            num_inference_steps=args.num_inference_steps,
         )
-        end_time = time.time()
+    end_time = time.time()
+    elapsed_time = end_time - start_time
 
-    if distri_config.rank == 0 and not args.use_profiler:
-        elapsed_time = end_time - start_time
-        print(f"epoch time: {elapsed_time:.2f}s")
-        output.images[0].save("astronaut.png")
+    peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+
+    if distri_config.rank == 0:
+        case_name = (
+            f"hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}"
+        )
+        print(
+            f"${case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
+        )
+        output.images[0].save(f"./results/astronaut_{case_name}.png")
 
 
 if __name__ == "__main__":

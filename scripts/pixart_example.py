@@ -128,6 +128,10 @@ def main():
         if distri_config.rank == 0:
             prof.export_memory_timeline(f"{distri_config.mode}_{distri_config.world_size}_mem.html")
     else:
+        MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
+        torch.cuda.memory._record_memory_history(
+            max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+        )
         start_time = time.time()
         output = pipeline(
             prompt="An astronaut riding a green horse",
@@ -135,6 +139,8 @@ def main():
             num_inference_steps = args.num_inference_steps
         )
         end_time = time.time()
+        torch.cuda.memory._dump_snapshot(f"{distri_config.mode}_{distri_config.world_size}.pickle")
+        torch.cuda.memory._record_memory_history(enabled=None)
 
     if distri_config.rank == 0 and not args.use_profiler:
         elapsed_time = end_time - start_time

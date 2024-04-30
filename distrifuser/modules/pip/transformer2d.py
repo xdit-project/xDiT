@@ -91,20 +91,20 @@ class DistriTransformer2DModel(BaseModule):
                 # torch.distributed.recv(hidden_states[idx], src=distri_config.world_size - 1, tag=-1)
         # logger.info(f"rank {distri_config.rank} wait")
 
-        for idx, block in enumerate(module.transformer_blocks):
-            tmp_hidden_states = block(
-                tmp_hidden_states,
-                attention_mask=attention_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                timestep=timestep,
-                cross_attention_kwargs=cross_attention_kwargs,
-                class_labels=class_labels,
-            )
-            if idx == 13:
-                logger.info(f"rank {distri_config.rank}: {torch.allclose(mid_hidden_states, tmp_hidden_states, atol=1e-6, rtol=1e-6)}")
+        # for idx, block in enumerate(module.transformer_blocks):
+        #     tmp_hidden_states = block(
+        #         tmp_hidden_states,
+        #         attention_mask=attention_mask,
+        #         encoder_hidden_states=encoder_hidden_states,
+        #         encoder_attention_mask=encoder_attention_mask,
+        #         timestep=timestep,
+        #         cross_attention_kwargs=cross_attention_kwargs,
+        #         class_labels=class_labels,
+        #     )
+        #     if idx == 13:
+        #         logger.info(f"rank {distri_config.rank}: {torch.allclose(mid_hidden_states, tmp_hidden_states, atol=1e-6, rtol=1e-6)}")
 
-        logger.info(f"{torch.allclose(hidden_states[0], tmp_hidden_states, atol=1e-6, rtol=1e-6)}")
+        # logger.info(f"{torch.allclose(hidden_states[0], tmp_hidden_states, atol=1e-6, rtol=1e-6)}")
 
         for handle in async_handle:
             if not handle.is_completed():

@@ -43,7 +43,7 @@ class DistriConfig:
         split_scheme: str = "row",
         use_seq_parallel_attn: bool = False,
         batch_size: Optional[int] = None,
-        num_micro_batch: Optional[int] = None,
+        num_micro_batch: int = 2,
         verbose: bool = False,
         use_resolution_binning: bool = True,
     ):
@@ -116,8 +116,7 @@ class DistriConfig:
         self.batch_group = batch_group
         self.split_group = split_group
 
-        if parallelism == "pipeline":
-            self.num_micro_batch = num_micro_batch or 2
+        self.num_micro_batch = num_micro_batch
 
         # pipeline variance
         self.num_inference_steps = None

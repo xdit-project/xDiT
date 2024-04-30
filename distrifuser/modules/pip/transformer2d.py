@@ -200,7 +200,7 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
-        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1
+        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
             hidden_states = self.pip_forward(
                 hidden_states,
                 attention_mask=attention_mask,

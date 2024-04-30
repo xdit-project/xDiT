@@ -47,16 +47,17 @@ class DistriTransformer2DModel(BaseModule):
         else:
             hidden_states_group = hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1)
         async_handle = []
+        logger.info(f"num_micro_batch: {len(hidden_states_group)}")
         for idx, hidden_states in enumerate(hidden_states_group):
-            logger.info(f"rank {distri_config.rank} idx {idx} hidden_states.shape: {hidden_states.shape}")
+            # logger.info(f"rank {distri_config.rank} idx {idx} hidden_states.shape: {hidden_states.shape}")
             if distri_config.rank > 0:
                 hidden_states = hidden_states.contiguous()
-                logger.info(f"rank {distri_config.rank} idx {idx} recv")
+                # logger.info(f"rank {distri_config.rank} idx {idx} recv")
                 torch.distributed.recv(hidden_states, src=distri_config.rank - 1, tag=idx)
-                logger.info(f"rank {distri_config.rank} idx {idx} recv done")
+                # logger.info(f"rank {distri_config.rank} idx {idx} recv done")
             for block_idx in range(start_idx, end_idx):
                 block = module.transformer_blocks[block_idx]
-                logger.info(f"rank {distri_config.rank} idx {idx} block {block_idx} start")
+                # logger.info(f"rank {distri_config.rank} idx {idx} block {block_idx} start")
                 hidden_states = block(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -66,23 +67,23 @@ class DistriTransformer2DModel(BaseModule):
                     cross_attention_kwargs=cross_attention_kwargs,
                     class_labels=class_labels,
                 ) 
-                logger.info(f"rank {distri_config.rank} idx {idx} block {block_idx} done")
-            logger.info(f"rank {distri_config.rank} idx {idx} block done")
+                # logger.info(f"rank {distri_config.rank} idx {idx} block {block_idx} done")
+            # logger.info(f"rank {distri_config.rank} idx {idx} block done")
             hidden_states = hidden_states.contiguous()
             if distri_config.rank < distri_config.world_size - 1:
-                logger.info(f"rank {distri_config.rank} idx {idx} send")
+                # logger.info(f"rank {distri_config.rank} idx {idx} send")
                 torch.distributed.isend(hidden_states, dst=distri_config.rank + 1, tag=idx)
             else:
-                logger.info(f"rank {distri_config.rank} idx {idx} send to 0")
+                # logger.info(f"rank {distri_config.rank} idx {idx} send to 0")
                 torch.distributed.isend(hidden_states, dst=0, tag=-1)    
             if distri_config.rank == 0:
-                logger.info(f"rank {distri_config.rank} idx {idx} recv from {distri_config.world_size - 1}")
+                # logger.info(f"rank {distri_config.rank} idx {idx} recv from {distri_config.world_size - 1}")
                 async_handle.append(torch.distributed.irecv(hidden_states, src=distri_config.world_size - 1, tag=-1))
-        logger.info(f"rank {distri_config.rank} wait")
+        # logger.info(f"rank {distri_config.rank} wait")
         for handle in async_handle:
             if not handle.is_completed():
                 handle.wait()
-        logger.info(f"rank {distri_config.rank} wait done")
+        # logger.info(f"rank {distri_config.rank} wait done")
         hidden_states = torch.cat(hidden_states_group, dim=1)
         return hidden_states
 

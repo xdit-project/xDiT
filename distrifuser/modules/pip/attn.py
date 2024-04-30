@@ -150,24 +150,30 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
 
         batch_size, sequence_length, _ = hidden_states.shape
 
-        # args = () if USE_PEFT_BACKEND else (scale,)
         query = attn.to_q(hidden_states)
 
         encoder_hidden_states = hidden_states
         kv = self.to_kv(encoder_hidden_states)
 
         # the distributed sparse attention from distrifuser
+
+        # TODO
+        # 根据 micro_batch 的编号替换对应的 block.
         if distri_config.n_device_per_batch == 1:
             full_kv = kv
         else:
-            if self.buffer_list is None:  # buffer not created
-                full_kv = torch.cat(
-                    [kv for _ in range(distri_config.n_device_per_batch)], dim=1
-                )
+            if distri_config.mode == "full_sync" or self.counter <= self.warmup_steps:
+                full_kv = kv
             else:
-                new_buffer_list = [buffer for buffer in self.buffer_list]
-                new_buffer_list[distri_config.split_idx()] = kv
-                full_kv = torch.cat(new_buffer_list, dim=1)
+                raise NotImplementedError
+                # if self.buffer_list is None:  # buffer not created
+                #     full_kv = torch.cat(
+                #         [kv for _ in range(distri_config.n_device_per_batch)], dim=1
+                #     )
+                # else:
+                #     new_buffer_list = [buffer for buffer in self.buffer_list]
+                #     new_buffer_list[distri_config.split_idx()] = kv
+                #     full_kv = torch.cat(new_buffer_list, dim=1)
 
         # naive attn
         key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)

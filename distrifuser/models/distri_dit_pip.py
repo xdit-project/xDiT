@@ -130,7 +130,6 @@ class DistriDiTPiP(BaseModel):  # for Patch Parallelism
                 return_dict=False,
             )[0] 
             torch.cuda.synchronize()
-            logger.info(f"output.shape = {output.shape} count {self.counter}")
             if record:
                 if self.static_inputs is None:
                     self.static_inputs = {
@@ -148,7 +147,6 @@ class DistriDiTPiP(BaseModel):  # for Patch Parallelism
         else:
             output = (output,)
 
-        logger.info(f"rank {distri_config.rank} counter {self.counter}")
         self.counter += 1
         return output
 

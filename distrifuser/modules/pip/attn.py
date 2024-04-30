@@ -61,6 +61,7 @@ class DistriAttentionPiP(BaseModule):
 
         self.to_kv = to_kv
 
+        self.batch_idx = 0
 
 class DistriCrossAttentionPiP(DistriAttentionPiP):
     def __init__(self, module: Attention, distri_config: DistriConfig):
@@ -156,24 +157,19 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         kv = self.to_kv(encoder_hidden_states)
 
         # the distributed sparse attention from distrifuser
-
-        # TODO
-        # 根据 micro_batch 的编号替换对应的 block.
         if distri_config.n_device_per_batch == 1:
             full_kv = kv
         else:
-            if distri_config.mode == "full_sync" or self.counter <= self.warmup_steps:
+            if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
                 full_kv = kv
             else:
-                raise NotImplementedError
-                # if self.buffer_list is None:  # buffer not created
-                #     full_kv = torch.cat(
-                #         [kv for _ in range(distri_config.n_device_per_batch)], dim=1
-                #     )
-                # else:
-                #     new_buffer_list = [buffer for buffer in self.buffer_list]
-                #     new_buffer_list[distri_config.split_idx()] = kv
-                #     full_kv = torch.cat(new_buffer_list, dim=1)
+                full_kv = self.buffer_list
+                # _, c, _ = full_kv.shape
+                _, c, _ = kv.shape
+                # assert c % distri_config.num_micro_batch == 0
+                full_kv[:, c * self.batch_idx : c * (self.batch_idx + 1), :] = kv 
+
+            self.buffer_list = full_kv
 
         # naive attn
         key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
@@ -206,6 +202,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
 
         hidden_states = hidden_states / attn.rescale_output_factor
 
+
         return hidden_states
 
     def forward(
@@ -217,27 +214,13 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         **kwargs,
     ) -> torch.FloatTensor:
         distri_config = self.distri_config
-        if (
-            self.comm_manager is not None
-            and self.comm_manager.handles is not None
-            and self.idx is not None
-        ):
-            if self.comm_manager.handles[self.idx] is not None:
-                self.comm_manager.handles[self.idx].wait()
-                self.comm_manager.handles[self.idx] = None
-
-        b, l, c = hidden_states.shape
-        if distri_config.n_device_per_batch > 1 and self.buffer_list is None:
-            if self.comm_manager.buffer_list is None:
-                self.idx = self.comm_manager.register_tensor(
-                    shape=(b, l, self.to_kv.out_features),
-                    torch_dtype=hidden_states.dtype,
-                    layer_type="attn",
-                )
-            else:
-                self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
         output = self._forward(hidden_states, scale=scale)
 
-
-        self.counter += 1
+        if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
+            self.counter += 1
+        else:
+            self.batch_idx += 1
+            if self.batch_idx == distri_config.num_micro_batch:
+                self.counter += 1
+                self.batch_idx = 0
         return output

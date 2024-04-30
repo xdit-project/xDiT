@@ -58,6 +58,11 @@ def main():
         default=20,
     )
     parser.add_argument(
+        "--num_micro_batch",
+        type=int,
+        default=2
+    )
+    parser.add_argument(
         "--height",
         type=int,
         default=1024,
@@ -89,6 +94,7 @@ def main():
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
+        num_micro_batch=args.num_micro_batch,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=False,

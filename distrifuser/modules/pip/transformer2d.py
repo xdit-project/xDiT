@@ -26,13 +26,12 @@ class DistriTransformer2DModel(BaseModule):
     def pip_forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        timestep: Optional[torch.LongTensor] = None,
-        added_cond_kwargs: Dict[str, torch.Tensor] = None,
-        class_labels: Optional[torch.LongTensor] = None,
-        cross_attention_kwargs: Dict[str, Any] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        cross_attention_kwargs: Dict[str, Any] = None,
+        class_labels: Optional[torch.LongTensor] = None,
     ):
         module = self.module
         distri_config = self.distri_config
@@ -40,26 +39,32 @@ class DistriTransformer2DModel(BaseModule):
         block_len = (len(module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
         start_idx = block_len * distri_config.rank
         end_idx = min(block_len * (distri_config.rank + 1), len(module.transformer_blocks))
+        async_handle = []
+
+        tmp_hidden_states = torch.zeros_like(hidden_states)
+        tmp_hidden_states.copy_(hidden_states)
+        mid_hidden_states = torch.zeros_like(hidden_states)
 
         b, c, h = hidden_states.shape
         if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
-            hidden_states_group = [hidden_states]
+            hidden_states = [hidden_states]
         else:
-            hidden_states_group = hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1)
-        async_handle = []
-        logger.info(f"num_micro_batch: {len(hidden_states_group)}")
-        for idx, hidden_states in enumerate(hidden_states_group):
+            hidden_states = hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1)
+        logger.info(f"start_idx: {start_idx}, end_idx: {end_idx}")
+        logger.info(f"num_micro_batch: {len(hidden_states)}")
+        for idx in range(len(hidden_states)):
             # logger.info(f"rank {distri_config.rank} idx {idx} hidden_states.shape: {hidden_states.shape}")
             if distri_config.rank > 0:
-                hidden_states = hidden_states.contiguous()
+                hidden_states[idx] = hidden_states[idx].contiguous()
                 # logger.info(f"rank {distri_config.rank} idx {idx} recv")
-                torch.distributed.recv(hidden_states, src=distri_config.rank - 1, tag=idx)
+                torch.distributed.recv(hidden_states[idx], src=distri_config.rank - 1, tag=idx)
                 # logger.info(f"rank {distri_config.rank} idx {idx} recv done")
+                # mid_hidden_states.copy_(hidden_states[idx])
             for block_idx in range(start_idx, end_idx):
                 block = module.transformer_blocks[block_idx]
                 # logger.info(f"rank {distri_config.rank} idx {idx} block {block_idx} start")
-                hidden_states = block(
-                    hidden_states,
+                hidden_states[idx] = block(
+                    hidden_states[idx],
                     attention_mask=attention_mask,
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_attention_mask,
@@ -67,24 +72,48 @@ class DistriTransformer2DModel(BaseModule):
                     cross_attention_kwargs=cross_attention_kwargs,
                     class_labels=class_labels,
                 ) 
+
                 # logger.info(f"rank {distri_config.rank} idx {idx} block {block_idx} done")
             # logger.info(f"rank {distri_config.rank} idx {idx} block done")
-            hidden_states = hidden_states.contiguous()
+            # hidden_states[idx] = hidden_states[idx].contiguous()
             if distri_config.rank < distri_config.world_size - 1:
                 # logger.info(f"rank {distri_config.rank} idx {idx} send")
-                torch.distributed.isend(hidden_states, dst=distri_config.rank + 1, tag=idx)
+                torch.distributed.isend(hidden_states[idx], dst=distri_config.rank + 1, tag=idx)
+                # mid_hidden_states.copy_(hidden_states[idx])
+                # torch.distributed.send(hidden_states[idx], dst=distri_config.rank + 1, tag=idx)
             else:
                 # logger.info(f"rank {distri_config.rank} idx {idx} send to 0")
-                torch.distributed.isend(hidden_states, dst=0, tag=-1)    
+                torch.distributed.isend(hidden_states[idx], dst=0, tag=-1)    
+                # torch.distributed.send(hidden_states[idx], dst=0, tag=-1)    
             if distri_config.rank == 0:
                 # logger.info(f"rank {distri_config.rank} idx {idx} recv from {distri_config.world_size - 1}")
-                async_handle.append(torch.distributed.irecv(hidden_states, src=distri_config.world_size - 1, tag=-1))
+                async_handle.append(torch.distributed.irecv(hidden_states[idx], src=distri_config.world_size - 1, tag=-1))
+                # torch.distributed.recv(hidden_states[idx], src=distri_config.world_size - 1, tag=-1)
         # logger.info(f"rank {distri_config.rank} wait")
+
+        for idx, block in enumerate(module.transformer_blocks):
+            tmp_hidden_states = block(
+                tmp_hidden_states,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                cross_attention_kwargs=cross_attention_kwargs,
+                class_labels=class_labels,
+            )
+            if idx == 13:
+                logger.info(f"rank {distri_config.rank}: {torch.allclose(mid_hidden_states, tmp_hidden_states, atol=1e-6, rtol=1e-6)}")
+
+        logger.info(f"{torch.allclose(hidden_states[0], tmp_hidden_states, atol=1e-6, rtol=1e-6)}")
+
         for handle in async_handle:
             if not handle.is_completed():
                 handle.wait()
         # logger.info(f"rank {distri_config.rank} wait done")
-        hidden_states = torch.cat(hidden_states_group, dim=1)
+        hidden_states = torch.cat(hidden_states, dim=1)
+
+        # hidden_states = tmp_hidden_states
+
         return hidden_states
 
     def forward(
@@ -207,17 +236,16 @@ class DistriTransformer2DModel(BaseModule):
         if (
             distri_config.world_size > 1
             and distri_config.n_device_per_batch > 1
-        ):
+        ) or True:
             logger.info(f"Before: hidden_states.shape: {hidden_states.shape}")
             hidden_states = self.pip_forward(
                 hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                timestep=timestep,
-                added_cond_kwargs=added_cond_kwargs,
-                class_labels=class_labels,
-                cross_attention_kwargs=cross_attention_kwargs,
                 attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep,
+                cross_attention_kwargs=cross_attention_kwargs,
+                class_labels=class_labels,
             )
             logger.info(f"After: hidden_states.shape: {hidden_states.shape}") 
         else:
@@ -267,7 +295,6 @@ class DistriTransformer2DModel(BaseModule):
                     module.out_channels,
                 )
             )
-            logger.info(f"rank {distri_config.rank} test")
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
                 shape=(
@@ -277,8 +304,6 @@ class DistriTransformer2DModel(BaseModule):
                     width * module.patch_size,
                 )
             )
-
-        logger.info(f"rank {distri_config.rank} counter {self.counter}")
 
         if not return_dict:
             return (output,)

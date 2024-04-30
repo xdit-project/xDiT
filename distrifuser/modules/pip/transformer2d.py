@@ -34,6 +34,7 @@ class DistriTransformer2DModel(BaseModule):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
     ):
+        module = self.module
         distri_config = self.distri_config
         num_micro_batch = self.distri_config.num_micro_batch
         block_len = (len(module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
@@ -82,7 +83,7 @@ class DistriTransformer2DModel(BaseModule):
             if not handle.is_completed():
                 handle.wait()
         logger.info(f"rank {distri_config.rank} wait done")
-        hidden_states = torch.cat(sliced_hidden_states_group, dim=1)
+        hidden_states = torch.cat(hidden_states_group, dim=1)
         logger.info(f"hidden_states.shape: {hidden_states.shape}")
 
     def forward(

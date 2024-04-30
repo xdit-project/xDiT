@@ -41,9 +41,12 @@ class DistriTransformer2DModel(BaseModule):
         end_idx = min(block_len * (distri_config.rank + 1), len(module.transformer_blocks))
 
         b, c, h = hidden_states.shape
-        sliced_hidden_states_group = hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1)
+        if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
+            hidden_states_group = [hidden_states]
+        else:
+            hidden_states_group = hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1)
         async_handle = []
-        for idx, hidden_states in enumerate(sliced_hidden_states_group):
+        for idx, hidden_states in enumerate(hidden_states_group):
             logger.info(f"rank {distri_config.rank} idx {idx} hidden_states.shape: {hidden_states.shape}")
             if distri_config.rank > 0:
                 hidden_states = hidden_states.contiguous()

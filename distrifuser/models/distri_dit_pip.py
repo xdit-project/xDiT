@@ -128,7 +128,6 @@ class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
                 encoder_attention_mask=encoder_attention_mask,
                 return_dict=False,
             )[0] 
-            torch.cuda.synchronize()
             if record:
                 if self.static_inputs is None:
                     self.static_inputs = {

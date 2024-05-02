@@ -117,6 +117,10 @@ class DistriConfig:
         self.split_group = split_group
 
         self.num_micro_batch = num_micro_batch
+        if self.parallelism == "pipeline":
+            self.groups = []
+            for _ in range(num_micro_batch):
+                self.groups.append(dist.new_group())
 
         # pipeline variance
         self.num_inference_steps = None

@@ -43,6 +43,7 @@ class DistriConfig:
         split_scheme: str = "row",
         use_seq_parallel_attn: bool = False,
         batch_size: Optional[int] = None,
+        num_micro_batch: int = 2,
         verbose: bool = False,
         use_resolution_binning: bool = True,
     ):
@@ -55,11 +56,11 @@ class DistriConfig:
         except Exception as e:
             rank = 0
             world_size = 1
-            print(
+            logger.warning(
                 f"Failed to initialize process group: {e}, falling back to single GPU"
             )
 
-        assert is_power_of_2(world_size)
+        assert is_power_of_2(world_size) or parallelism == "pipeline"
         check_env()
 
         self.world_size = world_size
@@ -115,6 +116,12 @@ class DistriConfig:
         self.batch_group = batch_group
         self.split_group = split_group
 
+        self.num_micro_batch = num_micro_batch
+        # if self.parallelism == "pipeline":
+        #     self.groups = []
+        #     for _ in range(num_micro_batch):
+        #         self.groups.append(dist.new_group())
+
         # pipeline variance
         self.num_inference_steps = None
 
@@ -169,7 +176,6 @@ class PatchParallelismCommManager:
             if layer_type not in self.numel_dict:
                 self.numel_dict[layer_type] = 0
             self.numel_dict[layer_type] += numel
-        # logger.info(f"Register tensor with shape {shape} and numel {numel} for {layer_type}.")
 
         self.ends.append(self.numel)
         self.shapes.append(shape)

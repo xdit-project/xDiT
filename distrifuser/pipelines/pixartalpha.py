@@ -6,7 +6,7 @@ from diffusers import PixArtAlphaPipeline
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
-from distrifuser.models import NaivePatchDiT, DistriDiTPP
+from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
 
@@ -149,6 +149,9 @@ class DistriPixArtAlphaPipeline:
         elif distri_config.parallelism == "naive_patch":
             logger.info("Using naive patch parallelism")
             transformer = NaivePatchDiT(transformer, distri_config)
+        elif distri_config.parallelism == "pipeline":
+            logger.info("Using pipeline parallelism")
+            transformer = DistriDiTPiP(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 

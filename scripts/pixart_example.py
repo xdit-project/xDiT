@@ -89,6 +89,9 @@ def main():
 
     args = parser.parse_args()
 
+    # torch.backends.cudnn.benchmark=True
+    torch.backends.cudnn.deterministic = True
+
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
         height=args.height,
@@ -129,12 +132,14 @@ def main():
     )
 
     torch.cuda.reset_peak_memory_stats()
-
+    case_name = f"hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
     start_time = time.time()
     if args.use_profiler:
         with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
+            activities=[ProfilerActivity.CUDA],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                f"./profile/{case_name}"
+            ),
             profile_memory=True,
             with_stack=True,
             record_shapes=True,
@@ -144,27 +149,36 @@ def main():
                 generator=torch.Generator(device="cuda").manual_seed(42),
                 num_inference_steps=args.num_inference_steps,
             )
-        if distri_config.rank == 0:
-            prof.export_memory_timeline(
-                f"{distri_config.mode}_{args.height}_{distri_config.world_size}_mem.html"
-            )
+        # if distri_config.rank == 0:
+        #     prof.export_memory_timeline(
+        #         f"{distri_config.mode}_{args.height}_{distri_config.world_size}_mem.html"
+        #     )
     else:
+        MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
+        torch.cuda.memory._record_memory_history(
+            max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+        )
+        start_time = time.time()
         output = pipeline(
             prompt="An astronaut riding a green horse",
             generator=torch.Generator(device="cuda").manual_seed(42),
             num_inference_steps=args.num_inference_steps,
         )
+
+        torch.cuda.memory._dump_snapshot(
+            f"{distri_config.mode}_{distri_config.world_size}.pickle"
+        )
+        torch.cuda.memory._record_memory_history(enabled=None)
+
     end_time = time.time()
     elapsed_time = end_time - start_time
 
     peak_memory = torch.cuda.max_memory_allocated(device="cuda")
 
     if distri_config.rank == 0:
-        case_name = (
-            f"hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}"
-        )
+
         print(
-            f"${case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
+            f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )
         output.images[0].save(f"./results/astronaut_{case_name}.png")
 

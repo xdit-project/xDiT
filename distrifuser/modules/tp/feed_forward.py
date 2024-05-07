@@ -39,23 +39,9 @@ class DitFFNTP(BaseModule):
         start_idx = distri_config.split_idx() * mid_features
         end_idx = (distri_config.split_idx() + 1) * mid_features
 
-        print(f"start_idx {start_idx} end_idx {end_idx} mid_features {mid_features}")
-        # module.net[0].proj.weight torch.Size([4608, 1152])
-        print(f"module.net[0].proj.weight {module.net[0].proj.weight.shape}")
-        # sharded_fc1.bias torch.Size([4608])
-        print(f"sharded_fc1.bias {sharded_fc1.bias.shape}")
-
         sharded_fc1.weight.data.copy_(module.net[0].proj.weight.data[start_idx:end_idx])
         if module.net[0].proj.bias is not None:
             sharded_fc1.bias.data.copy_(module.net[0].proj.bias.data[start_idx:end_idx])
-
-        # start_idx = (distri_config.n_device_per_batch + distri_config.split_idx()) * mid_features
-        # end_idx = (distri_config.n_device_per_batch + distri_config.split_idx() + 1) * mid_features
-        # print(f"updated start_idx {start_idx} end_idx {end_idx}")
-
-        # sharded_fc1.weight.data.copy_(module.net[0].proj.weight.data[start_idx:end_idx])
-        # if module.net[0].proj.bias is not None:
-        #     sharded_fc1.bias.data[mid_features:].copy_(module.net[0].proj.bias.data[start_idx:end_idx])
 
         sharded_fc2 = nn.Linear(
             mid_features,

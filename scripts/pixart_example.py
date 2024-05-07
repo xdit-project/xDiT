@@ -87,6 +87,10 @@ def main():
         "--use_profiler",
         action="store_true",
     )
+    parser.add_argument(
+        "--use_cuda_graph",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
@@ -105,7 +109,7 @@ def main():
         num_micro_batch=args.num_micro_batch,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
-        use_cuda_graph=False,
+        use_cuda_graph=args.use_cuda_graph,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:

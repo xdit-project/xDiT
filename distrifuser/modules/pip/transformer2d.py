@@ -22,7 +22,6 @@ class DistriTransformer2DModel(BaseModule):
         super().__init__(module, distri_config)
         self.config = module.config
 
-
     def pip_forward(
         self,
         hidden_states: torch.Tensor,
@@ -47,24 +46,13 @@ class DistriTransformer2DModel(BaseModule):
             hidden_states = [hidden_states]
         else:
             hidden_states = list(hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1))
-            for idx in range(len(hidden_states)):
-                hidden_states[idx] = hidden_states[idx].contiguous()
-        
-        num_micro_batch = len(hidden_states)
-        send_req = None
-        recv_req = None
+        # logger.info(f"start_idx: {start_idx}, end_idx: {end_idx}")
+        # logger.info(f"num_micro_batch: {len(hidden_states)}")
 
-        if dist.get_rank() > 0: 
-            recv_req = torch.distributed.irecv(hidden_states[0], src=dist.get_rank() - 1)
-
-        # filling the pipeline
-
-        for idx in range(num_micro_batch):
+        for idx in range(len(hidden_states)):
             if distri_config.rank > 0:
-                if not recv_req.is_completed():
-                    recv_req.wait()
-                if idx < num_micro_batch - 1:
-                    recv_req = torch.distributed.irecv(hidden_states[idx+1], src=distri_config.rank - 1)
+                hidden_states[idx] = hidden_states[idx].contiguous()
+                torch.distributed.recv(hidden_states[idx], src=distri_config.rank - 1, tag=idx)
             for block_idx in range(start_idx, end_idx):
                 block = module.transformer_blocks[block_idx]
                 hidden_states[idx] = block(
@@ -77,29 +65,16 @@ class DistriTransformer2DModel(BaseModule):
                     class_labels=class_labels,
                 ) 
 
-            if send_req is not None and not send_req.is_completed():
-                send_req.wait()
-            
             if distri_config.rank < distri_config.world_size - 1:
-                send_req = torch.distributed.isend(
-                    hidden_states[idx], 
-                    dst=distri_config.rank + 1)
+                torch.distributed.isend(hidden_states[idx], dst=distri_config.rank + 1, tag=idx)
             else:
-                torch.distributed.isend(
-                    hidden_states[idx], 
-                    dst=0,
-                    group=distri_config.groups[idx])
-
+                torch.distributed.isend(hidden_states[idx], dst=0, tag=-1)    
             if distri_config.rank == 0:
-                async_handle.append(
-                    torch.distributed.irecv(
-                        hidden_states[idx], 
-                        src=distri_config.world_size - 1,
-                        group=distri_config.groups[idx]))
-        if distri_config.rank == 0:
-            for handle in async_handle:
-                if not handle.is_completed():
-                    handle.wait()
+                async_handle.append(torch.distributed.irecv(hidden_states[idx], src=distri_config.world_size - 1, tag=-1))
+
+        for handle in async_handle:
+            if not handle.is_completed():
+                handle.wait()
 
         hidden_states = torch.cat(hidden_states, dim=1)
         return hidden_states

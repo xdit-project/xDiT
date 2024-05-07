@@ -134,7 +134,7 @@ def main():
     )
 
     torch.cuda.reset_peak_memory_stats()
-    case_name = f"hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
+    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
     start_time = time.time()
     if args.use_profiler:
         with profile(

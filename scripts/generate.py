@@ -160,7 +160,7 @@ def main():
             guidance_scale=args.guidance_scale,
         ).images[0]
         if distri_config.rank == 0:
-            output_path = os.path.join(args.output_root, f"{i:04d}.png")
+            output_path = os.path.join(args.output_root, f"{i:05d}.png")
             image.save(output_path)
 
 

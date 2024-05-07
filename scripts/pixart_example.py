@@ -29,7 +29,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipeline"],
+        choices=["patch", "naive_patch", "pipeline", "tensor"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -182,6 +182,7 @@ def main():
         print(
             f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )
+        print(f"save images to ./results/astronaut_{case_name}.png")
         output.images[0].save(f"./results/astronaut_{case_name}.png")
 
 

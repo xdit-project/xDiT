@@ -9,7 +9,7 @@ from distrifuser.models.diffusers import Transformer2DModel
 
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
-from distrifuser.models import NaivePatchDiT, DistriDiTPP
+from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTTP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
 from typing import Union, List
@@ -47,11 +47,17 @@ class DistriDiTPipeline:
         if distri_config.parallelism == "patch":
             transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "tensor":
-            raise NotImplementedError("Tensor parallelism is not supported for DiT")
+            transformer = DistriDiTTP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
             transformer = NaivePatchDiT(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
+
+        # for debug, print submodules
+        # if distri_config.rank == 0:
+        #     for name, module in transformer.named_modules():
+        #         logger.info(f"module: {name} {module}")
+        # exit(0)
 
         pipeline = DiTPipeline.from_pretrained(
             pretrained_model_name_or_path,
@@ -151,14 +157,20 @@ class DistriDiTPipeline:
             if distri_config.parallelism == "naive_patch":
                 counters = [0, 1]
             elif distri_config.parallelism == "patch":
-                counters = [0, distri_config.warmup_steps + 1, distri_config.warmup_steps + 2]
+                counters = [
+                    0,
+                    distri_config.warmup_steps + 1,
+                    distri_config.warmup_steps + 2,
+                ]
             else:
                 raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
             for counter in counters:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     pipeline.transformer.set_counter(counter)
-                    output = pipeline.transformer(**static_inputs, return_dict=False, record=True)[0]
+                    output = pipeline.transformer(
+                        **static_inputs, return_dict=False, record=True
+                    )[0]
                     static_outputs.append(output)
                 cuda_graphs.append(graph)
             pipeline.transformer.setup_cuda_graph(static_outputs, cuda_graphs)

@@ -6,7 +6,7 @@ from datasets import load_dataset
 from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from tqdm import trange
 
-from distrifuser.pipelines import DistriSDXLPipeline, DistriDiTPipeline 
+from distrifuser.pipelines import DistriSDXLPipeline, DistriDiTPipeline, DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
 from distrifuser.logger import init_logger
 logger = init_logger(__name__)
@@ -16,13 +16,13 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     # Diffuser specific arguments
     parser.add_argument("--output_root", type=str, default=None)
-    parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps")
+    parser.add_argument("--num_inference_steps", type=int, default=20, help="Number of inference steps")
     parser.add_argument("--image_size", type=int, nargs="*", default=1024, help="Image size of generation")
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument("--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"])
 
     # DistriFuser specific arguments
-    parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit"])
+    parser.add_argument("--pipeline", type=str, default="dit", choices=["sdxl", "dit", "pixart"])
     parser.add_argument("--model_path", type=str, default="facebook/DiT-XL-2-256")
     parser.add_argument(
         "--no_split_batch", action="store_true", help="Disable the batch splitting for classifier-free guidance"
@@ -55,6 +55,9 @@ def get_args() -> argparse.Namespace:
 
     # Dataset specific arguments
     parser.add_argument("--dataset", type=str, default="imagenet", choices=["coco", "imagenet"])
+
+    parser.add_argument("--start_idx", type=int, default=0, help="Start index of the dataset")
+    parser.add_argument("--end_idx", type=int, default=5000, help="End index of the dataset")
 
     args = parser.parse_args()
     return args
@@ -106,6 +109,12 @@ def main():
             use_safetensors=True,
             scheduler=scheduler,
         )
+    elif args.pipeline == "pixart":
+        pipeline = DistriPixArtAlphaPipeline.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            distri_config=distri_config,
+            scheduler=scheduler
+        )
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0, position=1, leave=False)
 
     if args.output_root is None:
@@ -132,13 +141,15 @@ def main():
         start_idx = args.split[0] * chunk_size
         end_idx = min((args.split[0] + 1) * chunk_size, 5000)
     else:
-        start_idx = 0 
-        end_idx = 1000
+        start_idx = args.start_idx
+        end_idx = args.end_idx 
+
+        
 
     for i in trange(start_idx, end_idx, disable=distri_config.rank != 0, position=0, leave=False):
         if args.pipeline == "dit":
             prompt = dataset["label"][i]
-        elif args.pipeline == "sdxl":
+        elif args.pipeline in ["sdxl", "pixart"]:
             prompt = dataset["sentences_raw"][i][i % len(dataset["sentences_raw"][i])]
         seed = i
 

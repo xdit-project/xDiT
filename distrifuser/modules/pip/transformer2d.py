@@ -22,7 +22,6 @@ class DistriTransformer2DModel(BaseModule):
         super().__init__(module, distri_config)
         self.config = module.config
 
-
     def pip_forward(
         self,
         hidden_states: torch.Tensor,
@@ -60,13 +59,14 @@ class DistriTransformer2DModel(BaseModule):
 
         # filling the pipeline
 
-        for idx in range(num_micro_batch):
+        for idx in range(len(hidden_states)):
             if distri_config.rank > 0:
                 if not recv_req.is_completed():
                     recv_req.wait()
                 if idx < num_micro_batch - 1:
                     hidden_states[idx+1] = hidden_states[idx+1].contiguous()
                     recv_req = torch.distributed.irecv(hidden_states[idx+1], src=distri_config.rank - 1)
+                    
             for block_idx in range(start_idx, end_idx):
                 block = module.transformer_blocks[block_idx]
                 hidden_states[idx] = block(
@@ -79,13 +79,8 @@ class DistriTransformer2DModel(BaseModule):
                     class_labels=class_labels,
                 ) 
 
-            if send_req is not None and not send_req.is_completed():
-                send_req.wait()
-            
             if distri_config.rank < distri_config.world_size - 1:
-                send_req = torch.distributed.isend(
-                    hidden_states[idx], 
-                    dst=distri_config.rank + 1)
+                torch.distributed.isend(hidden_states[idx], dst=distri_config.rank + 1, tag=idx)
             else:
                 send_req = torch.distributed.isend(
                     hidden_states[idx], 

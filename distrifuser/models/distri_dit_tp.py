@@ -15,7 +15,6 @@ from distrifuser.modules.base_module import BaseModule
 from distrifuser.modules.tp import (
     DistriAttentionTP,
     DistriConv2dTP,
-    DistriFeedForwardTP,
     DitFFNTP,
 )
 
@@ -41,6 +40,11 @@ class DistriDiTTP(BaseModel):  # for Tensor Parallelism
                     if isinstance(submodule, nn.Conv2d):
                         kernel_size = submodule.kernel_size
                         if kernel_size == (1, 1) or kernel_size == 1:
+                            continue
+                        if (
+                            submodule.in_channels % distri_config.n_device_per_batch
+                            != 0
+                        ):
                             continue
                         wrapped_submodule = DistriConv2dTP(submodule, distri_config)
                         setattr(module, subname, wrapped_submodule)

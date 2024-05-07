@@ -126,7 +126,7 @@ def main():
         # use_safetensors=True,
     )
 
-    # pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(
         prompt="An astronaut riding a green horse",

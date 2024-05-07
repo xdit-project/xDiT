@@ -55,6 +55,8 @@ class DistriTransformer2DModel(BaseModule):
         if dist.get_rank() > 0: 
             hidden_states[0] = hidden_states[0].contiguous()
             recv_req = torch.distributed.irecv(hidden_states[0], src=distri_config.rank - 1)
+        else:
+            recv_queue = []
 
         # filling the pipeline
 
@@ -85,21 +87,24 @@ class DistriTransformer2DModel(BaseModule):
                     hidden_states[idx], 
                     dst=distri_config.rank + 1)
             else:
-                torch.distributed.isend(
+                send_req = torch.distributed.isend(
                     hidden_states[idx], 
-                    dst=0,
-                    group=distri_config.groups[idx])
+                    dst=0)
 
             if distri_config.rank == 0:
-                async_handle.append(
-                    torch.distributed.irecv(
-                        hidden_states[idx], 
-                        src=distri_config.world_size - 1,
-                        group=distri_config.groups[idx]))
+                recv_queue.append(idx)
+                if recv_req is None or recv_req.is_completed():
+                    recv_req = torch.distributed.irecv(hidden_states[recv_queue[0]], src=distri_config.world_size - 1)
+                    recv_queue.pop(0)
+
         if distri_config.rank == 0:
-            for handle in async_handle:
-                if not handle.is_completed():
-                    handle.wait()
+            if not recv_req.is_completed():
+                recv_req.wait()
+
+            for idx in recv_queue:
+                torch.distributed.recv(hidden_states[idx], src=distri_config.world_size - 1)
+        if send_req is not None and not send_req.is_completed():
+            send_req.wait()
 
         hidden_states = torch.cat(hidden_states, dim=1)
         return hidden_states

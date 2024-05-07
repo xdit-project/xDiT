@@ -73,4 +73,12 @@ SYNC_MODE="full_sync"
 export ACC_FLAG="--use_seq_parallel_attn --ulysses_degree 1 --use_use_ulysses_low"
 torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG  \
 --height $HEIGHT --width $HEIGHT --no_use_resolution_binning
+
+# pipeline
+num_micro_batchs=(4 8 16 32)
+for num_micro_batch in "${num_micro_batchs[@]}"
+do
+    torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipeline  \
+    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --num_micro_batch $num_micro_batch 
+done
 done

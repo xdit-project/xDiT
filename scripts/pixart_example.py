@@ -87,6 +87,10 @@ def main():
         "--use_profiler",
         action="store_true",
     )
+    parser.add_argument(
+        "--use_cuda_graph",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
@@ -105,7 +109,7 @@ def main():
         num_micro_batch=args.num_micro_batch,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
-        use_cuda_graph=False,
+        use_cuda_graph=args.use_cuda_graph,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
@@ -135,8 +139,8 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
     case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
-    start_time = time.time()
     if args.use_profiler:
+        start_time = time.time()
         with profile(
             activities=[ProfilerActivity.CUDA],
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
@@ -155,6 +159,7 @@ def main():
         #     prof.export_memory_timeline(
         #         f"{distri_config.mode}_{args.height}_{distri_config.world_size}_mem.html"
         #     )
+        end_time = time.time()
     else:
         MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
         torch.cuda.memory._record_memory_history(
@@ -167,12 +172,12 @@ def main():
             num_inference_steps=args.num_inference_steps,
         )
 
+        end_time = time.time()
         torch.cuda.memory._dump_snapshot(
             f"{distri_config.mode}_{distri_config.world_size}.pickle"
         )
         torch.cuda.memory._record_memory_history(enabled=None)
 
-    end_time = time.time()
     elapsed_time = end_time - start_time
 
     peak_memory = torch.cuda.max_memory_allocated(device="cuda")

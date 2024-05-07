@@ -29,7 +29,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch"],
+        choices=["patch", "naive_patch", "pipeline"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -57,6 +57,7 @@ def main():
         type=int,
         default=20,
     )
+    parser.add_argument("--num_micro_batch", type=int, default=2)
     parser.add_argument(
         "--height",
         type=int,
@@ -101,6 +102,7 @@ def main():
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
+        num_micro_batch=args.num_micro_batch,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=False,

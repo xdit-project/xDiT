@@ -20,7 +20,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "none"],
+        choices=["patch", "naive_patch", "tensor"],
         help="Parallelism to use.",
     )
     parser.add_argument(

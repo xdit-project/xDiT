@@ -6,7 +6,7 @@ from diffusers import PixArtAlphaPipeline
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
 
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
-from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP
+from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP, DistriDiTTP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
 
@@ -120,6 +120,7 @@ ASPECT_RATIO_256_BIN = {
     "4.0": [512.0, 128.0],
 }
 
+
 class DistriPixArtAlphaPipeline:
     def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
@@ -141,22 +142,28 @@ class DistriPixArtAlphaPipeline:
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         transformer = Transformer2DModel.from_pretrained(
-            pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="transformer"
+            pretrained_model_name_or_path,
+            torch_dtype=torch_dtype,
+            subfolder="transformer",
         ).to(device)
 
+        logger.info(f"Using {distri_config.parallelism} parallelism")
         if distri_config.parallelism == "patch":
             transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
-            logger.info("Using naive patch parallelism")
             transformer = NaivePatchDiT(transformer, distri_config)
         elif distri_config.parallelism == "pipeline":
-            logger.info("Using pipeline parallelism")
             transformer = DistriDiTPiP(transformer, distri_config)
+        elif distri_config.parallelism == "tensor":
+            transformer = DistriDiTTP(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
         pipeline = PixArtAlphaPipeline.from_pretrained(
-            pretrained_model_name_or_path, torch_dtype=torch_dtype, transformer=transformer, **kwargs
+            pretrained_model_name_or_path,
+            torch_dtype=torch_dtype,
+            transformer=transformer,
+            **kwargs,
         ).to(device)
         return DistriPixArtAlphaPipeline(pipeline, distri_config)
 
@@ -164,13 +171,21 @@ class DistriPixArtAlphaPipeline:
         pass
 
     @torch.no_grad()
-    def __call__(self, prompt, num_inference_steps = 20, *args, **kwargs):
+    def __call__(self, prompt, num_inference_steps=20, *args, **kwargs):
         assert "height" not in kwargs, "height should not be in kwargs"
         assert "width" not in kwargs, "width should not be in kwargs"
         self.distri_config.num_inference_steps = num_inference_steps
         self.pipeline.transformer.set_counter(0)
         config = self.distri_config
-        return self.pipeline(height=config.height, width=config.width, prompt=prompt, use_resolution_binning=config.use_resolution_binning, num_inference_steps=num_inference_steps, *args, **kwargs)
+        return self.pipeline(
+            height=config.height,
+            width=config.width,
+            prompt=prompt,
+            use_resolution_binning=config.use_resolution_binning,
+            num_inference_steps=num_inference_steps,
+            *args,
+            **kwargs,
+        )
 
     @torch.no_grad()
     def prepare(self, **kwargs):
@@ -201,7 +216,9 @@ class DistriPixArtAlphaPipeline:
             else:
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
-            height, width = pipeline.height, width = pipeline.classify_height_width_bin(height, width, ratios=aspect_ratio_bin)
+            height, width = pipeline.height, width = pipeline.classify_height_width_bin(
+                height, width, ratios=aspect_ratio_bin
+            )
 
         # Encode input prompt
         (
@@ -217,7 +234,9 @@ class DistriPixArtAlphaPipeline:
 
         if distri_config.do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
+            prompt_attention_mask = torch.cat(
+                [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+            )
 
         # Prepare added time ids & embeddings
 
@@ -233,9 +252,17 @@ class DistriPixArtAlphaPipeline:
 
         latent_channels = pipeline.transformer.config.in_channels
         latents = pipeline.prepare_latents(
-            batch_size, latent_channels, height, width, prompt_embeds.dtype, device, None
-        ) 
-        latent_model_input = torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
+            batch_size,
+            latent_channels,
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            None,
+        )
+        latent_model_input = (
+            torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
+        )
 
         # encoder_hidden_states.shape torch.Size([2, 120, 4096])
         # encoder_attention_mask.shape torch.Size([2, 120])
@@ -247,8 +274,12 @@ class DistriPixArtAlphaPipeline:
         static_inputs["encoder_attention_mask"] = prompt_attention_mask
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
         if pipeline.transformer.config.sample_size == 128:
-            resolution = torch.tensor([0, 0]).repeat(batch_size * num_images_per_prompt, 1)
-            aspect_ratio = torch.tensor([0.0]).repeat(batch_size * num_images_per_prompt, 1)
+            resolution = torch.tensor([0, 0]).repeat(
+                batch_size * num_images_per_prompt, 1
+            )
+            aspect_ratio = torch.tensor([0.0]).repeat(
+                batch_size * num_images_per_prompt, 1
+            )
             resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
             aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
@@ -281,14 +312,20 @@ class DistriPixArtAlphaPipeline:
             if distri_config.parallelism == "naive_patch":
                 counters = [0, 1]
             elif distri_config.parallelism == "patch":
-                counters = [0, distri_config.warmup_steps + 1, distri_config.warmup_steps + 2]
+                counters = [
+                    0,
+                    distri_config.warmup_steps + 1,
+                    distri_config.warmup_steps + 2,
+                ]
             else:
                 raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
             for counter in counters:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     pipeline.transformer.set_counter(counter)
-                    output = pipeline.transformer(**static_inputs, return_dict=False, record=True)[0]
+                    output = pipeline.transformer(
+                        **static_inputs, return_dict=False, record=True
+                    )[0]
                     static_outputs.append(output)
                 cuda_graphs.append(graph)
             pipeline.transformer.setup_cuda_graph(static_outputs, cuda_graphs)

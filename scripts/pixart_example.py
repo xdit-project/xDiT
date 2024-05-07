@@ -29,7 +29,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipeline"],
+        choices=["patch", "naive_patch", "pipeline", "tensor"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -57,11 +57,7 @@ def main():
         type=int,
         default=20,
     )
-    parser.add_argument(
-        "--num_micro_batch",
-        type=int,
-        default=2
-    )
+    parser.add_argument("--num_micro_batch", type=int, default=2)
     parser.add_argument(
         "--height",
         type=int,
@@ -79,11 +75,23 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+        "--ulysses_degree",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--use_use_ulysses_low",
+        action="store_true",
+    )
+    parser.add_argument(
         "--use_profiler",
         action="store_true",
     )
 
     args = parser.parse_args()
+
+    # torch.backends.cudnn.benchmark=True
+    torch.backends.cudnn.deterministic = True
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
@@ -101,10 +109,14 @@ def main():
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = 2 #distri_config.world_size
+        ulysses_degree = args.ulysses_degree
         ring_degree = distri_config.world_size // ulysses_degree
         set_seq_parallel_pg(
-            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size, use_ulysses_low = True 
+            ulysses_degree,
+            ring_degree,
+            distri_config.rank,
+            distri_config.world_size,
+            use_ulysses_low=args.use_use_ulysses_low,
         )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
@@ -114,25 +126,35 @@ def main():
         # use_safetensors=True,
     )
 
-    pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    # pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    # warmup
     output = pipeline(
         prompt="An astronaut riding a green horse",
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
 
+    torch.cuda.reset_peak_memory_stats()
+    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
+    start_time = time.time()
     if args.use_profiler:
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler("./profile/"),
-                    profile_memory=True, 
-                    with_stack=True,
-                    record_shapes=True) as prof:
+        with profile(
+            activities=[ProfilerActivity.CUDA],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                f"./profile/{case_name}"
+            ),
+            profile_memory=True,
+            with_stack=True,
+            record_shapes=True,
+        ) as prof:
             output = pipeline(
                 prompt="An astronaut riding a green horse",
                 generator=torch.Generator(device="cuda").manual_seed(42),
-                num_inference_steps = args.num_inference_steps
+                num_inference_steps=args.num_inference_steps,
             )
-        if distri_config.rank == 0:
-            prof.export_memory_timeline(f"{distri_config.mode}_{distri_config.world_size}_mem.html")
+        # if distri_config.rank == 0:
+        #     prof.export_memory_timeline(
+        #         f"{distri_config.mode}_{args.height}_{distri_config.world_size}_mem.html"
+        #     )
     else:
         MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
         torch.cuda.memory._record_memory_history(
@@ -142,16 +164,26 @@ def main():
         output = pipeline(
             prompt="An astronaut riding a green horse",
             generator=torch.Generator(device="cuda").manual_seed(42),
-            num_inference_steps = args.num_inference_steps
+            num_inference_steps=args.num_inference_steps,
         )
-        end_time = time.time()
-        torch.cuda.memory._dump_snapshot(f"{distri_config.mode}_{distri_config.world_size}.pickle")
+
+        torch.cuda.memory._dump_snapshot(
+            f"{distri_config.mode}_{distri_config.world_size}.pickle"
+        )
         torch.cuda.memory._record_memory_history(enabled=None)
 
-    if distri_config.rank == 0 and not args.use_profiler:
-        elapsed_time = end_time - start_time
-        print(f"epoch time: {elapsed_time:.2f}s")
-        output.images[0].save("astronaut.png")
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+
+    if distri_config.rank == 0:
+
+        print(
+            f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
+        )
+        print(f"save images to ./results/astronaut_{case_name}.png")
+        output.images[0].save(f"./results/astronaut_{case_name}.png")
 
 
 if __name__ == "__main__":

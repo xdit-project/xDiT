@@ -161,10 +161,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         if (
             HAS_LONG_CTX_ATTN
             and use_seq_parallel_attn
-            and (
-                distri_config.mode == "full_sync"
-                or self.counter <= distri_config.warmup_steps
-            )
+            and (distri_config.mode == "full_sync")
         ):
             # the distributed sparse attention using ring-attention.
             key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
@@ -175,7 +172,9 @@ class DistriSelfAttentionPP(DistriAttentionPP):
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
 
-            hidden_states = self.hybrid_seq_parallel_attn(query, key, value)
+            hidden_states = self.hybrid_seq_parallel_attn(
+                query, key, value, dropout_p=0.0, causal=False
+            )
 
             hidden_states = hidden_states.reshape(
                 batch_size, -1, attn.heads * head_dim
@@ -204,7 +203,10 @@ class DistriSelfAttentionPP(DistriAttentionPP):
                     new_buffer_list = [buffer for buffer in self.buffer_list]
                     new_buffer_list[distri_config.split_idx()] = kv
                     full_kv = torch.cat(new_buffer_list, dim=1)
-                    if distri_config.mode != "no_sync" and (distri_config.num_inference_steps is None or self.counter < distri_config.num_inference_steps - 1):
+                    if distri_config.mode != "no_sync" and (
+                        distri_config.num_inference_steps is None
+                        or self.counter < distri_config.num_inference_steps - 1
+                    ):
                         self.comm_manager.enqueue(self.idx, kv)
 
             # naive attn
@@ -219,6 +221,8 @@ class DistriSelfAttentionPP(DistriAttentionPP):
 
             # the output of sdp = (batch, num_heads, seq_len, head_dim)
             # TODO: add support for attn.scale when we move to Torch 2.1
+            # print(f"{distri_config.mode} query: {query.shape}, key: {key.shape}, value: {value.shape}")
+            # full_sync query: torch.Size([2, 16, 1024, 72]), key: torch.Size([2, 16, 4096, 72]), value: torch.Size([2, 16, 4096, 72])
             hidden_states = F.scaled_dot_product_attention(
                 query, key, value, dropout_p=0.0, is_causal=False
             )

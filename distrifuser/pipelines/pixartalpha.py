@@ -141,7 +141,6 @@ class DistriPixArtAlphaPipeline:
             "pretrained_model_name_or_path", "PixArt-alpha/PixArt-XL-2-1024-MS"
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
-        torch.cuda.reset_peak_memory_stats()
         transformer = Transformer2DModel.from_pretrained(
             pretrained_model_name_or_path,
             torch_dtype=torch_dtype,

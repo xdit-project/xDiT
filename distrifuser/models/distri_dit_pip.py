@@ -25,10 +25,7 @@ from typing import Optional, Dict, Any
 class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
         assert isinstance(model, Transformer2DModel)
-        torch.cuda.reset_peak_memory_stats()
         model = DistriTransformer2DModel(model, distri_config)
-
-        torch.cuda.reset_peak_memory_stats()
         if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
             for name, module in model.named_modules():
                 if isinstance(module, BaseModule):

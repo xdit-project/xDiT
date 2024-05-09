@@ -1,10 +1,82 @@
 # adpated from https://github.com/huggingface/diffusers/blob/v0.27.2/src/diffusers/pipelines/pixart_alpha/pipeline_pixart_alpha.py
-from diffusers import PixArtAlphaPipeline
+import torch
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
+    PixArtAlphaPipeline,
+    ImagePipelineOutput,
+    ASPECT_RATIO_1024_BIN,
+    ASPECT_RATIO_512_BIN,
+    ASPECT_RATIO_256_BIN,
+    retrieve_timesteps
+)
+from typing import List, Optional, Union, Tuple, Callable, Dict, Final
+from distrifuser.utils import DistriConfig
+from distrifuser.logger import init_logger
+
+logger = init_logger(__name__)
 
 class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
-    def __init__(self, model, distri_config):
-        super(DistriPixArtAlphaPiP, self).__init__(model)
+    def init(self, distri_config: DistriConfig):
+        self.batch_idx = 0
         self.distri_config = distri_config
+    
+    def pip_forward(
+        self,
+        latents: torch.FloatTensor,
+        prompt_embeds: Final[torch.FloatTensor],
+        prompt_attention_mask: Final[torch.FloatTensor],
+        added_cond_kwargs: Final[Dict],
+        t: Final[Union[float, torch.Tensor]], 
+        do_classifier_free_guidance: Final[bool],
+        guidance_scale: Final[float], 
+        latent_channels: Final[int], 
+        extra_step_kwargs: Final[Dict]
+    ):
+        distri_config = self.distri_config
+
+        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+        current_timestep = t
+        if not torch.is_tensor(current_timestep):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            # This would be a good case for the `match` statement (Python 3.10+)
+            is_mps = latent_model_input.device.type == "mps"
+            if isinstance(current_timestep, float):
+                dtype = torch.float32 if is_mps else torch.float64
+            else:
+                dtype = torch.int32 if is_mps else torch.int64
+            current_timestep = torch.tensor([current_timestep], dtype=dtype, device=latent_model_input.device)
+        elif len(current_timestep.shape) == 0:
+            current_timestep = current_timestep[None].to(latent_model_input.device)
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        current_timestep = current_timestep.expand(latent_model_input.shape[0])
+
+        # predict noise model_output
+        noise_pred = self.transformer(
+            latent_model_input,
+            encoder_hidden_states=prompt_embeds,
+            encoder_attention_mask=prompt_attention_mask,
+            timestep=current_timestep,
+            added_cond_kwargs=added_cond_kwargs,
+            return_dict=False,
+        )[0]
+
+        # perform guidance
+        if do_classifier_free_guidance:
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        # learned sigma
+        if self.transformer.config.out_channels // 2 == latent_channels:
+            noise_pred = noise_pred.chunk(2, dim=1)[0]
+        else:
+            noise_pred = noise_pred
+
+        # compute previous image: x_t -> x_t-1
+        latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+
+        return latents
+
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -31,6 +103,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         max_sequence_length: int = 120,
         **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
+        logger.info(f"using DistriPixArtAlphaPiP")
         """
         Function invoked when calling the pipeline for generation.
 
@@ -107,6 +180,9 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
                 returned where the first element is a list with the generated images
         """
+        distri_config = self.distri_config
+        assert callback is None
+
         if "mask_feature" in kwargs:
             deprecation_message = "The use of `mask_feature` is deprecated. It is no longer used in any computation and that doesn't affect the end results. It will be removed in a future version."
             deprecate("mask_feature", "1.0.0", deprecation_message, standard_warn=False)
@@ -213,54 +289,17 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-                current_timestep = t
-                if not torch.is_tensor(current_timestep):
-                    # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-                    # This would be a good case for the `match` statement (Python 3.10+)
-                    is_mps = latent_model_input.device.type == "mps"
-                    if isinstance(current_timestep, float):
-                        dtype = torch.float32 if is_mps else torch.float64
-                    else:
-                        dtype = torch.int32 if is_mps else torch.int64
-                    current_timestep = torch.tensor([current_timestep], dtype=dtype, device=latent_model_input.device)
-                elif len(current_timestep.shape) == 0:
-                    current_timestep = current_timestep[None].to(latent_model_input.device)
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                current_timestep = current_timestep.expand(latent_model_input.shape[0])
-
-                # predict noise model_output
-                noise_pred = self.transformer(
-                    latent_model_input,
-                    encoder_hidden_states=prompt_embeds,
-                    encoder_attention_mask=prompt_attention_mask,
-                    timestep=current_timestep,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
-
-                # perform guidance
-                if do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # learned sigma
-                if self.transformer.config.out_channels // 2 == latent_channels:
-                    noise_pred = noise_pred.chunk(2, dim=1)[0]
-                else:
-                    noise_pred = noise_pred
-
-                # compute previous image: x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
+                latents = self.pip_forward(
+                    latents,
+                    prompt_embeds,
+                    prompt_attention_mask,
+                    added_cond_kwargs,
+                    t,
+                    do_classifier_free_guidance,
+                    guidance_scale,
+                    latent_channels,
+                    extra_step_kwargs
+                )
 
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

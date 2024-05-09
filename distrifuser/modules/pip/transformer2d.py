@@ -19,6 +19,13 @@ from distrifuser.utils import DistriConfig
 
 class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
+<<<<<<< Updated upstream
+=======
+        block_len = (len(self.module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
+        start_idx = block_len * distri_config.rank
+        end_idx = min(block_len * (distri_config.rank + 1), len(self.module.transformer_blocks))
+        self.module.transformer_blocks = self.module.transformer_blocks[start_idx:end_idx]
+>>>>>>> Stashed changes
         super().__init__(module, distri_config)
         self.config = module.config
 

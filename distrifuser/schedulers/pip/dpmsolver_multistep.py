@@ -93,7 +93,7 @@ class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        if batch_idx is None or batch_idx == distri_config.num_micro_batch:
+        if batch_idx is None or batch_idx == distri_config.num_micro_batch - 1:
             self._step_index += 1
 
         if not return_dict:

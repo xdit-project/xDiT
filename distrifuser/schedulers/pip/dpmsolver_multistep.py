@@ -74,8 +74,8 @@ class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
         
         if batch_idx is not None:
             model_outputs = []
-            for model_output in self.model_outputs:
-                model_outputs.append(model_output[:, :, c * batch_idx : c * (batch_idx + 1), :])
+            for output in self.model_outputs:
+                model_outputs.append(output[:, :, c * batch_idx : c * (batch_idx + 1), :])
         else:
             model_outputs = self.model_outputs
         

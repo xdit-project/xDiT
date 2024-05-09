@@ -13,6 +13,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
 from distrifuser.pipelines.pip.distri_pixartalpha import DistriPixArtAlphaPiP
 from distrifuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
+from diffusers import DPMSolverMultistepScheduler
 from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP, DistriDiTTP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
@@ -62,7 +63,7 @@ class DistriPixArtAlphaPipeline:
                 subfolder="scheduler"
             )
             scheduler.init(distri_config)
-        
+
         if distri_config.parallelism == "pipeline":
             pipeline = DistriPixArtAlphaPiP.from_pretrained(
                 pretrained_model_name_or_path,
@@ -77,6 +78,7 @@ class DistriPixArtAlphaPipeline:
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
                 transformer=transformer,
+                scheduler=scheduler,
                 **kwargs,
             ).to(device)
 

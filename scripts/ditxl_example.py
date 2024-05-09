@@ -4,6 +4,14 @@ import torch
 from distrifuser.pipelines.dit import DistriDiTPipeline
 from distrifuser.utils import DistriConfig
 
+HAS_LONG_CTX_ATTN = False
+try:
+    from yunchang import set_seq_parallel_pg
+
+    HAS_LONG_CTX_ATTN = True
+except ImportError:
+    print("yunchang not found")
+
 import time
 
 
@@ -43,6 +51,15 @@ def main():
         default=False,
         help="Enable sequence parallel attention.",
     )
+    parser.add_argument(
+        "--ulysses_degree",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--use_use_ulysses_low",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     # for DiT the height and width are fixed according to the model
@@ -57,6 +74,18 @@ def main():
         use_cuda_graph=False,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
+
+    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
+        ulysses_degree = args.ulysses_degree
+        ring_degree = distri_config.world_size // ulysses_degree
+        set_seq_parallel_pg(
+            ulysses_degree,
+            ring_degree,
+            distri_config.rank,
+            distri_config.world_size,
+            use_ulysses_low=args.use_use_ulysses_low,
+        )
+
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,
@@ -65,6 +94,8 @@ def main():
     )
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+
+    case_name = f"{args.parallelism}_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
 
     # warmup
     output = pipeline(
@@ -85,8 +116,8 @@ def main():
 
     if distri_config.rank == 0:
         elapsed_time = end_time - start_time
-        print(f"elapse: {elapsed_time} sec")
-        output.images[0].save("panda.png")
+        print(f"{case_name}: elapse: {elapsed_time:.2f} sec")
+        output.images[0].save(f"./results/{case_name}_panda.png")
 
 
 if __name__ == "__main__":

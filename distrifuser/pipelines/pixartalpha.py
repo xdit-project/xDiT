@@ -61,12 +61,14 @@ class DistriPixArtAlphaPipeline:
                 pretrained_model_name_or_path, 
                 subfolder="scheduler"
             )
+            scheduler.init(distri_config)
         
         if distri_config.parallelism == "pipeline":
             pipeline = DistriPixArtAlphaPiP.from_pretrained(
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
                 transformer=transformer,
+                scheduler=scheduler,
                 **kwargs,
             ).to(device)
             pipeline.init(distri_config)

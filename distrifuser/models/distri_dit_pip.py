@@ -12,7 +12,8 @@ import torch
 from distrifuser.modules.base_module import BaseModule
 from distrifuser.modules.pip import (
     DistriSelfAttentionPiP,
-    DistriTransformer2DModel
+    DistriTransformer2DModel,
+    DistriConv2dPiP
 )
 
 from .base_model import BaseModel
@@ -34,14 +35,14 @@ class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
                 if isinstance(module, BaseModule):
                     continue
                 for subname, submodule in module.named_children():
-                    # if isinstance(submodule, nn.Conv2d):
-                    #     kernel_size = submodule.kernel_size
-                    #     if kernel_size == (1, 1) or kernel_size == 1:
-                    #         continue
-                    #     wrapped_submodule = DistriConv2dPP(
-                    #         submodule, distri_config, is_first_layer=True
-                    #     )
-                    #     setattr(module, subname, wrapped_submodule)
+                    if isinstance(submodule, nn.Conv2d):
+                        kernel_size = submodule.kernel_size
+                        if kernel_size == (1, 1) or kernel_size == 1:
+                            continue
+                        wrapped_submodule = DistriConv2dPiP(
+                            submodule, distri_config, is_first_layer=True
+                        )
+                        setattr(module, subname, wrapped_submodule)
                     # elif isinstance(submodule, PatchEmbed): 
                         # wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
                         # setattr(module, subname, wrapped_submodule)
@@ -52,11 +53,13 @@ class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
                             )
                             setattr(module, subname, wrapped_submodule)
             logger.info(
-                f"Using parallelism for DiT, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
+                f"Using pipeline parallelism, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
             )
         else:
-            logger.info("Not using parallelism for DiT")
+            raise NotImplementedError
         super(DistriDiTPiP, self).__init__(model, distri_config)
+
+        self.batch_idx = 0
 
     def forward(
         self,
@@ -82,63 +85,17 @@ class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
             and attention_mask is None
             # and encoder_attention_mask is None
         )
-        if distri_config.use_cuda_graph and not record:
-            static_inputs = self.static_inputs
-            assert hidden_states.shape == static_inputs['hidden_states'].shape
-            static_inputs['hidden_states'].copy_(hidden_states)
-            if torch.is_tensor(timestep):
-                if timestep.ndim == 0:
-                    for b in range(static_inputs["timestep"].shape[0]):
-                        static_inputs["timestep"][b] = timestep.item()
-                else:
-                    assert static_inputs["timestep"].shape == timestep.shape
-                    static_inputs["timestep"].copy_(timestep)
-            else:
-                for b in range(static_inputs["timestep"].shape[0]):
-                    static_inputs["timestep"][b] = timestep
-            if encoder_hidden_states is not None:
-                assert static_inputs['encoder_hidden_states'].shape == encoder_hidden_states.shape
-                static_inputs['encoder_hidden_states'].copy_(encoder_hidden_states)
-            if class_labels is not None:
-                static_inputs['class_labels'].copy_(class_labels)
-            if added_cond_kwargs is not None:
-                for k in added_cond_kwargs:
-                    assert static_inputs["added_cond_kwargs"][k].shape == added_cond_kwargs[k].shape
-            if encoder_attention_mask is not None:
-                static_inputs['encoder_attention_mask'].copy_(encoder_attention_mask)
-
-            if self.counter <= distri_config.warmup_steps:
-                graph_idx = 0
-            elif self.counter == distri_config.warmup_steps + 1:
-                graph_idx = 1
-            else:
-                graph_idx = 2
-
-            self.cuda_graphs[graph_idx].replay()
-            output = self.static_outputs[graph_idx]
-        else:
-            output = self.model(
-                hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                timestep=timestep,
-                added_cond_kwargs=added_cond_kwargs,
-                class_labels=class_labels,
-                cross_attention_kwargs=cross_attention_kwargs,
-                attention_mask=attention_mask,
-                encoder_attention_mask=encoder_attention_mask,
-                return_dict=False,
-            )[0] 
-            if record:
-                if self.static_inputs is None:
-                    self.static_inputs = {
-                        "hidden_states": hidden_states,
-                        "class_labels": class_labels,
-                        "timestep": timestep,
-                        "encoder_hidden_states": encoder_hidden_states,
-                        "encoder_attention_mask": encoder_attention_mask,
-                        "added_cond_kwargs": added_cond_kwargs,
-                    }
-                self.synchronize()
+        output = self.model(
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            timestep=timestep,
+            added_cond_kwargs=added_cond_kwargs,
+            class_labels=class_labels,
+            cross_attention_kwargs=cross_attention_kwargs,
+            attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
+            return_dict=False,
+        )[0] 
 
         if return_dict:
             output = Transformer2DModelOutput(sample=output)

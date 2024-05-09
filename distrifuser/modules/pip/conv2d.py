@@ -14,6 +14,7 @@ class DistriConv2dPiP(BaseModule):
     def __init__(self, module: nn.Conv2d, distri_config: DistriConfig, is_first_layer: bool = False):
         super(DistriConv2dPiP, self).__init__(module, distri_config)
         self.is_first_layer = is_first_layer
+        self.batch_idx = 0
 
     def naive_forward(self, x: torch.Tensor) -> torch.Tensor:
         #  x: [B, C, H, W]

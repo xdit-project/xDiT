@@ -52,8 +52,10 @@ class DitFFNTP(BaseModule):
         )
         sharded_fc2.weight.data.copy_(module.net[2].weight.data[:, start_idx:end_idx])
 
-        # bias2 add to reduced out
-        self.bias2 = module.net[2].bias.data.clone()
+        # bias2 add to allreduced out
+        # self.bias2 = module.net[2].bias.data.clone()
+        # to(cuda) works for bias2
+        self.register_parameter("bias2", nn.Parameter(module.net[2].bias.data.clone()))
 
         old_fc1 = module.net[0].proj
         old_fc2 = module.net[2]

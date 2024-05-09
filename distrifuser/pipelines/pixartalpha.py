@@ -145,9 +145,8 @@ class DistriPixArtAlphaPipeline:
             pretrained_model_name_or_path,
             torch_dtype=torch_dtype,
             subfolder="transformer",
-        ).to(device)
+        )
 
-        logger.info(f"Using {distri_config.parallelism} parallelism")
         if distri_config.parallelism == "patch":
             transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
@@ -158,6 +157,8 @@ class DistriPixArtAlphaPipeline:
             transformer = DistriDiTTP(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
+        
+        transformer.to(device)
 
         pipeline = PixArtAlphaPipeline.from_pretrained(
             pretrained_model_name_or_path,
@@ -165,6 +166,7 @@ class DistriPixArtAlphaPipeline:
             transformer=transformer,
             **kwargs,
         ).to(device)
+
         return DistriPixArtAlphaPipeline(pipeline, distri_config)
 
     def set_progress_bar_config(self, **kwargs):

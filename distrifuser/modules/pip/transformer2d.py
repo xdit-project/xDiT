@@ -33,6 +33,10 @@ class DistriTransformer2DModel(BaseModule):
 =======
 >>>>>>> Stashed changes
         super().__init__(module, distri_config)
+        block_len = (len(self.module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
+        start_idx = block_len * distri_config.rank
+        end_idx = min(block_len * (distri_config.rank + 1), len(self.module.transformer_blocks))
+        self.module.transformer_blocks = self.module.transformer_blocks[start_idx:end_idx]
         self.config = module.config
 
     def pip_forward(
@@ -48,10 +52,6 @@ class DistriTransformer2DModel(BaseModule):
         module = self.module
         distri_config = self.distri_config
         num_micro_batch = self.distri_config.num_micro_batch
-        block_len = (len(module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
-        start_idx = block_len * distri_config.rank
-        end_idx = min(block_len * (distri_config.rank + 1), len(module.transformer_blocks))
-        async_handle = []
 
         _, c, _ = hidden_states.shape
         assert c % num_micro_batch == 0
@@ -80,8 +80,7 @@ class DistriTransformer2DModel(BaseModule):
                     hidden_states[idx+1] = hidden_states[idx+1].contiguous()
                     recv_req = torch.distributed.irecv(hidden_states[idx+1], src=distri_config.rank - 1)
                     
-            for block_idx in range(start_idx, end_idx):
-                block = module.transformer_blocks[block_idx]
+            for block in module.transformer_blocks:
                 hidden_states[idx] = block(
                     hidden_states[idx],
                     attention_mask=attention_mask,

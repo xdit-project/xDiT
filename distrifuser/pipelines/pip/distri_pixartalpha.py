@@ -29,7 +29,8 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         do_classifier_free_guidance: Final[bool],
         guidance_scale: Final[float], 
         latent_channels: Final[int], 
-        extra_step_kwargs: Final[Dict]
+        extra_step_kwargs: Final[Dict],
+        batch_idx: Optional[int] = None
     ):
         distri_config = self.distri_config
 
@@ -41,6 +42,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
             # This would be a good case for the `match` statement (Python 3.10+)
             is_mps = latent_model_input.device.type == "mps"
+
             if isinstance(current_timestep, float):
                 dtype = torch.float32 if is_mps else torch.float64
             else:
@@ -60,6 +62,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             added_cond_kwargs=added_cond_kwargs,
             return_dict=False,
         )[0]
+        logger.info(f"noise_pred.shape {noise_pred.shape}, latent_model_input.shape {latent_model_input.shape}")
 
         # perform guidance
         if do_classifier_free_guidance:
@@ -73,7 +76,25 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             noise_pred = noise_pred
 
         # compute previous image: x_t -> x_t-1
-        latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+        # if batch_idx is not None:
+            # mb = 4
+        # else:
+        # mb = 1
+        # _, _, c, _ = noise_pred.shape
+        # noise_pred = list(noise_pred.split(c // mb, dim=2))
+        # latents = list(latents.split(c // mb, dim=2))
+
+        # for i in range(len(latents)):
+            # logger.info(f"latents[i].shape {latents[i].shape}")
+        latents = self.scheduler.step(
+            noise_pred, 
+            t, 
+            latents, 
+            **extra_step_kwargs, 
+            return_dict=False, 
+            # batch_idx=None if mb == 1 else i
+        )[0]
+        # latents = torch.cat(latents, dim=2)
 
         return latents
 
@@ -289,17 +310,39 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                latents = self.pip_forward(
-                    latents,
-                    prompt_embeds,
-                    prompt_attention_mask,
-                    added_cond_kwargs,
-                    t,
-                    do_classifier_free_guidance,
-                    guidance_scale,
-                    latent_channels,
-                    extra_step_kwargs
-                )
+                counter = i
+                if counter == 0:
+                    latents_group = [latents]
+                elif counter == distri_config.warmup_steps + 1:
+                    # latents.shape [1, 4, 128, 128]
+                    num_micro_batch = distri_config.num_micro_batch
+                    _, _, c, _ = latents.shape
+                    assert c % num_micro_batch == 0
+                    latents_group = list(latents_group[0].split(c // num_micro_batch, dim=2))
+                
+                for batch_idx, _ in enumerate(latents_group):
+                    latents_group[batch_idx] = self.pip_forward(
+                        latents_group[batch_idx],
+                        prompt_embeds,
+                        prompt_attention_mask,
+                        added_cond_kwargs,
+                        t,
+                        do_classifier_free_guidance,
+                        guidance_scale,
+                        latent_channels,
+                        extra_step_kwargs,
+                        batch_idx = None if counter <= distri_config.warmup_steps else batch_idx
+                    )
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        assert False
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+            latents = torch.cat(latents_group, dim=2)
+
 
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

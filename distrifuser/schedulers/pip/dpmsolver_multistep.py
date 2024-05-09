@@ -6,10 +6,14 @@ from diffusers.schedulers.scheduling_dpmsolver_multistep import (
     DPMSolverMultistepScheduler, SchedulerOutput
 )
 
+from distrifuser.utils import DistriConfig
 from distrifuser.logger import init_logger
 logger = init_logger(__name__)
 
 class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
+    def init(self, distri_config: DistriConfig):
+        self.distri_config = distri_config
+
     def step(
         self,
         model_output: torch.FloatTensor,
@@ -41,14 +45,17 @@ class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
         )
 
         model_output = self.convert_model_output(model_output, sample=sample)
-        for i in range(self.config.solver_order - 1):
-            self.model_outputs[i] = self.model_outputs[i + 1]
+        if batch_idx is None or batch_idx == 0:
+            for i in range(self.config.solver_order - 1):
+                self.model_outputs[i] = self.model_outputs[i + 1]
+            
+        _, _, c, _ = model_output.shape
         
         if batch_idx == 0:
-            assert len(model_outputs) >= 2
-            self.model_outputs[-1] = torch.zeros_like(model_output[-2])
+            assert len(self.model_outputs) >= 2
+            self.model_outputs[-1] = torch.zeros_like(self.model_outputs[-2])
         if batch_idx is not None:
-            logger.info(f"shape {self.model_outputs[-1].shape}")
+            self.model_outputs[-1][:, :, c * batch_idx : c * (batch_idx + 1), :] = model_output 
         else: 
             self.model_outputs[-1] = model_output
 
@@ -62,13 +69,22 @@ class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
             noise = variance_noise.to(device=model_output.device, dtype=torch.float32)
         else:
             noise = None
-
+        
+        # logger.info(f"batch_idx {batch_idx}")
+        
+        if batch_idx is not None:
+            model_outputs = []
+            for model_output in self.model_outputs:
+                model_outputs.append(model_output[:, :, c * batch_idx : c * (batch_idx + 1), :])
+        else:
+            model_outputs = self.model_outputs
+        
         if self.config.solver_order == 1 or self.lower_order_nums < 1 or lower_order_final:
             prev_sample = self.dpm_solver_first_order_update(model_output, sample=sample, noise=noise)
         elif self.config.solver_order == 2 or self.lower_order_nums < 2 or lower_order_second:
-            prev_sample = self.multistep_dpm_solver_second_order_update(self.model_outputs, sample=sample, noise=noise)
+            prev_sample = self.multistep_dpm_solver_second_order_update(model_outputs, sample=sample, noise=noise)
         else:
-            prev_sample = self.multistep_dpm_solver_third_order_update(self.model_outputs, sample=sample)
+            prev_sample = self.multistep_dpm_solver_third_order_update(model_outputs, sample=sample)
 
         if self.lower_order_nums < self.config.solver_order:
             self.lower_order_nums += 1
@@ -77,7 +93,8 @@ class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        self._step_index += 1
+        if batch_idx is None or batch_idx == distri_config.num_micro_batch:
+            self._step_index += 1
 
         if not return_dict:
             return (prev_sample,)

@@ -104,6 +104,7 @@ def main():
         generator=torch.Generator(device="cuda").manual_seed(42),
     )
 
+    torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 
     output = pipeline(
@@ -113,10 +114,12 @@ def main():
     )
 
     end_time = time.time()
-
+    peak_memory = torch.cuda.max_memory_allocated(device="cuda")
     if distri_config.rank == 0:
         elapsed_time = end_time - start_time
-        print(f"{case_name}: elapse: {elapsed_time:.2f} sec")
+        print(
+            f"{case_name}: elapse: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
+        )
         output.images[0].save(f"./results/{case_name}_panda.png")
 
 

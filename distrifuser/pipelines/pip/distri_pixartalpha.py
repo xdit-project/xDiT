@@ -328,6 +328,9 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             for i, t in enumerate(warmup_timesteps):
                 if distri_config.rank == 0:
                     ori_latents = latents
+                else:
+                    self.comm_manager.irecv_from_prev(latents.dtype)
+                    latents = self.comm_manager.get_data(is_block=True)
                 latents = self.pip_forward(
                     latents,
                     prompt_embeds,
@@ -354,18 +357,29 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                         if callback is not None and i % callback_steps == 0:
                             step_idx = i // getattr(self.scheduler, "order", 1)
                             callback(step_idx, t, latents)
+                else:
+                    self.comm_manager.isend_to_next(latents)
  
             if distri_config.rank == 0:
+                self.comm_manager.irecv_from_prev()
+                latents = self.comm_manager.get_data(is_block=True)
                 num_micro_batch = distri_config.num_micro_batch
                 _, _, c, _ = latents.shape
                 assert c % num_micro_batch == 0
                 latents = list(latents.split(c // num_micro_batch, dim=2))
 
             for i, t in enumerate(pip_timesteps):
-                for batch_idx in range(distri_config.num_micro_batch):
+                
+                for batch_idx in range(num_micro_batch):
 
                     if distri_config.rank == 0:
                         ori_latents = latents[batch_idx]
+                    
+                    if distri_config.rank != 0 or i != 0:
+                        self.comm_manager.irecv_from_prev(
+                            idx = (batch_idx + 1) % num_micro_batch
+                        )
+                        latents[batch_idx] = self.comm_manager.get_data(batch_idx)
                     
                     # TODO: ADD RECV FOR > 0
                     latents[batch_idx] = self.pip_forward(
@@ -392,6 +406,10 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                             extra_step_kwargs,
                             batch_idx
                         )
+                        if i + 1 != len(pip_timesteps):
+                            self.comm_manager.isend_to_next(latents[batch_idx])
+                    else:
+                        self.comm_manager.isend_to_next(latents[batch_idx])
 
                 # call the callback, if provided
                 if distri_config.rank == 0 and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):

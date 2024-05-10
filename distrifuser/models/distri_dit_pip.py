@@ -11,7 +11,8 @@ from distrifuser.modules.base_module import BaseModule
 from distrifuser.modules.pip import (
     DistriSelfAttentionPiP,
     DistriTransformer2DModel,
-    DistriConv2dPiP
+    DistriConv2dPiP,
+    DistriPatchEmbed
 )
 
 from .base_model import BaseModel
@@ -27,33 +28,30 @@ class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
         assert isinstance(model, Transformer2DModel)
         model = DistriTransformer2DModel(model, distri_config)
-        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
-            for name, module in model.named_modules():
-                if isinstance(module, BaseModule):
-                    continue
-                for subname, submodule in module.named_children():
-                    if isinstance(submodule, nn.Conv2d):
-                        kernel_size = submodule.kernel_size
-                        if kernel_size == (1, 1) or kernel_size == 1:
-                            continue
-                        wrapped_submodule = DistriConv2dPiP(
-                            submodule, distri_config, is_first_layer=True
+        for name, module in model.named_modules():
+            if isinstance(module, BaseModule):
+                continue
+            for subname, submodule in module.named_children():
+                if isinstance(submodule, nn.Conv2d):
+                    kernel_size = submodule.kernel_size
+                    if kernel_size == (1, 1) or kernel_size == 1:
+                        continue
+                    wrapped_submodule = DistriConv2dPiP(
+                        submodule, distri_config, is_first_layer=True
+                    )
+                    setattr(module, subname, wrapped_submodule)
+                elif isinstance(submodule, PatchEmbed): 
+                    wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
+                    setattr(module, subname, wrapped_submodule)
+                elif isinstance(submodule, Attention):
+                    if subname == "attn1":  # self attention
+                        wrapped_submodule = DistriSelfAttentionPiP(
+                            submodule, distri_config
                         )
                         setattr(module, subname, wrapped_submodule)
-                    # elif isinstance(submodule, PatchEmbed): 
-                        # wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
-                        # setattr(module, subname, wrapped_submodule)
-                    if isinstance(submodule, Attention):
-                        if subname == "attn1":  # self attention
-                            wrapped_submodule = DistriSelfAttentionPiP(
-                                submodule, distri_config
-                            )
-                            setattr(module, subname, wrapped_submodule)
-            logger.info(
-                f"Using pipeline parallelism, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
-            )
-        else:
-            raise NotImplementedError
+        logger.info(
+            f"Using pipeline parallelism, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
+        )
         super(DistriDiTPiP, self).__init__(model, distri_config)
 
         self.batch_idx = 0

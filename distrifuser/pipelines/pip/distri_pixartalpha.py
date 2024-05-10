@@ -9,7 +9,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     retrieve_timesteps
 )
 from typing import List, Optional, Union, Tuple, Callable, Dict, Final
-from distrifuser.utils import DistriConfig
+from distrifuser.utils import DistriConfig, PipelineParallelismCommManager
 from distrifuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -18,9 +18,14 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
     def init(self, distri_config: DistriConfig):
         if distri_config.rank != 0:
             self.scheduler = None
+            self.vae = None
+            self.image_processor = None
 
         self.batch_idx = 0
         self.distri_config = distri_config
+    
+    def set_comm_manager(self, comm_manger: PipelineParallelismCommManager):
+        self.comm_manager = comm_manger
     
     def pip_forward(
         self,
@@ -310,24 +315,58 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if distri_config.rank == 0:
-                latents = [latents]
-            for i, t in enumerate(timesteps):
-                counter = i
-                if counter == distri_config.warmup_steps + 1 and distri_config.rank == 0:
-                    # latents.shape [1, 4, 128, 128]
-                    latents = latents[0]
-                    num_micro_batch = distri_config.num_micro_batch
-                    _, _, c, _ = latents.shape
-                    assert c % num_micro_batch == 0
-                    latents = list(latents.split(c // num_micro_batch, dim=2))
+        dtype = latents.dtype
 
-                for batch_idx, _ in enumerate(latents):
-                    # logger.info(f"{batch_idx} : {latents[batch_idx].shape}")
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            if distri_config.rank != "full_sync":
+                warmup_timesteps = timesteps[:distri_config.warmup_steps+1]
+                pip_timesteps = timesteps[distri_config.warmup_steps+1:]
+            else:
+                warmup_timesteps = timesteps
+                pip_timesteps = None
+            for i, t in enumerate(warmup_timesteps):
+                if distri_config.rank == 0:
+                    ori_latents = latents
+                latents = self.pip_forward(
+                    latents,
+                    prompt_embeds,
+                    prompt_attention_mask,
+                    added_cond_kwargs,
+                    t,
+                    do_classifier_free_guidance,
+                )
+                if distri_config.rank == 0:
+                    latents = self.scheduler_step(
+                        latents,
+                        ori_latents,
+                        do_classifier_free_guidance,
+                        guidance_scale,
+                        t,
+                        latent_channels,
+                        extra_step_kwargs,
+                    )
+
+                # call the callback, if provided
+                if distri_config.rank == 0 and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
+                    progress_bar.update()
+                    assert callback is None
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+ 
+            if distri_config.rank == 0:
+                num_micro_batch = distri_config.num_micro_batch
+                _, _, c, _ = latents.shape
+                assert c % num_micro_batch == 0
+                latents = list(latents.split(c // num_micro_batch, dim=2))
+
+            for i, t in enumerate(pip_timesteps):
+                for batch_idx in range(distri_config.num_micro_batch):
+
                     if distri_config.rank == 0:
                         ori_latents = latents[batch_idx]
-
+                    
+                    # TODO: ADD RECV FOR > 0
                     latents[batch_idx] = self.pip_forward(
                         latents[batch_idx],
                         prompt_embeds,
@@ -336,6 +375,10 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                         t,
                         do_classifier_free_guidance,
                     )
+
+                    # TODO: ADD SEND FOR ALL
+
+                    # TODO: ADD RECV FOR 0 
                 
                     if distri_config.rank == 0:
                         latents[batch_idx] = self.scheduler_step(
@@ -346,7 +389,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                             t,
                             latent_channels,
                             extra_step_kwargs,
-                            batch_idx = None if counter <= distri_config.warmup_steps else batch_idx
+                            batch_idx
                         )
 
                 # call the callback, if provided
@@ -356,8 +399,10 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
-
-            latents = torch.cat(latents, dim=2)
+            if distri_config.rank == 0:
+                latents = torch.cat(latents, dim=2)
+            else:
+                return None
 
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

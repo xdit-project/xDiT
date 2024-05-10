@@ -28,8 +28,9 @@ class DistriConv2dPiP(BaseModule):
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
+        logger.info(f"stride {self.module.stride}; padding {self.module.padding}")
 
-        output_h = x.shape[2] // stride // config.n_device_per_batch
+        output_h = x.shape[2] // stride // config.num_micro_batch
         idx = self.batch_idx
         h_begin = output_h * idx * stride - padding
         h_end = output_h * (idx + 1) * stride + padding
@@ -40,17 +41,18 @@ class DistriConv2dPiP(BaseModule):
         if h_end > h:
             h_end = h
             final_padding[3] = padding
+        logger.info(f"{h_begin}:{h_end}")
         sliced_input = x[:, :, h_begin:h_end, :]
         padded_input = F.pad(sliced_input, final_padding, mode="constant")
         return F.conv2d(padded_input, self.module.weight, self.module.bias, stride=stride, padding="valid")
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        logger.info(f"Conv2dPiP forward x.shape {x.shape}") 
+        logger.info(f"Conv2dPiP forward x.shape {x.shape} : self.batch_idx {self.batch_idx}, self.counter {self.counter}") 
         # [2, 4, 128, 128]
 
         distri_config = self.distri_config
 
-        if distri_config.n_device_per_batch == 1:
+        if distri_config.num_micro_batch == 1:
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
@@ -58,6 +60,7 @@ class DistriConv2dPiP(BaseModule):
                 if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
                     full_x = x
                     output = self.naive_forward(full_x)
+                    # [2, 1152, 64, 64]
                 else:
                     _, _, cc, _ = full_x.shape
                     _, _, c, _ = x.shape
@@ -71,17 +74,18 @@ class DistriConv2dPiP(BaseModule):
                 
             # else:
             #     boundary_size = self.module.padding[0]
-            #     if self.buffer_list is None:
-            #         if self.comm_manager.buffer_list is None:
-            #             self.idx = self.comm_manager.register_tensor(
-            #                 shape=[2, x.shape[0], x.shape[1], boundary_size, x.shape[3]],
-            #                 torch_dtype=x.dtype,
-            #                 layer_type="conv2d",
-            #             )
-            #         else:
-            #             self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
+            #     # if self.buffer_list is None:
+            #     #     if self.comm_manager.buffer_list is None:
+            #     #         self.idx = self.comm_manager.register_tensor(
+            #     #             shape=[2, x.shape[0], x.shape[1], boundary_size, x.shape[3]],
+            #     #             torch_dtype=x.dtype,
+            #     #             layer_type="conv2d",
+            #     #         )
+            #     #     else:
+            #     #         self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
             #     if self.buffer_list is None:
             #         output = self.naive_forward(x)
+            #         self.buffer_list = x
             #     else:
 
             #         def create_padded_x():

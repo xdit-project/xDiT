@@ -16,26 +16,26 @@ logger = init_logger(__name__)
 
 class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
     def init(self, distri_config: DistriConfig):
+        if distri_config.rank != 0:
+            self.scheduler = None
+
         self.batch_idx = 0
         self.distri_config = distri_config
     
     def pip_forward(
         self,
         latents: torch.FloatTensor,
-        prompt_embeds: Final[torch.FloatTensor],
-        prompt_attention_mask: Final[torch.FloatTensor],
-        added_cond_kwargs: Final[Dict],
-        t: Final[Union[float, torch.Tensor]], 
-        do_classifier_free_guidance: Final[bool],
-        guidance_scale: Final[float], 
-        latent_channels: Final[int], 
-        extra_step_kwargs: Final[Dict],
-        batch_idx: Optional[int] = None
+        prompt_embeds: torch.FloatTensor,
+        prompt_attention_mask: torch.FloatTensor,
+        added_cond_kwargs: Dict,
+        t: Union[float, torch.Tensor], 
+        do_classifier_free_guidance: bool,
     ):
         distri_config = self.distri_config
 
-        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+        if distri_config.rank == 0:
+            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
         current_timestep = t
         if not torch.is_tensor(current_timestep):
@@ -62,8 +62,20 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             added_cond_kwargs=added_cond_kwargs,
             return_dict=False,
         )[0]
-        # logger.info(f"noise_pred.shape {noise_pred.shape}, latent_model_input.shape {latent_model_input.shape}")
 
+        return noise_pred
+        
+    def scheduler_step(
+        self,
+        noise_pred: torch.FloatTensor,
+        latents: torch.FloatTensor,
+        do_classifier_free_guidance: bool,
+        guidance_scale: float, 
+        t: Union[float, torch.Tensor],
+        latent_channels: int, 
+        extra_step_kwargs: Dict,
+        batch_idx: Union[int] = None
+    ):
         # perform guidance
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -86,6 +98,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         )[0]
 
         return latents
+
 
     def __call__(
         self,
@@ -298,10 +311,11 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            latents = [latents]
+            if distri_config.rank == 0:
+                latents = [latents]
             for i, t in enumerate(timesteps):
                 counter = i
-                if counter == distri_config.warmup_steps + 1:
+                if counter == distri_config.warmup_steps + 1 and distri_config.rank == 0:
                     # latents.shape [1, 4, 128, 128]
                     latents = latents[0]
                     num_micro_batch = distri_config.num_micro_batch
@@ -311,6 +325,9 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
                 for batch_idx, _ in enumerate(latents):
                     # logger.info(f"{batch_idx} : {latents[batch_idx].shape}")
+                    if distri_config.rank == 0:
+                        ori_latents = latents[batch_idx]
+
                     latents[batch_idx] = self.pip_forward(
                         latents[batch_idx],
                         prompt_embeds,
@@ -318,14 +335,22 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                         added_cond_kwargs,
                         t,
                         do_classifier_free_guidance,
-                        guidance_scale,
-                        latent_channels,
-                        extra_step_kwargs,
-                        batch_idx = None if counter <= distri_config.warmup_steps else batch_idx
                     )
+                
+                    if distri_config.rank == 0:
+                        latents[batch_idx] = self.scheduler_step(
+                            latents[batch_idx],
+                            ori_latents,
+                            do_classifier_free_guidance,
+                            guidance_scale,
+                            t,
+                            latent_channels,
+                            extra_step_kwargs,
+                            batch_idx = None if counter <= distri_config.warmup_steps else batch_idx
+                        )
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if distri_config.rank == 0 and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
                     progress_bar.update()
                     assert callback is None
                     if callback is not None and i % callback_steps == 0:

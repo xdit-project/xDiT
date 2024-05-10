@@ -16,8 +16,9 @@ logger = init_logger(__name__)
 
 class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
     def init(self, distri_config: DistriConfig):
-        if distri_config.rank != 0:
+        if distri_config.rank != 0 or distri_config.rank != distri_config.world_size - 1:
             self.scheduler = None
+        if distri_config.rank != distri_config.world_size - 1:
             self.vae = None
             self.image_processor = None
 
@@ -335,7 +336,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     t,
                     do_classifier_free_guidance,
                 )
-                if distri_config.rank == 0:
+                if distri_config.rank == distri_config.world_size - 1:
                     latents = self.scheduler_step(
                         latents,
                         ori_latents,
@@ -346,13 +347,13 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                         extra_step_kwargs,
                     )
 
-                # call the callback, if provided
-                if distri_config.rank == 0 and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
-                    progress_bar.update()
-                    assert callback is None
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
+                    # call the callback, if provided
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        assert callback is None
+                        if callback is not None and i % callback_steps == 0:
+                            step_idx = i // getattr(self.scheduler, "order", 1)
+                            callback(step_idx, t, latents)
  
             if distri_config.rank == 0:
                 num_micro_batch = distri_config.num_micro_batch
@@ -380,7 +381,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
                     # TODO: ADD RECV FOR 0 
                 
-                    if distri_config.rank == 0:
+                    if distri_config.rank == distri_config.world_size - 1:
                         latents[batch_idx] = self.scheduler_step(
                             latents[batch_idx],
                             ori_latents,
@@ -399,7 +400,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
-            if distri_config.rank == 0:
+            if distri_config.rank == distri_config.world_size - 1:
                 latents = torch.cat(latents, dim=2)
             else:
                 return None

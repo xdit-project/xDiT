@@ -20,10 +20,15 @@ from distrifuser.utils import DistriConfig
 class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
         super().__init__(module, distri_config)
+
         block_len = (len(self.module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
         start_idx = block_len * distri_config.rank
         end_idx = min(block_len * (distri_config.rank + 1), len(self.module.transformer_blocks))
         self.module.transformer_blocks = self.module.transformer_blocks[start_idx:end_idx]
+        
+        if distri_config.rank != 0:
+            self.module.pos_embed = None
+
         self.config = module.config
         self.batch_idx = 0
 
@@ -279,6 +284,8 @@ class DistriTransformer2DModel(BaseModule):
                         width * module.patch_size,
                     )
                 )
+        else:
+            output = hidden_states
         
         if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
             self.counter += 1

@@ -45,7 +45,7 @@ class DistriConv2dPiP(BaseModule):
         return F.conv2d(padded_input, self.module.weight, self.module.bias, stride=stride, padding="valid")
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        # logger.info(f"Conv2dPiP forward x.shape {x.shape}") 
+        logger.info(f"Conv2dPiP forward x.shape {x.shape}") 
         # [2, 4, 128, 128]
 
         distri_config = self.distri_config
@@ -54,6 +54,7 @@ class DistriConv2dPiP(BaseModule):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
+                full_x = self.buffer_list
                 if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
                     full_x = x
                     output = self.naive_forward(full_x)
@@ -63,6 +64,7 @@ class DistriConv2dPiP(BaseModule):
                     assert cc // distri_config.num_micro_batch == c
                     full_x[:, :, c * self.batch_idx : c * (self.batch_idx + 1), :] = x
                     output = self.sliced_forward(full_x)
+                self.buffer_list = full_x
                 logger.info(f"output {output.shape}")
             else:
                 raise NotImplementedError

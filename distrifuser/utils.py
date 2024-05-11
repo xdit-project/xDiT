@@ -118,10 +118,6 @@ class DistriConfig:
         self.split_group = split_group
 
         self.num_micro_batch = num_micro_batch
-        # if self.parallelism == "pipeline":
-        #     self.groups = []
-        #     for _ in range(num_micro_batch):
-        #         self.groups.append(dist.new_group())
 
         # pipeline variance
         self.num_inference_steps = None
@@ -199,7 +195,7 @@ class PipelineParallelismCommManager:
             logger.warning(f"Recv buffer is already initialized, skip receiving shape.")
     
     def isend_to_next(self, tensor: torch.Tensor):
-        logger.info(f"rank {self.distri_config.rank} is sending")
+        # logger.info(f"rank {self.distri_config.rank} is sending")
         if self.send_shape is None:
             self.first_send_to_next(tensor)
         if self.send_req is not None and not self.send_req.is_completed():
@@ -222,21 +218,19 @@ class PipelineParallelismCommManager:
                     src=self.prev_rank)
 
     def irecv_from_prev(self, dtype: Optional[torch.dtype] = None, idx: Optional[int] = None):
-        logger.info(f"rank {self.distri_config.rank} is receiving ({idx})")
-        distri_config = self.distri_config
+        # logger.info(f"rank {self.distri_config.rank} is receiving ({idx})")
         if self.recv_buffer is None:
             self.first_recv_from_prev(dtype)
         self.recv_queue.append(idx)
         self._irecv_add_req()
 
     def get_data(self, idx: Optional[int] = None) -> torch.Tensor:
-        distri_config = self.distri_config
         if self.recv_req is not None and not self.recv_req.is_completed():
             self.recv_req.wait()
             self.recv_req = None
             self._irecv_add_req()
             
-        logger.info(f"rank {self.distri_config.rank} is getting {idx}")
+        # logger.info(f"rank {self.distri_config.rank} is getting {idx}")
         if idx is None:
             return self.recv_buffer
         else:

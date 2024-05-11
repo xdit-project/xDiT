@@ -22,14 +22,14 @@ class DistriConv2dPiP(BaseModule):
         return output
 
     def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
-        config = self.distri_config
+        distri_config = self.distri_config
         b, c, h, w = x.shape
-        assert h % config.n_device_per_batch == 0
+        assert h % distri_config.num_micro_batch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
-        output_h = x.shape[2] // stride // config.num_micro_batch
+        output_h = x.shape[2] // stride // distri_config.num_micro_batch
         idx = self.batch_idx
         h_begin = output_h * idx * stride - padding
         h_end = output_h * (idx + 1) * stride + padding

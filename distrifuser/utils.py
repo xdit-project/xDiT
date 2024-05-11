@@ -7,7 +7,7 @@ from distrifuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-from typing import Union, Optional
+from typing import Union, Optional, List
 
 
 def check_env():
@@ -142,20 +142,45 @@ class DistriConfig:
 class PipelineParallelismCommManager:
     def __init__(self, distri_config: DistriConfig):
         self.distri_config = distri_config
-        self.recv_buffer = None
-        self.send_buffer = None
+        self.recv_buffer : Optional[Union[List[torch.Tensor], torch.Tensor]] = None
+        self.send_shape : Optional[torch.Size] = None
+        self.recv_shape : Optional[torch.Size] = None
         self.send_req = None
         self.recv_req = None
         self.next_rank = (distri_config.rank + 1) % distri_config.world_size
         self.prev_rank = (distri_config.rank - 1 + distri_config.world_size) % distri_config.world_size
+        self.dtype = None
+
+    def _creat_recv_buffer(self, is_split: bool = False):
+        distri_config = self.distri_config
+        assert self.recv_shape is not None
+        if is_split:
+            if isinstance(self.recv_buffer, list) and len(self.recv_buffer) == distri_config.num_micro_batch:
+                return
+            shape = list(self.recv_shape)
+            shape[-2] = shape[-2] // distri_config.num_micro_batch
+            self.recv_buffer = [torch.zeros(
+                shape,
+                dtype=self.dtype,
+                device=distri_config.device,
+            ) for _ in range(distri_config.num_micro_batch)]
+        else:
+            if isinstance(self.recv_buffer, torch.Tensor):
+                return 
+            self.recv_buffer = torch.zeros(
+                self.recv_shape,
+                dtype=self.dtype,
+                device=distri_config.device
+            )
+
     def first_send_to_next(self, tensor: torch.Tensor):
         distri_config = self.distri_config
-        if self.send_buffer is None:
+        if self.send_shape is None:
             shape = torch.tensor(tensor.shape, dtype=torch.int32, device=distri_config.device)
             dim = torch.tensor(len(shape), dtype=torch.int32, device=distri_config.device)
             dist.send(dim, dst=self.next_rank)
             dist.send(shape, dst=self.next_rank)
-            self.send_buffer = True
+            self.send_shape = torch.Size(list(shape))
         else:
             logger.warning(f"Send buffer is already initialized, skip sending shape.")
     
@@ -166,21 +191,23 @@ class PipelineParallelismCommManager:
             dist.recv(dim, src=self.prev_rank)
             shape = torch.zeros(dim, dtype=torch.int32, device=distri_config.device)
             dist.recv(shape, src=self.prev_rank)
-            self.shape = torch.Size(shape)
-            self.recv_buffer = torch.zeros(shape, dtype=dtype, device=distri_config.device)
+            self.recv_shape = torch.Size(list(shape))
+            self.dtype = dtype
+            self._creat_recv_buffer()
         else:
             logger.warning(f"Recv buffer is already initialized, skip receiving shape.")
-  
+    
     def isend_to_next(self, tensor: torch.Tensor):
-        # TODO: dynamically change the shape of buffer due to current shape
-        # assert self.send_buffer is not None
-        if self.send_buffer is None:
-            self.first_send_to_next()
+        logger.info(f"rank {self.distri_config.rank} is sending {tensor.shape} ({self.send_shape})")
+        if self.send_shape is None:
+            self.first_send_to_next(tensor)
         if self.send_req is not None and not self.send_req.is_completed():
             self.send_req.wait()
+        tensor = tensor.contiguous()
         self.send_req = dist.isend(tensor, dst=self.next_rank)
 
     def irecv_from_prev(self, dtype: Optional[torch.dtype] = None, idx: Optional[int] = None):
+        logger.info(f"rank {self.distri_config.rank} is receiving ({idx})")
         distri_config = self.distri_config
         if self.recv_buffer is None:
             self.first_recv_from_prev(dtype)
@@ -189,9 +216,9 @@ class PipelineParallelismCommManager:
         if idx is None:
             self.recv_req = dist.irecv(self.recv_buffer, src=self.prev_rank)
         else:
-            c = self.recv_buffer.shape[-2] // distri_config.num_micro_batch
+            self._creat_recv_buffer(is_split=True)
             self.recv_req = dist.irecv(
-                self.recv_buffer[...,c * idx : c * (idx + 1), :], 
+                self.recv_buffer[idx], 
                 src=self.prev_rank)
 
     def get_data(self, is_block: bool = False, idx: Optional[int] = None) -> torch.Tensor:
@@ -201,10 +228,11 @@ class PipelineParallelismCommManager:
                 self.recv_req.wait()
                 self.recv_req = None
         if idx is None:
-            return self.recv_req
+            logger.info(f"rank {self.distri_config.rank} is getting all ({self.recv_buffer.shape})")
+            return self.recv_buffer
         else:
-            c = self.recv_buffer.shape[-2] // distri_config.num_micro_batch
-            return self.recv_req[..., c * idx : c * (idx + 1), :]
+            logger.info(f"rank {self.distri_config.rank} is getting {idx} ({self.recv_buffer[idx].shape})")
+            return self.recv_buffer[idx]
 
 
 class PatchParallelismCommManager:

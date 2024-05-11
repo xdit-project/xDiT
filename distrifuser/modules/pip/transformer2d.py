@@ -32,83 +32,6 @@ class DistriTransformer2DModel(BaseModule):
         self.config = module.config
         self.batch_idx = 0
 
-    def pip_forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        timestep: Optional[torch.LongTensor] = None,
-        cross_attention_kwargs: Dict[str, Any] = None,
-        class_labels: Optional[torch.LongTensor] = None,
-    ):
-        module = self.module
-        distri_config = self.distri_config
-        num_micro_batch = self.distri_config.num_micro_batch
-
-        _, c, _ = hidden_states.shape
-        assert c % num_micro_batch == 0
-        if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
-            hidden_states = [hidden_states]
-        else:
-            hidden_states = list(hidden_states.split((c + num_micro_batch - 1) // num_micro_batch, dim=1))
-        
-        num_micro_batch = len(hidden_states)
-        send_req = None
-        recv_req = None
-
-        if dist.get_rank() > 0: 
-            hidden_states[0] = hidden_states[0].contiguous()
-            recv_req = torch.distributed.irecv(hidden_states[0], src=distri_config.rank - 1)
-        else:
-            recv_queue = []
-
-        # filling the pipeline
-
-        for idx in range(len(hidden_states)):
-            if distri_config.rank > 0:
-                if not recv_req.is_completed():
-                    recv_req.wait()
-                if idx < num_micro_batch - 1:
-                    hidden_states[idx+1] = hidden_states[idx+1].contiguous()
-                    recv_req = torch.distributed.irecv(hidden_states[idx+1], src=distri_config.rank - 1)
-                    
-            for block in module.transformer_blocks:
-                hidden_states[idx] = block(
-                    hidden_states[idx],
-                    attention_mask=attention_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    timestep=timestep,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    class_labels=class_labels,
-                ) 
-
-            if distri_config.rank < distri_config.world_size - 1:
-                torch.distributed.isend(hidden_states[idx], dst=distri_config.rank + 1, tag=idx)
-            else:
-                send_req = torch.distributed.isend(
-                    hidden_states[idx], 
-                    dst=0)
-
-            if distri_config.rank == 0:
-                recv_queue.append(idx)
-                if recv_req is None or recv_req.is_completed():
-                    recv_req = torch.distributed.irecv(hidden_states[recv_queue[0]], src=distri_config.world_size - 1)
-                    recv_queue.pop(0)
-
-        if distri_config.rank == 0:
-            if not recv_req.is_completed():
-                recv_req.wait()
-
-            for idx in recv_queue:
-                torch.distributed.recv(hidden_states[idx], src=distri_config.world_size - 1)
-        if send_req is not None and not send_req.is_completed():
-            send_req.wait()
-
-        hidden_states = torch.cat(hidden_states, dim=1)
-        return hidden_states
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -198,10 +121,15 @@ class DistriTransformer2DModel(BaseModule):
         # 1. Input
         if module.is_input_patches:
             height, width = (
-                hidden_states.shape[-2] // module.patch_size // 
-                    (distri_config.n_device_per_batch if distri_config.parallelism == "patch" else 1),
+                hidden_states.shape[-2] // module.patch_size,
                 hidden_states.shape[-1] // module.patch_size,
             )
+            height, width = 64, 64
+            if self.counter <= distri_config.warmup_steps or distri_config.mode == "full_sync":
+                pass
+            else:
+                height //= distri_config.num_micro_batch
+            # logger.info(f"rank {distri_config.rank} {height} {width}")
 
             if distri_config.rank == 0:
                 hidden_states = module.pos_embed(hidden_states)
@@ -227,7 +155,6 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
-    
         for block in module.transformer_blocks:
             hidden_states = block(
                 hidden_states,

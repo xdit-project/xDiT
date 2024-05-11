@@ -336,7 +336,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
                 if distri_config.rank != 0:
                     self.comm_manager.irecv_from_prev(dtype)
-                    latents = self.comm_manager.get_data(is_block=True)
+                    latents = self.comm_manager.get_data()
                 latents = self.pip_forward(
                     latents,
                     prompt_embeds,
@@ -346,10 +346,9 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     do_classifier_free_guidance,
                 )
                 if distri_config.rank == 0:
-                    if i != len(warmup_timesteps) - 1:
-                        self.comm_manager.isend_to_next(latents)
+                    self.comm_manager.isend_to_next(latents)
                     self.comm_manager.irecv_from_prev(dtype)
-                    latents = self.comm_manager.get_data(is_block=True)
+                    latents = self.comm_manager.get_data()
                     latents = self.scheduler_step(
                         latents,
                         ori_latents,
@@ -366,19 +365,12 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     self.comm_manager.isend_to_next(latents)
  
             if distri_config.rank == 0:
-                logger.info(f"rank 0: latents shape {latents.shape}")
                 _, _, c, _ = latents.shape
                 assert c % num_micro_batch == 0
                 latents = list(latents.split(c // num_micro_batch, dim=2))
                 ori_latents = list(ori_latents.split(c // num_micro_batch, dim=2))
-                logger.info(f"rank 0: split latents shape {latents[0].shape}")
-
-                self.comm_manager.irecv_from_prev(idx=0)
-
-                logger.info(f"rank 0: return from irecv")
                 for batch_idx in range(num_micro_batch):
                     ori_latents[batch_idx] = latents[batch_idx]
-                    logger.info(f"rank 0: start to process {batch_idx}")
                     latents[batch_idx] = self.pip_forward(
                         latents[batch_idx],
                         prompt_embeds,
@@ -387,9 +379,8 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                         pip_timesteps[0],
                         do_classifier_free_guidance,
                     ) 
-                    logger.info(f"rank 0: start to isend {batch_idx}")
                     self.comm_manager.isend_to_next(latents[batch_idx])
-                    logger.info(f"rank 0: return from isend {batch_idx}")
+                    self.comm_manager.irecv_from_prev(idx=batch_idx)
                 
                 i = len(warmup_timesteps)
                 if (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
@@ -397,8 +388,6 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
                 for i in range(len(pip_timesteps) - 1):
                     for batch_idx in range(num_micro_batch):
-                        logger.info(f"rank {distri_config.rank} i {i} batch_idx {batch_idx}")
-                        self.comm_manager.irecv_from_prev(idx=(batch_idx + 1) % num_micro_batch)
                         latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
                         latents[batch_idx] = self.scheduler_step(
                             latents[batch_idx],
@@ -422,18 +411,14 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                             do_classifier_free_guidance,
                         )
                         self.comm_manager.isend_to_next(latents[batch_idx])
+                        self.comm_manager.irecv_from_prev(idx=batch_idx)
 
                     i += len(warmup_timesteps) + 1
                     if (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
                         progress_bar.update()
 
                 for batch_idx in range(num_micro_batch):  
-                    logger.info(f"rank {distri_config.rank} i -1 batch_idx {batch_idx}") 
-                    if batch_idx != num_micro_batch - 1:
-                        self.comm_manager.irecv_from_prev(idx=(batch_idx + 1) % num_micro_batch)
-                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
-                    else:
-                        latents[batch_idx] = self.comm_manager.get_data(is_block=True, idx=batch_idx)
+                    latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
                     
                     latents[batch_idx] = self.scheduler_step(
                         latents[batch_idx],
@@ -449,17 +434,12 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 latents = torch.cat(latents, dim=2)
 
             else:
-                self.comm_manager.irecv_from_prev(idx=0)
                 latents = [None for _ in range(num_micro_batch)]
                 for i, t in enumerate(pip_timesteps):
                     for batch_idx in range(num_micro_batch):
-                        logger.info(f"rank {distri_config.rank} i {i} batch_idx {batch_idx}")
-                        if batch_idx == num_micro_batch - 1 and i == len(pip_timesteps) - 1:
-                            latents[batch_idx] = self.comm_manager.get_data(is_block=True, idx=batch_idx)
-                        else:
-                            self.comm_manager.irecv_from_prev(idx=(batch_idx + 1) % num_micro_batch)
-                            latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
-                        
+                        self.comm_manager.irecv_from_prev(idx=batch_idx)
+                    for batch_idx in range(num_micro_batch):
+                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
                         latents[batch_idx] = self.pip_forward(
                             latents[batch_idx],
                             prompt_embeds,

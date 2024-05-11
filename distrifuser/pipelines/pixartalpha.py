@@ -123,6 +123,8 @@ class DistriPixArtAlphaPipeline:
         num_images_per_prompt = 1
         
         if distri_config.parallelism == "pipeline":
+            comm_manager = PipelineParallelismCommManager(distri_config)    
+            self.pipeline.set_comm_manager(comm_manager)
             self.pipeline(
                 height=distri_config.height,
                 width=distri_config.width,
@@ -130,8 +132,6 @@ class DistriPixArtAlphaPipeline:
                 use_resolution_binning=distri_config.use_resolution_binning,
                 num_inference_steps=distri_config.warmup_steps + 2
             )
-            comm_manager = PipelineParallelismCommManager(distri_config)    
-            self.pipeline.set_comm_manager(comm_manager)
 
         else:
             # Resolution binning
@@ -172,12 +172,6 @@ class DistriPixArtAlphaPipeline:
             t = torch.zeros([2], device=device, dtype=torch.long)
 
             guidance_scale = 4.0
-            latent_size = pipeline.transformer.config.sample_size
-            # latents = torch.zeros(
-            #     [batch_size, latent_channels, latent_size, latent_size],
-            #     device=device,
-            #     dtype=pipeline.transformer.dtype,
-            # )
 
             latent_channels = pipeline.transformer.config.in_channels
             latents = pipeline.prepare_latents(

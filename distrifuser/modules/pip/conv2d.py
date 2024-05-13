@@ -14,6 +14,7 @@ class DistriConv2dPiP(BaseModule):
     def __init__(self, module: nn.Conv2d, distri_config: DistriConfig, is_first_layer: bool = False):
         super(DistriConv2dPiP, self).__init__(module, distri_config)
         self.is_first_layer = is_first_layer
+        self.batch_idx = 0
 
     def naive_forward(self, x: torch.Tensor) -> torch.Tensor:
         #  x: [B, C, H, W]
@@ -21,14 +22,14 @@ class DistriConv2dPiP(BaseModule):
         return output
 
     def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
-        config = self.distri_config
+        distri_config = self.distri_config
         b, c, h, w = x.shape
-        assert h % config.n_device_per_batch == 0
+        assert h % distri_config.num_micro_batch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
-        output_h = x.shape[2] // stride // config.n_device_per_batch
+        output_h = x.shape[2] // stride // distri_config.num_micro_batch
         idx = self.batch_idx
         h_begin = output_h * idx * stride - padding
         h_end = output_h * (idx + 1) * stride + padding
@@ -44,41 +45,43 @@ class DistriConv2dPiP(BaseModule):
         return F.conv2d(padded_input, self.module.weight, self.module.bias, stride=stride, padding="valid")
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        # logger.info(f"Conv2dPiP forward x.shape {x.shape}") 
         # [2, 4, 128, 128]
 
         distri_config = self.distri_config
 
-        if distri_config.n_device_per_batch == 1:
+        if distri_config.num_micro_batch == 1:
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
+                full_x = self.buffer_list
                 if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:
                     full_x = x
                     output = self.naive_forward(full_x)
+                    # [2, 1152, 64, 64]
                 else:
                     _, _, cc, _ = full_x.shape
                     _, _, c, _ = x.shape
                     assert cc // distri_config.num_micro_batch == c
                     full_x[:, :, c * self.batch_idx : c * (self.batch_idx + 1), :] = x
                     output = self.sliced_forward(full_x)
-                logger.info(f"output {output.shape}")
+                self.buffer_list = full_x
             else:
                 raise NotImplementedError
                 
             # else:
             #     boundary_size = self.module.padding[0]
-            #     if self.buffer_list is None:
-            #         if self.comm_manager.buffer_list is None:
-            #             self.idx = self.comm_manager.register_tensor(
-            #                 shape=[2, x.shape[0], x.shape[1], boundary_size, x.shape[3]],
-            #                 torch_dtype=x.dtype,
-            #                 layer_type="conv2d",
-            #             )
-            #         else:
-            #             self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
+            #     # if self.buffer_list is None:
+            #     #     if self.comm_manager.buffer_list is None:
+            #     #         self.idx = self.comm_manager.register_tensor(
+            #     #             shape=[2, x.shape[0], x.shape[1], boundary_size, x.shape[3]],
+            #     #             torch_dtype=x.dtype,
+            #     #             layer_type="conv2d",
+            #     #         )
+            #     #     else:
+            #     #         self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
             #     if self.buffer_list is None:
             #         output = self.naive_forward(x)
+            #         self.buffer_list = x
             #     else:
 
             #         def create_padded_x():

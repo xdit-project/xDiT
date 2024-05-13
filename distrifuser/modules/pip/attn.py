@@ -157,7 +157,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         kv = self.to_kv(encoder_hidden_states)
 
         # the distributed sparse attention from distrifuser
-        if distri_config.n_device_per_batch == 1:
+        if distri_config.num_micro_batch == 1:
             full_kv = kv
         else:
             if distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps:

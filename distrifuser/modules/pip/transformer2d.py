@@ -22,11 +22,12 @@ class DistriTransformer2DModel(BaseModule):
         super().__init__(module, distri_config)
 
         block_len = (len(self.module.transformer_blocks) + distri_config.world_size - 1) // distri_config.world_size 
-        start_idx = block_len * distri_config.rank
-        end_idx = min(block_len * (distri_config.rank + 1), len(self.module.transformer_blocks))
+        current_rank = (distri_config.rank - 1 + distri_config.world_size) % distri_config.world_size
+        start_idx = block_len * current_rank
+        end_idx = min(block_len * (current_rank + 1), len(self.module.transformer_blocks))
         self.module.transformer_blocks = self.module.transformer_blocks[start_idx:end_idx]
-        
-        if distri_config.rank != 0:
+
+        if distri_config.rank != 1:
             self.module.pos_embed = None
 
         self.config = module.config
@@ -120,18 +121,21 @@ class DistriTransformer2DModel(BaseModule):
 
         # 1. Input
         if module.is_input_patches:
-            height, width = (
-                hidden_states.shape[-2] // module.patch_size,
-                hidden_states.shape[-1] // module.patch_size,
-            )
-            height, width = 64, 64
-            if self.counter <= distri_config.warmup_steps or distri_config.mode == "full_sync":
-                pass
-            else:
-                height //= distri_config.num_micro_batch
-            # logger.info(f"rank {distri_config.rank} {height} {width}")
-
             if distri_config.rank == 0:
+                # height, width = (
+                #     hidden_states.shape[-2] // module.patch_size,
+                #     hidden_states.shape[-1] // module.patch_size,
+                # )
+                height, width = (
+                    distri_config.height // module.patch_size // 8,
+                    distri_config.width // module.patch_size // 8,
+                )
+                if self.counter <= distri_config.warmup_steps or distri_config.mode == "full_sync":
+                    pass
+                else:
+                    height //= distri_config.num_micro_batch
+
+            if distri_config.rank == 1:
                 hidden_states = module.pos_embed(hidden_states)
 
             if module.adaln_single is not None:
@@ -167,7 +171,7 @@ class DistriTransformer2DModel(BaseModule):
             ) 
 
         # 3. Output
-        if distri_config.rank == distri_config.world_size - 1:
+        if distri_config.rank == 0:
             if module.is_input_patches:
                 if module.config.norm_type != "ada_norm_single":
                     conditioning = module.transformer_blocks[0].norm1.emb(

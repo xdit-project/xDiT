@@ -78,7 +78,6 @@ class DistriPixArtAlphaPipeline:
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
                 transformer=transformer,
-                scheduler=scheduler,
                 **kwargs,
             ).to(device)
 

@@ -172,7 +172,6 @@ class PipelineParallelismCommManager:
             dist.send(dim, dst=self.next_rank)
             dist.send(shape, dst=self.next_rank)
             self.send_shape = torch.Size(list(shape))
-            logger.info(f"self.send_shape {self.send_shape}")
         else:
             logger.warning(f"Send buffer is already initialized, skip sending shape.")
     
@@ -186,7 +185,6 @@ class PipelineParallelismCommManager:
             self.recv_shape = torch.Size(list(shape))
             self.dtype = dtype
             self._creat_recv_buffer()
-            logger.info(f"self.recv_shape {self.recv_shape}")
         else:
             logger.warning(f"Recv buffer is already initialized, skip receiving shape.")
     
@@ -197,7 +195,7 @@ class PipelineParallelismCommManager:
         # if self.send_req is not None:
             # self.send_req.wait()
             # self.send_req = None
-        logger.info(f"rank {self.distri_config.rank} is sending {tensor.shape}")
+        # logger.info(f"rank {self.distri_config.rank} is sending {tensor.shape}")
         self.send_req = dist.isend(tensor, dst=self.next_rank)
     
     def _irecv_add_req(self):
@@ -221,8 +219,7 @@ class PipelineParallelismCommManager:
 
     def get_data(self, idx: Optional[int] = None) -> torch.Tensor:
         if self.recv_req is not None:
-            logger.info(f"rank {self.distri_config.rank} : idx {idx} {self.recv_queue}")
-            # logger.info(f"rank {self.distri_config.rank} is waiting")
+            # logger.info(f"rank {self.distri_config.rank} : idx {idx} {self.recv_queue}")
             self.recv_req.wait()
             self.recv_req = None
             self._irecv_add_req()

@@ -38,23 +38,23 @@ class DistriPatchEmbed(BaseModule):
 
         # TODO: There might be a more faster way to generate a smaller pos_embed
         if module.height != height or module.width != width:
-            if is_warmup or self.batch_idx == 0:
-                pos_embed = get_2d_sincos_pos_embed(
-                    embed_dim=module.pos_embed.shape[-1],
-                    grid_size=(height, width),
-                    base_size=module.base_size,
-                    interpolation_scale=module.interpolation_scale,
-                )
-                pos_embed = torch.from_numpy(pos_embed)
-                self.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+            pos_embed = get_2d_sincos_pos_embed(
+                embed_dim=module.pos_embed.shape[-1],
+                grid_size=(height, width),
+                base_size=module.base_size,
+                interpolation_scale=module.interpolation_scale,
+            )
+            pos_embed = torch.from_numpy(pos_embed)
+            module.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+            module.height = height
+            module.width = width
+            pos_embed = module.pos_embed
         else:
-            self.pos_embed = module.pos_embed
-        b, c, h = self.pos_embed.shape
+            pos_embed = module.pos_embed
+        b, c, h = pos_embed.shape
 
-        if is_warmup:
-            pos_embed = self.pos_embed
-        else:
-            pos_embed = self.pos_embed.view(
+        if not is_warmup:
+            pos_embed = pos_embed.view(
                 b, distri_config.num_micro_batch, -1, h)[
                     :, self.batch_idx]
 
@@ -65,7 +65,5 @@ class DistriPatchEmbed(BaseModule):
             if self.batch_idx == distri_config.num_micro_batch:
                 self.batch_idx = 0
                 self.counter += 1
-
-        logger.info(f"pos_embed.shape: {pos_embed.shape}, latent.shape: {latent.shape}")
 
         return (latent + pos_embed).to(latent.dtype)

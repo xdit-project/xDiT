@@ -14,7 +14,6 @@ class DistriPatchEmbed(BaseModule):
         self.pos_embed = None
 
     def forward(self, latent):
-        logger.info(f"latent.shape: {latent.shape}")
         module = self.module
         distri_config = self.distri_config
         is_warmup = distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps

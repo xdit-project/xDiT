@@ -66,5 +66,8 @@ class DistriConv2dTP(BaseModule):
         if self.module.bias is not None:
             output = output + self.module.bias.view(1, -1, 1, 1)
 
+        peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+        print(f"memory after conv2D {peak_memory/1e9} GB")
+
         self.counter += 1
         return output

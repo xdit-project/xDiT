@@ -56,6 +56,9 @@ class DistriPixArtAlphaPipeline:
             transformer = DistriDiTTP(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
+
+        peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+        print(f"DistriPixArtAlphaPipeline from pretrain stage 1 {peak_memory/1e9} GB")
         
         if distri_config.parallelism == "pipeline":
             scheduler = DPMSolverMultistepSchedulerPiP.from_pretrained(
@@ -81,7 +84,14 @@ class DistriPixArtAlphaPipeline:
                 **kwargs,
             ).to(device)
 
-        return DistriPixArtAlphaPipeline(pipeline, distri_config)
+        peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+        print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
+
+        ret = DistriPixArtAlphaPipeline(pipeline, distri_config)
+
+        peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+        print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")
+        return ret
 
     def set_progress_bar_config(self, **kwargs):
         pass
@@ -253,3 +263,6 @@ class DistriPixArtAlphaPipeline:
                 pipeline.transformer.setup_cuda_graph(static_outputs, cuda_graphs)
 
             self.static_inputs = static_inputs
+            
+        peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+        print(f"memory before prepare {peak_memory/1e9} GB")

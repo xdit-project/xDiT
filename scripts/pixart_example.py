@@ -91,6 +91,13 @@ def main():
         "--use_cuda_graph",
         action="store_true",
     )
+    parser.add_argument(
+        "--output_type",
+        type=str,
+        default="latent",
+        choices=["latent", "pil"],
+        help="latent saves memory, pil will results a memory burst in vae",
+    )
 
     args = parser.parse_args()
 
@@ -135,6 +142,7 @@ def main():
     output = pipeline(
         prompt="An astronaut riding a green horse",
         generator=torch.Generator(device="cuda").manual_seed(42),
+        output_type=args.output_type,
     )
 
     torch.cuda.reset_peak_memory_stats()
@@ -157,6 +165,7 @@ def main():
                 prompt="An astronaut riding a green horse",
                 generator=torch.Generator(device="cuda").manual_seed(42),
                 num_inference_steps=args.num_inference_steps,
+                output_type="latent",
             )
         # if distri_config.rank == 0:
         #     prof.export_memory_timeline(
@@ -173,6 +182,7 @@ def main():
             prompt="An astronaut riding a green horse",
             generator=torch.Generator(device="cuda").manual_seed(42),
             num_inference_steps=args.num_inference_steps,
+            output_type=args.output_type,
         )
 
         end_time = time.time()
@@ -190,8 +200,9 @@ def main():
         print(
             f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )
-        print(f"save images to ./results/astronaut_{case_name}.png")
-        output.images[0].save(f"./results/astronaut_{case_name}.png")
+        if args.output_type == "pil":
+            print(f"save images to ./results/astronaut_{case_name}.png")
+            output.images[0].save(f"./results/astronaut_{case_name}.png")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         added_cond_kwargs: Dict,
         t: Union[float, torch.Tensor], 
         do_classifier_free_guidance: bool,
+        guidance_scale: float, 
+        latent_channels: int, 
+ 
     ):
         # if latents is None:
         #     logger.info(f"rank {self.distri_config.rank} latents is None")
@@ -43,7 +46,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         #     logger.info(f"rank {self.distri_config.rank} latents shape {latents.shape}")
         distri_config = self.distri_config
 
-        if distri_config.rank == 0:
+        if distri_config.rank == 1:
             latents = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
             latents = self.scheduler.scale_model_input(latents, t)
 
@@ -74,29 +77,29 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             return_dict=False,
         )[0]
 
+        if distri_config.rank == 0:
+            # perform guidance
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            # learned sigma
+            if self.transformer.config.out_channels // 2 == latent_channels:
+                noise_pred = noise_pred.chunk(2, dim=1)[0]
+            else:
+                noise_pred = noise_pred
+
         return noise_pred
         
     def scheduler_step(
         self,
         noise_pred: torch.FloatTensor,
         latents: torch.FloatTensor,
-        do_classifier_free_guidance: bool,
-        guidance_scale: float, 
         t: Union[float, torch.Tensor],
-        latent_channels: int, 
         extra_step_kwargs: Dict,
         batch_idx: Union[int] = None
     ):
-        # perform guidance
-        if do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-        # learned sigma
-        if self.transformer.config.out_channels // 2 == latent_channels:
-            noise_pred = noise_pred.chunk(2, dim=1)[0]
-        else:
-            noise_pred = noise_pred
+        
 
         # compute previous image: x_t -> x_t-1
         latents = self.scheduler.step(
@@ -323,6 +326,8 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         dtype = latents.dtype
         num_micro_batch = distri_config.num_micro_batch
 
+        assert self.comm_manager.recv_queue == []
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if distri_config.rank != "full_sync":
                 warmup_timesteps = timesteps[:distri_config.warmup_steps+1]
@@ -334,9 +339,12 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 if distri_config.rank == 0:
                     ori_latents = latents
 
-                if distri_config.rank != 0:
+                if distri_config.rank == 1 and i == 0:
+                    pass
+                else:
                     self.comm_manager.irecv_from_prev(dtype)
                     latents = self.comm_manager.get_data()
+
                 latents = self.pip_forward(
                     latents,
                     prompt_embeds,
@@ -344,112 +352,93 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     added_cond_kwargs,
                     t,
                     do_classifier_free_guidance,
+                    guidance_scale,
+                    latent_channels,
                 )
+
                 if distri_config.rank == 0:
-                    self.comm_manager.isend_to_next(latents)
-                    self.comm_manager.irecv_from_prev(dtype)
-                    latents = self.comm_manager.get_data()
                     latents = self.scheduler_step(
                         latents,
                         ori_latents,
-                        do_classifier_free_guidance,
-                        guidance_scale,
                         t,
-                        latent_channels,
                         extra_step_kwargs,
                     )
-
-                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                        progress_bar.update()
-                else:
-                    self.comm_manager.isend_to_next(latents)
+                    
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                   
+                self.comm_manager.isend_to_next(latents)
  
-            if distri_config.rank == 0:
+            assert self.comm_manager.recv_queue == []
+
+            if distri_config.rank == 1:
+                self.comm_manager.irecv_from_prev()
+                latents = self.comm_manager.get_data()
+                for _ in range(len(pip_timesteps) - 1):
+                    for batch_idx in range(num_micro_batch):
+                        self.comm_manager.irecv_from_prev(idx=batch_idx)
                 _, _, c, _ = latents.shape
-                assert c % num_micro_batch == 0
                 latents = list(latents.split(c // num_micro_batch, dim=2))
-                ori_latents = list(ori_latents.split(c // num_micro_batch, dim=2))
+ 
+            else:
+                for _ in range(len(pip_timesteps)):
+                    for batch_idx in range(num_micro_batch):
+                        self.comm_manager.irecv_from_prev(idx=batch_idx)
+                if distri_config.rank == 0:
+                    _, _, c, _ = latents.shape
+                    c //= num_micro_batch
+                    tmp = latents
+                    latents = []
+                    for batch_idx in range(num_micro_batch):
+                        latents.append(tmp[..., batch_idx * c: (batch_idx + 1) * c, :])
+                    ori_latents = [None for _ in range(num_micro_batch)]
+                else:
+                    latents = [None for _ in range(num_micro_batch)]
+        
+                    
+            for i, t in enumerate(pip_timesteps):
                 for batch_idx in range(num_micro_batch):
-                    ori_latents[batch_idx] = latents[batch_idx]
+
+                    if distri_config.rank == 0:
+                        ori_latents[batch_idx] = latents[batch_idx]
+
+                    if distri_config.rank == 1 and i == 0:
+                        pass
+                    else:
+                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
+                    
                     latents[batch_idx] = self.pip_forward(
                         latents[batch_idx],
                         prompt_embeds,
                         prompt_attention_mask,
                         added_cond_kwargs,
-                        pip_timesteps[0],
+                        t,
                         do_classifier_free_guidance,
-                    ) 
-                    self.comm_manager.isend_to_next(latents[batch_idx])
-                    self.comm_manager.irecv_from_prev(idx=batch_idx)
-                
-                i = len(warmup_timesteps)
-                if (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
-                    progress_bar.update()
+                        guidance_scale,
+                        latent_channels,
+                    )
 
-                for i in range(len(pip_timesteps) - 1):
-                    for batch_idx in range(num_micro_batch):
-                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
+                    if distri_config.rank == 0:
                         latents[batch_idx] = self.scheduler_step(
                             latents[batch_idx],
                             ori_latents[batch_idx],
-                            do_classifier_free_guidance,
-                            guidance_scale,
-                            pip_timesteps[i],
-                            latent_channels,
+                            t,
                             extra_step_kwargs,
                             batch_idx
                         )
-
-                        ori_latents[batch_idx] = latents[batch_idx]
-
-                        latents[batch_idx] = self.pip_forward(
-                            latents[batch_idx],
-                            prompt_embeds,
-                            prompt_attention_mask,
-                            added_cond_kwargs,
-                            pip_timesteps[i+1],
-                            do_classifier_free_guidance,
-                        )
+                    # self.comm_manager.irecv_from_prev(idx=batch_idx)
+                        if i != len(pip_timesteps) - 1:
+                            self.comm_manager.isend_to_next(latents[batch_idx])
+                        
+                    else:
                         self.comm_manager.isend_to_next(latents[batch_idx])
-                        self.comm_manager.irecv_from_prev(idx=batch_idx)
+                i += len(warmup_timesteps)
+                if (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
+                            progress_bar.update()
 
-                    i += len(warmup_timesteps) + 1
-                    if (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
-                        progress_bar.update()
-
-                for batch_idx in range(num_micro_batch):  
-                    latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
-                    
-                    latents[batch_idx] = self.scheduler_step(
-                        latents[batch_idx],
-                        ori_latents[batch_idx],
-                        do_classifier_free_guidance,
-                        guidance_scale,
-                        pip_timesteps[-1],
-                        latent_channels,
-                        extra_step_kwargs,
-                        batch_idx
-                    )
-                
+            if distri_config.rank == 0: 
                 latents = torch.cat(latents, dim=2)
-
             else:
-                latents = [None for _ in range(num_micro_batch)]
-                for i, t in enumerate(pip_timesteps):
-                    for batch_idx in range(num_micro_batch):
-                        self.comm_manager.irecv_from_prev(idx=batch_idx)
-                    for batch_idx in range(num_micro_batch):
-                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
-                        latents[batch_idx] = self.pip_forward(
-                            latents[batch_idx],
-                            prompt_embeds,
-                            prompt_attention_mask,
-                            added_cond_kwargs,
-                            t,
-                            do_classifier_free_guidance,
-                        )
-                        self.comm_manager.isend_to_next(latents[batch_idx])
-
                 return None
 
         if not output_type == "latent":

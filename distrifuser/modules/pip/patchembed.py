@@ -11,8 +11,10 @@ class DistriPatchEmbed(BaseModule):
     def __init__(self, module: PatchEmbed, distri_config: DistriConfig):
         super(DistriPatchEmbed, self).__init__(module, distri_config)
         self.batch_idx = 0
+        self.pos_embed = None
 
     def forward(self, latent):
+        logger.info(f"latent.shape: {latent.shape}")
         module = self.module
         distri_config = self.distri_config
         is_warmup = distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps
@@ -36,18 +38,25 @@ class DistriPatchEmbed(BaseModule):
 
         # TODO: There might be a more faster way to generate a smaller pos_embed
         if module.height != height or module.width != width:
-            pos_embed = get_2d_sincos_pos_embed(
-                embed_dim=module.pos_embed.shape[-1],
-                grid_size=(height, width),
-                base_size=module.base_size,
-                interpolation_scale=module.interpolation_scale,
-            )
-            pos_embed = torch.from_numpy(pos_embed)
-            pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+            if is_warmup or self.batch_idx == 0:
+                pos_embed = get_2d_sincos_pos_embed(
+                    embed_dim=module.pos_embed.shape[-1],
+                    grid_size=(height, width),
+                    base_size=module.base_size,
+                    interpolation_scale=module.interpolation_scale,
+                )
+                pos_embed = torch.from_numpy(pos_embed)
+                self.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
         else:
-            pos_embed = module.pos_embed
-        _, c, _ = latent.shape
-        pos_embed = pos_embed[:, c * self.batch_idx : c * (self.batch_idx + 1), :]
+            self.pos_embed = module.pos_embed
+        b, c, h = self.pos_embed.shape
+
+        if is_warmup:
+            pos_embed = self.pos_embed
+        else:
+            pos_embed = self.pos_embed.view(
+                b, distri_config.num_micro_batch, -1, h)[
+                    :, self.batch_idx]
 
         if is_warmup:
             self.counter += 1
@@ -56,5 +65,7 @@ class DistriPatchEmbed(BaseModule):
             if self.batch_idx == distri_config.num_micro_batch:
                 self.batch_idx = 0
                 self.counter += 1
+
+        logger.info(f"pos_embed.shape: {pos_embed.shape}, latent.shape: {latent.shape}")
 
         return (latent + pos_embed).to(latent.dtype)

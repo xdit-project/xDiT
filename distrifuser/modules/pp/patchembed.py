@@ -32,7 +32,10 @@ class DistriPatchEmbed(BaseModule):
                 interpolation_scale=module.interpolation_scale,
             )
             pos_embed = torch.from_numpy(pos_embed)
-            pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+            module.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+            module.height = height
+            module.width = width
+            pos_embed = module.pos_embed 
         else:
             pos_embed = module.pos_embed
         b, c, h = pos_embed.shape

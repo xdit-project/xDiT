@@ -98,11 +98,19 @@ def main():
         choices=["latent", "pil"],
         help="latent saves memory, pil will results a memory burst in vae",
     )
+    parser.add_argument(
+        "--attn_num",
+        default=None,
+        nargs='*',
+        type=int
+    )
 
     args = parser.parse_args()
 
     # torch.backends.cudnn.benchmark=True
     torch.backends.cudnn.deterministic = True
+
+    print(args.attn_num)
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
@@ -117,6 +125,7 @@ def main():
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
+        attn_num=args.attn_num,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:

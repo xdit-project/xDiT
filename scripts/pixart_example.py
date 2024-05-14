@@ -110,8 +110,6 @@ def main():
     # torch.backends.cudnn.benchmark=True
     torch.backends.cudnn.deterministic = True
 
-    print(args.attn_num)
-
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
         height=args.height,

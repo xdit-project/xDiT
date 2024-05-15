@@ -48,6 +48,7 @@ class DistriConfig:
         verbose: bool = False,
         use_resolution_binning: bool = True,
         attn_num: Optional[List[int]] = None,
+        scheduler: str = "dpmsolver_multistep",
     ):
         try:
             # Initialize the process group
@@ -121,6 +122,7 @@ class DistriConfig:
         self.num_micro_batch = num_micro_batch
 
         self.attn_num = attn_num
+        self.scheduler = scheduler
 
         # pipeline variance
         self.num_inference_steps = None

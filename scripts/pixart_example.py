@@ -104,6 +104,15 @@ def main():
         nargs='*',
         type=int
     )
+    parser.add_argument(
+        "--scheduler",
+        "-s",
+        default="dpmsolver_multistep",
+        type=str,
+        choices=["dpmsolver_multistep", "ddim"],
+        help="Scheduler to use.",
+    )
+    
 
     args = parser.parse_args()
 
@@ -124,6 +133,7 @@ def main():
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
+        scheduler=args.scheduler,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:

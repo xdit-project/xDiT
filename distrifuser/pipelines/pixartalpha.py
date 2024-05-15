@@ -13,6 +13,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
 # from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
 from distrifuser.pipelines.pip.distri_pixartalpha import DistriPixArtAlphaPiP
 from distrifuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
+from distrifuser.schedulers.pip.ddim import DDIMSchedulerPiP
 from diffusers import DPMSolverMultistepScheduler
 from distrifuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP, DistriDiTTP
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager, PipelineParallelismCommManager
@@ -61,10 +62,16 @@ class DistriPixArtAlphaPipeline:
         print(f"DistriPixArtAlphaPipeline from pretrain stage 1 {peak_memory/1e9} GB")
         
         if distri_config.parallelism == "pipeline":
-            scheduler = DPMSolverMultistepSchedulerPiP.from_pretrained(
-                pretrained_model_name_or_path, 
-                subfolder="scheduler"
-            )
+            if distri_config.scheduler == "dpmsolver_multistep":
+                scheduler = DPMSolverMultistepSchedulerPiP.from_pretrained(
+                    pretrained_model_name_or_path, 
+                    subfolder="scheduler"
+                )
+            elif distri_config.scheduler == "ddim":
+                scheduler = DDIMSchedulerPiP.from_pretrained(
+                    pretrained_model_name_or_path, 
+                    subfolder="scheduler"
+                )
             scheduler.init(distri_config)
 
         if distri_config.parallelism == "pipeline":

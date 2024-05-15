@@ -57,7 +57,7 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument(
-        "--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"]
+        "--scheduler", type=str, default="dpm-solver", choices=["euler", "dpm-solver", "ddim"]
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
@@ -88,8 +88,7 @@ def get_args() -> argparse.Namespace:
         "--parallelism",
         type=str,
         default="patch",
-        choices=["patch", "tensor", "naive_patch"],
-        help="patch parallelism, tensor parallelism or naive patch",
+        choices=["patch", "tensor", "naive_patch", "pipeline"],
     )
     parser.add_argument(
         "--no_cuda_graph", action="store_true", help="Disable CUDA graph"
@@ -125,7 +124,15 @@ def get_args() -> argparse.Namespace:
         default=False,
         help="Enable sequence parallel attention.",
     )
-
+    parser.add_argument(
+        "--num_micro_batch",
+        type=int,
+        default=2
+    )
+    parser.add_argument(
+        "--no_use_resolution_binning",
+        action="store_true",
+    )
     args = parser.parse_args()
     return args
 
@@ -147,10 +154,13 @@ def main():
         split_batch=not args.no_split_batch if args.pipeline == "sdxl" else False,
         warmup_steps=args.warmup_steps,
         mode=args.sync_mode,
-        # use_cuda_graph=not args.no_cuda_graph,
+        use_cuda_graph=not args.no_cuda_graph,
         parallelism=args.parallelism,
         split_scheme=args.split_scheme,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
+        scheduler=args.scheduler,
+        num_micro_batch=args.num_micro_batch,
+        use_resolution_binning=not args.no_use_resolution_binning,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
@@ -168,20 +178,21 @@ def main():
         elif args.pipeline == "pixartalpha":
             args.model_path = "PixArt-alpha/PixArt-XL-2-1024-MS"
 
-    if args.scheduler == "euler":
-        scheduler = EulerDiscreteScheduler.from_pretrained(
-            args.model_path, subfolder="scheduler"
-        )
-    elif args.scheduler == "dpm-solver":
-        scheduler = DPMSolverMultistepScheduler.from_pretrained(
-            args.model_path, subfolder="scheduler"
-        )
-    elif args.scheduler == "ddim":
-        scheduler = DDIMScheduler.from_pretrained(
-            args.model_path, subfolder="scheduler"
-        )
-    else:
-        raise NotImplementedError
+    if args.parallelism != "pipeline":
+        if args.scheduler == "euler":
+            scheduler = EulerDiscreteScheduler.from_pretrained(
+                args.model_path, subfolder="scheduler"
+            )
+        elif args.scheduler == "dpm-solver":
+            scheduler = DPMSolverMultistepScheduler.from_pretrained(
+                args.model_path, subfolder="scheduler"
+            )
+        elif args.scheduler == "ddim":
+            scheduler = DDIMScheduler.from_pretrained(
+                args.model_path, subfolder="scheduler"
+            )
+        else:
+            raise NotImplementedError
 
     if args.pipeline == "dit":
         pipeline = DistriDiTPipeline.from_pretrained(
@@ -207,7 +218,6 @@ def main():
         pipeline = DistriPixArtAlphaPipeline.from_pretrained(
             pretrained_model_name_or_path=args.model_path,
             distri_config=distri_config,
-            scheduler=scheduler,
         )
         prompt = args.prompt
 
@@ -265,7 +275,18 @@ def main():
         if ignored_count > 0:
             latency_list = latency_list[ignored_count:-ignored_count]
         if distri_config.rank == 0:
-            print(f"Latency: {sum(latency_list) / len(latency_list):.5f} s")
+            memory = torch.cuda.max_memory_allocated(device="cuda")
+            if args.output_path is not None:
+                with open(f"{args.output_path}", "a") as f:
+                    f.write(f"Info : {args} {distri_config.__dict__}\n")
+                    f.write(f"Latency: {sum(latency_list) / len(latency_list):.5f} s\n")
+                    f.write(f"{latency_list}\n")
+                    f.write(f"{memory}\n")
+            else:
+                print(f"Info : {args} {distri_config.__dict__}")
+                print(f"Latency: {sum(latency_list) / len(latency_list):.5f} s")
+                print(f"{latency_list}")
+                print(f"{memory / 1e9} GB\n")
     else:
         raise NotImplementedError
 

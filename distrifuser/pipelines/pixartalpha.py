@@ -62,7 +62,7 @@ class DistriPixArtAlphaPipeline:
         print(f"DistriPixArtAlphaPipeline from pretrain stage 1 {peak_memory/1e9} GB")
         
         if distri_config.parallelism == "pipeline":
-            if distri_config.scheduler == "dpmsolver_multistep":
+            if distri_config.scheduler == "dpm-solver":
                 scheduler = DPMSolverMultistepSchedulerPiP.from_pretrained(
                     pretrained_model_name_or_path, 
                     subfolder="scheduler"
@@ -101,7 +101,7 @@ class DistriPixArtAlphaPipeline:
         return ret
 
     def set_progress_bar_config(self, **kwargs):
-        pass
+        self.pipeline.set_progress_bar_config(**kwargs)
 
     @torch.no_grad()
     def __call__(self, prompt, num_inference_steps=20, *args, **kwargs):

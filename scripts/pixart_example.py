@@ -107,9 +107,9 @@ def main():
     parser.add_argument(
         "--scheduler",
         "-s",
-        default="dpmsolver_multistep",
+        default="dpm-solver",
         type=str,
-        choices=["dpmsolver_multistep", "ddim"],
+        choices=["dpm-solver", "ddim"],
         help="Scheduler to use.",
     )
     

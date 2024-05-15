@@ -84,6 +84,7 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
             # and encoder_attention_mask is None
         )
         if distri_config.use_cuda_graph and not record:
+            logger.info(f"Recording cuda graph at step {self.counter}")
             static_inputs = self.static_inputs
             assert hidden_states.shape == static_inputs['hidden_states'].shape
             static_inputs['hidden_states'].copy_(hidden_states)
@@ -148,7 +149,6 @@ class DistriDiTPP(BaseModel):  # for Patch Parallelism
                         "encoder_attention_mask": encoder_attention_mask,
                         "added_cond_kwargs": added_cond_kwargs,
                     }
-                logger.info(f"Recording cuda graph at step {self.counter}")
                 self.synchronize()
 
         if return_dict:

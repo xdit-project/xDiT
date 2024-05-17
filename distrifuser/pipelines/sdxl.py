@@ -1,8 +1,12 @@
 import torch
 from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel
 
+from distrifuser.pipelines.pip.distri_sdxl import DistriStableDiffusionXLPiP
+from distrifuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
+from distrifuser.schedulers.pip.ddim import DDIMSchedulerPiP
 from distrifuser.models.distri_sdxl_unet_pp import DistriSDXLUNetPP
 from distrifuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
+from distrifuser.models.distri_sdxl_unet_pip import DistriSDXLUNetPiP
 from distrifuser.models.naive_patch_sdxl import NaivePatchSDXL
 from distrifuser.utils import DistriConfig, PatchParallelismCommManager
 from distrifuser.logger import init_logger
@@ -28,7 +32,7 @@ class DistriSDXLPipeline:
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         unet = UNet2DConditionModel.from_pretrained(
             pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="unet"
-        ).to(device)
+        )
 
         if distri_config.parallelism == "patch":
             unet = DistriSDXLUNetPP(unet, distri_config)
@@ -36,12 +40,41 @@ class DistriSDXLPipeline:
             unet = DistriSDXLUNetTP(unet, distri_config)
         elif distri_config.parallelism == "naive_patch":
             unet = NaivePatchSDXL(unet, distri_config)
+        elif distri_config.parallelism == "pipeline":
+            unet = DistriSDXLUNetPiP(unet, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
-        pipeline = StableDiffusionXLPipeline.from_pretrained(
-            pretrained_model_name_or_path, torch_dtype=torch_dtype, unet=unet, **kwargs
-        ).to(device)
+        if distri_config.parallelism == "pipeline":
+            if distri_config.scheduler == "dpmsolver_multistep":
+                scheduler = DPMSolverMultistepSchedulerPiP.from_pretrained(
+                    pretrained_model_name_or_path, 
+                    subfolder="scheduler"
+                )
+            elif distri_config.scheduler == "ddim":
+                scheduler = DDIMSchedulerPiP.from_pretrained(
+                    pretrained_model_name_or_path, 
+                    subfolder="scheduler"
+                )
+            scheduler.init(distri_config)
+
+        if distri_config.parallelism == "pipeline":
+            pipeline = DistriStableDiffusionXLPiP.from_pretrained(
+                pretrained_model_name_or_path,
+                torch_dtype=torch_dtype,
+                unet=unet,
+                scheduler=scheduler,
+                **kwargs,
+            ).to(device)
+            pipeline.init(distri_config)
+        else:
+            pipeline = StableDiffusionXLPipeline.from_pretrained(
+                pretrained_model_name_or_path, 
+                torch_dtype=torch_dtype, 
+                unet=unet, 
+                **kwargs
+            ).to(device)
+
         return DistriSDXLPipeline(pipeline, distri_config)
 
     def set_progress_bar_config(self, **kwargs):

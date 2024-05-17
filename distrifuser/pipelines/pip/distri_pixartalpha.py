@@ -329,7 +329,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         assert self.comm_manager.recv_queue == []
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if distri_config.rank != "full_sync":
+            if distri_config.mode != "full_sync":
                 warmup_timesteps = timesteps[:distri_config.warmup_steps+1]
                 pip_timesteps = timesteps[distri_config.warmup_steps+1:]
             else:
@@ -372,7 +372,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             assert self.comm_manager.recv_queue == []
 
             if distri_config.rank == 1:
-                self.comm_manager.irecv_from_prev()
+                self.comm_manager.irecv_from_prev(dtype)
                 latents = self.comm_manager.get_data()
                 for _ in range(len(pip_timesteps) - 1):
                     for batch_idx in range(num_micro_batch):

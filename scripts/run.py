@@ -281,12 +281,12 @@ def main():
                     f.write(f"Info : {args} {distri_config.__dict__}\n")
                     f.write(f"Latency: {sum(latency_list) / len(latency_list):.5f} s\n")
                     f.write(f"{latency_list}\n")
-                    f.write(f"{memory}\n")
+                    f.write(f"{memory / (1024**3)} GB\n")
             else:
                 print(f"Info : {args} {distri_config.__dict__}")
                 print(f"Latency: {sum(latency_list) / len(latency_list):.5f} s")
                 print(f"{latency_list}")
-                print(f"{memory / 1e9} GB\n")
+                print(f"{memory / (1024**3)} GB\n")
     else:
         raise NotImplementedError
 

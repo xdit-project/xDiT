@@ -152,6 +152,10 @@ class PipelineParallelismCommManager:
         self.next_rank = (distri_config.rank + 1) % distri_config.world_size
         self.prev_rank = (distri_config.rank - 1 + distri_config.world_size) % distri_config.world_size
         self.dtype = None
+        if distri_config.world_size == 2:
+            self.groups = [torch.distributed.new_group(), torch.distributed.new_group()]
+        else:
+            self.groups = None
 
     def _creat_recv_buffer(self):
         distri_config = self.distri_config
@@ -197,11 +201,8 @@ class PipelineParallelismCommManager:
         # logger.info(f"rank {self.distri_config.rank} is sending")
         if self.send_shape is None:
             self.first_send_to_next(tensor)
-        # if self.send_req is not None:
-            # self.send_req.wait()
-            # self.send_req = None
-        # logger.info(f"rank {self.distri_config.rank} is sending {tensor.shape}")
-        self.send_req = dist.isend(tensor, dst=self.next_rank)
+        group = self.groups[(self.distri_config.rank + 1) % 2] if self.groups is not None else None
+        self.send_req = dist.isend(tensor, dst=self.next_rank, group=group)
     
     def _irecv_add_req(self):
         # if self.recv_req is not None and self.recv_req.is_completed():
@@ -209,12 +210,14 @@ class PipelineParallelismCommManager:
         if self.recv_req is None and len(self.recv_queue) > 0:
             idx = self.recv_queue.pop(0)
             # logger.info(f"rank {self.distri_config.rank} is receiving {idx}")
+            group = self.groups[self.distri_config.rank % 2] if self.groups is not None else None
             if idx is None:
-                self.recv_req = dist.irecv(self.recv_buffer[-1], src=self.prev_rank)
+                self.recv_req = dist.irecv(self.recv_buffer[-1], src=self.prev_rank, group=group)
             else:
                 self.recv_req = dist.irecv(
                     self.recv_buffer[idx], 
-                    src=self.prev_rank)
+                    src=self.prev_rank,
+                    group=group)
 
     def irecv_from_prev(self, dtype: Optional[torch.dtype] = None, idx: Optional[int] = None):
         if self.recv_buffer is None:

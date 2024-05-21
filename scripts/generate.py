@@ -39,7 +39,7 @@ def get_args() -> argparse.Namespace:
         "--parallelism",
         type=str,
         default="patch",
-        choices=["patch", "tensor", "naive_patch"],
+        choices=["patch", "tensor", "naive_patch", "pipeline"],
         help="patch parallelism, tensor parallelism or naive patch",
     )
     parser.add_argument(
@@ -52,6 +52,8 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--no_cuda_graph", action="store_true", help="Disable CUDA graph")
 
     parser.add_argument("--split", nargs=2, type=int, default=None, help="Split the dataset into chunks")
+
+    parser.add_argument("--num_micro_batch", type=int, default=2, help="Number of micro batches")
 
     # Dataset specific arguments
     parser.add_argument("--dataset", type=str, default="imagenet", choices=["coco", "imagenet"])
@@ -83,6 +85,8 @@ def main():
         use_cuda_graph=not args.no_cuda_graph,
         parallelism=args.parallelism,
         split_scheme=args.split_scheme,
+        num_micro_batch=args.num_micro_batch,
+        scheduler=args.scheduler
     )
 
     pretrained_model_name_or_path = args.model_path
@@ -113,7 +117,8 @@ def main():
         pipeline = DistriPixArtAlphaPipeline.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             distri_config=distri_config,
-            scheduler=scheduler
+            output_type="pil"
+            # scheduler=args.scheduler
         )
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0, position=1, leave=False)
 
@@ -123,7 +128,7 @@ def main():
             f"{args.dataset}",
             f"{args.scheduler}-{args.num_inference_steps}",
             f"gpus{distri_config.world_size if args.no_split_batch else distri_config.world_size // 2}-"
-            f"warmup{args.warmup_steps}-{args.sync_mode}"
+            f"warmup{args.warmup_steps}-{args.sync_mode}-{args.num_micro_batch}-{args.parallelism}",
         )
     if distri_config.rank == 0:
         os.makedirs(args.output_root, exist_ok=True)
@@ -133,7 +138,7 @@ def main():
     elif args.dataset == "imagenet":
         dataset = load_dataset("evanarlian/imagenet_1k_resized_256", split="val")
     
-    dataset = dataset.shuffle(seed=42)
+    # dataset = dataset.shuffle(seed=42)
 
     if args.split is not None:
         assert args.split[0] < args.split[1]
@@ -158,10 +163,10 @@ def main():
             generator=torch.Generator(device="cuda").manual_seed(seed),
             num_inference_steps=args.num_inference_steps,
             guidance_scale=args.guidance_scale,
-        ).images[0]
+        )
         if distri_config.rank == 0:
             output_path = os.path.join(args.output_root, f"{i:05d}.png")
-            image.save(output_path)
+            image.images[0].save(output_path)
 
 
 if __name__ == "__main__":

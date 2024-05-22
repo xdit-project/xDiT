@@ -173,9 +173,11 @@ def main():
     )
 
     torch.cuda.reset_peak_memory_stats()
+
     case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.num_micro_batch if args.parallelism=='pipeline' else 0}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
+
     if args.use_profiler:
         start_time = time.time()
         with profile(
@@ -212,9 +214,9 @@ def main():
         )
 
         end_time = time.time()
-        torch.cuda.memory._dump_snapshot(
-            f"{distri_config.mode}_{distri_config.world_size}.pickle"
-        )
+        # torch.cuda.memory._dump_snapshot(
+        #     f"{distri_config.mode}_{distri_config.world_size}.pickle"
+        # )
         torch.cuda.memory._record_memory_history(enabled=None)
 
     elapsed_time = end_time - start_time

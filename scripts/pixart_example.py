@@ -4,6 +4,7 @@ import torch
 from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from distrifuser.utils import DistriConfig
 from torch.profiler import profile, record_function, ProfilerActivity
+from distrifuser.modules.opt.chunk_conv2d import PatchConv2d
 
 import time
 
@@ -164,6 +165,7 @@ def main():
         # use_safetensors=True,
     )
 
+    PatchConv2d(1024)(pipeline)
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(

@@ -98,6 +98,31 @@ def main():
         choices=["latent", "pil"],
         help="latent saves memory, pil will results a memory burst in vae",
     )
+    parser.add_argument(
+        "--attn_num",
+        default=None,
+        nargs='*',
+        type=int
+    )
+    parser.add_argument(
+        "--scheduler",
+        "-s",
+        default="dpm-solver",
+        type=str,
+        choices=["dpm-solver", "ddim"],
+        help="Scheduler to use.",
+    )
+    
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default="An astronaut riding a green horse",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default=None
+    )
 
     args = parser.parse_args()
 
@@ -117,6 +142,8 @@ def main():
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
+        attn_num=args.attn_num,
+        scheduler=args.scheduler,
     )
 
     if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
@@ -140,13 +167,17 @@ def main():
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(
-        prompt="An astronaut riding a green horse",
+        prompt=args.prompt,
         generator=torch.Generator(device="cuda").manual_seed(42),
         output_type=args.output_type,
     )
 
     torch.cuda.reset_peak_memory_stats()
-    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_{args.num_micro_batch}"
+
+    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.num_micro_batch if args.parallelism=='pipeline' else 0}"
+    if args.output_file:
+        case_name = args.output_file + "_" + case_name
+
     if args.use_profiler:
         start_time = time.time()
         with profile(
@@ -159,10 +190,10 @@ def main():
             record_shapes=True,
         ) as prof:
             output = pipeline(
-                prompt="An astronaut riding a green horse",
+                prompt=args.prompt,
                 generator=torch.Generator(device="cuda").manual_seed(42),
                 num_inference_steps=args.num_inference_steps,
-                output_type="latent",
+                output_type=args.output_type,
             )
         # if distri_config.rank == 0:
         #     prof.export_memory_timeline(
@@ -176,7 +207,7 @@ def main():
         )
         start_time = time.time()
         output = pipeline(
-            prompt="An astronaut riding a green horse",
+            prompt=args.prompt,
             generator=torch.Generator(device="cuda").manual_seed(42),
             num_inference_steps=args.num_inference_steps,
             output_type=args.output_type,
@@ -198,8 +229,8 @@ def main():
             f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )
         if args.output_type == "pil":
-            print(f"save images to ./results/astronaut_{case_name}.png")
-            output.images[0].save(f"./results/astronaut_{case_name}.png")
+            print(f"save images to ./results/{case_name}.png")
+            output.images[0].save(f"./results/{case_name}.png")
 
 
 if __name__ == "__main__":

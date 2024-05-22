@@ -12,7 +12,7 @@ if __name__ == "__main__":
         author="Muyang Li, Tianle Cai, Jiaxin Cao, Qinsheng Zhang, Han Cai, Junjie Bai, Yangqing Jia, Ming-Yu Liu, Kai Li and Song Han",
         author_email="muyangli@mit.edu",
         packages=find_packages(),
-        install_requires=["torch>=2.2", "diffusers>=0.27.2", "transformers", "tqdm"],
+        install_requires=["torch>=2.2", "diffusers==0.27.2", "transformers", "tqdm"],
         url="https://github.com/mit-han-lab/distrifuser",
         description="DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models",
         long_description=long_description,

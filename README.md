@@ -10,6 +10,7 @@ The backend networks of the diffusion model primarily include U-Net and Transfor
 
 The communication and memory cost of the above parallelism for DiT is listed in the following table. (* indicates comm. can be hidden by computation, but need extra buffer.)
 
+<div align="center">
 
 |          | attn-KV | communication cost | param | activations | extra buff |
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
@@ -18,6 +19,8 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 | Ring Seq Parallel* | fresh | NA | $\frac{1}{N}A$ | 0 | 0 |
 | Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{1}{N}A$ | 0 |
 | PipeFusion* | stale- | $O(p \times hs)$ | $\frac{1}{N}P$ | $\frac{1}{M}A$ | $\frac{A}{M}L$ |
+
+</div>
 
 The Latency on 4xA100 (PCIe)
 
@@ -54,7 +57,7 @@ As shown in the above table, PipeFusion significantly reduces the memory usage a
 It is the best parallel approch for DiT inference to be hosted on GPUs connected via PCIe.
 
 <div align="center">
-    <img src="./assets/pipefusion_overview.png" alt="PipeFusion Image">
+    <img src="./assets/overview.jpg" alt="PipeFusion Image">
 </div>
 
 The above picture compares DistriFusion and PipeFusion.
@@ -72,7 +75,7 @@ Each device processes the computation task for one patch of its assigned stage i
 The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
 
 <div align="center">
-    <img src="./assets/pipeline.png" alt="Pipeline Image">
+    <img src="./assets/pipefusion.jpg" alt="Pipeline Image">
 </div>
 
 
@@ -86,7 +89,7 @@ python setup.py install
 ```
 
 3. Usage Example
-In [./scripts/pixart_example.py](./scripts/pixart_example.py), we provide a minimal script for running DiT with DistriFusion.
+In [./scripts/pixart_example.py](./scripts/pixart_example.py), we provide a minimal script for running DiT with PipeFusion.
 
 ```python
 import torch

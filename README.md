@@ -1,5 +1,7 @@
 # PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models
 
+[Paper on arXiv](https://arxiv.org/abs/2405.14430)
+
 ***Facing Sora Era, still investing in NVLink and high-bandwidth networks for Serving long-sequence Diffusion Models? With PipeFusion, PCIe and Ethernet is enough!***
 
 The project provides a suite of efficient parallel inference appoaches for Diffusion Models.

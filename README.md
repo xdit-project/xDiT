@@ -2,15 +2,15 @@
 
 [Paper on arXiv](https://arxiv.org/abs/2405.14430)
 
-***In the Sora Era, still spend money in NVLink and high-bandwidth networks for serving long-context Diffusion Models? With PipeFusion, PCIe and Ethernet are enough!***
+***In the Sora Era, still spend money on NVLink and high-bandwidth networks for serving long-context Diffusion Models? With PipeFusion, PCIe and Ethernet are enough!***
 
 The project provides a suite of efficient parallel inference approaches for Diffusion Models.
 The backend networks of the diffusion model primarily include U-Net and Transfors (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
 
 1. Tensor Parallelism. (DiT, U-Net)
-2. Sequence Parallelism, including Ulysses and Ring Attention: (DiT)
+2. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach including DeepSpeed-Ulysses, Ring-Attention: (DiT)
 3. Displaced Patch Parallelism, named [DistriFusion](https://arxiv.org/abs/2402.19481): (DiT, U-Net)
-4. Displaced Patch Pipeline Parallelism, named PipeFusion, was first proposed in this repo. (DiT)
+4. Displaced Patch Pipeline Paralelism, named [PipeFusion](https://arxiv.org/abs/2405.14430), first proposed in this repo. (DiT)
 
 The communication and memory cost of the above parallelism for DiT is listed in the following table. (* indicates comm. can be hidden by computation, but needs extra buffers.)
 
@@ -20,7 +20,7 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
 | Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
 | DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $(2+\frac{2}{N})A = \frac{1}{N}QO+KV$ | $2AL = (KV)L$ |
-| Ring Seq Parallel* | fresh | NA | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 | 0 |
+| Ring Seq Parallel* | fresh | NA | $P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
 | Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
 | PipeFusion* | stale- | $O(p \times hs)$ | $\frac{1}{N}P$ | $(2+\frac{2}{M})A = \frac{1}{M}QO+KV$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
 

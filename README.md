@@ -1,5 +1,7 @@
 # PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models
 
+***Facing Sora Era, still investing in NVLink and high-bandwidth networks for Serving long-sequence Diffusion Models? With PipeFusion, PCIe and Ethernet is enough!***
+
 The project provides a suite of efficient parallel inference appoaches for Diffusion Models.
 The backend networks of the diffusion model primarily include U-Net and Transfors (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
 
@@ -94,18 +96,22 @@ In [./scripts/pixart_example.py](./scripts/pixart_example.py), we provide a mini
 ```python
 import torch
 
-from distrifuser.pipelines import DistriPixArtAlphaPipeline
-from distrifuser.utils import DistriConfig
+from pipefuser.pipelines import DistriPixArtAlphaPipeline
+from pipefuser.utils import DistriConfig
 from pipefusion.modules.opt.chunk_conv2d import PatchConv2d
 
-distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4)
+# parallelism choose from ["patch", "naive_patch", "pipeline", "tensor"],
+distri_config = DistriConfig(
+    parallelism="pipeline",
+)
+
 pipeline = DistriPixArtAlphaPipeline.from_pretrained(
     distri_config=distri_config,
     pretrained_model_name_or_path=args.model_id,
 )
 
-# memory efficient VAE
-PatchConv2d(1024)(pipeline)
+# use the following patch for memory efficient VAE
+# PatchConv2d(1024)(pipeline)
 pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
 
 output = pipeline(
@@ -124,43 +130,12 @@ You can  adapt to [./scripts/benchmark.sh](./scripts/benchmark.sh) to benchmark 
 
 ## Evaluation Image Quality
 
+To conduct the FID experiment, follow the detailed instructions provided in the assets/doc/FID.md documentation.
+
 <div align="center">
     <img src="./assets/image_quality.png" alt="image_quality">
 </div>
 
-### Procedure
-#### Prerequisite
-Firstly, Install the following additional dependencies before testing:
-```
-pip3 install datasets tensorflow scipy
-```
-
-#### Sample Batch Generation
-Then you can use `scripts/generate.py` to generate images with COCO captions. An example command is as follow:
-```
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --rdzv-endpoint=localhost:8070 scripts/generate.py --pipeline pixart --scheduler dpm-solver --warmup_steps 4 --parallelism pipeline --no_cuda_graph --dataset coco --no_split_batch --guidance_scale 2.0 --num_micro_batch 8.0
-```
-
-After that, you can use `scripts/npz.py` to pack the generated images into a `.npz` file, where the `$GENERATED_IMAGES_FOLODER` is the path you saved the generated images, while `$IMAGES_NUM` is the total images count:
-```
-python3 scripts/npz.py --sample_dir $GENERATED_IMAGES_FOLODER --num $IMAGES_NUM
-```
-
-#### Reference Batch Generation
-To get the COCO ref images, you can run the following commands:
-```
-python3 scripts/dump_coco.py
-```
-Then you could use `scripts/npz.py` to pack the reference images into a `.npz` file as well, where the `$REF_IMAGES_FOLODER` is the path you saved the reference images, while `$IMAGES_NUM` is the total images count:
-```
-python3 scripts/npz.py --sample_dir $REF_IMAGES_FOLODER --num $IMAGES_NUM
-```
-
-#### Evaluate the results
-After you completing the above procedure, you'll get two .npz files `$SAMPLE_NPZ` and `$REF_NPZ` (replace them with the corresponding files). You can evalute the results with `scripts/evaluator` by running:
-```
-python3 scripts/evaluator.py --ref_batch $REF_NPZ --sample_batch $SAMPLE_NPZ
-```
 
 
 ## Other optimizations
@@ -173,4 +148,16 @@ We fixed the issue by split image to conv operator in VAE by splitting the input
 
 
 ## Cite Us
-TBD
+```
+@article{wang2024pipefusion,
+      title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
+      author={Jiannan Wang and Jiarui Fang and Aoyu Li and PengCheng Yang},
+      year={2024},
+      eprint={2405.07719},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
+```
+
+## Acknowledgenments
+Our code is developed on [distrifuser](https://github.com/mit-han-lab/distrifuser) from MIT-HAN-LAB.

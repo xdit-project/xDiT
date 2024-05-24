@@ -1,10 +1,10 @@
 import argparse
 import torch
 
-from distrifuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
-from distrifuser.utils import DistriConfig
+from pipefuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
+from pipefuser.utils import DistriConfig
 from torch.profiler import profile, record_function, ProfilerActivity
-from distrifuser.modules.opt.chunk_conv2d import PatchConv2d
+from pipefuser.modules.opt.chunk_conv2d import PatchConv2d
 
 import time
 
@@ -99,12 +99,7 @@ def main():
         choices=["latent", "pil"],
         help="latent saves memory, pil will results a memory burst in vae",
     )
-    parser.add_argument(
-        "--attn_num",
-        default=None,
-        nargs='*',
-        type=int
-    )
+    parser.add_argument("--attn_num", default=None, nargs="*", type=int)
     parser.add_argument(
         "--scheduler",
         "-s",
@@ -113,17 +108,13 @@ def main():
         choices=["dpm-solver", "ddim"],
         help="Scheduler to use.",
     )
-    
+
     parser.add_argument(
         "--prompt",
         type=str,
         default="An astronaut riding a green horse",
     )
-    parser.add_argument(
-        "--output_file",
-        type=str,
-        default=None
-    )
+    parser.add_argument("--output_file", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -165,7 +156,8 @@ def main():
         # use_safetensors=True,
     )
 
-    PatchConv2d(1024)(pipeline)
+    if args.output_type == "pil":
+        PatchConv2d(1024)(pipeline)
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(

@@ -6,12 +6,12 @@ import torch
 from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from tqdm import trange
 
-from distrifuser.pipelines import (
+from pipefuser.pipelines import (
     DistriSDXLPipeline,
     DistriDiTPipeline,
     DistriPixArtAlphaPipeline,
 )
-from distrifuser.utils import DistriConfig
+from pipefuser.utils import DistriConfig
 
 
 HAS_LONG_CTX_ATTN = False
@@ -57,11 +57,14 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument(
-        "--scheduler", type=str, default="dpm-solver", choices=["euler", "dpm-solver", "ddim"]
+        "--scheduler",
+        type=str,
+        default="dpm-solver",
+        choices=["euler", "dpm-solver", "ddim"],
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
-    # DistriFuser specific arguments
+    # pipefuser specific arguments
     parser.add_argument(
         "--no_split_batch",
         action="store_true",
@@ -124,11 +127,7 @@ def get_args() -> argparse.Namespace:
         default=False,
         help="Enable sequence parallel attention.",
     )
-    parser.add_argument(
-        "--num_micro_batch",
-        type=int,
-        default=2
-    )
+    parser.add_argument("--num_micro_batch", type=int, default=2)
     parser.add_argument(
         "--no_use_resolution_binning",
         action="store_true",

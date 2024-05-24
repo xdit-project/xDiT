@@ -1,8 +1,8 @@
 import argparse
 import torch
 
-from distrifuser.pipelines.dit import DistriDiTPipeline
-from distrifuser.utils import DistriConfig
+from pipefuser.pipelines.dit import DistriDiTPipeline
+from pipefuser.utils import DistriConfig
 
 HAS_LONG_CTX_ATTN = False
 try:

@@ -6,29 +6,50 @@ from datasets import load_dataset
 from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerDiscreteScheduler
 from tqdm import trange
 
-from distrifuser.pipelines import DistriSDXLPipeline
-from distrifuser.utils import DistriConfig
+from pipefuser.pipelines import DistriSDXLPipeline
+from pipefuser.utils import DistriConfig
 
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     # Diffuser specific arguments
     parser.add_argument("--output_root", type=str, default=None)
-    parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps")
-    parser.add_argument("--image_size", type=int, nargs="*", default=1024, help="Image size of generation")
-    parser.add_argument("--guidance_scale", type=float, default=5.0)
-    parser.add_argument("--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"])
-
-    # DistriFuser specific arguments
     parser.add_argument(
-        "--no_split_batch", action="store_true", help="Disable the batch splitting for classifier-free guidance"
+        "--num_inference_steps", type=int, default=50, help="Number of inference steps"
     )
-    parser.add_argument("--warmup_steps", type=int, default=4, help="Number of warmup steps")
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        nargs="*",
+        default=1024,
+        help="Image size of generation",
+    )
+    parser.add_argument("--guidance_scale", type=float, default=5.0)
+    parser.add_argument(
+        "--scheduler", type=str, default="ddim", choices=["euler", "dpm-solver", "ddim"]
+    )
+
+    # pipefuser specific arguments
+    parser.add_argument(
+        "--no_split_batch",
+        action="store_true",
+        help="Disable the batch splitting for classifier-free guidance",
+    )
+    parser.add_argument(
+        "--warmup_steps", type=int, default=4, help="Number of warmup steps"
+    )
     parser.add_argument(
         "--sync_mode",
         type=str,
         default="corrected_async_gn",
-        choices=["separate_gn", "stale_gn", "corrected_async_gn", "sync_gn", "full_sync", "no_sync"],
+        choices=[
+            "separate_gn",
+            "stale_gn",
+            "corrected_async_gn",
+            "sync_gn",
+            "full_sync",
+            "no_sync",
+        ],
         help="Different GroupNorm synchronization modes",
     )
     parser.add_argument(
@@ -45,9 +66,13 @@ def get_args() -> argparse.Namespace:
         choices=["row", "col", "alternate"],
         help="Split scheme for naive patch",
     )
-    parser.add_argument("--no_cuda_graph", action="store_true", help="Disable CUDA graph")
+    parser.add_argument(
+        "--no_cuda_graph", action="store_true", help="Disable CUDA graph"
+    )
 
-    parser.add_argument("--split", nargs=2, type=int, default=None, help="Split the dataset into chunks")
+    parser.add_argument(
+        "--split", nargs=2, type=int, default=None, help="Split the dataset into chunks"
+    )
 
     args = parser.parse_args()
     return args
@@ -77,11 +102,17 @@ def main():
 
     pretrained_model_name_or_path = "stabilityai/stable-diffusion-xl-base-1.0"
     if args.scheduler == "euler":
-        scheduler = EulerDiscreteScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = EulerDiscreteScheduler.from_pretrained(
+            pretrained_model_name_or_path, subfolder="scheduler"
+        )
     elif args.scheduler == "dpm-solver":
-        scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = DPMSolverMultistepScheduler.from_pretrained(
+            pretrained_model_name_or_path, subfolder="scheduler"
+        )
     elif args.scheduler == "ddim":
-        scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
+        scheduler = DDIMScheduler.from_pretrained(
+            pretrained_model_name_or_path, subfolder="scheduler"
+        )
     else:
         raise NotImplementedError
     pipeline = DistriSDXLPipeline.from_pretrained(
@@ -91,7 +122,9 @@ def main():
         use_safetensors=True,
         scheduler=scheduler,
     )
-    pipeline.set_progress_bar_config(disable=distri_config.rank != 0, position=1, leave=False)
+    pipeline.set_progress_bar_config(
+        disable=distri_config.rank != 0, position=1, leave=False
+    )
 
     if args.output_root is None:
         args.output_root = os.path.join(
@@ -104,7 +137,9 @@ def main():
     if distri_config.rank == 0:
         os.makedirs(args.output_root, exist_ok=True)
 
-    dataset = load_dataset("HuggingFaceM4/COCO", name="2014_captions", split="validation")
+    dataset = load_dataset(
+        "HuggingFaceM4/COCO", name="2014_captions", split="validation"
+    )
 
     if args.split is not None:
         assert args.split[0] < args.split[1]
@@ -115,7 +150,9 @@ def main():
         start_idx = 0
         end_idx = 5000
 
-    for i in trange(start_idx, end_idx, disable=distri_config.rank != 0, position=0, leave=False):
+    for i in trange(
+        start_idx, end_idx, disable=distri_config.rank != 0, position=0, leave=False
+    ):
         prompt = dataset["sentences_raw"][i][i % len(dataset["sentences_raw"][i])]
         seed = i
 

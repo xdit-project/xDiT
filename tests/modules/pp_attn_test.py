@@ -1,8 +1,8 @@
 import unittest
 import torch
-from distrifuser.models.diffusers import Attention  # type: ignore
-from distrifuser.modules.pp.attn import DistriSelfAttentionPP
-from distrifuser.utils import DistriConfig
+from pipefuser.models.diffusers import Attention  # type: ignore
+from pipefuser.modules.pp.attn import DistriSelfAttentionPP
+from pipefuser.utils import DistriConfig
 
 
 class TestDistriSelfAttentionPP(unittest.TestCase):

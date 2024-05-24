@@ -2,6 +2,6 @@
 .DS_Store
 build
 __pycache__
-distrifuser.egg-info
+pipefuser.egg-info
 *.log
 *.txt

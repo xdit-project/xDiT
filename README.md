@@ -94,11 +94,15 @@ In [./scripts/pixart_example.py](./scripts/pixart_example.py), we provide a mini
 ```python
 import torch
 
-from distrifuser.pipelines import DistriPixArtAlphaPipeline
-from distrifuser.utils import DistriConfig
+from pipefuser.pipelines import DistriPixArtAlphaPipeline
+from pipefuser.utils import DistriConfig
 from pipefusion.modules.opt.chunk_conv2d import PatchConv2d
 
-distri_config = DistriConfig(height=1024, width=1024, warmup_steps=4)
+# parallelism choose from ["patch", "naive_patch", "pipeline", "tensor"],
+distri_config = DistriConfig(
+    parallelism="pipeline",
+)
+
 pipeline = DistriPixArtAlphaPipeline.from_pretrained(
     distri_config=distri_config,
     pretrained_model_name_or_path=args.model_id,

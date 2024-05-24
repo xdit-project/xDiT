@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import unittest
 
-from distrifuser.modules.opt.chunk_conv2d import ChunkConv2d
+from pipefuser.modules.opt.chunk_conv2d import ChunkConv2d
 
 
 class TestChunkConv(unittest.TestCase):
@@ -18,7 +18,7 @@ class TestChunkConv(unittest.TestCase):
             bias=True,
             padding_mode="zeros",
             device=None,
-            dtype=None
+            dtype=None,
         )
         self.chunk_conv = ChunkConv2d(
             in_channels=3,
@@ -47,7 +47,7 @@ class TestChunkConv(unittest.TestCase):
             bias=True,
             padding_mode="zeros",
             device=None,
-            dtype=None
+            dtype=None,
         )
         self.chunk_conv1 = ChunkConv2d(
             in_channels=3,
@@ -76,7 +76,7 @@ class TestChunkConv(unittest.TestCase):
             bias=True,
             padding_mode="zeros",
             device=None,
-            dtype=None
+            dtype=None,
         )
         self.chunk_conv2 = ChunkConv2d(
             in_channels=3,

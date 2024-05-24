@@ -4,7 +4,7 @@ from setuptools import find_packages, setup
 if __name__ == "__main__":
     with open("README.md", "r") as f:
         long_description = f.read()
-    fp = open("distrifuser/__version__.py", "r").read()
+    fp = open("pipefuser/__version__.py", "r").read()
     version = eval(fp.strip().split()[-1])
 
     setup(

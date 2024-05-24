@@ -19,7 +19,7 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 |          | attn-KV | communication cost | param | activations | extra buff |
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
 | Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
-| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $(2+\frac{2}{N})A = \frac{1}{N}QO+KV$ | $2AL = (KV)L |
+| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $(2+\frac{2}{N})A = \frac{1}{N}QO+KV$ | $2AL = (KV)L$ |
 | Ring Seq Parallel* | fresh | NA | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 | 0 |
 | Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
 | PipeFusion* | stale- | $O(p \times hs)$ | $\frac{1}{N}P$ | $(2+\frac{2}{M})A = \frac{1}{M}QO+KV$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |

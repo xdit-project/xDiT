@@ -1,5 +1,7 @@
 # PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models
 
+***Facing Sora Era, still investing in NVLink and high-bandwidth networks for Serving long-sequence Diffusion Models? With PipeFusion, PCIe and Ethernet is enough!***
+
 The project provides a suite of efficient parallel inference appoaches for Diffusion Models.
 The backend networks of the diffusion model primarily include U-Net and Transfors (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
 

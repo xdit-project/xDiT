@@ -175,6 +175,7 @@ class PatchConv2d:
 
         for attr_str in dir(module):
             target_attr = getattr(module, attr_str)
+            # print(f"attr: {attr_str}, type: {type(target_attr)}")
             if isinstance(target_attr, nn.Module):
                 replace_conv2d(target_attr, attr_str)
         return module

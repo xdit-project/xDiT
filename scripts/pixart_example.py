@@ -58,7 +58,9 @@ def main():
         type=int,
         default=20,
     )
-    parser.add_argument("--num_micro_batch", type=int, default=2)
+    parser.add_argument(
+        "--pp_num_patch", type=int, default=2, help="patch number in pipefusion."
+    )
     parser.add_argument(
         "--height",
         type=int,
@@ -130,7 +132,7 @@ def main():
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
-        num_micro_batch=args.num_micro_batch,
+        pp_num_patch=args.pp_num_patch,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
@@ -157,7 +159,8 @@ def main():
     )
 
     if args.output_type == "pil":
-        PatchConv2d(1024)(pipeline)
+        print("************************Patching Conv2d")
+        PatchConv2d(1024)(pipeline.pipeline)
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(
@@ -168,7 +171,7 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
 
-    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.num_micro_batch if args.parallelism=='pipeline' else 0}"
+    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipeline' else 0}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
 

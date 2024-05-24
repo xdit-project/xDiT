@@ -30,7 +30,7 @@ class DistriPatchEmbed(BaseModule):
             )
         else:
             height, width = (
-                latent.shape[-2] // module.patch_size * distri_config.num_micro_batch,
+                latent.shape[-2] // module.patch_size * distri_config.pp_num_patch,
                 latent.shape[-1] // module.patch_size,
             )
 
@@ -64,7 +64,7 @@ class DistriPatchEmbed(BaseModule):
         b, c, h = pos_embed.shape
 
         if not is_warmup:
-            pos_embed = pos_embed.view(b, distri_config.num_micro_batch, -1, h)[
+            pos_embed = pos_embed.view(b, distri_config.pp_num_patch, -1, h)[
                 :, self.batch_idx
             ]
 
@@ -72,7 +72,7 @@ class DistriPatchEmbed(BaseModule):
             self.counter += 1
         else:
             self.batch_idx += 1
-            if self.batch_idx == distri_config.num_micro_batch:
+            if self.batch_idx == distri_config.pp_num_patch:
                 self.batch_idx = 0
                 self.counter += 1
 

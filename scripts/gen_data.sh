@@ -15,14 +15,14 @@ for output in "${output_list[@]}"; do
     echo "$prompt"
     torchrun --nproc_per_node=8 scripts/pixart_example.py \
     --model_id /mnt/models/SD/PixArt-XL-2-1024-MS --height 1024 --width 1024 --no_use_resolution_binning \
-    --output_type pil --num_micro_batch 8 --output_file "$output" --prompt "$prompt"
+    --output_type pil --pp_num_patch 8 --output_file "$output" --prompt "$prompt"
 
     torchrun --nproc_per_node=8 scripts/pixart_example.py \
     --model_id /mnt/models/SD/PixArt-XL-2-1024-MS --height 1024 --width 1024 --no_use_resolution_binning \
-    --output_type pil --num_micro_batch 8 --output_file "$output" --prompt "$prompt" -p pipeline
+    --output_type pil --pp_num_patch 8 --output_file "$output" --prompt "$prompt" -p pipeline
 
     torchrun --nproc_per_node=8 scripts/pixart_example.py \
     --model_id /mnt/models/SD/PixArt-XL-2-1024-MS --height 1024 --width 1024 --no_use_resolution_binning \
-    --output_type pil --num_micro_batch 4 --output_file "$output" --prompt "$prompt" -p pipeline
+    --output_type pil --pp_num_patch 4 --output_file "$output" --prompt "$prompt" -p pipeline
 
 done

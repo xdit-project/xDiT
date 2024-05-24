@@ -158,7 +158,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         kv = self.to_kv(encoder_hidden_states)
 
         # the distributed sparse attention from pipefuser
-        if distri_config.num_micro_batch == 1:
+        if distri_config.pp_num_patch == 1:
             full_kv = kv
         else:
             if (
@@ -170,7 +170,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
                 full_kv = self.buffer_list
                 # _, c, _ = full_kv.shape
                 _, c, _ = kv.shape
-                # assert c % distri_config.num_micro_batch == 0
+                # assert c % distri_config.pp_num_patch == 0
                 full_kv[:, c * self.batch_idx : c * (self.batch_idx + 1), :] = kv
 
             self.buffer_list = full_kv
@@ -226,7 +226,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
             self.counter += 1
         else:
             self.batch_idx += 1
-            if self.batch_idx == distri_config.num_micro_batch:
+            if self.batch_idx == distri_config.pp_num_patch:
                 self.counter += 1
                 self.batch_idx = 0
         return output

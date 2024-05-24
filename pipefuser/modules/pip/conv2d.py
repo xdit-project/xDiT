@@ -29,12 +29,12 @@ class DistriConv2dPiP(BaseModule):
     def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
         distri_config = self.distri_config
         b, c, h, w = x.shape
-        assert h % distri_config.num_micro_batch == 0
+        assert h % distri_config.pp_num_patch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
-        output_h = x.shape[2] // stride // distri_config.num_micro_batch
+        output_h = x.shape[2] // stride // distri_config.pp_num_patch
         idx = self.batch_idx
         h_begin = output_h * idx * stride - padding
         h_end = output_h * (idx + 1) * stride + padding
@@ -60,7 +60,7 @@ class DistriConv2dPiP(BaseModule):
 
         distri_config = self.distri_config
 
-        if distri_config.num_micro_batch == 1:
+        if distri_config.pp_num_patch == 1:
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
@@ -75,7 +75,7 @@ class DistriConv2dPiP(BaseModule):
                 else:
                     _, _, cc, _ = full_x.shape
                     _, _, c, _ = x.shape
-                    assert cc // distri_config.num_micro_batch == c
+                    assert cc // distri_config.pp_num_patch == c
                     full_x[:, :, c * self.batch_idx : c * (self.batch_idx + 1), :] = x
                     output = self.sliced_forward(full_x)
                 self.buffer_list = full_x
@@ -147,7 +147,7 @@ class DistriConv2dPiP(BaseModule):
             self.counter += 1
         else:
             self.batch_idx += 1
-            if self.batch_idx == distri_config.num_micro_batch:
+            if self.batch_idx == distri_config.pp_num_patch:
                 self.counter += 1
                 self.batch_idx = 0
         return output

@@ -127,7 +127,7 @@ def get_args() -> argparse.Namespace:
         default=False,
         help="Enable sequence parallel attention.",
     )
-    parser.add_argument("--num_micro_batch", type=int, default=2)
+    parser.add_argument("--pp_num_patch", type=int, default=2)
     parser.add_argument(
         "--no_use_resolution_binning",
         action="store_true",
@@ -158,7 +158,7 @@ def main():
         split_scheme=args.split_scheme,
         use_seq_parallel_attn=args.use_seq_parallel_attn,
         scheduler=args.scheduler,
-        num_micro_batch=args.num_micro_batch,
+        pp_num_patch=args.pp_num_patch,
         use_resolution_binning=not args.no_use_resolution_binning,
     )
 

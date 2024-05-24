@@ -86,7 +86,10 @@ def get_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--num_micro_batch", type=int, default=2, help="Number of micro batches"
+        "--pp_num_patch",
+        type=int,
+        default=2,
+        help="Number of patch number in PipeFusion",
     )
 
     # Dataset specific arguments
@@ -127,7 +130,7 @@ def main():
         use_cuda_graph=not args.no_cuda_graph,
         parallelism=args.parallelism,
         split_scheme=args.split_scheme,
-        num_micro_batch=args.num_micro_batch,
+        pp_num_patch=args.pp_num_patch,
         scheduler=args.scheduler,
     )
 
@@ -178,7 +181,7 @@ def main():
             f"{args.dataset}",
             f"{args.scheduler}-{args.num_inference_steps}",
             f"gpus{distri_config.world_size if args.no_split_batch else distri_config.world_size // 2}-"
-            f"warmup{args.warmup_steps}-{args.sync_mode}-{args.num_micro_batch}-{args.parallelism}",
+            f"warmup{args.warmup_steps}-{args.sync_mode}-{args.pp_num_patch}-{args.parallelism}",
         )
     if distri_config.rank == 0:
         os.makedirs(args.output_root, exist_ok=True)

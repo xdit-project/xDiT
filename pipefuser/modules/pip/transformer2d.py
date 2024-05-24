@@ -165,7 +165,7 @@ class DistriTransformer2DModel(BaseModule):
                 ):
                     pass
                 else:
-                    height //= distri_config.num_micro_batch
+                    height //= distri_config.pp_num_patch
 
             if distri_config.rank == 1:
                 hidden_states = module.pos_embed(hidden_states)
@@ -259,7 +259,7 @@ class DistriTransformer2DModel(BaseModule):
             self.counter += 1
         else:
             self.batch_idx += 1
-            if self.batch_idx == distri_config.num_micro_batch:
+            if self.batch_idx == distri_config.pp_num_patch:
                 self.counter += 1
                 self.batch_idx = 0
 

@@ -44,12 +44,34 @@ class DistriConfig:
         split_scheme: str = "row",
         use_seq_parallel_attn: bool = False,
         batch_size: Optional[int] = None,
-        num_micro_batch: int = 2,
+        pp_num_patch: int = 2,
         verbose: bool = False,
         use_resolution_binning: bool = True,
         attn_num: Optional[List[int]] = None,
         scheduler: str = "dpmsolver_multistep",
     ):
+        f"""
+        Configurations for distributed diffusion inference.
+        
+        Args:
+            height (int, optional): height of generation image. Defaults to 1024.
+            width (int, optional): width of generation image. Defaults to 1024.
+            do_classifier_free_guidance (bool, optional): use classifier_free_guidance. Defaults to True.
+            split_batch (bool, optional): first split the batch and then apply other parallelism. Defaults to True.
+            warmup_steps (int, optional): sync timestep for DistriFusion and PipeFusion. Defaults to 4.
+            comm_checkpoint (int, optional): _description_. Defaults to 1.
+            mode (str, optional): sync mode. Defaults to "corrected_async_gn".
+            use_cuda_graph (bool, optional): use cuda graph to accelerate speed. Defaults to True.
+            parallelism (str, optional): parallel approches. Defaults to "patch".
+            split_scheme (str, optional): how to split the image. Defaults to "row".
+            use_seq_parallel_attn (bool, optional): sequence parallelism. Defaults to False.
+            batch_size (Optional[int], optional): batch size. Defaults to None.
+            pp_num_patch (int, optional): patch number. Defaults to 2.
+            verbose (bool, optional): verbose print. Defaults to False.
+            use_resolution_binning (bool, optional): image resolution bin. Defaults to True.
+            attn_num (Optional[List[int]], optional): num of attn. Defaults to None.
+            scheduler (str, optional): scheduler (sampler) for diffusion. Defaults to "dpmsolver_multistep".
+        """
         try:
             # Initialize the process group
             dist.init_process_group("nccl")
@@ -119,7 +141,7 @@ class DistriConfig:
         self.batch_group = batch_group
         self.split_group = split_group
 
-        self.num_micro_batch = num_micro_batch
+        self.pp_num_patch = pp_num_patch
 
         self.attn_num = attn_num
         self.scheduler = scheduler
@@ -164,14 +186,14 @@ class PipelineParallelismCommManager:
         distri_config = self.distri_config
         assert self.recv_shape is not None
         shape = list(self.recv_shape)
-        shape[-2] = shape[-2] // distri_config.num_micro_batch
+        shape[-2] = shape[-2] // distri_config.pp_num_patch
         self.recv_buffer = [
             torch.zeros(
                 shape,
                 dtype=self.dtype,
                 device=distri_config.device,
             )
-            for _ in range(distri_config.num_micro_batch)
+            for _ in range(distri_config.pp_num_patch)
         ]
         self.recv_buffer.append(
             torch.zeros(self.recv_shape, dtype=self.dtype, device=distri_config.device)

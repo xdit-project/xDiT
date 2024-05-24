@@ -68,10 +68,10 @@ do
 
 
 # PipeFusion
-num_micro_batchs=(4 8 16 32)
-for num_micro_batch in "${num_micro_batchs[@]}"
+pp_num_patchs=(4 8 16 32)
+for pp_num_patch in "${pp_num_patchs[@]}"
 do
     torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipeline  \
-    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --num_micro_batch $num_micro_batch 
+    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --pp_num_patch $pp_num_patch 
 done
 done

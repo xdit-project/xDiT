@@ -340,7 +340,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
         )
 
         dtype = latents.dtype
-        num_micro_batch = distri_config.num_micro_batch
+        pp_num_patch = distri_config.pp_num_patch
 
         assert self.comm_manager.recv_queue == []
 
@@ -393,28 +393,28 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 self.comm_manager.irecv_from_prev(dtype)
                 latents = self.comm_manager.get_data()
                 for _ in range(len(pip_timesteps) - 1):
-                    for batch_idx in range(num_micro_batch):
+                    for batch_idx in range(pp_num_patch):
                         self.comm_manager.irecv_from_prev(idx=batch_idx)
                 _, _, c, _ = latents.shape
-                latents = list(latents.split(c // num_micro_batch, dim=2))
+                latents = list(latents.split(c // pp_num_patch, dim=2))
 
             else:
                 for _ in range(len(pip_timesteps)):
-                    for batch_idx in range(num_micro_batch):
+                    for batch_idx in range(pp_num_patch):
                         self.comm_manager.irecv_from_prev(idx=batch_idx)
                 if distri_config.rank == 0:
                     _, _, c, _ = latents.shape
-                    c //= num_micro_batch
+                    c //= pp_num_patch
                     tmp = latents
                     latents = []
-                    for batch_idx in range(num_micro_batch):
+                    for batch_idx in range(pp_num_patch):
                         latents.append(tmp[..., batch_idx * c : (batch_idx + 1) * c, :])
-                    ori_latents = [None for _ in range(num_micro_batch)]
+                    ori_latents = [None for _ in range(pp_num_patch)]
                 else:
-                    latents = [None for _ in range(num_micro_batch)]
+                    latents = [None for _ in range(pp_num_patch)]
 
             for i, t in enumerate(pip_timesteps):
-                for batch_idx in range(num_micro_batch):
+                for batch_idx in range(pp_num_patch):
 
                     if distri_config.rank == 0:
                         ori_latents[batch_idx] = latents[batch_idx]

@@ -2,27 +2,27 @@
 
 [Paper on arXiv](https://arxiv.org/abs/2405.14430)
 
-***Facing Sora Era, still investing in NVLink and high-bandwidth networks for Serving long-sequence Diffusion Models? With PipeFusion, PCIe and Ethernet is enough!***
+***In the Sora Era, still spend money in NVLink and high-bandwidth networks for serving long-context Diffusion Models? With PipeFusion, PCIe and Ethernet are enough!***
 
-The project provides a suite of efficient parallel inference appoaches for Diffusion Models.
+The project provides a suite of efficient parallel inference approaches for Diffusion Models.
 The backend networks of the diffusion model primarily include U-Net and Transfors (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
 
 1. Tensor Parallelism. (DiT, U-Net)
 2. Sequence Parallelism, including Ulysses and Ring Attention: (DiT)
 3. Displaced Patch Parallelism, named [DistriFusion](https://arxiv.org/abs/2402.19481): (DiT, U-Net)
-4. Displaced Patch Pipeline Paralelism, named PipeFusion, first proposed in this repo. (DiT)
+4. Displaced Patch Pipeline Parallelism, named PipeFusion, was first proposed in this repo. (DiT)
 
-The communication and memory cost of the above parallelism for DiT is listed in the following table. (* indicates comm. can be hidden by computation, but need extra buffer.)
+The communication and memory cost of the above parallelism for DiT is listed in the following table. (* indicates comm. can be hidden by computation, but needs extra buffers.)
 
 <div align="center">
 
 |          | attn-KV | communication cost | param | activations | extra buff |
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
-| Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{1}{N}A$ | 0 |
-| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $A$ | $AL$ |
-| Ring Seq Parallel* | fresh | NA | $\frac{1}{N}A$ | 0 | 0 |
-| Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{1}{N}A$ | 0 |
-| PipeFusion* | stale- | $O(p \times hs)$ | $\frac{1}{N}P$ | $\frac{1}{M}A$ | $\frac{A}{M}L$ |
+| Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
+| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $(2+\frac{2}{N})A = \frac{1}{N}QO+KV$ | $2AL = (KV)L |
+| Ring Seq Parallel* | fresh | NA | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 | 0 |
+| Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
+| PipeFusion* | stale- | $O(p \times hs)$ | $\frac{1}{N}P$ | $(2+\frac{2}{M})A = \frac{1}{M}QO+KV$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
 
 </div>
 
@@ -46,19 +46,19 @@ The Latency on 8xA100 (NVLink)
 
 Best Practices:
 
-1. PipeFusion is the best on both memory and communication efficiency. It dose not need high inter-GPU bandwidth, like NVLink. Therefore, it is lowest on latency for PCIe cluster. However, on NVLink, the power of PipeFusion is weakened.
-2. DistriFusion is fast on NVLink at cost of large overall memory cost using, and threfore has OOM for high resolution images.
-3. PipeFusion and Tensor parallelism is able to generate high resolution images due to their spliting on both parameter and activations. Tensor parallelism is fast on NVLink, while PipeFusion is fast on PCIe. 
-4. Sequence Parallelism usually fast than tensor parallelis, but has OOM for 
-high resolution images.
+1. PipeFusion is the preferable for both memory and communication efficiency. It does not need high inter-GPU bandwidth, like NVLink. Therefore, it is the lowest latency for PCIe clusters. However, on NVLink, the power of PipeFusion is weakened.
+2. DistriFusion is fast on NVLink at a cost with large overall memory cost usage and therefore has OOM for high-resolution images.
+3. PipeFusion and Tensor parallelism is able to generate high-resolution images due to their splitting on both parameters and activations. Tensor parallelism is fast on NVLink, while PipeFusion is fast on PCIe. 
+4. Sequence Parallelism is usually faster than tensor parallelism, but has OOM for 
+high-resolution images.
 
 
-##  PipeFusion: Displaced Patch Pipeline Paralelism
+##  PipeFusion: Displaced Patch Pipeline Parallelism
 
 ### Overview
 
-As shown in the above table, PipeFusion significantly reduces the memory usage and required communication bandwidth, not to mention it also hides communication overhead under the communication.
-It is the best parallel approch for DiT inference to be hosted on GPUs connected via PCIe.
+As shown in the above table, PipeFusion significantly reduces memory usage and required communication bandwidth, not to mention it also hides communication overhead under the communication.
+It is the best parallel approach for DiT inference to be hosted on GPUs connected via PCIe.
 
 <div align="center">
     <img src="./assets/overview.jpg" alt="PipeFusion Image">

@@ -5,7 +5,7 @@
 ***In the Sora Era, still spend money on NVLink and high-bandwidth networks for serving long-context Diffusion Models? With PipeFusion, PCIe and Ethernet are enough!***
 
 The project provides a suite of efficient parallel inference approaches for Diffusion Models.
-The backend networks of the diffusion model primarily include U-Net and Transfors (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
+The backend networks of the diffusion model primarily include U-Net and Transformers (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
 
 1. Tensor Parallelism. (DiT, U-Net)
 2. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach including DeepSpeed-Ulysses, Ring-Attention: (DiT)
@@ -18,11 +18,11 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 
 |          | attn-KV | communication cost | param | activations | extra buff |
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
-| Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
-| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $(2+\frac{2}{N})A = \frac{1}{N}QO+KV$ | $2AL = (KV)L$ |
-| Ring Seq Parallel* | fresh | NA | $P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
-| Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{4}{N}A = \frac{1}{N}(QO+KV)$ | 0 |
-| PipeFusion* | stale- | $2O(p \times hs)$ | $\frac{1}{N}P$ | $(2+\frac{2}{M})A = \frac{1}{M}QO+KV$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
+| Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
+| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $2AL = (KV)L$ |
+| Ring Seq Parallel* | fresh | NA | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
+| Ulysses Seq Parallel | fresh | $4O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
+| PipeFusion* | stale- | $2O(p \times hs)$ | $\frac{1}{N}P$ | $\frac{2}{M}A = \frac{1}{M}QO$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
 
 </div>
 
@@ -146,7 +146,7 @@ To conduct the FID experiment, follow the detailed instructions provided in the 
 
 The VAE decode implementation from diffusers can not be applied on high resolution images (8192px).
 It has CUDA memory spike issue, [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924). 
-We fixed the issue by split image to conv operator in VAE by splitting the input feature maps into chunks.
+We fixed the issue by splitting a conv operator into multiple small ones and executing them sequentially to reduce the peak memory.
 
 
 ## Cite Us

@@ -1,0 +1,1 @@
+python -m torch.distributed.launch --use-env --nnode=1 --node_rank=0 --nproc_per_node=8 test/patch_parallel_test.py

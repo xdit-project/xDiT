@@ -52,12 +52,15 @@ class PatchParallelismConv2d(nn.Conv2d):
 
     # for the even
     def even_calc_send_start(self, end, kernel_size, stride):
+        # the first cross with the next partition
+        # assert kernel_size > stride
         # The raw Equal: ((end - (kernel_size-1) + stride - 1) // stride) * stride + (kernel_size-1) - kernel_size
-        return ((end - (kernel_size - 1) + stride - 1) // stride) * stride - 1
+        return ((end + 1 - kernel_size + stride - 1) // stride) * stride
 
     def even_calc_cur_end(self, end, kernel_size, stride):
-        return ((end - (kernel_size - 1) + stride - 1) // stride -
-                1) * stride + kernel_size - 1
+        return end
+        # return ((end + 1 - kernel_size + stride - 1) // stride -
+        #         1) * stride + kernel_size - 1
 
     # for the odd
     def odd_correct_end(self, end, kernel_size, stride):
@@ -94,6 +97,32 @@ class PatchParallelismConv2d(nn.Conv2d):
                 f"stride should be int or tuple, type: {type(self.stride)}")
         return kernel_size_h, kernel_size_w, stride_h, stride_w
 
+    def _all_gather(self, result: Tensor):
+        b, c, h, w = result.shape
+        world_size, rank = self.get_world_size_and_rank()
+        cuda = torch.device(f"cuda:{rank}")
+        if world_size == 1:
+            return result
+        tensor_list = [
+            torch.zeros(1, dtype=torch.int64, device=cuda) for _ in range(world_size)
+        ]
+        dist.all_gather(tensor_list,
+                        torch.tensor([h], dtype=torch.int64, device=cuda))
+        segment_list = [t.item() for t in tensor_list]
+        max_h = max(segment_list)
+        padding = [0, 0, 0, max_h - h]
+        result = F.pad(result, padding, mode="constant")
+        result_list = [
+            torch.zeros([b, c, max_h, w],
+                        dtype=result.dtype,
+                        device=cuda) for _ in range(world_size)
+        ]
+        dist.all_gather(result_list, result)
+        post_result_list = [
+            res[:, :, :segment_list[i], :] for i, res in enumerate(result_list)
+        ]
+        return torch.cat(post_result_list, dim=2)
+
     def _conv_forward(self, input: Tensor, weight: Tensor,
                       bias: Optional[Tensor]) -> Tensor:
         inner_input = input
@@ -127,26 +156,27 @@ class PatchParallelismConv2d(nn.Conv2d):
                 raise ValueError(
                     f"padding should be int or tuple, type:{type(self.padding)}"
                 )
-            adjust_padding(padding_tuple, rank)
-            inner_input = F.pad(inner_input, padding_tuple, mode="constant")
+            padding_list = list(padding_tuple)
+            adjust_padding(padding_list, rank)
+            inner_input = F.pad(inner_input, padding_list, mode="constant")
 
         b, c, h, w = inner_input.shape
-        cpu = torch.device('cpu:')
+        cuda = torch.device(f"cuda:{rank}")
         segment_list = [h]
         if world_size > 1:
             tensor_list = [
-                torch.zeros(1, dtype=torch.int64, device=cpu)
+                torch.zeros(1, dtype=torch.int64, device=cuda)
                 for _ in range(world_size)
             ]
-            dist.all_gather(tensor_list, torch.tensor([h], device=cpu))
+            dist.all_gather(tensor_list, torch.tensor([h], device=cuda))
             segment_list = [t.item() for t in tensor_list]
 
         kernel_size_h, _, stride_h, _ = self.get_kernel_size_and_stride()
 
-        cuda = torch.device(f"cuda:{rank}")
         previous_recv_tensor = None
         next_recv_tensor = None
         cur_end = sum(segment_list[:rank + 1])
+        communicators = []
         if self.previous_group:
             if self.order_idx % 2 == 0:
                 pre_end = sum(segment_list[:rank])
@@ -154,36 +184,33 @@ class PatchParallelismConv2d(nn.Conv2d):
                                                       stride_h)
                 previous_recv_tensor = torch.zeros(
                     [b, c, pre_end - pre_start, w], device=cuda)
-                dist.recv(previous_recv_tensor, rank - 1, self.previous_group)
+                communicators.append(dist.irecv(previous_recv_tensor, rank - 1))
             else:
                 pre_end = sum(segment_list[:rank])
                 pre_max_end = self.odd_correct_end(pre_end, kernel_size_h,
                                                    stride_h)
-                dist.send(inner_input[:, :, :pre_max_end - pre_end, :],
-                          rank - 1, self.previous_group)
+                communicators.append(dist.isend(inner_input[:, :, :pre_max_end - pre_end, :].contiguous(),
+                          rank - 1))
 
         if self.next_group:
             if self.order_idx % 2 == 0:
                 cur_end = sum(segment_list[:rank + 1])
                 cur_send_start = self.even_calc_send_start(
                     cur_end, kernel_size_h, stride_h)
-                dist.send(inner_input[:, :, cur_send_start:cur_end, :],
-                          rank + 1, self.next_group)
+                communicators.append(dist.isend(inner_input[:, :, -(cur_end-cur_send_start):, :].contiguous(),
+                          rank + 1))
             else:
                 cur_end = sum(segment_list[:rank + 1])
                 cur_max_end = self.odd_correct_end(cur_end, kernel_size_h,
                                                    stride_h)
                 next_recv_tensor = torch.zeros(
                     [b, c, cur_max_end - cur_end, w], device=cuda)
-                dist.recv(next_recv_tensor, rank + 1, self.next_group)
+                communicators.append(dist.irecv(next_recv_tensor, rank + 1))
 
+        for op in communicators:
+            op.wait()
         if self.order_idx % 2 == 0:
             # even: rank0 -> rank1 -> ... -> rank-n
-            if rank + 1 < world_size:
-                cur_end = sum(segment_list[:rank + 1])
-                cur_fix_end = self.even_calc_cur_end(cur_end, kernel_size_h,
-                                                     stride_h)
-                inner_input = inner_input[:, :, :-(cur_end - cur_fix_end), :]
             if previous_recv_tensor is not None:
                 inner_input = torch.cat([previous_recv_tensor, inner_input],
                                         dim=2)
@@ -231,8 +258,8 @@ class PatchParallelismConv2dFirst(PatchParallelismConv2d):
                                 self._reversed_padding_repeated_twice,
                                 mode=self.padding_mode)
         _, _, h, w = inner_input.shape
-        if self.chunk_size <= 0 or (h <= self.chunk_size
-                                    and w <= self.chunk_size):
+        world_size, rank = self.get_world_size_and_rank()
+        if world_size == 1:
             return F.conv2d(inner_input, weight, bias, self.stride,
                             self.padding, self.dilation, self.groups)
 
@@ -303,13 +330,14 @@ class PatchParallelismConv2dLast(PatchParallelismConv2d):
         result = super()._conv_forward(input, weight, bias)
         b, c, h, w = result.shape
         world_size, rank = self.get_world_size_and_rank()
+        cuda = torch.device(f"cuda:{rank}")
         if world_size == 1:
             return result
         tensor_list = [
-            torch.zeros(1, dtype=torch.int64) for _ in range(world_size)
+            torch.zeros(1, dtype=torch.int64, device=cuda) for _ in range(world_size)
         ]
         dist.all_gather(tensor_list,
-                        torch.tensor([h], dtype=torch.int64, device="cpu"))
+                        torch.tensor([h], dtype=torch.int64, device=cuda))
         segment_list = [t.item() for t in tensor_list]
         max_h = max(segment_list)
         padding = [0, 0, 0, max_h - h]
@@ -317,10 +345,10 @@ class PatchParallelismConv2dLast(PatchParallelismConv2d):
         result_list = [
             torch.zeros([b, c, max_h, w],
                         dtype=result.dtype,
-                        device=f"cuda:{rank}") for _ in range(world_size)
+                        device=cuda) for _ in range(world_size)
         ]
         dist.all_gather(result_list, result)
         post_result_list = [
-            res[:, :, :segment_list[rank], :] for res in result_list
+            res[:, :, :segment_list[i], :] for i, res in enumerate(result_list)
         ]
         return torch.cat(post_result_list, dim=2)

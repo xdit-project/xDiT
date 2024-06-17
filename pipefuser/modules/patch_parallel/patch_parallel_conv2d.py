@@ -104,7 +104,8 @@ class PatchParallelismConv2d(nn.Conv2d):
         if world_size == 1:
             return result
         tensor_list = [
-            torch.zeros(1, dtype=torch.int64, device=cuda) for _ in range(world_size)
+            torch.zeros(1, dtype=torch.int64, device=cuda)
+            for _ in range(world_size)
         ]
         dist.all_gather(tensor_list,
                         torch.tensor([h], dtype=torch.int64, device=cuda))
@@ -113,9 +114,8 @@ class PatchParallelismConv2d(nn.Conv2d):
         padding = [0, 0, 0, max_h - h]
         result = F.pad(result, padding, mode="constant")
         result_list = [
-            torch.zeros([b, c, max_h, w],
-                        dtype=result.dtype,
-                        device=cuda) for _ in range(world_size)
+            torch.zeros([b, c, max_h, w], dtype=result.dtype, device=cuda)
+            for _ in range(world_size)
         ]
         dist.all_gather(result_list, result)
         post_result_list = [
@@ -184,21 +184,27 @@ class PatchParallelismConv2d(nn.Conv2d):
                                                       stride_h)
                 previous_recv_tensor = torch.zeros(
                     [b, c, pre_end - pre_start, w], device=cuda)
-                communicators.append(dist.irecv(previous_recv_tensor, rank - 1))
+                communicators.append(dist.irecv(previous_recv_tensor,
+                                                rank - 1))
             else:
                 pre_end = sum(segment_list[:rank])
                 pre_max_end = self.odd_correct_end(pre_end, kernel_size_h,
                                                    stride_h)
-                communicators.append(dist.isend(inner_input[:, :, :pre_max_end - pre_end, :].contiguous(),
-                          rank - 1))
+                communicators.append(
+                    dist.isend(
+                        inner_input[:, :, :pre_max_end -
+                                    pre_end, :].contiguous(), rank - 1))
 
         if self.next_group:
             if self.order_idx % 2 == 0:
                 cur_end = sum(segment_list[:rank + 1])
                 cur_send_start = self.even_calc_send_start(
                     cur_end, kernel_size_h, stride_h)
-                communicators.append(dist.isend(inner_input[:, :, -(cur_end-cur_send_start):, :].contiguous(),
-                          rank + 1))
+                communicators.append(
+                    dist.isend(
+                        inner_input[:, :, -(cur_end -
+                                            cur_send_start):, :].contiguous(),
+                        rank + 1))
             else:
                 cur_end = sum(segment_list[:rank + 1])
                 cur_max_end = self.odd_correct_end(cur_end, kernel_size_h,
@@ -328,27 +334,4 @@ class PatchParallelismConv2dLast(PatchParallelismConv2d):
     def _conv_forward(self, input: Tensor, weight: Tensor,
                       bias: Optional[Tensor]) -> Tensor:
         result = super()._conv_forward(input, weight, bias)
-        b, c, h, w = result.shape
-        world_size, rank = self.get_world_size_and_rank()
-        cuda = torch.device(f"cuda:{rank}")
-        if world_size == 1:
-            return result
-        tensor_list = [
-            torch.zeros(1, dtype=torch.int64, device=cuda) for _ in range(world_size)
-        ]
-        dist.all_gather(tensor_list,
-                        torch.tensor([h], dtype=torch.int64, device=cuda))
-        segment_list = [t.item() for t in tensor_list]
-        max_h = max(segment_list)
-        padding = [0, 0, 0, max_h - h]
-        result = F.pad(result, padding, mode="constant")
-        result_list = [
-            torch.zeros([b, c, max_h, w],
-                        dtype=result.dtype,
-                        device=cuda) for _ in range(world_size)
-        ]
-        dist.all_gather(result_list, result)
-        post_result_list = [
-            res[:, :, :segment_list[i], :] for i, res in enumerate(result_list)
-        ]
-        return torch.cat(post_result_list, dim=2)
+        return self._all_gather(result)

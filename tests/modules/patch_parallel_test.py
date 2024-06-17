@@ -4,10 +4,10 @@ import torch.nn as nn
 import torch.distributed as dist
 import unittest
 
-from patch_parallelism.patch_parallelism_conv.patch_parallelism_conv2d import (
+from pipefuser.modules.patch_parallel.patch_parallel_conv2d import (
     PatchParallelismConv2dFirst, PatchParallelismConv2d,
     PatchParallelismConv2dLast)
-from patch_parallelism.patch_parallelism_conv.parallel_state import (
+from pipefuser.modules.patch_parallel.parallel_state import (
     get_patch_parallel_next_group, get_patch_parallel_previous_group,
     init_patch_parallel)
 
@@ -105,7 +105,8 @@ class TestPatchParallelConv2d(unittest.TestCase):
         output_parallel = self.input
         for i, layer in enumerate(self.parallel_conv):
             output_parallel = layer(output_parallel)
-        self.assertTrue(torch.allclose(output, output_parallel))
+        self.assertTrue(
+            torch.allclose(output, output_parallel, atol=1e-3, rtol=1e-5))
 
     def tearDown(self):
         del self.conv

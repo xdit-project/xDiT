@@ -64,7 +64,7 @@ class ChunkConv2d(nn.Conv2d):
                 self.groups,
             )
 
-        if self.padding != 0:
+        if self.padding != 0 and self.padding_mode == "zeros":
             if isinstance(self.padding, int):
                 padding_tuple = (self.padding,) * 4
             elif isinstance(self.padding, tuple):

@@ -1,18 +1,17 @@
 from pipefuser.models.diffusers.attention import FeedForward
-from pipefuser.modules.pp.transformer2d import DistriTransformer2DModel
+from pipefuser.modules.dit.patch_parallel.transformer2d import DistriTransformer2DModel
 import torch
 
 # from diffusers.models.attention_processor import Attention
 from pipefuser.models.diffusers import Attention
 
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
-from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.attention import Attention, FeedForward
 from pipefuser.models.diffusers import Transformer2DModel
 from torch import distributed as dist, nn
 
-from pipefuser.modules.base_module import BaseModule
-from pipefuser.modules.tp import (
+from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.dit.tensor_parallel import (
     DistriAttentionTP,
     DistriConv2dTP,
     DitFFNTP,

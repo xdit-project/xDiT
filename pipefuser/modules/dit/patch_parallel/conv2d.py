@@ -3,7 +3,7 @@ from torch import distributed as dist
 from torch import nn
 from torch.nn import functional as F
 
-from pipefuser.modules.base_module import BaseModule
+from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.utils import DistriConfig
 
 
@@ -25,7 +25,9 @@ class DistriConv2dPP(BaseModule):
     def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
         config = self.distri_config
         b, c, h, w = x.shape
-        assert h % config.n_device_per_batch == 0
+        assert (
+            h % config.n_device_per_batch == 0
+        ), f"height {h} is not divisible by n_device_per_batch {config.n_device_per_batch}"
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]

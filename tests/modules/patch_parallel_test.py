@@ -4,12 +4,16 @@ import torch.nn as nn
 import torch.distributed as dist
 import unittest
 
-from pipefuser.modules.patch_parallel.patch_parallel_conv2d import (
-    PatchParallelismConv2dFirst, PatchParallelismConv2d,
-    PatchParallelismConv2dLast)
-from pipefuser.modules.patch_parallel.parallel_state import (
-    get_patch_parallel_next_group, get_patch_parallel_previous_group,
-    init_patch_parallel)
+from pipefuser.modules.conv_parallel.patch_parallel_conv2d import (
+    PatchParallelismConv2dFirst,
+    PatchParallelismConv2d,
+    PatchParallelismConv2dLast,
+)
+from pipefuser.modules.conv_parallel.parallel_state import (
+    get_patch_parallel_next_group,
+    get_patch_parallel_previous_group,
+    init_patch_parallel,
+)
 
 STRIDE = 2
 PADDING = (1, 1)
@@ -37,23 +41,26 @@ class TestPatchParallelConv2d(unittest.TestCase):
                     padding_mode="zeros",
                     device=None,
                     dtype=None,
-                ))
+                )
+            )
         dist.init_process_group(backend="nccl")
         init_patch_parallel()
         self.rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
         self.conv = nn.ModuleList(conv_list).cuda()
-        conv0 = PatchParallelismConv2dFirst(in_channels=3,
-                                            out_channels=3,
-                                            kernel_size=3,
-                                            stride=STRIDE,
-                                            padding=PADDING,
-                                            dilation=1,
-                                            groups=1,
-                                            bias=True,
-                                            padding_mode="zeros",
-                                            device=None,
-                                            dtype=None)
+        conv0 = PatchParallelismConv2dFirst(
+            in_channels=3,
+            out_channels=3,
+            kernel_size=3,
+            stride=STRIDE,
+            padding=PADDING,
+            dilation=1,
+            groups=1,
+            bias=True,
+            padding_mode="zeros",
+            device=None,
+            dtype=None,
+        )
         conv0.weight.data = self.conv[0].weight.data
         conv0.bias.data = self.conv[0].bias.data
         parallel_conv_list.append(conv0)
@@ -105,8 +112,7 @@ class TestPatchParallelConv2d(unittest.TestCase):
         output_parallel = self.input
         for i, layer in enumerate(self.parallel_conv):
             output_parallel = layer(output_parallel)
-        self.assertTrue(
-            torch.allclose(output, output_parallel, atol=1e-3, rtol=1e-5))
+        self.assertTrue(torch.allclose(output, output_parallel, atol=1e-3, rtol=1e-5))
 
     def tearDown(self):
         del self.conv

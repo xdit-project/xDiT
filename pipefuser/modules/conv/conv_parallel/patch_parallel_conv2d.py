@@ -28,24 +28,36 @@ class PatchParallelismConv2d(nn.Conv2d):
         rank-n -> rank-n-1 -> ... -> rank1 -> rank0
     """
 
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 kernel_size: _size_2_t,
-                 stride: _size_2_t = 1,
-                 padding: Union[str, _size_2_t] = 0,
-                 dilation: _size_2_t = 1,
-                 groups: int = 1,
-                 bias: bool = True,
-                 padding_mode: str = 'zeros',
-                 device=None,
-                 dtype=None,
-                 previous_group=None,
-                 next_group=None,
-                 order_idx: int = 0) -> None:
-        super().__init__(in_channels, out_channels, kernel_size, stride,
-                         padding, dilation, groups, bias, padding_mode, device,
-                         dtype)
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t = 1,
+        padding: Union[str, _size_2_t] = 0,
+        dilation: _size_2_t = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: str = "zeros",
+        device=None,
+        dtype=None,
+        previous_group=None,
+        next_group=None,
+        order_idx: int = 0,
+    ) -> None:
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            bias,
+            padding_mode,
+            device,
+            dtype,
+        )
         self.previous_group = previous_group
         self.next_group = next_group
         self.order_idx = order_idx
@@ -94,7 +106,8 @@ class PatchParallelismConv2d(nn.Conv2d):
             stride_h, stride_w = self.stride
         else:
             raise ValueError(
-                f"stride should be int or tuple, type: {type(self.stride)}")
+                f"stride should be int or tuple, type: {type(self.stride)}"
+            )
         return kernel_size_h, kernel_size_w, stride_h, stride_w
 
     def _all_gather(self, result: Tensor):
@@ -104,11 +117,9 @@ class PatchParallelismConv2d(nn.Conv2d):
         if world_size == 1:
             return result
         tensor_list = [
-            torch.zeros(1, dtype=torch.int64, device=cuda)
-            for _ in range(world_size)
+            torch.zeros(1, dtype=torch.int64, device=cuda) for _ in range(world_size)
         ]
-        dist.all_gather(tensor_list,
-                        torch.tensor([h], dtype=torch.int64, device=cuda))
+        dist.all_gather(tensor_list, torch.tensor([h], dtype=torch.int64, device=cuda))
         segment_list = [t.item() for t in tensor_list]
         max_h = max(segment_list)
         padding = [0, 0, 0, max_h - h]
@@ -119,12 +130,13 @@ class PatchParallelismConv2d(nn.Conv2d):
         ]
         dist.all_gather(result_list, result)
         post_result_list = [
-            res[:, :, :segment_list[i], :] for i, res in enumerate(result_list)
+            res[:, :, : segment_list[i], :] for i, res in enumerate(result_list)
         ]
         return torch.cat(post_result_list, dim=2)
 
-    def _conv_forward(self, input: Tensor, weight: Tensor,
-                      bias: Optional[Tensor]) -> Tensor:
+    def _conv_forward(
+        self, input: Tensor, weight: Tensor, bias: Optional[Tensor]
+    ) -> Tensor:
         inner_input = input
         world_size, rank = self.get_world_size_and_rank()
 
@@ -136,22 +148,28 @@ class PatchParallelismConv2d(nn.Conv2d):
             else:
                 padding[-2:] = [0, 0]
 
-        if self.padding_mode != 'zeros':
+        if self.padding_mode != "zeros":
             copy_padding = self._reversed_padding_repeated_twice[:]
             if world_size > 1:
                 adjust_padding(copy_padding, rank)
             inner_input = F.pad(input, copy_padding, mode=self.padding_mode)
 
         if world_size == 1:
-            return F.conv2d(inner_input, weight, bias, self.stride,
-                            self.padding, self.dilation, self.groups)
+            return F.conv2d(
+                inner_input,
+                weight,
+                bias,
+                self.stride,
+                self.padding,
+                self.dilation,
+                self.groups,
+            )
 
-        if self.padding != 0 and self.padding_mode == 'zeros':
+        if self.padding != 0 and self.padding_mode == "zeros":
             if isinstance(self.padding, int):
-                padding_tuple = (self.padding, ) * 4
+                padding_tuple = (self.padding,) * 4
             elif isinstance(self.padding, tuple):
-                padding_tuple = (self.padding[0], ) * 2 + (
-                    self.padding[1], ) * 2
+                padding_tuple = (self.padding[0],) * 2 + (self.padding[1],) * 2
             else:
                 raise ValueError(
                     f"padding should be int or tuple, type:{type(self.padding)}"
@@ -175,42 +193,46 @@ class PatchParallelismConv2d(nn.Conv2d):
 
         previous_recv_tensor = None
         next_recv_tensor = None
-        cur_end = sum(segment_list[:rank + 1])
+        cur_end = sum(segment_list[: rank + 1])
         communicators = []
         if self.previous_group:
             if self.order_idx % 2 == 0:
                 pre_end = sum(segment_list[:rank])
-                pre_start = self.even_calc_send_start(pre_end, kernel_size_h,
-                                                      stride_h)
+                pre_start = self.even_calc_send_start(pre_end, kernel_size_h, stride_h)
                 previous_recv_tensor = torch.zeros(
-                    [b, c, pre_end - pre_start, w], device=cuda)
-                communicators.append(dist.irecv(previous_recv_tensor,
-                                                rank - 1))
+                    [b, c, pre_end - pre_start, w], device=cuda
+                )
+                communicators.append(dist.irecv(previous_recv_tensor, rank - 1))
             else:
                 pre_end = sum(segment_list[:rank])
-                pre_max_end = self.odd_correct_end(pre_end, kernel_size_h,
-                                                   stride_h)
+                pre_max_end = self.odd_correct_end(pre_end, kernel_size_h, stride_h)
                 communicators.append(
                     dist.isend(
-                        inner_input[:, :, :pre_max_end -
-                                    pre_end, :].contiguous(), rank - 1))
+                        inner_input[:, :, : pre_max_end - pre_end, :].contiguous(),
+                        rank - 1,
+                    )
+                )
 
         if self.next_group:
             if self.order_idx % 2 == 0:
-                cur_end = sum(segment_list[:rank + 1])
+                cur_end = sum(segment_list[: rank + 1])
                 cur_send_start = self.even_calc_send_start(
-                    cur_end, kernel_size_h, stride_h)
+                    cur_end, kernel_size_h, stride_h
+                )
                 communicators.append(
                     dist.isend(
-                        inner_input[:, :, -(cur_end -
-                                            cur_send_start):, :].contiguous(),
-                        rank + 1))
+                        inner_input[
+                            :, :, -(cur_end - cur_send_start) :, :
+                        ].contiguous(),
+                        rank + 1,
+                    )
+                )
             else:
-                cur_end = sum(segment_list[:rank + 1])
-                cur_max_end = self.odd_correct_end(cur_end, kernel_size_h,
-                                                   stride_h)
+                cur_end = sum(segment_list[: rank + 1])
+                cur_max_end = self.odd_correct_end(cur_end, kernel_size_h, stride_h)
                 next_recv_tensor = torch.zeros(
-                    [b, c, cur_max_end - cur_end, w], device=cuda)
+                    [b, c, cur_max_end - cur_end, w], device=cuda
+                )
                 communicators.append(dist.irecv(next_recv_tensor, rank + 1))
 
         for op in communicators:
@@ -218,20 +240,21 @@ class PatchParallelismConv2d(nn.Conv2d):
         if self.order_idx % 2 == 0:
             # even: rank0 -> rank1 -> ... -> rank-n
             if previous_recv_tensor is not None:
-                inner_input = torch.cat([previous_recv_tensor, inner_input],
-                                        dim=2)
-            return F.conv2d(inner_input, weight, bias, self.stride, 0,
-                            self.dilation, self.groups)
+                inner_input = torch.cat([previous_recv_tensor, inner_input], dim=2)
+            return F.conv2d(
+                inner_input, weight, bias, self.stride, 0, self.dilation, self.groups
+            )
         else:
             # odd: rank-n -> rank-n-1 ... -> rank0
             if rank > 0:
                 pre_end = sum(segment_list[:rank])
                 cur_start = self.odd_correct_start(pre_end, stride_h)
-                inner_input = inner_input[:, :, (cur_start - pre_end):, :]
+                inner_input = inner_input[:, :, (cur_start - pre_end) :, :]
             if next_recv_tensor is not None:
                 inner_input = torch.cat([inner_input, next_recv_tensor], dim=2)
-            return F.conv2d(inner_input, weight, bias, self.stride, 0,
-                            self.dilation, self.groups)
+            return F.conv2d(
+                inner_input, weight, bias, self.stride, 0, self.dilation, self.groups
+            )
 
 
 class PatchParallelismConv2dFirst(PatchParallelismConv2d):
@@ -248,33 +271,50 @@ class PatchParallelismConv2dFirst(PatchParallelismConv2d):
         dilation: _size_2_t = 1,
         groups: int = 1,
         bias: bool = True,
-        padding_mode: str = 'zeros',
+        padding_mode: str = "zeros",
         device=None,
         dtype=None,
     ) -> None:
-        super().__init__(in_channels, out_channels, kernel_size, stride,
-                         padding, dilation, groups, bias, padding_mode, device,
-                         dtype)
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            bias,
+            padding_mode,
+            device,
+            dtype,
+        )
 
-    def _conv_forward(self, input: Tensor, weight: Tensor,
-                      bias: Optional[Tensor]) -> Tensor:
+    def _conv_forward(
+        self, input: Tensor, weight: Tensor, bias: Optional[Tensor]
+    ) -> Tensor:
         inner_input = input
-        if self.padding_mode != 'zeros':
-            inner_input = F.pad(input,
-                                self._reversed_padding_repeated_twice,
-                                mode=self.padding_mode)
+        if self.padding_mode != "zeros":
+            inner_input = F.pad(
+                input, self._reversed_padding_repeated_twice, mode=self.padding_mode
+            )
         _, _, h, w = inner_input.shape
         world_size, rank = self.get_world_size_and_rank()
         if world_size == 1:
-            return F.conv2d(inner_input, weight, bias, self.stride,
-                            self.padding, self.dilation, self.groups)
+            return F.conv2d(
+                inner_input,
+                weight,
+                bias,
+                self.stride,
+                self.padding,
+                self.dilation,
+                self.groups,
+            )
 
         if self.padding != 0:
             if isinstance(self.padding, int):
-                padding_tuple = (self.padding, ) * 4
+                padding_tuple = (self.padding,) * 4
             elif isinstance(self.padding, tuple):
-                padding_tuple = (self.padding[0], ) * 2 + (
-                    self.padding[1], ) * 2
+                padding_tuple = (self.padding[0],) * 2 + (self.padding[1],) * 2
             else:
                 raise ValueError(
                     f"padding should be int or tuple, type:{type(self.padding)}"
@@ -297,8 +337,15 @@ class PatchParallelismConv2dFirst(PatchParallelismConv2d):
         if rank > 0:
             start_h = self.odd_correct_start(start_h, stride_h)
 
-        return F.conv2d(inner_input[:, :, start_h:end_h, :], weight, bias,
-                        self.stride, 0, self.dilation, self.groups)
+        return F.conv2d(
+            inner_input[:, :, start_h:end_h, :],
+            weight,
+            bias,
+            self.stride,
+            0,
+            self.dilation,
+            self.groups,
+        )
 
 
 class PatchParallelismConv2dLast(PatchParallelismConv2d):
@@ -309,29 +356,42 @@ class PatchParallelismConv2dLast(PatchParallelismConv2d):
         rank-n -> rank-n-1 -> ... -> rank1 -> rank0
     """
 
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 kernel_size: _size_2_t,
-                 stride: _size_2_t = 1,
-                 padding: Union[str, _size_2_t] = 0,
-                 dilation: _size_2_t = 1,
-                 groups: int = 1,
-                 bias: bool = True,
-                 padding_mode: str = 'zeros',
-                 device=None,
-                 dtype=None,
-                 previous_group=None,
-                 next_group=None,
-                 order_idx: int = 0) -> None:
-        super().__init__(in_channels, out_channels, kernel_size, stride,
-                         padding, dilation, groups, bias, padding_mode, device,
-                         dtype)
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t = 1,
+        padding: Union[str, _size_2_t] = 0,
+        dilation: _size_2_t = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: str = "zeros",
+        device=None,
+        dtype=None,
+        previous_group=None,
+        next_group=None,
+        order_idx: int = 0,
+    ) -> None:
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            bias,
+            padding_mode,
+            device,
+            dtype,
+        )
         self.previous_group = previous_group
         self.next_group = next_group
         self.order_idx = order_idx
 
-    def _conv_forward(self, input: Tensor, weight: Tensor,
-                      bias: Optional[Tensor]) -> Tensor:
+    def _conv_forward(
+        self, input: Tensor, weight: Tensor, bias: Optional[Tensor]
+    ) -> Tensor:
         result = super()._conv_forward(input, weight, bias)
         return self._all_gather(result)

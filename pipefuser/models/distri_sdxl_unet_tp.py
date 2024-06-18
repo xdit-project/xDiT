@@ -5,13 +5,12 @@ from diffusers.models.resnet import ResnetBlock2D
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from torch import distributed as dist, nn
 
-from pipefuser.modules.base_module import BaseModule
-from .base_model import BaseModel
-from ..modules.tp.attention import DistriAttentionTP
-from ..modules.tp.conv2d import DistriConv2dTP
-from ..modules.tp.feed_forward import DistriFeedForwardTP
-from ..modules.tp.resnet import DistriResnetBlock2DTP
-from ..utils import DistriConfig
+from .base_model import BaseModel, BaseModule
+from pipefuser.modules.dit.tensor_parallel.attention import DistriAttentionTP
+from pipefuser.modules.dit.tensor_parallel.conv2d import DistriConv2dTP
+from pipefuser.modules.dit.tensor_parallel.feed_forward import DistriFeedForwardTP
+from pipefuser.modules.dit.tensor_parallel.resnet import DistriResnetBlock2DTP
+from pipefuser.utils import DistriConfig
 
 
 class DistriSDXLUNetTP(BaseModel):  # for Patch Parallelism

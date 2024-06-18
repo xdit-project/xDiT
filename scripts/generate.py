@@ -67,7 +67,7 @@ def get_args() -> argparse.Namespace:
         "--parallelism",
         type=str,
         default="patch",
-        choices=["patch", "tensor", "naive_patch", "pipeline"],
+        choices=["patch", "tensor", "naive_patch", "pipefusion"],
         help="patch parallelism, tensor parallelism or naive patch",
     )
     parser.add_argument(

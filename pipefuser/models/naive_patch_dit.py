@@ -1,5 +1,6 @@
+from pipefuser.models.base_model import BaseModel
 import torch
-from pipefuser.modules.pp.transformer2d import DistriTransformer2DModel
+from pipefuser.modules.dit.patch_parallel.transformer2d import DistriTransformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 
 # from diffusers.models.transformers.transformer_2d import Transformer2DModel
@@ -7,8 +8,7 @@ from pipefuser.models.diffusers import Transformer2DModel
 
 from torch import distributed as dist
 
-from .base_model import BaseModel
-from ..utils import DistriConfig
+from pipefuser.utils import DistriConfig
 from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)

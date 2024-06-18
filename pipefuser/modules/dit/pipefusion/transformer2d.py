@@ -13,14 +13,52 @@ from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F
 from torch import distributed as dist
-from pipefuser.modules.base_module import BaseModule
+from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.utils import DistriConfig
 
 
 class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
         super().__init__(module, distri_config)
+        current_rank = (
+            distri_config.rank - 1 + distri_config.world_size
+        ) % distri_config.world_size
+
+        # logger.info(f"attn_num {distri_config.attn_num}")
+        # logger.info(f"{len{self.module.transformer_blocks}}")
+
+        if distri_config.attn_num is not None:
+            assert sum(distri_config.attn_num) == len(self.module.transformer_blocks)
+            assert len(distri_config.attn_num) == distri_config.world_size
+
+            if current_rank == 0:
+                self.module.transformer_blocks = self.module.transformer_blocks[
+                    : distri_config.attn_num[0]
+                ]
+            else:
+                self.module.transformer_blocks = self.module.transformer_blocks[
+                    sum(distri_config.attn_num[: current_rank - 1]) : sum(
+                        distri_config.attn_num[:current_rank]
+                    )
+                ]
+        else:
+
+            block_len = (
+                len(self.module.transformer_blocks) + distri_config.world_size - 1
+            ) // distri_config.world_size
+            start_idx = block_len * current_rank
+            end_idx = min(
+                block_len * (current_rank + 1), len(self.module.transformer_blocks)
+            )
+            self.module.transformer_blocks = self.module.transformer_blocks[
+                start_idx:end_idx
+            ]
+
+        if distri_config.rank != 1:
+            self.module.pos_embed = None
+
         self.config = module.config
+        self.batch_idx = 0
 
     def forward(
         self,
@@ -112,17 +150,25 @@ class DistriTransformer2DModel(BaseModule):
 
         # 1. Input
         if module.is_input_patches:
-            height, width = (
-                hidden_states.shape[-2]
-                // module.patch_size
-                // (
-                    distri_config.n_device_per_batch
-                    if distri_config.parallelism == "patch"
-                    else 1
-                ),
-                hidden_states.shape[-1] // module.patch_size,
-            )
-            hidden_states = module.pos_embed(hidden_states)
+            if distri_config.rank == 0:
+                # height, width = (
+                #     hidden_states.shape[-2] // module.patch_size,
+                #     hidden_states.shape[-1] // module.patch_size,
+                # )
+                height, width = (
+                    distri_config.height // module.patch_size // 8,
+                    distri_config.width // module.patch_size // 8,
+                )
+                if (
+                    self.counter <= distri_config.warmup_steps
+                    or distri_config.mode == "full_sync"
+                ):
+                    pass
+                else:
+                    height //= distri_config.pp_num_patch
+
+            if distri_config.rank == 1:
+                hidden_states = module.pos_embed(hidden_states)
 
             if module.adaln_single is not None:
                 if module.use_additional_conditions and added_cond_kwargs is None:
@@ -157,49 +203,65 @@ class DistriTransformer2DModel(BaseModule):
             )
 
         # 3. Output
-        if module.is_input_patches:
-            if module.config.norm_type != "ada_norm_single":
-                conditioning = module.transformer_blocks[0].norm1.emb(
-                    timestep, class_labels, hidden_dtype=hidden_states.dtype
-                )
-                shift, scale = module.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
-                hidden_states = (
-                    module.norm_out(hidden_states) * (1 + scale[:, None])
-                    + shift[:, None]
-                )
-                hidden_states = module.proj_out_2(hidden_states)
-            elif module.config.norm_type == "ada_norm_single":
-                shift, scale = (
-                    module.scale_shift_table[None] + embedded_timestep[:, None]
-                ).chunk(2, dim=1)
-                hidden_states = module.norm_out(hidden_states)
-                # Modulation
-                hidden_states = hidden_states * (1 + scale) + shift
-                hidden_states = module.proj_out(hidden_states)
-                hidden_states = hidden_states.squeeze(1)
+        if distri_config.rank == 0:
+            if module.is_input_patches:
+                if module.config.norm_type != "ada_norm_single":
+                    conditioning = module.transformer_blocks[0].norm1.emb(
+                        timestep, class_labels, hidden_dtype=hidden_states.dtype
+                    )
+                    shift, scale = module.proj_out_1(F.silu(conditioning)).chunk(
+                        2, dim=1
+                    )
+                    hidden_states = (
+                        module.norm_out(hidden_states) * (1 + scale[:, None])
+                        + shift[:, None]
+                    )
+                    hidden_states = module.proj_out_2(hidden_states)
+                elif module.config.norm_type == "ada_norm_single":
+                    shift, scale = (
+                        module.scale_shift_table[None] + embedded_timestep[:, None]
+                    ).chunk(2, dim=1)
+                    hidden_states = module.norm_out(hidden_states)
+                    # Modulation
+                    hidden_states = hidden_states * (1 + scale) + shift
+                    hidden_states = module.proj_out(hidden_states)
+                    hidden_states = hidden_states.squeeze(1)
 
-            # unpatchify
-            # if module.adaln_single is None:
-            # height = width = int(hidden_states.shape[1] ** 0.5)
-            hidden_states = hidden_states.reshape(
-                shape=(
-                    -1,
-                    height,
-                    width,
-                    module.patch_size,
-                    module.patch_size,
-                    module.out_channels,
+                # unpatchify
+                # if module.adaln_single is None:
+                # height = width = int(hidden_states.shape[1] ** 0.5)
+                hidden_states = hidden_states.reshape(
+                    shape=(
+                        -1,
+                        height,
+                        width,
+                        module.patch_size,
+                        module.patch_size,
+                        module.out_channels,
+                    )
                 )
-            )
-            hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
-            output = hidden_states.reshape(
-                shape=(
-                    -1,
-                    module.out_channels,
-                    height * module.patch_size,
-                    width * module.patch_size,
+                hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
+                output = hidden_states.reshape(
+                    shape=(
+                        -1,
+                        module.out_channels,
+                        height * module.patch_size,
+                        width * module.patch_size,
+                    )
                 )
-            )
+        else:
+            output = hidden_states
+
+        if (
+            distri_config.mode == "full_sync"
+            or self.counter <= distri_config.warmup_steps
+        ):
+            self.counter += 1
+        else:
+            self.batch_idx += 1
+            if self.batch_idx == distri_config.pp_num_patch:
+                self.counter += 1
+                self.batch_idx = 0
 
         if not return_dict:
             return (output,)

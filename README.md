@@ -102,9 +102,9 @@ from pipefuser.pipelines import DistriPixArtAlphaPipeline
 from pipefuser.utils import DistriConfig
 from pipefusion.modules.opt.chunk_conv2d import PatchConv2d
 
-# parallelism choose from ["patch", "naive_patch", "pipeline", "tensor"],
+# parallelism choose from ["patch", "naive_patch", "pipefusion", "tensor"],
 distri_config = DistriConfig(
-    parallelism="pipeline",
+    parallelism="pipefusion",
 )
 
 pipeline = DistriPixArtAlphaPipeline.from_pretrained(

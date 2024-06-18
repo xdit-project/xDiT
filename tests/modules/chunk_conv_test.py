@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import unittest
 
-from pipefuser.modules.opt.chunk_conv2d import ChunkConv2d
+from pipefuser.modules.conv_chunk.chunk_conv2d import ChunkConv2d
 
 
 class TestChunkConv(unittest.TestCase):

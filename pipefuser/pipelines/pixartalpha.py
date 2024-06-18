@@ -15,7 +15,12 @@ from pipefuser.pipelines.pip.distri_pixartalpha import DistriPixArtAlphaPiP
 from pipefuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
 from pipefuser.schedulers.pip.ddim import DDIMSchedulerPiP
 from diffusers import DPMSolverMultistepScheduler
-from pipefuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTPiP, DistriDiTTP
+from pipefuser.models import (
+    NaivePatchDiT,
+    DistriDiTPP,
+    DistriDiTPipeFusion,
+    DistriDiTTP,
+)
 from pipefuser.utils import (
     DistriConfig,
     PatchParallelismCommManager,
@@ -56,8 +61,8 @@ class DistriPixArtAlphaPipeline:
             transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
             transformer = NaivePatchDiT(transformer, distri_config)
-        elif distri_config.parallelism == "pipeline":
-            transformer = DistriDiTPiP(transformer, distri_config)
+        elif distri_config.parallelism == "pipefusion":
+            transformer = DistriDiTPipeFusion(transformer, distri_config)
         elif distri_config.parallelism == "tensor":
             transformer = DistriDiTTP(transformer, distri_config)
         else:
@@ -66,7 +71,7 @@ class DistriPixArtAlphaPipeline:
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 1 {peak_memory/1e9} GB")
 
-        if distri_config.parallelism == "pipeline":
+        if distri_config.parallelism == "pipefusion":
             if distri_config.scheduler == "dpm-solver":
                 scheduler = DPMSolverMultistepSchedulerPiP.from_pretrained(
                     pretrained_model_name_or_path, subfolder="scheduler"
@@ -77,7 +82,7 @@ class DistriPixArtAlphaPipeline:
                 )
             scheduler.init(distri_config)
 
-        if distri_config.parallelism == "pipeline":
+        if distri_config.parallelism == "pipefusion":
             pipeline = DistriPixArtAlphaPiP.from_pretrained(
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
@@ -141,7 +146,7 @@ class DistriPixArtAlphaPipeline:
         batch_size = distri_config.batch_size or 1
         num_images_per_prompt = 1
 
-        if distri_config.parallelism == "pipeline":
+        if distri_config.parallelism == "pipefusion":
             comm_manager = PipelineParallelismCommManager(distri_config)
             self.pipeline.set_comm_manager(comm_manager)
             self.pipeline(

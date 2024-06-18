@@ -85,7 +85,7 @@ class DistriConfig:
                 f"Failed to initialize process group: {e}, falling back to single GPU"
             )
 
-        assert is_power_of_2(world_size) or parallelism == "pipeline"
+        assert is_power_of_2(world_size) or parallelism == "pipefusion"
         check_env()
 
         self.world_size = world_size

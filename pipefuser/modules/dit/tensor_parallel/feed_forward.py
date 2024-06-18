@@ -4,8 +4,8 @@ from torch import distributed as dist
 from torch import nn
 from torch.nn import functional as F
 
-from ..base_module import BaseModule
-from ...utils import DistriConfig
+from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.utils import DistriConfig
 
 
 # (net): ModuleList(

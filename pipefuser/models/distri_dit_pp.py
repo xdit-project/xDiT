@@ -8,8 +8,8 @@ from diffusers.models.embeddings import PatchEmbed
 from pipefuser.models.diffusers import Transformer2DModel
 from torch import distributed as dist, nn
 
-from pipefuser.modules.base_module import BaseModule
-from pipefuser.modules.pp import (
+from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.dit.patch_parallel import (
     DistriConv2dPP,
     DistriSelfAttentionPP,
     DistriPatchEmbed,

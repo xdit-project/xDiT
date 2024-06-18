@@ -71,7 +71,7 @@ do
 pp_num_patchs=(4 8 16 32)
 for pp_num_patch in "${pp_num_patchs[@]}"
 do
-    torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipeline  \
+    torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipefusion  \
     --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --pp_num_patch $pp_num_patch 
 done
 done

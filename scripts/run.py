@@ -91,7 +91,7 @@ def get_args() -> argparse.Namespace:
         "--parallelism",
         type=str,
         default="patch",
-        choices=["patch", "tensor", "naive_patch", "pipeline"],
+        choices=["patch", "tensor", "naive_patch", "pipefusion"],
     )
     parser.add_argument(
         "--no_cuda_graph", action="store_true", help="Disable CUDA graph"
@@ -177,7 +177,7 @@ def main():
         elif args.pipeline == "pixartalpha":
             args.model_path = "PixArt-alpha/PixArt-XL-2-1024-MS"
 
-    if args.parallelism != "pipeline":
+    if args.parallelism != "pipefusion":
         if args.scheduler == "euler":
             scheduler = EulerDiscreteScheduler.from_pretrained(
                 args.model_path, subfolder="scheduler"

@@ -25,17 +25,18 @@ def get_nccl_options(pg_name, nccl_comm_cfgs):
     if pg_name in nccl_comm_cfgs:
         nccl_options = torch.distributed.ProcessGroupNCCL.Options()
         nccl_options.config.cga_cluster_size = nccl_comm_cfgs[pg_name].get(
-            'cga_cluster_size', 4)
-        nccl_options.config.max_ctas = nccl_comm_cfgs[pg_name].get(
-            'max_ctas', 32)
-        nccl_options.config.min_ctas = nccl_comm_cfgs[pg_name].get(
-            'min_ctas', 1)
+            "cga_cluster_size", 4
+        )
+        nccl_options.config.max_ctas = nccl_comm_cfgs[pg_name].get("max_ctas", 32)
+        nccl_options.config.min_ctas = nccl_comm_cfgs[pg_name].get("min_ctas", 1)
         return nccl_options
     else:
         return None
 
 
-def init_patch_parallel(distributed_timeout_minutes: int = 30, ):
+def init_patch_parallel(
+    distributed_timeout_minutes: int = 30,
+):
     global _PATCH_PARALLEL_PREVIOUS_GROUP
     global _PATCH_PARALLEL_NEXT_GROUP
     rank = 0
@@ -50,22 +51,26 @@ def init_patch_parallel(distributed_timeout_minutes: int = 30, ):
         _PATCH_PARALLEL_NEXT_GROUP = dist.new_group(
             [rank, rank + 1],
             timeout=timeout,
-            pg_options=get_nccl_options('patch_parallel_next_group', {}))
+            pg_options=get_nccl_options("patch_parallel_next_group", {}),
+        )
         return
     if rank + 1 == world_size:
         _PATCH_PARALLEL_PREVIOUS_GROUP = dist.new_group(
             [rank - 1, rank],
             timeout=timeout,
-            pg_options=get_nccl_options('patch_parallel_previous_group', {}))
+            pg_options=get_nccl_options("patch_parallel_previous_group", {}),
+        )
         return
     _PATCH_PARALLEL_NEXT_GROUP = dist.new_group(
         [rank, rank + 1],
         timeout=timeout,
-        pg_options=get_nccl_options('patch_parallel_next_group', {}))
+        pg_options=get_nccl_options("patch_parallel_next_group", {}),
+    )
     _PATCH_PARALLEL_PREVIOUS_GROUP = dist.new_group(
         [rank - 1, rank],
         timeout=timeout,
-        pg_options=get_nccl_options('patch_parallel_previous_group', {}))
+        pg_options=get_nccl_options("patch_parallel_previous_group", {}),
+    )
 
 
 def get_patch_parallel_previous_group():

@@ -3,8 +3,8 @@ from diffusers import UNet2DConditionModel
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from torch import distributed as dist
 
-from .base_model import BaseModel
-from ..utils import DistriConfig
+from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.utils import DistriConfig
 
 
 class NaivePatchSDXL(BaseModel):  # for Patch Parallelism

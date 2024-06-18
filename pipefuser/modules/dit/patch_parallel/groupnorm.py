@@ -2,7 +2,7 @@ import torch
 from torch import distributed as dist
 from torch import nn
 
-from pipefuser.modules.base_module import BaseModule
+from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.utils import DistriConfig
 
 

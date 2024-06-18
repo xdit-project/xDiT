@@ -7,8 +7,8 @@ from pipefuser.models.diffusers import Transformer2DModel
 from torch import distributed as dist, nn
 import torch
 
-from pipefuser.modules.base_module import BaseModule
-from pipefuser.modules.pip import (
+from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.dit.pipefusion import (
     DistriSelfAttentionPiP,
     DistriTransformer2DModel,
     DistriConv2dPiP,
@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 from typing import Optional, Dict, Any
 
 
-class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
+class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
         assert isinstance(model, Transformer2DModel)
         model = DistriTransformer2DModel(model, distri_config)
@@ -52,7 +52,7 @@ class DistriDiTPiP(BaseModel):  # for Pipeline Parallelism
         logger.info(
             f"Using pipeline parallelism, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
         )
-        super(DistriDiTPiP, self).__init__(model, distri_config)
+        super(DistriDiTPipeFusion, self).__init__(model, distri_config)
 
         self.batch_idx = 0
 

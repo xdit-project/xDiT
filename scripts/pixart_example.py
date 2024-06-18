@@ -4,7 +4,7 @@ import torch
 from pipefuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from pipefuser.utils import DistriConfig
 from torch.profiler import profile, record_function, ProfilerActivity
-from pipefuser.modules.opt.chunk_conv2d import PatchConv2d
+from pipefuser.modules.conv.conv_chunk.chunk_conv2d import PatchConv2d
 
 import time
 
@@ -30,7 +30,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipeline", "tensor"],
+        choices=["patch", "naive_patch", "pipefusion", "tensor"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -198,10 +198,10 @@ def main():
         #     )
         end_time = time.time()
     else:
-        MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
-        torch.cuda.memory._record_memory_history(
-            max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
-        )
+        # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
+        # torch.cuda.memory._record_memory_history(
+        #     max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+        # )
         start_time = time.time()
         output = pipeline(
             prompt=args.prompt,

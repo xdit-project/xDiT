@@ -8,7 +8,7 @@ from torch import distributed as dist
 from torch import nn
 from torch.nn import functional as F
 
-from pipefuser.modules.base_module import BaseModule
+from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.utils import DistriConfig
 from pipefuser.logger import init_logger
 

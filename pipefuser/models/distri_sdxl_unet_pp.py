@@ -5,10 +5,13 @@ from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 from torch import distributed as dist, nn
 
 from .base_model import BaseModel
-from pipefuser.modules.pp.attn import DistriCrossAttentionPP, DistriSelfAttentionPP
-from pipefuser.modules.base_module import BaseModule
-from pipefuser.modules.pp.conv2d import DistriConv2dPP
-from pipefuser.modules.pp.groupnorm import DistriGroupNorm
+from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.dit.patch_parallel.attn import (
+    DistriCrossAttentionPP,
+    DistriSelfAttentionPP,
+)
+from pipefuser.modules.dit.patch_parallel.conv2d import DistriConv2dPP
+from pipefuser.modules.dit.patch_parallel.groupnorm import DistriGroupNorm
 from ..utils import DistriConfig
 
 from pipefuser.logger import init_logger

@@ -276,8 +276,8 @@ class DistriSelfAttentionPP(DistriAttentionPP):
     ) -> torch.FloatTensor:
         distri_config = self.distri_config
 
-        # async preallocates memo buffer
-        if distri_config.mode == "corrected_async_gn":
+        if not distri_config.use_seq_parallel_attn:
+            # async preallocates memo buffer
             if (
                 self.comm_manager is not None
                 and self.comm_manager.handles is not None

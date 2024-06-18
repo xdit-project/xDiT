@@ -1,7 +1,7 @@
 import unittest
 import torch
 from pipefuser.models.diffusers import Attention  # type: ignore
-from pipefuser.modules.patch_parallel.attn import DistriSelfAttentionPP
+from pipefuser.modules.dit.patch_parallel.attn import DistriSelfAttentionPP
 from pipefuser.utils import DistriConfig
 
 
@@ -17,16 +17,20 @@ class TestDistriSelfAttentionPP(unittest.TestCase):
         self.attention = (
             Attention(query_dim=self.hidden_dim).to(self.dtype).to(self.device)
         )
-        self.distri_config = DistriConfig(height=self.height, width=self.width)
 
-        self.distri_config.use_seq_parallel_attn = True
-        self.attention_pp_true = DistriSelfAttentionPP(
-            self.attention, self.distri_config
+        self.distri_config_seq = DistriConfig(
+            height=self.height, width=self.width, parallelism="sequence"
         )
 
-        self.distri_config.use_seq_parallel_attn = False
+        self.attention_pp_true = DistriSelfAttentionPP(
+            self.attention, self.distri_config_seq
+        )
+
+        self.distri_config_patch = DistriConfig(
+            height=self.height, width=self.width, parallelism="patch"
+        )
         self.attention_pp_false = DistriSelfAttentionPP(
-            self.attention, self.distri_config
+            self.attention, self.distri_config_patch
         )
 
         self.hidden_states = torch.rand(

@@ -46,12 +46,6 @@ def main():
         help="Different GroupNorm synchronization modes",
     )
     parser.add_argument(
-        "--use_seq_parallel_attn",
-        action="store_true",
-        default=False,
-        help="Enable sequence parallel attention.",
-    )
-    parser.add_argument(
         "--ulysses_degree",
         type=int,
         default=1,
@@ -72,19 +66,7 @@ def main():
         parallelism=args.parallelism,
         mode=args.sync_mode,
         use_cuda_graph=False,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
-
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = args.ulysses_degree
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree,
-            ring_degree,
-            distri_config.rank,
-            distri_config.world_size,
-            use_ulysses_low=args.use_use_ulysses_low,
-        )
 
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,
@@ -95,7 +77,7 @@ def main():
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
 
-    case_name = f"{args.parallelism}_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}"
+    case_name = f"{args.parallelism}_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}"
 
     # warmup
     output = pipeline(

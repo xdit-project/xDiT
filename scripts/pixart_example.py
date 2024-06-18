@@ -8,14 +8,6 @@ from pipefuser.modules.conv.conv_chunk.chunk_conv2d import PatchConv2d
 
 import time
 
-HAS_LONG_CTX_ATTN = False
-try:
-    from yunchang import set_seq_parallel_pg
-
-    HAS_LONG_CTX_ATTN = True
-except ImportError:
-    print("yunchang not found")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -30,14 +22,8 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipefusion", "tensor"],
+        choices=["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
         help="Parallelism to use.",
-    )
-    parser.add_argument(
-        "--use_seq_parallel_attn",
-        action="store_true",
-        default=False,
-        help="Enable sequence parallel attention.",
     )
     parser.add_argument(
         "--sync_mode",
@@ -133,23 +119,11 @@ def main():
         parallelism=args.parallelism,
         mode=args.sync_mode,
         pp_num_patch=args.pp_num_patch,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
         scheduler=args.scheduler,
     )
-
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = args.ulysses_degree
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree,
-            ring_degree,
-            distri_config.rank,
-            distri_config.world_size,
-            use_ulysses_low=args.use_use_ulysses_low,
-        )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
@@ -171,7 +145,7 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
 
-    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipeline' else 0}"
+    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipeline' else 0}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
 
@@ -228,6 +202,8 @@ def main():
         if args.output_type == "pil":
             print(f"save images to ./results/{case_name}.png")
             output.images[0].save(f"./results/{case_name}.png")
+        else:
+            print(f"use --output_type pil to use VAE to generate images")
 
 
 if __name__ == "__main__":

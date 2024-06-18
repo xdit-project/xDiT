@@ -144,9 +144,8 @@ class DistriSelfAttentionPP(DistriAttentionPP):
     def __init__(self, module: Attention, distri_config: DistriConfig):
         super(DistriSelfAttentionPP, self).__init__(module, distri_config)
 
-        if HAS_LONG_CTX_ATTN and distri_config.use_seq_parallel_attn:
+        if distri_config.parallelism == "sequence":
             self.hybrid_seq_parallel_attn = LongContextAttention()
-            # self.hybrid_seq_parallel_attn = ring_flash_attn_func
 
     def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):
         attn = self.module
@@ -163,13 +162,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         encoder_hidden_states = hidden_states
         kv = self.to_kv(encoder_hidden_states)
 
-        use_seq_parallel_attn = self.distri_config.use_seq_parallel_attn
-
-        if (
-            HAS_LONG_CTX_ATTN
-            and use_seq_parallel_attn
-            and (distri_config.mode == "full_sync")
-        ):
+        if distri_config.parallelism == "sequence":
             # the distributed sparse attention using ring-attention.
             key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
             inner_dim = key.shape[-1]

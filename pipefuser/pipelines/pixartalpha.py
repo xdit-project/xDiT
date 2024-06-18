@@ -57,7 +57,10 @@ class DistriPixArtAlphaPipeline:
             subfolder="transformer",
         )
 
-        if distri_config.parallelism == "patch":
+        if (
+            distri_config.parallelism == "patch"
+            or distri_config.parallelism == "sequence"
+        ):
             transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
             transformer = NaivePatchDiT(transformer, distri_config)

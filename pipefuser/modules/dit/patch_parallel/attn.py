@@ -276,26 +276,27 @@ class DistriSelfAttentionPP(DistriAttentionPP):
     ) -> torch.FloatTensor:
         distri_config = self.distri_config
 
-        # async preallocates memo buffer
-        if (
-            self.comm_manager is not None
-            and self.comm_manager.handles is not None
-            and self.idx is not None
-        ):
-            if self.comm_manager.handles[self.idx] is not None:
-                self.comm_manager.handles[self.idx].wait()
-                self.comm_manager.handles[self.idx] = None
+        if not distri_config.use_seq_parallel_attn:
+            # async preallocates memo buffer
+            if (
+                self.comm_manager is not None
+                and self.comm_manager.handles is not None
+                and self.idx is not None
+            ):
+                if self.comm_manager.handles[self.idx] is not None:
+                    self.comm_manager.handles[self.idx].wait()
+                    self.comm_manager.handles[self.idx] = None
 
-        b, l, c = hidden_states.shape
-        if distri_config.n_device_per_batch > 1 and self.buffer_list is None:
-            if self.comm_manager.buffer_list is None:
-                self.idx = self.comm_manager.register_tensor(
-                    shape=(b, l, self.to_kv.out_features),
-                    torch_dtype=hidden_states.dtype,
-                    layer_type="attn",
-                )
-            else:
-                self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
+            b, l, c = hidden_states.shape
+            if distri_config.n_device_per_batch > 1 and self.buffer_list is None:
+                if self.comm_manager.buffer_list is None:
+                    self.idx = self.comm_manager.register_tensor(
+                        shape=(b, l, self.to_kv.out_features),
+                        torch_dtype=hidden_states.dtype,
+                        layer_type="attn",
+                    )
+                else:
+                    self.buffer_list = self.comm_manager.get_buffer_list(self.idx)
 
         output = self._forward(hidden_states, scale=scale)
 

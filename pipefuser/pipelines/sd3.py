@@ -7,11 +7,10 @@ from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 
 # from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP
 from pipefuser.pipelines.pip.distri_sd3 import DistriSD3PiP
-from pipefuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
-from pipefuser.schedulers.pip.ddim import DDIMSchedulerPiP
-from diffusers import (
-    DPMSolverMultistepScheduler,
-    FlowMatchEulerDiscreteScheduler
+from pipefuser.schedulers.pip import (
+    DPMSolverMultistepSchedulerPiP,
+    DDIMSchedulerPiP,
+    FlowMatchEulerDiscreteSchedulerPiP
 )
 
 from pipefuser.models import (
@@ -83,7 +82,7 @@ class DistriSD3Pipeline:
                     pretrained_model_name_or_path, subfolder="scheduler"
                 )
             elif distri_config.scheduler == "FM-ED":
-                scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                scheduler = FlowMatchEulerDiscreteSchedulerPiP.from_pretrained(
                     pretrained_model_name_or_path, subfolder="scheduler"
                 )
             scheduler.init(distri_config)

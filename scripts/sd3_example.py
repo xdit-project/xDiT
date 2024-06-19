@@ -21,7 +21,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_id",
-        default="PixArt-alpha/PixArt-XL-2-1024-MS",
+        default="stabilityai/stable-diffusion-3-medium-diffusers",
         type=str,
         help="Path to the pretrained model.",
     )

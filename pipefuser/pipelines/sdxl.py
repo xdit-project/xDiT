@@ -3,7 +3,7 @@ from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel
 
 from pipefuser.models.distri_unet_pp import DistriUNetPP
 from pipefuser.models.distri_unet_tp import DistriUNetTP
-from pipefuser.models.naive_patch_unet import NaivePathUnet
+from pipefuser.models.naive_patch_unet import NaivePatchUNet
 from pipefuser.utils import DistriConfig, PatchParallelismCommManager
 from pipefuser.logger import init_logger
 
@@ -38,7 +38,7 @@ class DistriSDXLPipeline:
         elif distri_config.parallelism == "tensor":
             unet = DistriUNetTP(unet, distri_config)
         elif distri_config.parallelism == "naive_patch":
-            unet = NaivePathUnet(unet, distri_config)
+            unet = NaivePatchUNet(unet, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 

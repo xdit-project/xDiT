@@ -3,7 +3,7 @@
 
 import torch
 from diffusers import StableDiffusion3Pipeline
-from diffusers.models.transformers.transformer_3d3 import SD3Transformer2DModel
+from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 
 # from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP
 from pipefuser.pipelines.pip.distri_sd3 import DistriSD3PiP

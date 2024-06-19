@@ -173,6 +173,7 @@ def main():
         prompt=args.prompt,
         generator=torch.Generator(device="cuda").manual_seed(42),
         output_type=args.output_type,
+        num_inference_steps=args.num_inference_steps,
     )
 
     torch.cuda.reset_peak_memory_stats()

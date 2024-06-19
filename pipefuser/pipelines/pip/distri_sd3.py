@@ -1,11 +1,11 @@
 # adpated from https://github.com/huggingface/diffusers/blob/v0.29.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
 import torch
-from diffusers.pipelines.stable_diffusion_3.pipeline_statble_diffusion_3 import (
+from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
     StableDiffusion3Pipeline,
-    StableDiffusion3PipelineOutput,
     retrieve_timesteps
 )
-from typing import List, Optional, Union, Tuple, Callable, Dict, Final
+from diffusers.pipelines.stable_diffusion_3.pipeline_output import StableDiffusion3PipelineOutput
+from typing import List, Optional, Union, Tuple, Callable, Dict, Final, Any
 from pipefuser.utils import DistriConfig, PipelineParallelismCommManager
 from pipefuser.logger import init_logger
 
@@ -141,7 +141,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-    ) -> Union[StableDiffusionXLPipelineOutput, Tuple]:
+    ) -> Union[StableDiffusion3PipelineOutput, Tuple]:
        
         r"""
         Function invoked when calling the pipeline for generation.

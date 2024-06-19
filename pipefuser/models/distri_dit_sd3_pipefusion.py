@@ -10,7 +10,6 @@ import torch
 from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.modules.dit.pipefusion import (
     DistriSelfAttentionPiP,
-    DistriTransformer2DModel,
     DistriConv2dPiP,
     DistriPatchEmbed,
 )
@@ -24,10 +23,10 @@ logger = init_logger(__name__)
 from typing import Optional, Dict, Any
 
 
-class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
+class DistriDiTSD3PipeFusion(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: SD3Transformer2DModel, distri_config: DistriConfig):
         assert isinstance(model, SD3Transformer2DModel)
-        model = DistriTransformer2DModel(model, distri_config)
+        # model = DistriTransformer2DModel(model, distri_config)
         for name, module in model.named_modules():
             if isinstance(module, BaseModule):
                 continue
@@ -52,7 +51,7 @@ class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
         logger.info(
             f"Using pipeline parallelism, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"
         )
-        super(DistriDiTPipeFusion, self).__init__(model, distri_config)
+        super(DistriDiTSD3PipeFusion, self).__init__(model, distri_config)
 
         self.batch_idx = 0
 
@@ -66,7 +65,7 @@ class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
         return_dict: bool = True,
         record: bool = False,
     ):
-        distri_config = self.distri_config
+        # distri_config = self.distri_config
 
         # hidden_states.shape = [2, 4, 32, 32]
         # b, c, h, w = hidden_states.shape
@@ -83,13 +82,8 @@ class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
             pooled_projections=pooled_projections,
             timestep=timestep,
             joint_attention_kwargs=joint_attention_kwargs,
-            return_dict=False,
+            return_dict=return_dict,
         )[0]
-
-        if return_dict:
-            output = Transformer2DModelOutput(sample=output)
-        else:
-            output = (output,)
 
         self.counter += 1
         return output

@@ -17,7 +17,7 @@ from diffusers import (
 from pipefuser.models import (
     NaivePatchDiT,
     DistriDiTPP,
-    DistriDiTPipeFusion,
+    DistriDiTSD3PipeFusion,
     DistriDiTTP,
 )
 from pipefuser.utils import (
@@ -47,7 +47,7 @@ class DistriSD3Pipeline:
     def from_pretrained(distri_config: DistriConfig, **kwargs):
         device = distri_config.device
         pretrained_model_name_or_path = kwargs.pop(
-            "pretrained_model_name_or_path", "PixArt-alpha/PixArt-XL-2-1024-MS"
+            "pretrained_model_name_or_path", "stabilityai/stable-diffusion-3-medium-diffusers"
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         transformer = SD3Transformer2DModel.from_pretrained(
@@ -57,13 +57,16 @@ class DistriSD3Pipeline:
         )
 
         if distri_config.parallelism == "patch":
-            transformer = DistriDiTPP(transformer, distri_config)
+            raise ValueError("Patch parallelism is not supported for SD3")
+            # transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
-            transformer = NaivePatchDiT(transformer, distri_config)
+            raise ValueError("Naive patch parallelism is not supported for SD3")
+            # transformer = NaivePatchDiT(transformer, distri_config)
         elif distri_config.parallelism == "pipefusion":
-            transformer = DistriDiTPipeFusion(transformer, distri_config)
+            transformer = DistriDiTSD3PipeFusion(transformer, distri_config)
         elif distri_config.parallelism == "tensor":
-            transformer = DistriDiTTP(transformer, distri_config)
+            raise ValueError("Tensor parallelism is not supported for SD3")
+            # transformer = DistriDiTTP(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 

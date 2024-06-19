@@ -10,7 +10,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_256_BIN,
 )
 
-# from pipefuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
+# from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP
 from pipefuser.pipelines.pip.distri_pixartalpha import DistriPixArtAlphaPiP
 from pipefuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
 from pipefuser.schedulers.pip.ddim import DDIMSchedulerPiP

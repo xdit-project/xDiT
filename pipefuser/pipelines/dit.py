@@ -8,7 +8,7 @@ from diffusers import DiTPipeline
 from pipefuser.models.diffusers import Transformer2DModel
 
 
-# from pipefuser.models.distri_sdxl_unet_tp import DistriSDXLUNetTP
+# from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP
 from pipefuser.models import NaivePatchDiT, DistriDiTPP, DistriDiTTP
 from pipefuser.utils import DistriConfig, PatchParallelismCommManager
 from pipefuser.logger import init_logger

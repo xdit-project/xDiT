@@ -19,7 +19,7 @@ from pipefuser.logger import init_logger
 logger = init_logger(__name__)
 
 
-class DistriSDXLUNetPP(BaseModel):  # for Patch Parallelism
+class DistriUNetPP(BaseModel):  # for Patch Parallelism
     def __init__(self, model: UNet2DConditionModel, distri_config: DistriConfig):
         assert isinstance(model, UNet2DConditionModel)
         if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
@@ -52,7 +52,7 @@ class DistriSDXLUNetPP(BaseModel):  # for Patch Parallelism
                         wrapped_submodule = DistriGroupNorm(submodule, distri_config)
                         setattr(module, subname, wrapped_submodule)
 
-        super(DistriSDXLUNetPP, self).__init__(model, distri_config)
+        super(DistriUNetPP, self).__init__(model, distri_config)
 
     def forward(
         self,

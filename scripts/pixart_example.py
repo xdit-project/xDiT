@@ -158,9 +158,6 @@ def main():
         # use_safetensors=True,
     )
 
-    if args.output_type == "pil":
-        print("Patching Conv2d")
-        PatchConv2d(1024)(pipeline.pipeline)
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(

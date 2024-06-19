@@ -5,3 +5,5 @@ __pycache__
 pipefuser.egg-info
 *.log
 *.txt
+results/
+pipefusion.egg-info/

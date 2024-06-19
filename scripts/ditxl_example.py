@@ -72,19 +72,7 @@ def main():
         parallelism=args.parallelism,
         mode=args.sync_mode,
         use_cuda_graph=False,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
     )
-
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = args.ulysses_degree
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree,
-            ring_degree,
-            distri_config.rank,
-            distri_config.world_size,
-            use_ulysses_low=args.use_use_ulysses_low,
-        )
 
     pipeline = DistriDiTPipeline.from_pretrained(
         distri_config=distri_config,

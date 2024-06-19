@@ -40,13 +40,13 @@ do
 # Sequence Parallelism
 # sp u=8, ulyssess
 # SYNC_MODE="full_sync"
-# export ACC_FLAG="--use_seq_parallel_attn --ulysses_degree 4 --use_use_ulysses_low"
-# torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
+# export ACC_FLAG="--ulysses_degree 4 --use_use_ulysses_low"
+# torchrun --nproc_per_node=$N_GPUS -p sequence scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
 
 # sp u=1, ring
 # SYNC_MODE="full_sync"
-# export ACC_FLAG="--use_seq_parallel_attn --ulysses_degree 2 --use_use_ulysses_low"
-# torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
+# export ACC_FLAG="--ulysses_degree 2 --use_use_ulysses_low"
+# torchrun --nproc_per_node=$N_GPUS -p sequence scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
 
 # Tensor Parallel
 # torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p "tensor" --model_id $MODEL_ID $TASK_SIZE

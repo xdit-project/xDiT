@@ -118,6 +118,7 @@ class DistriTransformer2DModel(BaseModule):
                 // (
                     distri_config.n_device_per_batch
                     if distri_config.parallelism == "patch"
+                    or distri_config.parallelism == "sequence"
                     else 1
                 ),
                 hidden_states.shape[-1] // module.patch_size,

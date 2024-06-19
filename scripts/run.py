@@ -14,15 +14,6 @@ from pipefuser.pipelines import (
 from pipefuser.utils import DistriConfig
 
 
-HAS_LONG_CTX_ATTN = False
-try:
-    from yunchang import set_seq_parallel_pg
-
-    HAS_LONG_CTX_ATTN = True
-except ImportError:
-    print("yunchang not found")
-
-
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -91,7 +82,7 @@ def get_args() -> argparse.Namespace:
         "--parallelism",
         type=str,
         default="patch",
-        choices=["patch", "tensor", "naive_patch", "pipefusion"],
+        choices=["patch", "tensor", "naive_patch", "pipefusion", "sequence"],
     )
     parser.add_argument(
         "--no_cuda_graph", action="store_true", help="Disable CUDA graph"
@@ -121,12 +112,6 @@ def get_args() -> argparse.Namespace:
         help="Ignored ratio of the slowest and fastest steps",
     )
 
-    parser.add_argument(
-        "--use_seq_parallel_attn",
-        action="store_true",
-        default=False,
-        help="Enable sequence parallel attention.",
-    )
     parser.add_argument("--pp_num_patch", type=int, default=2)
     parser.add_argument(
         "--no_use_resolution_binning",
@@ -156,18 +141,10 @@ def main():
         use_cuda_graph=not args.no_cuda_graph,
         parallelism=args.parallelism,
         split_scheme=args.split_scheme,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
         scheduler=args.scheduler,
         pp_num_patch=args.pp_num_patch,
         use_resolution_binning=not args.no_use_resolution_binning,
     )
-
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = distri_config.world_size
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree, ring_degree, distri_config.rank, distri_config.world_size
-        )
 
     if args.model_path is None:
         if args.pipeline == "dit":

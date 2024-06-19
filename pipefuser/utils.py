@@ -10,6 +10,15 @@ logger = init_logger(__name__)
 from typing import Union, Optional, List
 
 
+HAS_LONG_CTX_ATTN = False
+try:
+    from yunchang import set_seq_parallel_pg
+
+    HAS_LONG_CTX_ATTN = True
+except ImportError:
+    print("yunchang not found")
+
+
 def check_env():
     if version.parse(torch.version.cuda) < version.parse("11.3"):
         # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html
@@ -42,7 +51,6 @@ class DistriConfig:
         use_cuda_graph: bool = True,
         parallelism: str = "patch",
         split_scheme: str = "row",
-        use_seq_parallel_attn: bool = False,
         batch_size: Optional[int] = None,
         pp_num_patch: int = 2,
         verbose: bool = False,
@@ -62,9 +70,7 @@ class DistriConfig:
             comm_checkpoint (int, optional): _description_. Defaults to 1.
             mode (str, optional): sync mode. Defaults to "corrected_async_gn".
             use_cuda_graph (bool, optional): use cuda graph to accelerate speed. Defaults to True.
-            parallelism (str, optional): parallel approches. Defaults to "patch".
             split_scheme (str, optional): how to split the image. Defaults to "row".
-            use_seq_parallel_attn (bool, optional): sequence parallelism. Defaults to False.
             batch_size (Optional[int], optional): batch size. Defaults to None.
             pp_num_patch (int, optional): patch number. Defaults to 2.
             verbose (bool, optional): verbose print. Defaults to False.
@@ -102,7 +108,7 @@ class DistriConfig:
 
         self.parallelism = parallelism
         self.split_scheme = split_scheme
-        self.use_seq_parallel_attn = use_seq_parallel_attn
+        self.use_seq_parallel_attn = self.parallelism == "sequence"
 
         self.verbose = verbose
         self.use_resolution_binning = use_resolution_binning
@@ -148,6 +154,11 @@ class DistriConfig:
 
         # pipeline variance
         self.num_inference_steps = None
+
+        if self.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
+            ulysses_degree = self.world_size
+            ring_degree = self.world_size // ulysses_degree
+            set_seq_parallel_pg(ulysses_degree, ring_degree, self.rank, self.world_size)
 
     def batch_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:

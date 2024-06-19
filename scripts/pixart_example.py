@@ -30,7 +30,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipefusion", "tensor"],
+        choices=["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -133,23 +133,11 @@ def main():
         parallelism=args.parallelism,
         mode=args.sync_mode,
         pp_num_patch=args.pp_num_patch,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
         scheduler=args.scheduler,
     )
-
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = args.ulysses_degree
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree,
-            ring_degree,
-            distri_config.rank,
-            distri_config.world_size,
-            use_ulysses_low=args.use_use_ulysses_low,
-        )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,

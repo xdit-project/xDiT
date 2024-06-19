@@ -28,12 +28,15 @@ from pipefuser.utils import (
 )
 from pipefuser.logger import init_logger
 
+from patchvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+
 logger = init_logger(__name__)
 
 
 class DistriPixArtAlphaPipeline:
     def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig):
         self.pipeline = pipeline
+        self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder)
 
         # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False

@@ -9,7 +9,11 @@ from diffusers.models.transformers.transformer_3d3 import SD3Transformer2DModel
 from pipefuser.pipelines.pip.distri_sd3 import DistriSD3PiP
 from pipefuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
 from pipefuser.schedulers.pip.ddim import DDIMSchedulerPiP
-from diffusers import DPMSolverMultistepScheduler
+from diffusers import (
+    DPMSolverMultistepScheduler,
+    FlowMatchEulerDiscreteScheduler
+)
+
 from pipefuser.models import (
     NaivePatchDiT,
     DistriDiTPP,
@@ -26,7 +30,7 @@ from pipefuser.logger import init_logger
 logger = init_logger(__name__)
 
 
-class DistriPixArtAlphaPipeline:
+class DistriSD3Pipeline:
     def __init__(self, pipeline: StableDiffusion3Pipeline, module_config: DistriConfig):
         self.pipeline = pipeline
 
@@ -75,6 +79,10 @@ class DistriPixArtAlphaPipeline:
                 scheduler = DDIMSchedulerPiP.from_pretrained(
                     pretrained_model_name_or_path, subfolder="scheduler"
                 )
+            elif distri_config.scheduler == "FM-ED":
+                scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                    pretrained_model_name_or_path, subfolder="scheduler"
+                )
             scheduler.init(distri_config)
 
         if distri_config.parallelism == "pipefusion":
@@ -97,7 +105,7 @@ class DistriPixArtAlphaPipeline:
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
 
-        ret = DistriPixArtAlphaPipeline(pipeline, distri_config)
+        ret = DistriSD3Pipeline(pipeline, distri_config)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")
@@ -107,7 +115,7 @@ class DistriPixArtAlphaPipeline:
         self.pipeline.set_progress_bar_config(**kwargs)
 
     @torch.no_grad()
-    def __call__(self, prompt, num_inference_steps=20, *args, **kwargs):
+    def __call__(self, prompt, num_inference_steps=28, *args, **kwargs):
         assert "height" not in kwargs, "height should not be in kwargs"
         assert "width" not in kwargs, "width should not be in kwargs"
         self.distri_config.num_inference_steps = num_inference_steps

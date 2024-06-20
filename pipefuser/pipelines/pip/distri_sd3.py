@@ -30,18 +30,35 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         self,
         latents: torch.FloatTensor,
         prompt_embeds: torch.FloatTensor,
-        prompt_attention_mask: torch.FloatTensor,
-        added_cond_kwargs: Dict,
         t: Union[float, torch.Tensor],
-        do_classifier_free_guidance: bool,
-        guidance_scale: float,
-        latent_channels: int,
+        pooled_prompt_embeds: torch.FloatTensor,
     ):
-        # if latents is None:
-        #     logger.info(f"rank {self.distri_config.rank} latents is None")
-        # else:
-        #     logger.info(f"rank {self.distri_config.rank} latents shape {latents.shape}")
         distri_config = self.distri_config
+
+        if distri_config.rank == 1:
+            # expand the latents if we are doing classifier free guidance
+            latents = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timestep = t.expand(latents.shape[0])
+
+        noise_pred = self.transformer(
+            hidden_states=latents,
+            timestep=timestep,
+            encoder_hidden_states=prompt_embeds,
+            pooled_projections=pooled_prompt_embeds,
+            joint_attention_kwargs=self.joint_attention_kwargs,
+            return_dict=False,
+        )[0]
+
+        if distri_config.rank == 0:
+            # perform guidance
+            if self.do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+
+               
 
     def __call__(
         self,
@@ -245,164 +262,132 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         )
 
         # 6. Denoising loop
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+
+        dtype = latents.dtype
+        pp_num_patch = distri_config.pp_num_patch
+
         assert self.comm_manager.recv_queue == []
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            if distri_config.mode != "full_sync":
+                warmup_timesteps = timesteps[: distri_config.warmup_steps + 1]
+                pip_timesteps = timesteps[distri_config.warmup_steps + 1 :]
+            else:
+                warmup_timesteps = timesteps
+                pip_timesteps = None
+            
+            for i, t in enumerate(warmup_timesteps):
+                if distri_config.rank == 0:
+                    ori_latents = latents
+
+                if distri_config.rank == 1 and i == 0:
+                    pass
+                else:
+                    self.comm_manager.irecv_from_prev(dtype)
+                    latents = self.comm_manager.get_data()
+                assert self._interrupt == False
                 # TBD
-                if self.interrupt:
-                    continue
+                # if self.interrupt:
+                    # continue
+                
+                latents = self.pip_forward(
+                    latents,
+                    prompt_embeds,
+                    t,
+                    pooled_prompt_embeds,
+                )
 
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = t.expand(latent_model_input.shape[0])
+                if distri_config.rank == 0:
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents_dtype = latents.dtype
+                    latents = self.scheduler.step(latents, t, ori_latents, return_dict=False)[0]
 
-                noise_pred = self.transformer(
-                    hidden_states=latent_model_input,
-                    timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
-                    return_dict=False,
-                )[0]
-
-                # perform guidance
-                if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-
-                if latents.dtype != latents_dtype:
-                    if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                        latents = latents.to(latents_dtype)
+                    if latents.dtype != latents_dtype:
+                        if torch.backends.mps.is_available():
+                            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                            latents = latents.to(latents_dtype)
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
-
+                
                 # TBD
                 # if XLA_AVAILABLE:
                 #     xm.mark_step()
+                
+                self.comm_manager.isend_to_next(latents)
+            assert self.comm_manager.recv_queue == []
 
-        # with self.progress_bar(total=num_inference_steps) as progress_bar:
-        #     if distri_config.mode != "full_sync":
-        #         warmup_timesteps = timesteps[: distri_config.warmup_steps + 1]
-        #         pip_timesteps = timesteps[distri_config.warmup_steps + 1 :]
-        #     else:
-        #         warmup_timesteps = timesteps
-        #         pip_timesteps = None
-        #     for i, t in enumerate(warmup_timesteps):
-        #         if distri_config.rank == 0:
-        #             ori_latents = latents
+            if distri_config.rank == 1:
+                self.comm_manager.irecv_from_prev(dtype)
+                latents = self.comm_manager.get_data()
+                for _ in range(len(pip_timesteps) - 1):
+                    for batch_idx in range(pp_num_patch):
+                        self.comm_manager.irecv_from_prev(idx=batch_idx)
+                _, _, c, _ = latents.shape
+                latents = list(latents.split(c // pp_num_patch, dim=2))
+            
+            else:
+                for _ in range(len(pip_timesteps)):
+                    for batch_idx in range(pp_num_patch):
+                        self.comm_manager.irecv_from_prev(idx=batch_idx)
+                if distri_config.rank == 0:
+                    _, _, c, _ = latents.shape
+                    c //= pp_num_patch
+                    tmp = latents
+                    latents = []
+                    for batch_idx in range(pp_num_patch):
+                        latents.append(tmp[..., batch_idx * c : (batch_idx + 1) * c, :])
+                    ori_latents = [None for _ in range(pp_num_patch)]
+                else:
+                    latents = [None for _ in range(pp_num_patch)]
 
-        #         if distri_config.rank == 1 and i == 0:
-        #             pass
-        #         else:
-        #             self.comm_manager.irecv_from_prev(dtype)
-        #             latents = self.comm_manager.get_data()
+            for i, t in enumerate(pip_timesteps):
 
-        #         latents = self.pip_forward(
-        #             latents,
-        #             prompt_embeds,
-        #             prompt_attention_mask,
-        #             added_cond_kwargs,
-        #             t,
-        #             do_classifier_free_guidance,
-        #             guidance_scale,
-        #             latent_channels,
-        #         )
+                assert self.interrupt == False
 
-        #         if distri_config.rank == 0:
-        #             latents = self.scheduler_step(
-        #                 latents,
-        #                 ori_latents,
-        #                 t,
-        #                 extra_step_kwargs,
-        #             )
+                for batch_idx in range(pp_num_patch):
 
-        #         if i == len(timesteps) - 1 or (
-        #             (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-        #         ):
-        #             progress_bar.update()
+                    if distri_config.rank == 0:
+                        ori_latents[batch_idx] = latents[batch_idx]
+                    
+                    if distri_config.rank == 1 and i == 0:
+                        pass
+                    else:
+                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
 
-        #         self.comm_manager.isend_to_next(latents)
+                    latents[batch_idx] = self.pip_forward(
+                        latents[batch_idx],
+                        prompt_embeds,
+                        t,
+                        pooled_prompt_embeds,
+                    )
 
-        #     assert self.comm_manager.recv_queue == []
+                    if distri_config.rank == 0:
+                        # compute the previous noisy sample x_t -> x_t-1
+                        latents_dtype = latents.dtype
+                        latents = self.scheduler.step(latents, t, ori_latents, return_dict=False)[0]
 
-        #     if distri_config.rank == 1:
-        #         self.comm_manager.irecv_from_prev(dtype)
-        #         latents = self.comm_manager.get_data()
-        #         for _ in range(len(pip_timesteps) - 1):
-        #             for batch_idx in range(pp_num_patch):
-        #                 self.comm_manager.irecv_from_prev(idx=batch_idx)
-        #         _, _, c, _ = latents.shape
-        #         latents = list(latents.split(c // pp_num_patch, dim=2))
+                        if latents.dtype != latents_dtype:
+                            if torch.backends.mps.is_available():
+                                # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                                latents = latents.to(latents_dtype)
+                        if i != len(pip_timesteps) - 1:
+                            self.comm_manager.isend_to_next(latents[batch_idx])
+                        
+                    else:
+                        self.comm_manager.isend_to_next(latents[batch_idx])
 
-        #     else:
-        #         for _ in range(len(pip_timesteps)):
-        #             for batch_idx in range(pp_num_patch):
-        #                 self.comm_manager.irecv_from_prev(idx=batch_idx)
-        #         if distri_config.rank == 0:
-        #             _, _, c, _ = latents.shape
-        #             c //= pp_num_patch
-        #             tmp = latents
-        #             latents = []
-        #             for batch_idx in range(pp_num_patch):
-        #                 latents.append(tmp[..., batch_idx * c : (batch_idx + 1) * c, :])
-        #             ori_latents = [None for _ in range(pp_num_patch)]
-        #         else:
-        #             latents = [None for _ in range(pp_num_patch)]
+                i += len(warmup_timesteps)
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
 
-        #     for i, t in enumerate(pip_timesteps):
-        #         for batch_idx in range(pp_num_patch):
+            if distri_config.rank == 0:
+                latents = torch.cat(latents, dim=2)
+            else:
+                return None
 
-        #             if distri_config.rank == 0:
-        #                 ori_latents[batch_idx] = latents[batch_idx]
-
-        #             if distri_config.rank == 1 and i == 0:
-        #                 pass
-        #             else:
-        #                 latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
-
-        #             latents[batch_idx] = self.pip_forward(
-        #                 latents[batch_idx],
-        #                 prompt_embeds,
-        #                 prompt_attention_mask,
-        #                 added_cond_kwargs,
-        #                 t,
-        #                 do_classifier_free_guidance,
-        #                 guidance_scale,
-        #                 latent_channels,
-        #             )
-
-        #             if distri_config.rank == 0:
-        #                 latents[batch_idx] = self.scheduler_step(
-        #                     latents[batch_idx],
-        #                     ori_latents[batch_idx],
-        #                     t,
-        #                     extra_step_kwargs,
-        #                     batch_idx,
-        #                 )
-        #                 # self.comm_manager.irecv_from_prev(idx=batch_idx)
-        #                 if i != len(pip_timesteps) - 1:
-        #                     self.comm_manager.isend_to_next(latents[batch_idx])
-
-        #             else:
-        #                 self.comm_manager.isend_to_next(latents[batch_idx])
-        #         i += len(warmup_timesteps)
-        #         if i == len(timesteps) - 1 or (
-        #             (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-        #         ):
-        #             progress_bar.update()
-
-        #     if distri_config.rank == 0:
-        #         latents = torch.cat(latents, dim=2)
-        #     else:
-        #         return None
 
         if output_type == "latent":
             image = latents

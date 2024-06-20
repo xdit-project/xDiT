@@ -44,7 +44,10 @@ class DistriDiTPipeline:
         ).to(device)
 
         logger.info(f"Using {distri_config.parallelism } parallelism")
-        if distri_config.parallelism == "patch":
+        if (
+            distri_config.parallelism == "patch"
+            or distri_config.parallelism == "sequence"
+        ):
             transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "tensor":
             transformer = DistriDiTTP(transformer, distri_config)
@@ -156,7 +159,10 @@ class DistriDiTPipeline:
                 comm_manager.clear()
             if distri_config.parallelism == "naive_patch":
                 counters = [0, 1]
-            elif distri_config.parallelism == "patch":
+            elif (
+                distri_config.parallelism == "patch"
+                or distri_config.parallelism == "sequence"
+            ):
                 counters = [
                     0,
                     distri_config.warmup_steps + 1,

@@ -30,7 +30,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipefusion", "tensor"],
+        choices=["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -83,6 +83,11 @@ def main():
         default=1,
     )
     parser.add_argument(
+        "--pipefusion_warmup_step",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--use_use_ulysses_low",
         action="store_true",
     )
@@ -92,6 +97,10 @@ def main():
     )
     parser.add_argument(
         "--use_cuda_graph",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--use_parallel_vae",
         action="store_true",
     )
     parser.add_argument(
@@ -123,50 +132,41 @@ def main():
     # torch.backends.cudnn.benchmark=True
     torch.backends.cudnn.deterministic = True
 
+    enable_parallel_vae = args.use_parallel_vae
+    if args.height >= 4096:
+        enable_parallel_vae = True
+
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
         height=args.height,
         width=args.width,
-        warmup_steps=4,
+        warmup_steps=args.pipefusion_warmup_step,
         do_classifier_free_guidance=True,
         split_batch=False,
         parallelism=args.parallelism,
         mode=args.sync_mode,
         pp_num_patch=args.pp_num_patch,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
         use_resolution_binning=not args.no_use_resolution_binning,
         use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
         scheduler=args.scheduler,
     )
 
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = args.ulysses_degree
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree,
-            ring_degree,
-            distri_config.rank,
-            distri_config.world_size,
-            use_ulysses_low=args.use_use_ulysses_low,
-        )
-
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,
+        enable_parallel_vae=enable_parallel_vae,
         # variant="fp16",
         # use_safetensors=True,
     )
 
-    if args.output_type == "pil":
-        print("Patching Conv2d")
-        PatchConv2d(1024)(pipeline.pipeline)
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(
         prompt=args.prompt,
         generator=torch.Generator(device="cuda").manual_seed(42),
         output_type=args.output_type,
+        num_inference_steps=args.num_inference_steps,
     )
 
     torch.cuda.reset_peak_memory_stats()

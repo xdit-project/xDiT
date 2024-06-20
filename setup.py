@@ -1,4 +1,5 @@
 from setuptools import find_packages, setup
+import os
 
 
 if __name__ == "__main__":
@@ -12,7 +13,21 @@ if __name__ == "__main__":
         author="Jiannan Wang, Jiarui Fang, Aoyu Li, Pengcheng Yang",
         author_email="",
         packages=find_packages(),
-        install_requires=["torch>=2.2", "diffusers==0.29.0", "transformers", "tqdm"],
+        install_requires=[
+            "torch>=2.2",
+            "diffusers==0.29.0",
+            "transformers",
+            "tqdm",
+            "sentencepiece",
+            "accelerate",
+            f"patchvae @ file://localhost/{os.path.join(os.getcwd(), 'pipefuser/modules/patchvae')}#egg=patchvae",
+        ],
+        dependency_links=[
+            "file://"
+            + os.path.join(
+                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b1"
+            )
+        ],
         url="https://github.com/PipeFusion/PipeFusion.",
         description="DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models",
         long_description=long_description,

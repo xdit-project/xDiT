@@ -83,6 +83,11 @@ def main():
         default=1,
     )
     parser.add_argument(
+        "--pipefusion_warmup_step",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--use_use_ulysses_low",
         action="store_true",
     )
@@ -135,7 +140,7 @@ def main():
     distri_config = DistriConfig(
         height=args.height,
         width=args.width,
-        warmup_steps=4,
+        warmup_steps=args.pipefusion_warmup_step,
         do_classifier_free_guidance=True,
         split_batch=False,
         parallelism=args.parallelism,

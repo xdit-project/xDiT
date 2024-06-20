@@ -1,5 +1,5 @@
 from pipefuser.models.diffusers.attention import FeedForward
-from pipefuser.modules.dit.patch_parallel.transformer2d import DistriTransformer2DModel
+from pipefuser.modules.dit.patch_parallel.transformer_2d import DistriTransformer2DModel
 import torch
 
 # from diffusers.models.attention_processor import Attention

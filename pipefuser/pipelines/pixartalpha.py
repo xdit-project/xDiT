@@ -34,9 +34,10 @@ logger = init_logger(__name__)
 
 
 class DistriPixArtAlphaPipeline:
-    def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig):
+    def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig, enable_parallel_vae: bool = False):
         self.pipeline = pipeline
-        self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder)
+        if enable_parallel_vae:
+            self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder)
 
         # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
@@ -54,6 +55,7 @@ class DistriPixArtAlphaPipeline:
             "pretrained_model_name_or_path", "PixArt-alpha/PixArt-XL-2-1024-MS"
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
+        enable_parallel_vae = kwargs.pop("enable_parallel_vae", False)
         transformer = Transformer2DModel.from_pretrained(
             pretrained_model_name_or_path,
             torch_dtype=torch_dtype,
@@ -108,7 +110,7 @@ class DistriPixArtAlphaPipeline:
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
 
-        ret = DistriPixArtAlphaPipeline(pipeline, distri_config)
+        ret = DistriPixArtAlphaPipeline(pipeline, distri_config, enable_parallel_vae=enable_parallel_vae)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")

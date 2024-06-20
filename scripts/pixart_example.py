@@ -95,6 +95,10 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+        "--use_parallel_vae",
+        action="store_true",
+    )
+    parser.add_argument(
         "--output_type",
         type=str,
         default="latent",
@@ -123,6 +127,10 @@ def main():
     # torch.backends.cudnn.benchmark=True
     torch.backends.cudnn.deterministic = True
 
+    enable_parallel_vae = args.use_parallel_vae
+    if args.height >= 4096:
+        enable_parallel_vae = True
+
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
         height=args.height,
@@ -142,6 +150,7 @@ def main():
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,
+        enable_parallel_vae=enable_parallel_vae,
         # variant="fp16",
         # use_safetensors=True,
     )
@@ -152,6 +161,7 @@ def main():
         prompt=args.prompt,
         generator=torch.Generator(device="cuda").manual_seed(42),
         output_type=args.output_type,
+        num_inference_steps=args.num_inference_steps,
     )
 
     torch.cuda.reset_peak_memory_stats()

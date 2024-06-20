@@ -43,78 +43,6 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         #     logger.info(f"rank {self.distri_config.rank} latents shape {latents.shape}")
         distri_config = self.distri_config
 
-        if distri_config.rank == 1:
-            latents = (
-                torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-            )
-            latents = self.scheduler.scale_model_input(latents, t)
-
-        current_timestep = t
-        if not torch.is_tensor(current_timestep):
-            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-            # This would be a good case for the `match` statement (Python 3.10+)
-            is_mps = latents.device.type == "mps"
-
-            if isinstance(current_timestep, float):
-                dtype = torch.float32 if is_mps else torch.float64
-            else:
-                dtype = torch.int32 if is_mps else torch.int64
-            current_timestep = torch.tensor(
-                [current_timestep], dtype=dtype, device=latents.device
-            )
-        elif len(current_timestep.shape) == 0:
-            current_timestep = current_timestep[None].to(latents.device)
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        current_timestep = current_timestep.expand(latents.shape[0])
-
-        # predict noise model_output
-        # logger.info(f"rank {self.distri_config.rank} latents shape {latents.shape}")
-        noise_pred = self.transformer(
-            latents,
-            encoder_hidden_states=prompt_embeds,
-            encoder_attention_mask=prompt_attention_mask,
-            timestep=current_timestep,
-            added_cond_kwargs=added_cond_kwargs,
-            return_dict=False,
-        )[0]
-
-        if distri_config.rank == 0:
-            # perform guidance
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (
-                    noise_pred_text - noise_pred_uncond
-                )
-
-            # learned sigma
-            if self.transformer.config.out_channels // 2 == latent_channels:
-                noise_pred = noise_pred.chunk(2, dim=1)[0]
-            else:
-                noise_pred = noise_pred
-
-        return noise_pred
-
-    def scheduler_step(
-        self,
-        noise_pred: torch.FloatTensor,
-        latents: torch.FloatTensor,
-        t: Union[float, torch.Tensor],
-        extra_step_kwargs: Dict,
-        batch_idx: Union[int] = None,
-    ):
-
-        # compute previous image: x_t -> x_t-1
-        latents = self.scheduler.step(
-            noise_pred,
-            t,
-            latents,
-            **extra_step_kwargs,
-            return_dict=False,
-            batch_idx=batch_idx,
-        )[0]
-
-        return latents
-
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -317,7 +245,48 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         )
 
         # 6. Denoising loop
-        # assert self.comm_manager.recv_queue == []
+        assert self.comm_manager.recv_queue == []
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # TBD
+                if self.interrupt:
+                    continue
+
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                timestep = t.expand(latent_model_input.shape[0])
+
+                noise_pred = self.transformer(
+                    hidden_states=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    pooled_projections=pooled_prompt_embeds,
+                    joint_attention_kwargs=self.joint_attention_kwargs,
+                    return_dict=False,
+                )[0]
+
+                # perform guidance
+                if self.do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents_dtype = latents.dtype
+                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+
+                if latents.dtype != latents_dtype:
+                    if torch.backends.mps.is_available():
+                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                        latents = latents.to(latents_dtype)
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+
+                # TBD
+                # if XLA_AVAILABLE:
+                #     xm.mark_step()
 
         # with self.progress_bar(total=num_inference_steps) as progress_bar:
         #     if distri_config.mode != "full_sync":

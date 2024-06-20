@@ -157,7 +157,6 @@ class DistriSD3Pipeline:
                 height=distri_config.height,
                 width=distri_config.width,
                 prompt="",
-                use_resolution_binning=distri_config.use_resolution_binning,
                 num_inference_steps=distri_config.warmup_steps + 2,
                 output_type="latent",
             )

@@ -30,7 +30,7 @@ def main():
         "-p",
         default="patch",
         type=str,
-        choices=["patch", "naive_patch", "pipefusion", "tensor"],
+        choices=["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
         help="Parallelism to use.",
     )
     parser.add_argument(
@@ -40,9 +40,23 @@ def main():
         help="Enable sequence parallel attention.",
     )
     parser.add_argument(
+        "--sync_mode",
+        type=str,
+        default="corrected_async_gn",
+        choices=[
+            "separate_gn",
+            "async_gn",
+            "corrected_async_gn",
+            "sync_gn",
+            "full_sync",
+            "no_sync",
+        ],
+        help="Different GroupNorm synchronization modes",
+    )
+    parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=28,
+        default=20,
     )
     parser.add_argument(
         "--pp_num_patch", type=int, default=2, help="patch number in pipefusion."
@@ -60,22 +74,35 @@ def main():
         help="The width of image",
     )
     parser.add_argument(
+        "--no_use_resolution_binning",
+        action="store_true",
+    )
+    parser.add_argument(
         "--ulysses_degree",
         type=int,
         default=1,
     )
     parser.add_argument(
-        "--use_use_ulysses_low",
-        action="store_true",
+        "--pipefusion_warmup_step",
+        type=int,
+        default=1,
     )
+    # parser.add_argument(
+    #     "--use_use_ulysses_low",
+    #     action="store_true",
+    # )
     parser.add_argument(
         "--use_profiler",
         action="store_true",
     )
-    parser.add_argument(
-        "--use_cuda_graph",
-        action="store_true",
-    )
+    # parser.add_argument(
+    #     "--use_cuda_graph",
+    #     action="store_true",
+    # )
+    # parser.add_argument(
+    #     "--use_parallel_vae",
+    #     action="store_true",
+    # )
     parser.add_argument(
         "--output_type",
         type=str,
@@ -87,9 +114,9 @@ def main():
     parser.add_argument(
         "--scheduler",
         "-s",
-        default="FM-ED",
+        default="dpm-solver",
         type=str,
-        choices=["dpm-solver", "ddim", "FM-ED"],
+        choices=["dpm-solver", "ddim"],
         help="Scheduler to use.",
     )
 
@@ -109,27 +136,14 @@ def main():
     distri_config = DistriConfig(
         height=args.height,
         width=args.width,
-        warmup_steps=4,
-        do_classifier_free_guidance=True,
+        warmup_steps=args.pipefusion_warmup_step,
         split_batch=False,
         parallelism=args.parallelism,
+        mode=args.sync_mode,
         pp_num_patch=args.pp_num_patch,
-        use_seq_parallel_attn=args.use_seq_parallel_attn,
-        use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
         scheduler=args.scheduler,
     )
-
-    if distri_config.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-        ulysses_degree = args.ulysses_degree
-        ring_degree = distri_config.world_size // ulysses_degree
-        set_seq_parallel_pg(
-            ulysses_degree,
-            ring_degree,
-            distri_config.rank,
-            distri_config.world_size,
-            use_ulysses_low=args.use_use_ulysses_low,
-        )
 
     pipeline = DistriSD3Pipeline.from_pretrained(
         distri_config=distri_config,

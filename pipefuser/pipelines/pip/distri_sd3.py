@@ -32,6 +32,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         prompt_embeds: torch.FloatTensor,
         t: Union[float, torch.Tensor],
         pooled_prompt_embeds: torch.FloatTensor,
+        timestep_expand_shape: int
     ):
         distri_config = self.distri_config
 
@@ -40,7 +41,9 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
             latents = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timestep = t.expand(latents.shape[0])
+        
+        # timestep = t.expand(latents.shape[0]) 
+        timestep = t.expand(timestep_expand_shape)
 
         noise_pred = self.transformer(
             hidden_states=latents,
@@ -57,8 +60,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-
-               
+        return noise_pred
 
     def __call__(
         self,
@@ -267,6 +269,8 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
         dtype = latents.dtype
         pp_num_patch = distri_config.pp_num_patch
 
+        timestep_expand_shape = latents.shape[0] * 2 if self.do_classifier_free_guidance else latents.shape[0]
+
         assert self.comm_manager.recv_queue == []
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -291,13 +295,16 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 # if self.interrupt:
                     # continue
                 
+                logger.info(f"rank {distri_config.rank} {i} : {latents.shape}") 
                 latents = self.pip_forward(
                     latents,
                     prompt_embeds,
                     t,
                     pooled_prompt_embeds,
+                    timestep_expand_shape
                 )
 
+                logger.info(f"rank {distri_config.rank} {i} : {latents.shape} !") 
                 if distri_config.rank == 0:
                     # compute the previous noisy sample x_t -> x_t-1
                     latents_dtype = latents.dtype
@@ -315,7 +322,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 # TBD
                 # if XLA_AVAILABLE:
                 #     xm.mark_step()
-                
+                logger.info(f"rank {distri_config.rank} {i} : {latents.shape} ?") 
                 self.comm_manager.isend_to_next(latents)
             assert self.comm_manager.recv_queue == []
 
@@ -362,6 +369,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                         prompt_embeds,
                         t,
                         pooled_prompt_embeds,
+                        timestep_expand_shape
                     )
 
                     if distri_config.rank == 0:

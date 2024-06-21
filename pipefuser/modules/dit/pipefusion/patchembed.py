@@ -91,5 +91,5 @@ class DistriPatchEmbed(BaseModule):
                 self.batch_idx = 0
                 self.counter += 1
 
-        logger.info(f"{latent.shape} {pos_embed.shape}")
+        logger.info(f"rank {distri_config.rank} {latent.shape} {pos_embed.shape}")
         return (latent + pos_embed).to(latent.dtype)

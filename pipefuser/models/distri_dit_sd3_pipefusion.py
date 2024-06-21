@@ -10,6 +10,7 @@ import torch
 from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.modules.dit.pipefusion import (
     DistriSelfAttentionPiP,
+    DistriSD3Transformer2DModel,
     DistriConv2dPiP,
     DistriPatchEmbed,
 )
@@ -26,7 +27,7 @@ from typing import Optional, Dict, Any
 class DistriDiTSD3PipeFusion(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: SD3Transformer2DModel, distri_config: DistriConfig):
         assert isinstance(model, SD3Transformer2DModel)
-        # model = DistriTransformer2DModel(model, distri_config)
+        model = DistriSD3Transformer2DModel(model, distri_config)
         for name, module in model.named_modules():
             if isinstance(module, BaseModule):
                 continue

@@ -240,6 +240,7 @@ class PipelineParallelismCommManager:
 
     def isend_to_next(self, tensor: torch.Tensor):
         # logger.info(f"rank {self.distri_config.rank} is sending")
+        tensor = tensor.contiguous()
         if self.send_shape is None:
             self.first_send_to_next(tensor)
         group = (

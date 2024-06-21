@@ -9,7 +9,7 @@ logger = init_logger(__name__)
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Tuple
 import torch
 import torch.nn.functional as F
 from torch import distributed as dist
@@ -68,7 +68,7 @@ class DistriSD3Transformer2DModel(BaseModule):
         timestep: torch.LongTensor = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
-    ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
+    ):
         """
         The [`SD3Transformer2DModel`] forward method.
 
@@ -110,22 +110,12 @@ class DistriSD3Transformer2DModel(BaseModule):
         #         "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
         #     )
 
-        # TODO
-        logger.info(f"rank {distri_config.rank} hidden_states.shape[-2:] = {hidden_states.shape[-2:]}")
-        if distri_config.rank == 0:
-            height, width = hidden_states.shape[-2:]
-            logger.info(f"height = {height}, width = {width}")
-            logger.info(f"hidden_states.shape = {hidden_states.shape}")
-            if not is_warmup:
-                height //= distri_config.pp_num_patch
-
         if distri_config.rank == 1:
             hidden_states = module.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
-        logger.info(f"rank {distri_config.rank} timestep {timestep.shape}, pooled_projections {pooled_projections.shape}")
+        
         temb = module.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = module.context_embedder(encoder_hidden_states)
 
-        logger.info(f"rank {distri_config.rank} len(transformer_blocks) = {len(module.transformer_blocks)}")
         for block in module.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
@@ -136,12 +126,15 @@ class DistriSD3Transformer2DModel(BaseModule):
             hidden_states = module.norm_out(hidden_states, temb)
             hidden_states = module.proj_out(hidden_states)
 
-            # unpatchify
             patch_size = module.config.patch_size
+            height, width = hidden_states.shape[-2] // module.out_channels // patch_size, hidden_states.shape[-1] * patch_size
+            if not is_warmup:
+                height //= distri_config.pp_num_patch
+
+            # unpatchify
             height = height // patch_size
             width = width // patch_size
 
-            logger.info(f"hidden_states.shape = {hidden_states.shape}")
             hidden_states = hidden_states.reshape(
                 shape=(hidden_states.shape[0], height, width, patch_size, patch_size, module.out_channels)
             )

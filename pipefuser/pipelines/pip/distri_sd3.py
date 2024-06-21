@@ -53,6 +53,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
             joint_attention_kwargs=self.joint_attention_kwargs,
             return_dict=False,
         )[0]
+        logger.info(f"{distri_config.rank} {noise_pred.shape}")
 
         if distri_config.rank == 0:
             # perform guidance
@@ -343,9 +344,11 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                     _, _, c, _ = latents.shape
                     c //= pp_num_patch
                     tmp = latents
+                    logger.info(f"tmp {tmp.shape}")
                     latents = []
                     for batch_idx in range(pp_num_patch):
                         latents.append(tmp[..., batch_idx * c : (batch_idx + 1) * c, :])
+                    logger.info(f"len(latents) {len(latents)}")
                     ori_latents = [None for _ in range(pp_num_patch)]
                 else:
                     latents = [None for _ in range(pp_num_patch)]
@@ -374,13 +377,13 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
 
                     if distri_config.rank == 0:
                         # compute the previous noisy sample x_t -> x_t-1
-                        latents_dtype = latents.dtype
-                        latents = self.scheduler.step(latents, t, ori_latents, return_dict=False)[0]
+                        latents_dtype = latents[batch_idx].dtype
+                        latents[batch_idx] = self.scheduler.step(latents[batch_idx], t, ori_latents[batch_idx], return_dict=False)[0]
 
-                        if latents.dtype != latents_dtype:
+                        if latents[batch_idx].dtype != latents_dtype:
                             if torch.backends.mps.is_available():
                                 # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                                latents = latents.to(latents_dtype)
+                                latents[batch_idx] = latents[batch_idx].to(latents_dtype)
                         if i != len(pip_timesteps) - 1:
                             self.comm_manager.isend_to_next(latents[batch_idx])
                         

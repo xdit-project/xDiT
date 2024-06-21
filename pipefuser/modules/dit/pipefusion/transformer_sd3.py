@@ -68,7 +68,7 @@ class DistriSD3Transformer2DModel(BaseModule):
         timestep: torch.LongTensor = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
-    ):
+    ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
         The [`SD3Transformer2DModel`] forward method.
 
@@ -128,8 +128,8 @@ class DistriSD3Transformer2DModel(BaseModule):
 
             patch_size = module.config.patch_size
             height, width = hidden_states.shape[-2] // module.out_channels // patch_size, hidden_states.shape[-1] * patch_size
-            if not is_warmup:
-                height //= distri_config.pp_num_patch
+            # if not is_warmup:
+                # height //= distri_config.pp_num_patch
 
             # unpatchify
             height = height // patch_size

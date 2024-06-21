@@ -70,7 +70,7 @@ class DistriSD3Pipeline:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-        print(f"DistriPixArtAlphaPipeline from pretrain stage 1 {peak_memory/1e9} GB")
+        print(f"DistriSD3Pipeline from pretrain stage 1 {peak_memory/1e9} GB")
 
         if distri_config.parallelism == "pipefusion":
             if distri_config.scheduler == "dpm-solver":
@@ -105,12 +105,12 @@ class DistriSD3Pipeline:
             ).to(device)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-        print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
+        print(f"DistriSD3Pipeline from pretrain stage 2 {peak_memory/1e9} GB")
 
         ret = DistriSD3Pipeline(pipeline, distri_config)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-        print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")
+        print(f"DistriSD3Pipeline from pretrain stage 3 {peak_memory/1e9} GB")
         return ret
 
     def set_progress_bar_config(self, **kwargs):

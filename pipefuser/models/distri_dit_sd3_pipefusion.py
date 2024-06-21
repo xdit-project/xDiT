@@ -86,6 +86,11 @@ class DistriDiTSD3PipeFusion(BaseModel):  # for Pipeline Parallelism
             return_dict=return_dict,
         )[0]
 
+        if return_dict:
+            output = Transformer2DModelOutput(sample=output)
+        else:
+            output = (output,)
+
         self.counter += 1
         return output
 

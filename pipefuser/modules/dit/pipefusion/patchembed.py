@@ -24,8 +24,6 @@ class DistriPatchEmbed(BaseModule):
             or self.counter <= distri_config.warmup_steps
         )
 
-        logger.info(f"{module.pos_embed_max_size}")
-
         if is_warmup:
             if module.pos_embed_max_size is not None:
                 height, width = latent.shape[-2:]

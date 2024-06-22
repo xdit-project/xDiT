@@ -88,6 +88,11 @@ def main():
         default=1,
     )
     parser.add_argument(
+        "--pipefusion_warmup_step",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--use_use_ulysses_low",
         action="store_true",
     )

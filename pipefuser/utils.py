@@ -57,6 +57,7 @@ class DistriConfig:
         use_resolution_binning: bool = True,
         attn_num: Optional[List[int]] = None,
         scheduler: str = "dpmsolver_multistep",
+        ulysses_degree: int = 0,
     ):
         f"""
         Configurations for distributed diffusion inference.
@@ -156,7 +157,8 @@ class DistriConfig:
         self.num_inference_steps = None
 
         if self.use_seq_parallel_attn and HAS_LONG_CTX_ATTN:
-            ulysses_degree = self.world_size
+            if ulysses_degree == 0:
+                ulysses_degree = self.world_size
             ring_degree = self.world_size // ulysses_degree
             set_seq_parallel_pg(ulysses_degree, ring_degree, self.rank, self.world_size)
 

@@ -80,6 +80,11 @@ def main():
     parser.add_argument(
         "--ulysses_degree",
         type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--pipefusion_warmup_step",
+        type=int,
         default=1,
     )
     parser.add_argument(
@@ -150,6 +155,7 @@ def main():
         use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
         scheduler=args.scheduler,
+        ulysses_degree=args.ulysses_degree,
     )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
@@ -166,7 +172,7 @@ def main():
         prompt=args.prompt,
         generator=torch.Generator(device="cuda").manual_seed(42),
         output_type=args.output_type,
-        num_inference_steps=args.num_inference_steps,
+        num_inference_steps=args.pipefusion_warmup_step + 1,
     )
 
     torch.cuda.reset_peak_memory_stats()

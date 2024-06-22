@@ -209,30 +209,48 @@ class PipelineParallelismCommManager:
         self.recv_buffer.append(
             torch.zeros(self.recv_shape, dtype=self.dtype, device=distri_config.device)
         )
+    
+    def send_shape_comm(self, tensor: torch.Tensor) -> torch.Size:
+        distri_config = self.distri_config
+        shape = torch.tensor(
+            tensor.shape, dtype=torch.int32, device=distri_config.device
+        )
+        dim = torch.tensor(
+            len(shape), dtype=torch.int32, device=distri_config.device
+        )
+        dist.send(dim, dst=self.next_rank)
+        dist.send(shape, dst=self.next_rank)
+        return torch.Size(list(shape))
+    
+    def recv_shape_comm(self) -> torch.Size:
+        distri_config = self.distri_config
+        dim = torch.tensor(0, dtype=torch.int32, device=distri_config.device)
+        dist.recv(dim, src=self.prev_rank)
+        shape = torch.zeros(dim, dtype=torch.int32, device=distri_config.device)
+        dist.recv(shape, src=self.prev_rank)
+        return torch.Size(list(shape))
+    
+    def send_to_next(self, tensor: torch.Tensor):
+        self.send_shape_comm(tensor)
+        dist.send(tensor, dst=self.next_rank)
+
+    def recv_from_prev(self, dtype: Optional[torch.dtype] = None) -> torch.Size:
+        shape = self.recv_shape_comm()
+        tensor = torch.zeros(shape, dtype=dtype or self.dtype, device=self.distri_config.device)
+        dist.recv(tensor, src=self.prev_rank)
+        return tensor
 
     def first_send_to_next(self, tensor: torch.Tensor):
         distri_config = self.distri_config
         if self.send_shape is None:
-            shape = torch.tensor(
-                tensor.shape, dtype=torch.int32, device=distri_config.device
-            )
-            dim = torch.tensor(
-                len(shape), dtype=torch.int32, device=distri_config.device
-            )
-            dist.send(dim, dst=self.next_rank)
-            dist.send(shape, dst=self.next_rank)
-            self.send_shape = torch.Size(list(shape))
+            self.send_shape = self.send_shape_comm(tensor)
         else:
             logger.warning(f"Send buffer is already initialized, skip sending shape.")
 
     def first_recv_from_prev(self, dtype: Optional[torch.dtype] = None):
         distri_config = self.distri_config
         if self.recv_buffer is None:
-            dim = torch.tensor(0, dtype=torch.int32, device=distri_config.device)
-            dist.recv(dim, src=self.prev_rank)
-            shape = torch.zeros(dim, dtype=torch.int32, device=distri_config.device)
-            dist.recv(shape, src=self.prev_rank)
-            self.recv_shape = torch.Size(list(shape))
+            self.recv_shape = self.recv_shape_comm()
             self.dtype = dtype
             self._creat_recv_buffer()
         else:

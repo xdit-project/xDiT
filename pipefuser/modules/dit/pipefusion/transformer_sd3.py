@@ -112,9 +112,9 @@ class DistriSD3Transformer2DModel(BaseModule):
 
         if distri_config.rank == 1:
             hidden_states = module.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
+            encoder_hidden_states = module.context_embedder(encoder_hidden_states)
         
         temb = module.time_text_embed(timestep, pooled_projections)
-        encoder_hidden_states = module.context_embedder(encoder_hidden_states)
 
         for block in module.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
@@ -141,15 +141,14 @@ class DistriSD3Transformer2DModel(BaseModule):
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
                 shape=(hidden_states.shape[0], module.out_channels, height * patch_size, width * patch_size)
-            )
-
+            ), None
     
             # if USE_PEFT_BACKEND:
             #     # remove `lora_scale` from each PEFT layer
             #     unscale_lora_layers(module, lora_scale)
         
         else:
-            output = hidden_states
+            output = hidden_states, encoder_hidden_states
 
         if is_warmup:
             self.counter += 1

@@ -25,7 +25,7 @@ class DistriPatchEmbed(BaseModule):
         )
 
         if is_warmup:
-            if module.pos_embed_max_size is not None:
+            if getattr(module, "pos_embed_max_size", None) is not None:
                 height, width = latent.shape[-2:]
             else:
                 height, width = (
@@ -33,7 +33,7 @@ class DistriPatchEmbed(BaseModule):
                     latent.shape[-1] // module.patch_size,
                 )
         else:
-            if module.pos_embed_max_size is not None:
+            if getattr(module, "pos_embed_max_size", None) is not None:
                 height, width = (
                     latent.shape[-2] * distri_config.pp_num_patch,
                     latent.shape[-1],
@@ -57,7 +57,7 @@ class DistriPatchEmbed(BaseModule):
         # (For PixArt-Alpha: https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L162C151-L162C160)
 
         # TODO: There might be a more faster way to generate a smaller pos_embed
-        if module.pos_embed_max_size:
+        if getattr(module, "pos_embed_max_size", None):
             pos_embed = module.cropped_pos_embed(height, width)
         else:
             if module.height != height or module.width != width:

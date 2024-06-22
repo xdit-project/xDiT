@@ -58,7 +58,7 @@ class FlowMatchEulerDiscreteSchedulerPiP(FlowMatchEulerDiscreteScheduler):
                 If return_dict is `True`, [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] is
                 returned, otherwise a tuple is returned where the first element is the sample tensor.
         """
-        
+        distri_config = self.distri_config
 
         if (
             isinstance(timestep, int)
@@ -110,7 +110,8 @@ class FlowMatchEulerDiscreteSchedulerPiP(FlowMatchEulerDiscreteScheduler):
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        self._step_index += 1
+        if batch_idx is None or batch_idx == distri_config.pp_num_patch - 1:
+            self._step_index += 1
 
         if not return_dict:
             return (prev_sample,)

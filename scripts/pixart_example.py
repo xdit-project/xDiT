@@ -171,7 +171,7 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
 
-    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipeline' else 0}"
+    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipefusion' else 0}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
 

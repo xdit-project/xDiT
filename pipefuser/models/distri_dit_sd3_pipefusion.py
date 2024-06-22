@@ -9,7 +9,7 @@ import torch
 
 from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.modules.dit.pipefusion import (
-    DistriSelfAttentionPiP,
+    DistriJointAttnPiP,
     DistriSD3Transformer2DModel,
     DistriConv2dPiP,
     DistriPatchEmbed,
@@ -44,8 +44,8 @@ class DistriDiTSD3PipeFusion(BaseModel):  # for Pipeline Parallelism
                     wrapped_submodule = DistriPatchEmbed(submodule, distri_config)
                     setattr(module, subname, wrapped_submodule)
                 elif isinstance(submodule, Attention):
-                    if subname == "attn1":  # self attention
-                        wrapped_submodule = DistriSelfAttentionPiP(
+                    if subname == "attn":  # self attention
+                        wrapped_submodule = DistriJointAttnPiP(
                             submodule, distri_config
                         )
                         setattr(module, subname, wrapped_submodule)

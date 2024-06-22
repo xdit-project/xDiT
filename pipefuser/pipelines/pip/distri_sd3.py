@@ -331,7 +331,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 # if XLA_AVAILABLE:
                 #     xm.mark_step()
                 self.comm_manager.isend_to_next(latents)
-                if distri_config.rank == 1 and i == 0:
+                if distri_config.rank != 0 and i == 0:
                     self.comm_manager.send_to_next(next_encoder_hidden_states)
 
             assert self.comm_manager.recv_queue == []

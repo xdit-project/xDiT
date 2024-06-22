@@ -26,7 +26,7 @@ from typing import Optional, Dict, Any
 
 class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
-        assert isinstance(model, Transformer2DModel)
+        assert isinstance(model, Transformer2DModel), f"{type(model)} is not Transformer2DModel"
         model = DistriTransformer2DModel(model, distri_config)
         for name, module in model.named_modules():
             if isinstance(module, BaseModule):

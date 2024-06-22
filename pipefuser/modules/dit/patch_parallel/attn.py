@@ -37,6 +37,7 @@ try:
     HAS_FLASH_ATTN = True
 except ImportError:
     HAS_FLASH_ATTN = False
+HAS_FLASH_ATTN = False
 
 
 class DistriAttentionPP(BaseModule):
@@ -145,7 +146,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
         super(DistriSelfAttentionPP, self).__init__(module, distri_config)
 
         if HAS_LONG_CTX_ATTN and distri_config.use_seq_parallel_attn:
-            self.hybrid_seq_parallel_attn = LongContextAttention()
+            self.hybrid_seq_parallel_attn = UlyssesAttention()
             # self.hybrid_seq_parallel_attn = ring_flash_attn_func
 
     def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):

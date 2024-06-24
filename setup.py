@@ -14,18 +14,20 @@ if __name__ == "__main__":
         author_email="muyangli@mit.edu",
         packages=find_packages(),
         install_requires=[
-            "torch>=2.2",
-            "diffusers==0.27.2",
-            "transformers",
-            "tqdm",
+            "torch>=2.2", 
+            "diffusers==0.27.2", 
+            "transformers", 
+            "tqdm", 
             "sentencepiece",
             "accelerate",
+            "beautifulsoup4",
+            "ftfy",
             f"patchvae @ file://localhost/{os.path.join(os.getcwd(), 'pipefuser/modules/patchvae')}#egg=patchvae",
         ],
         dependency_links=[
             "file://"
             + os.path.join(
-                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b1"
+                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b3"
             )
         ],
         url="https://github.com/PipeFusion/PipeFusion.",

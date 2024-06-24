@@ -24,8 +24,11 @@ if __name__ == "__main__":
             "ftfy",
             f"patchvae @ file://localhost/{os.path.join(os.getcwd(), 'pipefuser/modules/patchvae')}#egg=patchvae",
         ],
-        dependency_links = [
-            "file://" + os.path.join(os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b1")
+        dependency_links=[
+            "file://"
+            + os.path.join(
+                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b1"
+            )
         ],
         url="https://github.com/PipeFusion/PipeFusion.",
         description="DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models",

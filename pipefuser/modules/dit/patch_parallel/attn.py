@@ -165,11 +165,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
 
         use_seq_parallel_attn = self.distri_config.use_seq_parallel_attn
 
-        if (
-            HAS_LONG_CTX_ATTN
-            and use_seq_parallel_attn
-            and (distri_config.mode == "full_sync")
-        ):
+        if use_seq_parallel_attn:
             # the distributed sparse attention using ring-attention.
             key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
             inner_dim = key.shape[-1]

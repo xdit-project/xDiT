@@ -119,8 +119,6 @@ def main():
     torch.backends.cudnn.deterministic = True
 
     enable_parallel_vae = args.use_parallel_vae
-    if args.height >= 4096:
-        enable_parallel_vae = True
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(

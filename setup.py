@@ -10,8 +10,8 @@ if __name__ == "__main__":
 
     setup(
         name="pipefusion",
-        author="Jiannan Wang, Jiarui Fang, Aoyu Li, Pengcheng Yang",
-        author_email="muyangli@mit.edu",
+        author="noname",
+        author_email="naname",
         packages=find_packages(),
         install_requires=[
             "torch>=2.2",
@@ -28,8 +28,8 @@ if __name__ == "__main__":
                 os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b1"
             )
         ],
-        url="https://github.com/PipeFusion/PipeFusion.",
-        description="DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models",
+        url="noname.",
+        description="nonames",
         long_description=long_description,
         long_description_content_type="text/markdown",
         version=version,

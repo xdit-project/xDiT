@@ -18,6 +18,10 @@ if __name__ == "__main__":
             "diffusers==0.27.2", 
             "transformers", 
             "tqdm", 
+            "sentencepiece",
+            "accelerate",
+            "beautifulsoup4",
+            "ftfy",
             f"patchvae @ file://localhost/{os.path.join(os.getcwd(), 'pipefuser/modules/patchvae')}#egg=patchvae",
         ],
         dependency_links = [

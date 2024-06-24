@@ -163,6 +163,8 @@ def main():
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,
         enable_parallel_vae=enable_parallel_vae,
+        # use_profiler=True,
+        # use_profiler=args.use_profiler,
         # variant="fp16",
         # use_safetensors=True,
     )
@@ -181,11 +183,16 @@ def main():
     case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipeline' else 0}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
+    if enable_parallel_vae:
+        case_name += "_patchvae"
 
     if args.use_profiler:
         start_time = time.time()
         with profile(
-            activities=[ProfilerActivity.CUDA],
+            activities=[
+                ProfilerActivity.CPU,
+                ProfilerActivity.CUDA
+            ],
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 f"./profile/{case_name}"
             ),

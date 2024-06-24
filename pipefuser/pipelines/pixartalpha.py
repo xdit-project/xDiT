@@ -34,10 +34,10 @@ logger = init_logger(__name__)
 
 
 class DistriPixArtAlphaPipeline:
-    def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig, enable_parallel_vae: bool = False):
+    def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig, enable_parallel_vae: bool = False, use_profiler: bool = False):
         self.pipeline = pipeline
         if enable_parallel_vae:
-            self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder)
+            self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder, use_profiler=use_profiler)
 
         # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
@@ -56,6 +56,7 @@ class DistriPixArtAlphaPipeline:
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         enable_parallel_vae = kwargs.pop("enable_parallel_vae", False)
+        use_profiler = kwargs.pop("use_profiler", False)
         transformer = Transformer2DModel.from_pretrained(
             pretrained_model_name_or_path,
             torch_dtype=torch_dtype,
@@ -85,6 +86,8 @@ class DistriPixArtAlphaPipeline:
                 scheduler = DDIMSchedulerPiP.from_pretrained(
                     pretrained_model_name_or_path, subfolder="scheduler"
                 )
+            else:
+                raise ValueError(f"scheduler do not support in pipefusion paralleliem: {distri_config.scheduler}")
             scheduler.init(distri_config)
 
         if distri_config.parallelism == "pipefusion":
@@ -107,7 +110,7 @@ class DistriPixArtAlphaPipeline:
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
 
-        ret = DistriPixArtAlphaPipeline(pipeline, distri_config, enable_parallel_vae=enable_parallel_vae)
+        ret = DistriPixArtAlphaPipeline(pipeline, distri_config, enable_parallel_vae=enable_parallel_vae, use_profiler=use_profiler)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")

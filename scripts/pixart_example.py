@@ -8,14 +8,6 @@ from pipefuser.modules.conv.conv_chunk.chunk_conv2d import PatchConv2d
 
 import time
 
-HAS_LONG_CTX_ATTN = False
-try:
-    from yunchang import set_seq_parallel_pg
-
-    HAS_LONG_CTX_ATTN = True
-except ImportError:
-    print("yunchang not found")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -32,12 +24,6 @@ def main():
         type=str,
         choices=["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
         help="Parallelism to use.",
-    )
-    parser.add_argument(
-        "--use_seq_parallel_attn",
-        action="store_true",
-        default=False,
-        help="Enable sequence parallel attention.",
     )
     parser.add_argument(
         "--sync_mode",
@@ -81,11 +67,6 @@ def main():
         "--ulysses_degree",
         type=int,
         default=0,
-    )
-    parser.add_argument(
-        "--pipefusion_warmup_step",
-        type=int,
-        default=1,
     )
     parser.add_argument(
         "--pipefusion_warmup_step",
@@ -138,8 +119,6 @@ def main():
     torch.backends.cudnn.deterministic = True
 
     enable_parallel_vae = args.use_parallel_vae
-    if args.height >= 4096:
-        enable_parallel_vae = True
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
@@ -177,7 +156,10 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
 
-    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipeline' else 0}"
+    if args.parallelism == "pipefusion":
+        case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch}_warm{args.pipefusion_warmup_step}"
+    else:
+        case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
 

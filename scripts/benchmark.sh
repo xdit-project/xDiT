@@ -21,7 +21,7 @@ export PYTHONPATH=$PWD:/mnt/fjr/long-context-attention
 # export MODEL_ID="/mnt/models/SD/DiT-XL-2-256"
 
 # HEIGHT=512
-HEIGHT=1024
+HEIGHT=512
 # HEIGHT=2048
 # HEIGHT=4096
 # HEIGHT=8192
@@ -33,24 +33,27 @@ export TASK_SIZE="--height $HEIGHT --width $HEIGHT --no_use_resolution_binning"
 
 
 
-for N_GPUS in 8 4 2 1;
+for N_GPUS in 8;
 do
 
 
 # Sequence Parallelism
 # sp u=8, ulyssess
-# SYNC_MODE="full_sync"
-# export ACC_FLAG="--ulysses_degree 4 --use_use_ulysses_low"
-# torchrun --nproc_per_node=$N_GPUS -p sequence scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
-
-# sp u=1, ring
 SYNC_MODE="full_sync"
-export ACC_FLAG="--use_use_ulysses_low"
+export ACC_FLAG="--ulysses_degree 8 --use_use_ulysses_low"
+torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p sequence --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
+
+export ACC_FLAG="--ulysses_degree 4 --use_use_ulysses_low"
+torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p sequence --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
+
+export ACC_FLAG="--ulysses_degree 2 --use_use_ulysses_low"
+torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p sequence --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
+
+export ACC_FLAG="--ulysses_degree 1 --use_use_ulysses_low"
 torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p sequence --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
 
 # Tensor Parallel
 torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p "tensor" --model_id $MODEL_ID $TASK_SIZE
-
 
 # Patch Parallel
 
@@ -72,6 +75,12 @@ pp_num_patchs=(4 8 16 32)
 for pp_num_patch in "${pp_num_patchs[@]}"
 do
     torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipefusion  \
-    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --pp_num_patch $pp_num_patch
+    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --pp_num_patch $pp_num_patch --pipefusion_warmup_step 0
+    
+    torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipefusion  \
+    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --pp_num_patch $pp_num_patch --pipefusion_warmup_step 1
+
+    torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID -p pipefusion  \
+    --height $HEIGHT --width $HEIGHT --no_use_resolution_binning --pp_num_patch $pp_num_patch --pipefusion_warmup_step 4
 done
 done

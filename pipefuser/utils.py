@@ -192,6 +192,7 @@ class PipelineParallelismCommManager:
             self.groups = [torch.distributed.new_group(), torch.distributed.new_group()]
         else:
             self.groups = None
+        self.extra_group = torch.distributed.new_group()
 
     def _creat_recv_buffer(self):
         distri_config = self.distri_config
@@ -210,7 +211,7 @@ class PipelineParallelismCommManager:
             torch.zeros(self.recv_shape, dtype=self.dtype, device=distri_config.device)
         )
     
-    def send_shape_comm(self, tensor: torch.Tensor) -> torch.Size:
+    def send_shape_comm(self, tensor: torch.Tensor, is_extra=False) -> torch.Size:
         distri_config = self.distri_config
         shape = torch.tensor(
             tensor.shape, dtype=torch.int32, device=distri_config.device
@@ -218,26 +219,26 @@ class PipelineParallelismCommManager:
         dim = torch.tensor(
             len(shape), dtype=torch.int32, device=distri_config.device
         )
-        dist.send(dim, dst=self.next_rank)
-        dist.send(shape, dst=self.next_rank)
+        dist.send(dim, dst=self.next_rank, group=self.extra_group if is_extra else None)
+        dist.send(shape, dst=self.next_rank, group=self.extra_group if is_extra else None)
         return torch.Size(list(shape))
     
-    def recv_shape_comm(self) -> torch.Size:
+    def recv_shape_comm(self, is_extra=False) -> torch.Size:
         distri_config = self.distri_config
         dim = torch.tensor(0, dtype=torch.int32, device=distri_config.device)
-        dist.recv(dim, src=self.prev_rank)
-        shape = torch.zeros(dim, dtype=torch.int32, device=distri_config.device)
-        dist.recv(shape, src=self.prev_rank)
+        dist.recv(dim, src=self.prev_rank, group=self.extra_group if is_extra else None)
+        shape = torch.zeros(dim, dtype=torch.int32, device=distri_config.device,)
+        dist.recv(shape, src=self.prev_rank, group=self.extra_group if is_extra else None)
         return torch.Size(list(shape))
     
-    def send_to_next(self, tensor: torch.Tensor):
+    def send_to_next(self, tensor: torch.Tensor, is_extra=False):
         self.send_shape_comm(tensor)
-        dist.send(tensor, dst=self.next_rank)
+        dist.isend(tensor, dst=self.next_rank, group=self.extra_group if is_extra else None)
 
-    def recv_from_prev(self, dtype: Optional[torch.dtype] = None) -> torch.Size:
+    def recv_from_prev(self, dtype: Optional[torch.dtype] = None, is_extra=False) -> torch.Size:
         shape = self.recv_shape_comm()
         tensor = torch.zeros(shape, dtype=dtype or self.dtype, device=self.distri_config.device)
-        dist.recv(tensor, src=self.prev_rank)
+        dist.recv(tensor, src=self.prev_rank, group=self.extra_group if is_extra else None)
         return tensor
 
     def first_send_to_next(self, tensor: torch.Tensor):

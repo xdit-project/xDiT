@@ -299,7 +299,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                     self.comm_manager.irecv_from_prev(dtype)
                     latents = self.comm_manager.get_data()
                     if i == 0:
-                        encoder_hidden_states = self.comm_manager.recv_from_prev(prompt_embeds.dtype)
+                        encoder_hidden_states = self.comm_manager.recv_from_prev(prompt_embeds.dtype, is_extra=True)
                 assert self._interrupt == False
                 # TBD
                 # if self.interrupt:
@@ -332,7 +332,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 #     xm.mark_step()
                 self.comm_manager.isend_to_next(latents)
                 if distri_config.rank != 0 and i == 0:
-                    self.comm_manager.send_to_next(next_encoder_hidden_states)
+                    self.comm_manager.send_to_next(next_encoder_hidden_states, is_extra=True)
 
             assert self.comm_manager.recv_queue == []
 
@@ -364,6 +364,9 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
 
                 assert self.interrupt == False
 
+                if distri_config.rank != 1:
+                    encoder_hidden_states = self.comm_manager.recv_from_prev(prompt_embeds.dtype, is_extra=True)
+
                 for batch_idx in range(pp_num_patch):
 
                     if distri_config.rank == 0:
@@ -374,7 +377,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                     else:
                         latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
 
-                    latents[batch_idx], _ = self.pip_forward(
+                    latents[batch_idx], next_encoder_hidden_states = self.pip_forward(
                         latents[batch_idx],
                         encoder_hidden_states,
                         t,
@@ -396,6 +399,9 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                         
                     else:
                         self.comm_manager.isend_to_next(latents[batch_idx])
+
+                    if distri_config.rank != 0 and batch_idx == 0:
+                        self.comm_manager.send_to_next(next_encoder_hidden_states, is_extra=True)
 
                 i += len(warmup_timesteps)
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):

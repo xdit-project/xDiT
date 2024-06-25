@@ -141,7 +141,7 @@ class DistriSD3Transformer2DModel(BaseModule):
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
                 shape=(hidden_states.shape[0], module.out_channels, height * patch_size, width * patch_size)
-            ), None
+            ), encoder_hidden_states 
     
             # if USE_PEFT_BACKEND:
             #     # remove `lora_scale` from each PEFT layer

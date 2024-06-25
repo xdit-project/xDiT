@@ -132,8 +132,6 @@ class DistriCrossAttentionPiP(DistriAttentionPiP):
 
         self.counter += 1
 
-        logger.info(f"{hidden_states.shape}")
-
         return hidden_states
 
 

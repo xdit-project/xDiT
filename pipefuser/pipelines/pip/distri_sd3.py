@@ -274,6 +274,8 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
 
         assert self.comm_manager.recv_queue == []
 
+        logger.info(f"rank {distri_config.rank} start")
+
         assert distri_config.warmup_steps >= 1
 
         if distri_config.rank == 1:
@@ -293,14 +295,16 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 if distri_config.rank == 0:
                     ori_latents = latents
 
+                logger.info(f"rank {distri_config.rank} {latents.shape} 1")
                 if distri_config.rank == 1 and i == 0:
                     pass
                 else:
+                    if distri_config.rank != 1:
+                        encoder_hidden_states = self.comm_manager.recv_from_prev(prompt_embeds.dtype)
                     self.comm_manager.irecv_from_prev(dtype)
                     latents = self.comm_manager.get_data()
-                    if i == 0:
-                        encoder_hidden_states = self.comm_manager.recv_from_prev(prompt_embeds.dtype)
-                assert self._interrupt == False
+                logger.info(f"rank {distri_config.rank} {latents.shape} 2")
+                assert self.interrupt == False
                 # TBD
                 # if self.interrupt:
                     # continue
@@ -316,6 +320,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 if distri_config.rank == 0:
                     # compute the previous noisy sample x_t -> x_t-1
                     latents_dtype = latents.dtype
+                    logger.info(f"rank {distri_config.rank} ori {ori_latents.shape} {latents.shape}")
                     latents = self.scheduler.step(latents, t, ori_latents, return_dict=False)[0]
 
                     if latents.dtype != latents_dtype:
@@ -330,9 +335,11 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 # TBD
                 # if XLA_AVAILABLE:
                 #     xm.mark_step()
-                self.comm_manager.isend_to_next(latents)
-                if distri_config.rank != 0 and i == 0:
+                logger.info(f"rank {distri_config.rank} {latents.shape} 3")
+                if distri_config.rank != 0:
                     self.comm_manager.send_to_next(next_encoder_hidden_states)
+                self.comm_manager.isend_to_next(latents)
+                logger.info(f"rank {distri_config.rank} {latents.shape} 4")
 
             assert self.comm_manager.recv_queue == []
 
@@ -342,16 +349,15 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 for _ in range(len(pip_timesteps) - 1):
                     for batch_idx in range(pp_num_patch):
                         self.comm_manager.irecv_from_prev(idx=batch_idx)
-                _, _, c, _ = latents.shape
-                latents = list(latents.split(c // pp_num_patch, dim=2))
+                c = latents.shape[-2] // pp_num_patch
+                latents = list(latents.split(c, dim=2))
             
             else:
                 for _ in range(len(pip_timesteps)):
                     for batch_idx in range(pp_num_patch):
                         self.comm_manager.irecv_from_prev(idx=batch_idx)
+                c = latents.shape[-2] // pp_num_patch
                 if distri_config.rank == 0:
-                    _, _, c, _ = latents.shape
-                    c //= pp_num_patch
                     tmp = latents
                     latents = []
                     for batch_idx in range(pp_num_patch):
@@ -368,13 +374,24 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
 
                     if distri_config.rank == 0:
                         ori_latents[batch_idx] = latents[batch_idx]
+                        logger.info(f"rank {distri_config.rank} ori {ori_latents[batch_idx].shape}")
                     
                     if distri_config.rank == 1 and i == 0:
                         pass
                     else:
-                        latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
+                        if distri_config.rank != 1 and batch_idx == 0:
+                            recv_data = self.comm_manager.get_data()
+                            encoder_hidden_states = recv_data[..., :2 * self.tokenizer_max_length, :]
+                            latents[batch_idx] = recv_data[
+                                ..., 
+                                2 * self.tokenizer_max_length:2 * self.tokenizer_max_length + self.comm_manager.recv_shape[-2] // pp_num_patch,
+                                :
+                            ]
+                        else:
+                            latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
+                    logger.info(f"rank {distri_config.rank} {latents[batch_idx].shape}")
 
-                    latents[batch_idx], _ = self.pip_forward(
+                    latents[batch_idx], next_encoder_hidden_states = self.pip_forward(
                         latents[batch_idx],
                         encoder_hidden_states,
                         t,
@@ -382,6 +399,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                         timestep_expand_shape
                     )
 
+                    logger.info(f"rank {distri_config.rank} {latents[batch_idx].shape}")
                     if distri_config.rank == 0:
                         # compute the previous noisy sample x_t -> x_t-1
                         latents_dtype = latents[batch_idx].dtype
@@ -395,12 +413,16 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                             self.comm_manager.isend_to_next(latents[batch_idx])
                         
                     else:
-                        self.comm_manager.isend_to_next(latents[batch_idx])
+                        if batch_idx == 0:
+                            self.comm_manager.isend_to_next(torch.cat([next_encoder_hidden_states, latents[batch_idx]], dim=-2))
+                        else:
+                            self.comm_manager.isend_to_next(latents[batch_idx])
 
                 i += len(warmup_timesteps)
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
+            logger.info(f"rank {distri_config.rank} end")
             if distri_config.rank == 0:
                 latents = torch.cat(latents, dim=2)
             else:

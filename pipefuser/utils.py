@@ -37,7 +37,6 @@ def check_env():
 def is_power_of_2(n: int) -> bool:
     return (n & (n - 1) == 0) and n != 0
 
-
 class DistriConfig:
     def __init__(
         self,

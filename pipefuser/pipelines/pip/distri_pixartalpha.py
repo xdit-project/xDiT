@@ -449,6 +449,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
                     else:
                         self.comm_manager.isend_to_next(latents[batch_idx])
+
                 i += len(warmup_timesteps)
                 if i == len(timesteps) - 1 or (
                     (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0

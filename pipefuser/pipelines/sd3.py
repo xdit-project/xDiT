@@ -2,23 +2,21 @@
 # https://github.com/huggingface/diffusers/blob/v0.27.2/src/diffusers/pipelines/pixart_alpha/pipeline_pixart_alpha.py#L218
 
 import torch
-from diffusers import PixArtAlphaPipeline
-from diffusers.models.transformers.transformer_2d import Transformer2DModel
-from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
-    ASPECT_RATIO_1024_BIN,
-    ASPECT_RATIO_512_BIN,
-    ASPECT_RATIO_256_BIN,
-)
+from diffusers import StableDiffusion3Pipeline
+from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 
 # from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP
-from pipefuser.pipelines.pip.distri_pixartalpha import DistriPixArtAlphaPiP
-from pipefuser.schedulers.pip.dpmsolver_multistep import DPMSolverMultistepSchedulerPiP
-from pipefuser.schedulers.pip.ddim import DDIMSchedulerPiP
-from diffusers import DPMSolverMultistepScheduler
+from pipefuser.pipelines.pip.distri_sd3 import DistriSD3PiP
+from pipefuser.schedulers.pip import (
+    DPMSolverMultistepSchedulerPiP,
+    DDIMSchedulerPiP,
+    FlowMatchEulerDiscreteSchedulerPiP
+)
+
 from pipefuser.models import (
     NaivePatchDiT,
     DistriDiTPP,
-    DistriDiTPipeFusion,
+    DistriDiTSD3PipeFusion,
     DistriDiTTP,
 )
 from pipefuser.utils import (
@@ -28,16 +26,12 @@ from pipefuser.utils import (
 )
 from pipefuser.logger import init_logger
 
-from patchvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-
 logger = init_logger(__name__)
 
 
-class DistriPixArtAlphaPipeline:
-    def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig, enable_parallel_vae: bool = False, use_profiler: bool = False):
+class DistriSD3Pipeline:
+    def __init__(self, pipeline: StableDiffusion3Pipeline, module_config: DistriConfig):
         self.pipeline = pipeline
-        if enable_parallel_vae:
-            self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder, use_profiler=use_profiler)
 
         # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
@@ -52,33 +46,31 @@ class DistriPixArtAlphaPipeline:
     def from_pretrained(distri_config: DistriConfig, **kwargs):
         device = distri_config.device
         pretrained_model_name_or_path = kwargs.pop(
-            "pretrained_model_name_or_path", "PixArt-alpha/PixArt-XL-2-1024-MS"
+            "pretrained_model_name_or_path", "stabilityai/stable-diffusion-3-medium-diffusers"
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
-        enable_parallel_vae = kwargs.pop("enable_parallel_vae", False)
-        use_profiler = kwargs.pop("use_profiler", False)
-        transformer = Transformer2DModel.from_pretrained(
+        transformer = SD3Transformer2DModel.from_pretrained(
             pretrained_model_name_or_path,
             torch_dtype=torch_dtype,
             subfolder="transformer",
         )
 
-        if (
-            distri_config.parallelism == "patch"
-            or distri_config.parallelism == "sequence"
-        ):
-            transformer = DistriDiTPP(transformer, distri_config)
+        if distri_config.parallelism == "patch":
+            raise ValueError("Patch parallelism is not supported for SD3")
+            # transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
-            transformer = NaivePatchDiT(transformer, distri_config)
+            raise ValueError("Naive patch parallelism is not supported for SD3")
+            # transformer = NaivePatchDiT(transformer, distri_config)
         elif distri_config.parallelism == "pipefusion":
-            transformer = DistriDiTPipeFusion(transformer, distri_config)
+            transformer = DistriDiTSD3PipeFusion(transformer, distri_config)
         elif distri_config.parallelism == "tensor":
-            transformer = DistriDiTTP(transformer, distri_config)
+            raise ValueError("Tensor parallelism is not supported for SD3")
+            # transformer = DistriDiTTP(transformer, distri_config)
         else:
             raise ValueError(f"Unknown parallelism: {distri_config.parallelism}")
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-        print(f"DistriPixArtAlphaPipeline from pretrain stage 1 {peak_memory/1e9} GB")
+        print(f"DistriSD3Pipeline from pretrain stage 1 {peak_memory/1e9} GB")
 
         if distri_config.parallelism == "pipefusion":
             if distri_config.scheduler == "dpm-solver":
@@ -89,12 +81,14 @@ class DistriPixArtAlphaPipeline:
                 scheduler = DDIMSchedulerPiP.from_pretrained(
                     pretrained_model_name_or_path, subfolder="scheduler"
                 )
-            else:
-                raise ValueError(f"scheduler do not support in pipefusion paralleliem: {distri_config.scheduler}")
+            elif distri_config.scheduler == "FM-ED":
+                scheduler = FlowMatchEulerDiscreteSchedulerPiP.from_pretrained(
+                    pretrained_model_name_or_path, subfolder="scheduler"
+                )
             scheduler.init(distri_config)
 
         if distri_config.parallelism == "pipefusion":
-            pipeline = DistriPixArtAlphaPiP.from_pretrained(
+            pipeline = DistriSD3PiP.from_pretrained(
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
                 transformer=transformer,
@@ -103,7 +97,7 @@ class DistriPixArtAlphaPipeline:
             ).to(device)
             pipeline.init(distri_config)
         else:
-            pipeline = PixArtAlphaPipeline.from_pretrained(
+            pipeline = StableDiffusion3Pipeline.from_pretrained(
                 pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
                 transformer=transformer,
@@ -111,19 +105,19 @@ class DistriPixArtAlphaPipeline:
             ).to(device)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-        print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
+        print(f"DistriSD3Pipeline from pretrain stage 2 {peak_memory/1e9} GB")
 
-        ret = DistriPixArtAlphaPipeline(pipeline, distri_config, enable_parallel_vae=enable_parallel_vae, use_profiler=use_profiler)
+        ret = DistriSD3Pipeline(pipeline, distri_config)
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-        print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")
+        print(f"DistriSD3Pipeline from pretrain stage 3 {peak_memory/1e9} GB")
         return ret
 
     def set_progress_bar_config(self, **kwargs):
         self.pipeline.set_progress_bar_config(**kwargs)
 
     @torch.no_grad()
-    def __call__(self, prompt, num_inference_steps=20, *args, **kwargs):
+    def __call__(self, prompt, num_inference_steps=28, *args, **kwargs):
         assert "height" not in kwargs, "height should not be in kwargs"
         assert "width" not in kwargs, "width should not be in kwargs"
         self.distri_config.num_inference_steps = num_inference_steps
@@ -133,7 +127,6 @@ class DistriPixArtAlphaPipeline:
             height=config.height,
             width=config.width,
             prompt=prompt,
-            use_resolution_binning=config.use_resolution_binning,
             num_inference_steps=num_inference_steps,
             *args,
             **kwargs,
@@ -164,29 +157,11 @@ class DistriPixArtAlphaPipeline:
                 height=distri_config.height,
                 width=distri_config.width,
                 prompt="",
-                use_resolution_binning=distri_config.use_resolution_binning,
                 num_inference_steps=distri_config.warmup_steps + 2,
                 output_type="latent",
             )
 
         else:
-            # Resolution binning
-            if distri_config.use_resolution_binning:
-                if pipeline.transformer.config.sample_size == 128:
-                    aspect_ratio_bin = ASPECT_RATIO_1024_BIN
-                elif pipeline.transformer.config.sample_size == 64:
-                    aspect_ratio_bin = ASPECT_RATIO_512_BIN
-                elif pipeline.transformer.config.sample_size == 32:
-                    aspect_ratio_bin = ASPECT_RATIO_256_BIN
-                else:
-                    raise ValueError("Invalid sample size")
-                orig_height, orig_width = height, width
-                height, width = pipeline.height, width = (
-                    pipeline.classify_height_width_bin(
-                        height, width, ratios=aspect_ratio_bin
-                    )
-                )
-
             # Encode input prompt
             (
                 prompt_embeds,
@@ -277,10 +252,7 @@ class DistriPixArtAlphaPipeline:
                     comm_manager.clear()
                 if distri_config.parallelism == "naive_patch":
                     counters = [0, 1]
-                elif (
-                    distri_config.parallelism == "patch"
-                    or distri_config.parallelism == "sequence"
-                ):
+                elif distri_config.parallelism == "patch":
                     counters = [
                         0,
                         distri_config.warmup_steps + 1,

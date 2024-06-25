@@ -11,13 +11,12 @@ if __name__ == "__main__":
     setup(
         name="pipefusion",
         author="Jiannan Wang, Jiarui Fang, Aoyu Li, Pengcheng Yang",
-        author_email="muyangli@mit.edu",
+        author_email="",
         packages=find_packages(),
         install_requires=[
-            "torch>=2.2", 
-            "diffusers==0.27.2", 
-            "transformers", 
-            "tqdm", 
+            "torch>=2.2",
+            "diffusers==0.29.0",
+            "transformers",
             "sentencepiece",
             "accelerate",
             "beautifulsoup4",

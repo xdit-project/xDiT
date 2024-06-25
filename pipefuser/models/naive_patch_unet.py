@@ -1,48 +1,16 @@
 import torch
 from diffusers import UNet2DConditionModel
-from diffusers.models.attention import Attention, FeedForward
-from diffusers.models.resnet import ResnetBlock2D
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
-from torch import distributed as dist, nn
+from torch import distributed as dist
 
-from .base_model import BaseModel, BaseModule
-from pipefuser.modules.dit.tensor_parallel.attention import DistriAttentionTP
-from pipefuser.modules.dit.tensor_parallel.conv2d import DistriConv2dTP
-from pipefuser.modules.dit.tensor_parallel.feed_forward import DistriFeedForwardTP
-from pipefuser.modules.dit.tensor_parallel.resnet import DistriResnetBlock2DTP
+from pipefuser.models.base_model import BaseModule, BaseModel
 from pipefuser.utils import DistriConfig
 
 
-class DistriSDXLUNetTP(BaseModel):  # for Patch Parallelism
+class NaivePatchUNet(BaseModel):  # for Patch Parallelism
     def __init__(self, model: UNet2DConditionModel, distri_config: DistriConfig):
         assert isinstance(model, UNet2DConditionModel)
-        if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:
-            for name, module in model.named_modules():
-                if isinstance(module, BaseModule):
-                    continue
-                for subname, submodule in module.named_children():
-                    if isinstance(submodule, Attention):
-                        wrapped_submodule = DistriAttentionTP(submodule, distri_config)
-                        setattr(module, subname, wrapped_submodule)
-                    elif isinstance(submodule, FeedForward):
-                        wrapped_submodule = DistriFeedForwardTP(
-                            submodule, distri_config
-                        )
-                        setattr(module, subname, wrapped_submodule)
-                    elif isinstance(submodule, ResnetBlock2D):
-                        wrapped_submodule = DistriResnetBlock2DTP(
-                            submodule, distri_config
-                        )
-                        setattr(module, subname, wrapped_submodule)
-                    elif isinstance(submodule, nn.Conv2d) and (
-                        subname == "conv_out"
-                        or "downsamplers" in name
-                        or "upsamplers" in name
-                    ):
-                        wrapped_submodule = DistriConv2dTP(submodule, distri_config)
-                        setattr(module, subname, wrapped_submodule)
-
-        super(DistriSDXLUNetTP, self).__init__(model, distri_config)
+        super(NaivePatchUNet, self).__init__(model, distri_config)
 
     def forward(
         self,
@@ -121,7 +89,8 @@ class DistriSDXLUNetTP(BaseModel):  # for Patch Parallelism
                 static_inputs["added_cond_kwargs"][k].copy_(added_cond_kwargs[k])
 
             graph_idx = 0
-
+            if distri_config.split_scheme == "alternate":
+                graph_idx = self.counter % 2
             self.cuda_graphs[graph_idx].replay()
             output = self.static_outputs[graph_idx]
         else:
@@ -159,6 +128,26 @@ class DistriSDXLUNetTP(BaseModel):  # for Patch Parallelism
                         batch_idx : batch_idx + 1
                     ]
                 added_cond_kwargs = new_added_cond_kwargs
+
+                if distri_config.split_scheme == "row":
+                    split_dim = 2
+                elif distri_config.split_scheme == "col":
+                    split_dim = 3
+                elif distri_config.split_scheme == "alternate":
+                    split_dim = 2 if self.counter % 2 == 0 else 3
+                else:
+                    raise NotImplementedError
+
+                if split_dim == 2:
+                    sample = sample.view(1, c, distri_config.n_device_per_batch, -1, w)[
+                        :, :, distri_config.split_idx()
+                    ]
+                else:
+                    assert split_dim == 3
+                    sample = sample.view(1, c, h, distri_config.n_device_per_batch, -1)[
+                        ..., distri_config.split_idx(), :
+                    ]
+
                 output = self.model(
                     sample,
                     timestep,
@@ -179,18 +168,47 @@ class DistriSDXLUNetTP(BaseModel):  # for Patch Parallelism
                         (b, c, h, w), device=output.device, dtype=output.dtype
                     )
                 if self.buffer_list is None:
-                    self.buffer_list = [torch.empty_like(output) for _ in range(2)]
+                    self.buffer_list = [
+                        torch.empty_like(output.view(-1))
+                        for _ in range(distri_config.world_size)
+                    ]
                 dist.all_gather(
-                    self.buffer_list,
-                    output.contiguous(),
-                    group=distri_config.split_group(),
-                    async_op=False,
+                    self.buffer_list, output.contiguous().view(-1), async_op=False
                 )
-                torch.cat(self.buffer_list, dim=0, out=self.output_buffer)
+                buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
+                torch.cat(
+                    buffer_list[: distri_config.n_device_per_batch],
+                    dim=split_dim,
+                    out=self.output_buffer[0:1],
+                )
+                torch.cat(
+                    buffer_list[distri_config.n_device_per_batch :],
+                    dim=split_dim,
+                    out=self.output_buffer[1:2],
+                )
                 output = self.output_buffer
             else:
+                if distri_config.split_scheme == "row":
+                    split_dim = 2
+                elif distri_config.split_scheme == "col":
+                    split_dim = 3
+                elif distri_config.split_scheme == "alternate":
+                    split_dim = 2 if self.counter % 2 == 0 else 3
+                else:
+                    raise NotImplementedError
+
+                if split_dim == 2:
+                    sliced_sample = sample.view(
+                        b, c, distri_config.n_device_per_batch, -1, w
+                    )[:, :, distri_config.split_idx()]
+                else:
+                    assert split_dim == 3
+                    sliced_sample = sample.view(
+                        b, c, h, distri_config.n_device_per_batch, -1
+                    )[..., distri_config.split_idx(), :]
+
                 output = self.model(
-                    sample,
+                    sliced_sample,
                     timestep,
                     encoder_hidden_states,
                     class_labels=class_labels,
@@ -205,8 +223,19 @@ class DistriSDXLUNetTP(BaseModel):  # for Patch Parallelism
                     return_dict=False,
                 )[0]
                 if self.output_buffer is None:
-                    self.output_buffer = torch.empty_like(output)
-                self.output_buffer.copy_(output)
+                    self.output_buffer = torch.empty(
+                        (b, c, h, w), device=output.device, dtype=output.dtype
+                    )
+                if self.buffer_list is None:
+                    self.buffer_list = [
+                        torch.empty_like(output.view(-1))
+                        for _ in range(distri_config.world_size)
+                    ]
+                dist.all_gather(
+                    self.buffer_list, output.contiguous().view(-1), async_op=False
+                )
+                buffer_list = [buffer.view(output.shape) for buffer in self.buffer_list]
+                torch.cat(buffer_list, dim=split_dim, out=self.output_buffer)
                 output = self.output_buffer
             if record:
                 if self.static_inputs is None:

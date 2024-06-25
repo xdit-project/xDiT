@@ -8,14 +8,6 @@ from pipefuser.modules.conv.conv_chunk.chunk_conv2d import PatchConv2d
 
 import time
 
-HAS_LONG_CTX_ATTN = False
-try:
-    from yunchang import set_seq_parallel_pg
-
-    HAS_LONG_CTX_ATTN = True
-except ImportError:
-    print("yunchang not found")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -32,12 +24,6 @@ def main():
         type=str,
         choices=["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
         help="Parallelism to use.",
-    )
-    parser.add_argument(
-        "--use_seq_parallel_attn",
-        action="store_true",
-        default=False,
-        help="Enable sequence parallel attention.",
     )
     parser.add_argument(
         "--sync_mode",
@@ -80,7 +66,7 @@ def main():
     parser.add_argument(
         "--ulysses_degree",
         type=int,
-        default=1,
+        default=0,
     )
     parser.add_argument(
         "--pipefusion_warmup_step",
@@ -133,8 +119,6 @@ def main():
     torch.backends.cudnn.deterministic = True
 
     enable_parallel_vae = args.use_parallel_vae
-    if args.height >= 4096:
-        enable_parallel_vae = True
 
     # for DiT the height and width are fixed according to the model
     distri_config = DistriConfig(
@@ -150,14 +134,14 @@ def main():
         use_cuda_graph=args.use_cuda_graph,
         attn_num=args.attn_num,
         scheduler=args.scheduler,
+        ulysses_degree=args.ulysses_degree,
     )
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
         pretrained_model_name_or_path=args.model_id,
         enable_parallel_vae=enable_parallel_vae,
-        # variant="fp16",
-        # use_safetensors=True,
+        use_profiler=args.use_profiler,
     )
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
@@ -166,19 +150,27 @@ def main():
         prompt=args.prompt,
         generator=torch.Generator(device="cuda").manual_seed(42),
         output_type=args.output_type,
-        num_inference_steps=args.num_inference_steps,
+        num_inference_steps=args.pipefusion_warmup_step + 1,
     )
 
     torch.cuda.reset_peak_memory_stats()
 
-    case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_sp_{args.use_seq_parallel_attn}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch if args.parallelism=='pipefusion' else 0}"
+    if args.parallelism == "pipefusion":
+        case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch}_warm{args.pipefusion_warmup_step}"
+    else:
+        case_name = f"{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
+    if enable_parallel_vae:
+        case_name += "_patchvae"
 
     if args.use_profiler:
         start_time = time.time()
         with profile(
-            activities=[ProfilerActivity.CUDA],
+            activities=[
+                ProfilerActivity.CPU,
+                ProfilerActivity.CUDA
+            ],
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 f"./profile/{case_name}"
             ),

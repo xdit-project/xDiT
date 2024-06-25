@@ -17,15 +17,16 @@ if __name__ == "__main__":
             "torch>=2.2",
             "diffusers==0.29.0",
             "transformers",
-            "tqdm",
             "sentencepiece",
             "accelerate",
+            "beautifulsoup4",
+            "ftfy",
             f"patchvae @ file://localhost/{os.path.join(os.getcwd(), 'pipefuser/modules/patchvae')}#egg=patchvae",
         ],
         dependency_links=[
             "file://"
             + os.path.join(
-                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b1"
+                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b3"
             )
         ],
         url="https://github.com/PipeFusion/PipeFusion.",

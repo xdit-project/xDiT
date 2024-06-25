@@ -6,4 +6,5 @@ pipefuser.egg-info
 *.log
 *.txt
 results/
+profile/
 pipefusion.egg-info/

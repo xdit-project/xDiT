@@ -145,9 +145,20 @@ To conduct the FID experiment, follow the detailed instructions provided in the 
 
 1. Memory Efficient VAE: 
 
-The VAE decode implementation from diffusers can not be applied on high resolution images (8192px).
-It has CUDA memory spike issue, [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924). 
-We fixed the issue by splitting a conv operator into multiple small ones and executing them sequentially to reduce the peak memory.
+The VAE decoder implementation in the diffusers library faces significant challenges when applied to high-resolution images (8192px and above). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
+
+To address this limitation, we developed [PatchVAE](https://github.com/PipeFusion/PatchVAE), an innovative solution that enables efficient processing of high-resolution images. Our approach incorporates two key strategies:
+
+
+
+* Patch Parallelization: We divide the feature maps in the latent space into multiple patches and perform parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/N, where N is the number of devices utilized.
+
+
+* Sequential Patch Processing: Building on [previous research](https://hanlab.mit.edu/blog/patch-conv), we implemented a method to process portions of each patch sequentially on individual devices. This approach minimizes temporary memory consumption, further optimizing memory usage.
+
+By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240 × 10240 pixels - an impressive 11-fold increase compared to the conventional VAE approach.
+
+This advancement represents a significant leap forward in high-resolution image processing, opening new possibilities for applications in various domains of computer vision and image generation.
 
 
 ## Cite Us

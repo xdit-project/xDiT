@@ -84,7 +84,7 @@ PipeFusion significantly reduces memory usage and required communication bandwid
 It is very suitable for DiT inference to be hosted on GPUs connected via PCIe.
 
 <div align="center">
-    <img src="./assets/overview.jpg" alt="PipeFusion Image">
+    <img src="./assets/overview.png" alt="PipeFusion Image">
 </div>
 
 The above picture compares DistriFusion and PipeFusion.
@@ -101,7 +101,7 @@ Each device processes the computation task for one patch of its assigned stage i
 The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
 
 <div align="center">
-    <img src="./assets/pipefusion.png" alt="Pipeline Image">
+    <img src="./assets/workflow.png" alt="Pipeline Image">
 </div>
 
 

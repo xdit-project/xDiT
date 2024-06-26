@@ -239,7 +239,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             else:
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
-            height, width = self.classify_height_width_bin(
+            height, width = self.image_processor.classify_height_width_bin(
                 height, width, ratios=aspect_ratio_bin
             )
 

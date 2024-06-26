@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
     setup(
         name="pipefusion",
-        author="Jiannan Wang, Jiarui Fang, Aoyu Li, Pengcheng Yang",
+        author="Jiannan Wang, Jiarui Fang, Jinzhe Pan, Aoyu Li, Pengcheng Yang",
         author_email="",
         packages=find_packages(),
         install_requires=[
@@ -20,14 +20,7 @@ if __name__ == "__main__":
             "sentencepiece",
             "accelerate",
             "beautifulsoup4",
-            "ftfy",
-            f"patchvae @ file://localhost/{os.path.join(os.getcwd(), 'pipefuser/modules/patchvae')}#egg=patchvae",
-        ],
-        dependency_links=[
-            "file://"
-            + os.path.join(
-                os.getcwd(), "pipefuser/modules/patchvae#egg=patchvae-0.0.0b3"
-            )
+            "distvae==0.0.0b3" "ftfy",
         ],
         url="https://github.com/PipeFusion/PipeFusion.",
         description="DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models",

@@ -16,6 +16,9 @@ from pipefuser.modules.dit.patch_parallel import (
     DistriTransformer2DModel,
 )
 
+from diffusers.models.modeling_utils import ModelMixin
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
+
 from .base_model import BaseModel
 from ..utils import DistriConfig
 from pipefuser.logger import init_logger
@@ -26,8 +29,8 @@ from typing import Optional, Dict, Any
 
 
 class DistriDiTPP(BaseModel):  # for Patch Parallelism
-    def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
-        assert isinstance(model, Transformer2DModel)
+    def __init__(self, model: ModelMixin, distri_config: DistriConfig):
+        assert isinstance(model, ModelMixin)
         model = DistriTransformer2DModel(model, distri_config)
 
         if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:

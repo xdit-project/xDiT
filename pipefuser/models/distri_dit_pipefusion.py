@@ -4,6 +4,7 @@ from pipefuser.models.diffusers import Attention
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.models.embeddings import PatchEmbed
 from pipefuser.models.diffusers import Transformer2DModel
+from diffusers.models.modeling_utils import ModelMixin
 from torch import distributed as dist, nn
 import torch
 
@@ -25,8 +26,8 @@ from typing import Optional, Dict, Any
 
 
 class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
-    def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
-        assert isinstance(model, Transformer2DModel), f"{type(model)} is not Transformer2DModel"
+    def __init__(self, model: ModelMixin, distri_config: DistriConfig):
+        assert isinstance(model, ModelMixin), f"{type(model)} is not ModelMixin"
         model = DistriTransformer2DModel(model, distri_config)
         for name, module in model.named_modules():
             if isinstance(module, BaseModule):

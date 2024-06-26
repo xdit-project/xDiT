@@ -20,7 +20,7 @@ if __name__ == "__main__":
             "sentencepiece",
             "accelerate",
             "beautifulsoup4",
-            "distvae==0.0.0b3",
+            "distvae",
             "ftfy",
         ],
         url="https://github.com/PipeFusion/PipeFusion.",

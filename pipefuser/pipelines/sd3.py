@@ -148,6 +148,7 @@ class DistriSD3Pipeline:
         device = distri_config.device
 
         batch_size = distri_config.batch_size or 1
+        prompt = [""] * batch_size if batch_size > 1 else ""
         num_images_per_prompt = 1
 
         if distri_config.parallelism == "pipefusion":
@@ -156,12 +157,13 @@ class DistriSD3Pipeline:
             self.pipeline(
                 height=distri_config.height,
                 width=distri_config.width,
-                prompt="",
+                prompt=prompt,
                 num_inference_steps=distri_config.warmup_steps + 2,
                 output_type="latent",
             )
 
         else:
+            raise NotImplementedError("SD3 doesn't support other parallelism methods now")
             # Encode input prompt
             (
                 prompt_embeds,
@@ -169,7 +171,7 @@ class DistriSD3Pipeline:
                 negative_prompt_embeds,
                 negative_prompt_attention_mask,
             ) = self.pipeline.encode_prompt(
-                prompt="",
+                prompt=prompt,
                 do_classifier_free_guidance=distri_config.do_classifier_free_guidance,
                 device=device,
             )

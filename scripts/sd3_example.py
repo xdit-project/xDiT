@@ -3,8 +3,7 @@ import torch
 
 from pipefuser.pipelines.sd3 import DistriSD3Pipeline
 from pipefuser.utils import DistriConfig
-from torch.profiler import profile, record_function, ProfilerActivity
-from pipefuser.modules.conv.conv_chunk.chunk_conv2d import PatchConv2d
+from torch.profiler import profile, ProfilerActivity
 
 import time
 
@@ -87,10 +86,10 @@ def main():
         type=int,
         default=1,
     )
-    # parser.add_argument(
-    #     "--use_use_ulysses_low",
-    #     action="store_true",
-    # )
+    parser.add_argument(
+        "--use_use_ulysses_low",
+        action="store_true",
+    )
     parser.add_argument(
         "--use_profiler",
         action="store_true",
@@ -152,9 +151,6 @@ def main():
         # use_safetensors=True,
     )
 
-    if args.output_type == "pil":
-        print("Patching Conv2d")
-        PatchConv2d(1024)(pipeline.pipeline)
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
     output = pipeline(

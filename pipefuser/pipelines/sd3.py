@@ -10,7 +10,7 @@ from pipefuser.pipelines.pip.distri_sd3 import DistriSD3PiP
 from pipefuser.schedulers.pip import (
     DPMSolverMultistepSchedulerPiP,
     DDIMSchedulerPiP,
-    FlowMatchEulerDiscreteSchedulerPiP
+    FlowMatchEulerDiscreteSchedulerPiP,
 )
 
 from pipefuser.models import (
@@ -46,7 +46,8 @@ class DistriSD3Pipeline:
     def from_pretrained(distri_config: DistriConfig, **kwargs):
         device = distri_config.device
         pretrained_model_name_or_path = kwargs.pop(
-            "pretrained_model_name_or_path", "stabilityai/stable-diffusion-3-medium-diffusers"
+            "pretrained_model_name_or_path",
+            "stabilityai/stable-diffusion-3-medium-diffusers",
         )
         torch_dtype = kwargs.pop("torch_dtype", torch.float16)
         transformer = SD3Transformer2DModel.from_pretrained(
@@ -55,9 +56,12 @@ class DistriSD3Pipeline:
             subfolder="transformer",
         )
 
-        if distri_config.parallelism == "patch":
-            raise ValueError("Patch parallelism is not supported for SD3")
-            # transformer = DistriDiTPP(transformer, distri_config)
+        if (
+            distri_config.parallelism == "patch"
+            or distri_config.parallelism == "sequence"
+        ):
+            # raise ValueError("Patch parallelism is not supported for SD3")
+            transformer = DistriDiTPP(transformer, distri_config)
         elif distri_config.parallelism == "naive_patch":
             raise ValueError("Naive patch parallelism is not supported for SD3")
             # transformer = NaivePatchDiT(transformer, distri_config)
@@ -163,7 +167,9 @@ class DistriSD3Pipeline:
             )
 
         else:
-            raise NotImplementedError("SD3 doesn't support other parallelism methods now")
+            raise NotImplementedError(
+                "SD3 doesn't support other parallelism methods now"
+            )
             # Encode input prompt
             (
                 prompt_embeds,

@@ -16,6 +16,9 @@ from pipefuser.modules.dit.patch_parallel import (
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
+from diffusers.models.modeling_utils import ModelMixin
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
+
 from .base_model import BaseModel
 from ..utils import DistriConfig
 from pipefuser.logger import init_logger

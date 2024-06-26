@@ -3,9 +3,9 @@ import torch
 
 from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers import (
-    PixArtAlphaPipeline, 
+    PixArtAlphaPipeline,
     StableDiffusion3Pipeline,
-    FlowMatchEulerDiscreteScheduler
+    FlowMatchEulerDiscreteScheduler,
 )
 import time
 
@@ -13,9 +13,10 @@ import time
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model",
-        default="sd3",
-        choices=["sd3", "pixart"],
+        "--model_id",
+        default="stabilityai/stable-diffusion-3-medium-diffusers",
+        type=str,
+        help="Path to the pretrained model.",
     )
     parser.add_argument(
         "--num_inference_steps",
@@ -37,7 +38,7 @@ def main():
     parser.add_argument(
         "--output_type",
         type=str,
-        default="latent",
+        default="pil",
         choices=["latent", "pil"],
         help="latent saves memory, pil will results a memory burst in vae",
     )
@@ -64,11 +65,12 @@ def main():
 
     # for DiT the height and width are fixed according to the model
 
-    if args.model == "sd3":
-        model_id = "stabilityai/stable-diffusion-3-medium-diffusers"
+    model_id = args.model_id
+
     if args.scheduler == "FM-ED":
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            pretrained_model_name_or_path=model_id, subfolder="scheduler"
+            pretrained_model_name_or_path=model_id,
+            subfolder="scheduler",
         )
 
     pipeline = StableDiffusion3Pipeline.from_pretrained(
@@ -85,50 +87,20 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
 
-    case_name = f"{args.parallelism}_hw_{args.height}_base"
+    case_name = f"baseline_hw_{args.height}_base"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
 
-    if args.use_profiler:
-        start_time = time.time()
-        with profile(
-            activities=[ProfilerActivity.CUDA],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                f"./profile/{case_name}"
-            ),
-            profile_memory=True,
-            with_stack=True,
-            record_shapes=True,
-        ) as prof:
-            output = pipeline(
-                prompt=args.prompt,
-                generator=torch.Generator(device="cuda").manual_seed(42),
-                num_inference_steps=args.num_inference_steps,
-                output_type=args.output_type,
-            )
-        # if distri_config.rank == 0:
-        #     prof.export_memory_timeline(
-        #         f"{distri_config.mode}_{args.height}_{distri_config.world_size}_mem.html"
-        #     )
-        end_time = time.time()
-    else:
-        # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT = 100000
-        # torch.cuda.memory._record_memory_history(
-        #     max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
-        # )
-        start_time = time.time()
-        output = pipeline(
-            prompt=args.prompt,
-            generator=torch.Generator(device="cuda").manual_seed(42),
-            num_inference_steps=args.num_inference_steps,
-            output_type=args.output_type,
-        )
+    start_time = time.time()
+    output = pipeline(
+        prompt=args.prompt,
+        generator=torch.Generator(device="cuda").manual_seed(42),
+        num_inference_steps=args.num_inference_steps,
+        output_type=args.output_type,
+    )
 
-        end_time = time.time()
-        # torch.cuda.memory._dump_snapshot(
-        #     f"{distri_config.mode}_{distri_config.world_size}.pickle"
-        # )
-        torch.cuda.memory._record_memory_history(enabled=None)
+    end_time = time.time()
+    torch.cuda.memory._record_memory_history(enabled=None)
 
     elapsed_time = end_time - start_time
 

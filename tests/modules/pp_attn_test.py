@@ -1,7 +1,7 @@
 import unittest
 import torch
-from pipefuser.models.diffusers import Attention  # type: ignore
-from pipefuser.modules.patch_parallel.attn import DistriSelfAttentionPP
+from diffusers.models.attention import Attention
+from pipefuser.modules.dit.patch_parallel.attn import DistriSelfAttentionPP
 from pipefuser.utils import DistriConfig
 
 

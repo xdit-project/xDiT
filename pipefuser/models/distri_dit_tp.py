@@ -1,9 +1,7 @@
-from pipefuser.models.diffusers.attention import FeedForward
 from pipefuser.modules.dit.patch_parallel.transformer_2d import DistriTransformer2DModel
 import torch
 
-# from diffusers.models.attention_processor import Attention
-from pipefuser.models.diffusers import Attention
+from diffusers.models.attention import Attention
 
 # if diffuser version <=0.29.0
 from packaging.version import Version

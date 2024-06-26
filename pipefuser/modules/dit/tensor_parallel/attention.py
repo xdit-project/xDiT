@@ -1,5 +1,5 @@
 import torch.cuda
-from pipefuser.models.diffusers import Attention
+from diffusers.models.attention import Attention
 from torch import distributed as dist
 from torch import nn
 from torch.nn import functional as F

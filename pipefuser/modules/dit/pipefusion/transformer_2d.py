@@ -5,8 +5,7 @@ from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-# from diffusers import Transformer2DModel
-from pipefuser.models.diffusers import Transformer2DModel
+from diffusers import Transformer2DModel
 
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from typing import Optional, Dict, Any

@@ -20,7 +20,6 @@ if __name__ == "__main__":
             "sentencepiece",
             "accelerate",
             "beautifulsoup4",
-            "yunchang==0.2",
             "distvae",
             "ftfy",
         ],

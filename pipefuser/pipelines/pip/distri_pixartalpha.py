@@ -239,9 +239,10 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             else:
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
-            height, width = self.image_processor.classify_height_width_bin(
-                height, width, ratios=aspect_ratio_bin
-            )
+            if distri_config.rank == 0:
+                height, width = self.image_processor.classify_height_width_bin(
+                    height, width, ratios=aspect_ratio_bin
+                )
 
         self.check_inputs(
             prompt,
@@ -466,7 +467,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 latents / self.vae.config.scaling_factor, return_dict=False
             )[0]
             if use_resolution_binning:
-                image = self.resize_and_crop_tensor(image, orig_width, orig_height)
+                image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
         else:
             image = latents
 

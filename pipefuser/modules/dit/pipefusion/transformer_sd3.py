@@ -13,7 +13,7 @@ from typing import Optional, Dict, Any, Union, Tuple
 import torch
 import torch.nn.functional as F
 from torch import distributed as dist
-from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.base_module import BaseModule
 from pipefuser.utils import DistriConfig
 
 
@@ -95,7 +95,10 @@ class DistriSD3Transformer2DModel(BaseModule):
         """
         module = self.module
         distri_config = self.distri_config
-        is_warmup = distri_config.mode == "full_sync" or self.counter <= distri_config.warmup_steps
+        is_warmup = (
+            distri_config.mode == "full_sync"
+            or self.counter <= distri_config.warmup_steps
+        )
         if joint_attention_kwargs is not None:
             joint_attention_kwargs = joint_attention_kwargs.copy()
             lora_scale = joint_attention_kwargs.pop("scale", 1.0)
@@ -111,42 +114,64 @@ class DistriSD3Transformer2DModel(BaseModule):
         #     )
 
         if distri_config.rank == 1:
-            hidden_states = module.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
+            hidden_states = module.pos_embed(
+                hidden_states
+            )  # takes care of adding positional embeddings too.
             encoder_hidden_states = module.context_embedder(encoder_hidden_states)
-        
+
         temb = module.time_text_embed(timestep, pooled_projections)
 
         for block in module.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
-                hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                temb=temb,
             )
-        
+
         if distri_config.rank == 0:
 
             hidden_states = module.norm_out(hidden_states, temb)
             hidden_states = module.proj_out(hidden_states)
 
             patch_size = module.config.patch_size
-            height, width = hidden_states.shape[-2] // module.out_channels // patch_size, hidden_states.shape[-1] * patch_size
+            height, width = (
+                hidden_states.shape[-2] // module.out_channels // patch_size,
+                hidden_states.shape[-1] * patch_size,
+            )
             # if not is_warmup:
-                # height //= distri_config.pp_num_patch
+            # height //= distri_config.pp_num_patch
 
             # unpatchify
             height = height // patch_size
             width = width // patch_size
 
             hidden_states = hidden_states.reshape(
-                shape=(hidden_states.shape[0], height, width, patch_size, patch_size, module.out_channels)
+                shape=(
+                    hidden_states.shape[0],
+                    height,
+                    width,
+                    patch_size,
+                    patch_size,
+                    module.out_channels,
+                )
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
-            output = hidden_states.reshape(
-                shape=(hidden_states.shape[0], module.out_channels, height * patch_size, width * patch_size)
-            ), None
-    
+            output = (
+                hidden_states.reshape(
+                    shape=(
+                        hidden_states.shape[0],
+                        module.out_channels,
+                        height * patch_size,
+                        width * patch_size,
+                    )
+                ),
+                None,
+            )
+
             # if USE_PEFT_BACKEND:
             #     # remove `lora_scale` from each PEFT layer
             #     unscale_lora_layers(module, lora_scale)
-        
+
         else:
             output = hidden_states, encoder_hidden_states
 

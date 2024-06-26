@@ -2,7 +2,7 @@
 import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
-from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.base_module import BaseModule
 from pipefuser.utils import DistriConfig
 from pipefuser.logger import init_logger
 

@@ -3,24 +3,23 @@ import torch
 # from diffusers.models.attention_processor import Attention
 from diffusers.models.attention import Attention
 
-from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.models.embeddings import PatchEmbed
 from torch import distributed as dist, nn
 
-from pipefuser.models.base_model import BaseModule, BaseModel
+
 from pipefuser.modules.dit.patch_parallel import (
     DistriConv2dPP,
     DistriSelfAttentionPP,
     DistriPatchEmbed,
     DistriTransformer2DModel,
 )
-
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from .base_model import BaseModel
 from ..utils import DistriConfig
 from pipefuser.logger import init_logger
+from pipefuser.models.base_model import BaseModule, BaseModel
 
 logger = init_logger(__name__)
 

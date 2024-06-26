@@ -3,8 +3,7 @@ from diffusers.models.attention import FeedForward, GELU, GEGLU
 from torch import distributed as dist
 from torch import nn
 from torch.nn import functional as F
-
-from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.base_module import BaseModule
 from pipefuser.utils import DistriConfig
 
 

@@ -11,7 +11,7 @@ if __name__ == "__main__":
     setup(
         name="pipefusion",
         author="Jiannan Wang, Jiarui Fang, Jinzhe Pan, Aoyu Li, Pengcheng Yang",
-        author_email="",
+        author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
             "torch>=2.2",
@@ -20,7 +20,8 @@ if __name__ == "__main__":
             "sentencepiece",
             "accelerate",
             "beautifulsoup4",
-            "distvae==0.0.0b3" "ftfy",
+            "distvae==0.0.0b3",
+            "ftfy",
         ],
         url="https://github.com/PipeFusion/PipeFusion.",
         description="DistriFusion: Distributed Parallel Inference for High-Resolution Diffusion Models",

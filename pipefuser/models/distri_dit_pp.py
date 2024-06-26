@@ -1,11 +1,10 @@
 import torch
 
 # from diffusers.models.attention_processor import Attention
-from pipefuser.models.diffusers import Attention
+from diffusers.models.attention import Attention
 
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.models.embeddings import PatchEmbed
-from pipefuser.models.diffusers import Transformer2DModel
 from torch import distributed as dist, nn
 
 from pipefuser.models.base_model import BaseModule, BaseModel
@@ -15,6 +14,9 @@ from pipefuser.modules.dit.patch_parallel import (
     DistriPatchEmbed,
     DistriTransformer2DModel,
 )
+
+from diffusers.models.modeling_utils import ModelMixin
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from .base_model import BaseModel
 from ..utils import DistriConfig
@@ -26,8 +28,8 @@ from typing import Optional, Dict, Any
 
 
 class DistriDiTPP(BaseModel):  # for Patch Parallelism
-    def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
-        assert isinstance(model, Transformer2DModel)
+    def __init__(self, model: ModelMixin, distri_config: DistriConfig):
+        assert isinstance(model, ModelMixin)
         model = DistriTransformer2DModel(model, distri_config)
 
         if distri_config.world_size > 1 and distri_config.n_device_per_batch > 1:

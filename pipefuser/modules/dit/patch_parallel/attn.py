@@ -1,7 +1,7 @@
 import torch
 
 # from diffusers.models.attention import Attention
-from pipefuser.models.diffusers import Attention
+from diffusers.models.attention import Attention
 
 from diffusers.utils import USE_PEFT_BACKEND
 from torch import distributed as dist

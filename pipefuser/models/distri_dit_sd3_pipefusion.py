@@ -1,6 +1,5 @@
 # from diffusers.models.attention_processor import Attention
-from pipefuser.models.diffusers import Attention
-
+from diffusers.models.attention import Attention
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
@@ -45,9 +44,7 @@ class DistriDiTSD3PipeFusion(BaseModel):  # for Pipeline Parallelism
                     setattr(module, subname, wrapped_submodule)
                 elif isinstance(submodule, Attention):
                     if subname == "attn":  # self attention
-                        wrapped_submodule = DistriJointAttnPiP(
-                            submodule, distri_config
-                        )
+                        wrapped_submodule = DistriJointAttnPiP(submodule, distri_config)
                         setattr(module, subname, wrapped_submodule)
         logger.info(
             f"Using pipeline parallelism, world_size: {distri_config.world_size} and n_device_per_batch: {distri_config.n_device_per_batch}"

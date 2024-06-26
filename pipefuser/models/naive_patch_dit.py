@@ -3,8 +3,7 @@ import torch
 from pipefuser.modules.dit.patch_parallel.transformer_2d import DistriTransformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 
-# from diffusers.models.transformers.transformer_2d import Transformer2DModel
-from pipefuser.models.diffusers import Transformer2DModel
+from diffusers.models.modeling_utils import ModelMixin
 
 from torch import distributed as dist
 
@@ -17,7 +16,7 @@ from typing import Optional, Dict, Any
 
 
 class NaivePatchDiT(BaseModel):  # for Patch Parallelism
-    def __init__(self, model: Transformer2DModel, distri_config: DistriConfig):
+    def __init__(self, model: ModelMixin, distri_config: DistriConfig):
         model = DistriTransformer2DModel(model, distri_config)
         super(NaivePatchDiT, self).__init__(model, distri_config)
 

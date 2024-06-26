@@ -1,11 +1,7 @@
 import torch
 from diffusers import DiTPipeline
 
-# lib impl
-# from diffusers.models.transformers.transformer_2d import Transformer2DModel
-
-# customized impl
-from pipefuser.models.diffusers import Transformer2DModel
+from diffusers import Transformer2DModel
 
 
 # from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP

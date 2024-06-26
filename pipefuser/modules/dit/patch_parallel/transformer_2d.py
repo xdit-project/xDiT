@@ -5,9 +5,7 @@ from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-# from diffusers import Transformer2DModel
-from pipefuser.models.diffusers import Transformer2DModel
-
+from diffusers import Transformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from typing import Optional, Dict, Any
 import torch
@@ -74,11 +72,12 @@ class DistriTransformer2DModel(BaseModule):
         """
         module = self.module
         distri_config = self.distri_config
-        assert (
-            module.is_input_continuous == False
-            and module.is_input_vectorized == False
-            and module.is_input_patches == True
-        )
+
+        # assert (
+        #     module.is_input_continuous == False
+        #     and module.is_input_vectorized == False
+        #     and module.is_input_patches == True
+        # )
 
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:
@@ -111,17 +110,21 @@ class DistriTransformer2DModel(BaseModule):
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
-        if module.is_input_patches:
+        patch_size = module.config.patch_size
+        in_channels = module.config.in_channels
+        is_input_patches = in_channels is not None and patch_size is not None
+
+        if is_input_patches:
             height, width = (
                 hidden_states.shape[-2]
-                // module.patch_size
+                // patch_size
                 // (
                     distri_config.n_device_per_batch
                     if distri_config.parallelism == "patch"
                     or distri_config.parallelism == "sequence"
                     else 1
                 ),
-                hidden_states.shape[-1] // module.patch_size,
+                hidden_states.shape[-1] // patch_size,
             )
             hidden_states = module.pos_embed(hidden_states)
 
@@ -139,7 +142,7 @@ class DistriTransformer2DModel(BaseModule):
                 )
 
         # 2. Blocks
-        if module.is_input_patches and module.caption_projection is not None:
+        if is_input_patches and module.caption_projection is not None:
             batch_size = hidden_states.shape[0]
             encoder_hidden_states = module.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(
@@ -158,7 +161,10 @@ class DistriTransformer2DModel(BaseModule):
             )
 
         # 3. Output
-        if module.is_input_patches:
+        in_channels = module.config.in_channels
+        patch_size = module.config.patch_size
+        is_input_patches = in_channels is not None and patch_size is not None
+        if is_input_patches:
             if module.config.norm_type != "ada_norm_single":
                 conditioning = module.transformer_blocks[0].norm1.emb(
                     timestep, class_labels, hidden_dtype=hidden_states.dtype
@@ -187,8 +193,8 @@ class DistriTransformer2DModel(BaseModule):
                     -1,
                     height,
                     width,
-                    module.patch_size,
-                    module.patch_size,
+                    patch_size,
+                    patch_size,
                     module.out_channels,
                 )
             )
@@ -197,8 +203,8 @@ class DistriTransformer2DModel(BaseModule):
                 shape=(
                     -1,
                     module.out_channels,
-                    height * module.patch_size,
-                    width * module.patch_size,
+                    height * patch_size,
+                    width * patch_size,
                 )
             )
 

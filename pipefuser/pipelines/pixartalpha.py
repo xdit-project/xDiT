@@ -28,16 +28,24 @@ from pipefuser.utils import (
 )
 from pipefuser.logger import init_logger
 
-from patchvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
 
 logger = init_logger(__name__)
 
 
 class DistriPixArtAlphaPipeline:
-    def __init__(self, pipeline: PixArtAlphaPipeline, module_config: DistriConfig, enable_parallel_vae: bool = False, use_profiler: bool = False):
+    def __init__(
+        self,
+        pipeline: PixArtAlphaPipeline,
+        module_config: DistriConfig,
+        enable_parallel_vae: bool = False,
+        use_profiler: bool = False,
+    ):
         self.pipeline = pipeline
         if enable_parallel_vae:
-            self.pipeline.vae.decoder = DecoderAdapter(self.pipeline.vae.decoder, use_profiler=use_profiler)
+            self.pipeline.vae.decoder = DecoderAdapter(
+                self.pipeline.vae.decoder, use_profiler=use_profiler
+            )
 
         # assert module_config.do_classifier_free_guidance == False
         assert module_config.split_batch == False
@@ -90,7 +98,9 @@ class DistriPixArtAlphaPipeline:
                     pretrained_model_name_or_path, subfolder="scheduler"
                 )
             else:
-                raise ValueError(f"scheduler do not support in pipefusion paralleliem: {distri_config.scheduler}")
+                raise ValueError(
+                    f"scheduler do not support in pipefusion paralleliem: {distri_config.scheduler}"
+                )
             scheduler.init(distri_config)
 
         if distri_config.parallelism == "pipefusion":
@@ -113,7 +123,12 @@ class DistriPixArtAlphaPipeline:
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 2 {peak_memory/1e9} GB")
 
-        ret = DistriPixArtAlphaPipeline(pipeline, distri_config, enable_parallel_vae=enable_parallel_vae, use_profiler=use_profiler)
+        ret = DistriPixArtAlphaPipeline(
+            pipeline,
+            distri_config,
+            enable_parallel_vae=enable_parallel_vae,
+            use_profiler=use_profiler,
+        )
 
         peak_memory = torch.cuda.max_memory_allocated(device="cuda")
         print(f"DistriPixArtAlphaPipeline from pretrain stage 3 {peak_memory/1e9} GB")
@@ -182,7 +197,7 @@ class DistriPixArtAlphaPipeline:
                     raise ValueError("Invalid sample size")
                 orig_height, orig_width = height, width
                 height, width = pipeline.height, width = (
-                    pipeline.classify_height_width_bin(
+                    pipeline.image_processor.classify_height_width_bin(
                         height, width, ratios=aspect_ratio_bin
                     )
                 )

@@ -1,8 +1,6 @@
 import torch
 
-# from diffusers.models.attention import Attention
-from pipefuser.models.diffusers import Attention
-
+from diffusers.models.attention import Attention
 from diffusers.utils import USE_PEFT_BACKEND
 from torch import distributed as dist
 from torch import nn
@@ -233,6 +231,7 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
                 self.batch_idx = 0
         return output
 
+
 class DistriJointAttnPiP(DistriAttentionPiP):
     def __init__(self, module: Attention, distri_config: DistriConfig):
         super(DistriJointAttnPiP, self).__init__(module, distri_config)
@@ -252,11 +251,15 @@ class DistriJointAttnPiP(DistriAttentionPiP):
         input_ndim = hidden_states.ndim
         if input_ndim == 4:
             batch_size, channel, height, width = hidden_states.shape
-            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+            hidden_states = hidden_states.view(
+                batch_size, channel, height * width
+            ).transpose(1, 2)
         context_input_ndim = encoder_hidden_states.ndim
         if context_input_ndim == 4:
             batch_size, channel, height, width = encoder_hidden_states.shape
-            encoder_hidden_states = encoder_hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+            encoder_hidden_states = encoder_hidden_states.view(
+                batch_size, channel, height * width
+            ).transpose(1, 2)
 
         batch_size = encoder_hidden_states.shape[0]
 
@@ -287,7 +290,7 @@ class DistriJointAttnPiP(DistriAttentionPiP):
             self.buffer_list = full_kv
 
         # naive attn
-        key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)        
+        key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
         # logger.info(f"key: {key.shape}; value: {value.shape}")
 
         # `context` projections.
@@ -309,7 +312,9 @@ class DistriJointAttnPiP(DistriAttentionPiP):
         hidden_states = hidden_states = F.scaled_dot_product_attention(
             query, key, value, dropout_p=0.0, is_causal=False
         )
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.transpose(1, 2).reshape(
+            batch_size, -1, attn.heads * head_dim
+        )
         hidden_states = hidden_states.to(query.dtype)
 
         # Split the attention outputs.
@@ -326,12 +331,16 @@ class DistriJointAttnPiP(DistriAttentionPiP):
             encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
 
         if input_ndim == 4:
-            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+            hidden_states = hidden_states.transpose(-1, -2).reshape(
+                batch_size, channel, height, width
+            )
         if context_input_ndim == 4:
-            encoder_hidden_states = encoder_hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+            encoder_hidden_states = encoder_hidden_states.transpose(-1, -2).reshape(
+                batch_size, channel, height, width
+            )
 
         return hidden_states, encoder_hidden_states
-    
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,

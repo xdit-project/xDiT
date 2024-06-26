@@ -1,7 +1,5 @@
 from pipefuser.models.base_model import BaseModel
 import torch
-from pipefuser.modules.dit.patch_parallel.transformer_2d import DistriTransformer2DModel
-from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 
 from diffusers.models.modeling_utils import ModelMixin
 

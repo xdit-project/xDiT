@@ -10,8 +10,7 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 from typing import Optional, Dict, Any
 import torch
 import torch.nn.functional as F
-from torch import distributed as dist
-from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.base_module import BaseModule
 from pipefuser.utils import DistriConfig
 
 

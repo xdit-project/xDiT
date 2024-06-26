@@ -3,6 +3,7 @@ import torch
 from diffusers.models.attention import Attention
 from pipefuser.modules.dit.patch_parallel.attn import DistriSelfAttentionPP
 from pipefuser.utils import DistriConfig
+import os
 
 
 class TestDistriSelfAttentionPP(unittest.TestCase):
@@ -12,12 +13,17 @@ class TestDistriSelfAttentionPP(unittest.TestCase):
         self.width = 4
         self.sequence_length = 128
         self.dtype = torch.bfloat16
-        self.device = "cuda"
+
+        # Set device using rank
+        rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.device = f"cuda:{rank}"
 
         self.attention = (
             Attention(query_dim=self.hidden_dim).to(self.dtype).to(self.device)
         )
-        self.distri_config = DistriConfig(height=self.height, width=self.width)
+        self.distri_config = DistriConfig(
+            height=self.height, width=self.width, parallelism="sequence"
+        )
 
         self.distri_config.use_seq_parallel_attn = True
         self.attention_pp_true = DistriSelfAttentionPP(

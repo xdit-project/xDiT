@@ -2,7 +2,7 @@
 import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
-from pipefuser.models.base_model import BaseModule, BaseModel
+from pipefuser.modules.base_module import BaseModule
 from pipefuser.utils import DistriConfig
 from pipefuser.logger import init_logger
 
@@ -15,7 +15,6 @@ class DistriPatchEmbed(BaseModule):
         self.batch_idx = 0
         self.pos_embed = None
 
-    
     def forward(self, latent):
         module = self.module
         distri_config = self.distri_config

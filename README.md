@@ -1,6 +1,15 @@
-# PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models
+<div align="center">
+<h1>PipeFusion: A Suite for Parallel Inference Diffusion Transformers (DiTs)</h1>
 
-[Paper on arXiv](https://arxiv.org/abs/2405.14430)
+  <div align="center">
+  <a href="https://opensource.org/licenses/Apache-2.0">
+    <img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-4E94CE.svg">
+  </a>
+  <a href="https://arxiv.org/abs/2405.14430">
+    <img src="https://img.shields.io/badge/Paper-Arixv-FFB000.svg" alt="Paper">
+  </a>
+</div>
+</div>
 
 ***In the Sora Era, still spend money on NVLink and high-bandwidth networks for serving long-context Diffusion Models? With PipeFusion, PCIe and Ethernet are enough!***
 
@@ -20,45 +29,59 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
 | Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
 | DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $2AL = (KV)L$ |
-| Ring Seq Parallel* | fresh | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
-| Ulysses Seq Parallel | fresh | $\frac{4}{N}O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
+| Ring Sequence Parallel* | fresh | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
+| Ulysses Sequence Parallel | fresh | $\frac{4}{N}O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
 | PipeFusion* | stale- | $2O(p \times hs)$ | $\frac{1}{N}P$ | $\frac{2}{M}A = \frac{1}{M}QO$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
 
 </div>
 
-The Latency on 4xA100 (PCIe)
+### Updates
+* **June 26, 2024**: Support Stable Diffusion 3. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
+* **May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py).
+
+### Supported DiTs:
+-  [PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
+-  [Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
+-  [DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256) 
+
+
+### Benchmark Results on Pixart-Alpha
+
+You can  adapt to [./scripts/benchmark.sh](./scripts/benchmark.sh) to benchmark latency and memory usage of different parallel approaches.
+
+1. The Latency on 4xA100-80GB (PCIe)
 
 <div align="center">
-    <img src="./assets/latency-A100-PCIe.jpg" alt="A100 PCIe latency">
+    <img src="./assets/latency-A100-PCIe.png" alt="A100 PCIe latency">
 </div>
 
-The Latency on 8xL20 (PCIe)
+2. The Latency on 8xL20-48GB (PCIe)
 
 <div align="center">
-    <img src="./assets/latency-L20.jpg" alt="L20 latency">
+    <img src="./assets/latency-L20.png" alt="L20 latency">
 </div>
 
-The Latency on 8xA100 (NVLink)
+3. The Latency on 8xA100-80GB (NVLink)
 
 <div align="center">
-    <img src="./assets/latency-A100-NVLink.jpg" alt="latency-A100-NVLink">
+    <img src="./assets/latency-A100-NVLink.png" alt="latency-A100-NVLink">
 </div>
 
-Best Practices:
+4. The Latency on 4xT4-16GB (PCIe)
 
-1. PipeFusion is the preferable for both memory and communication efficiency. It does not need high inter-GPU bandwidth, like NVLink. Therefore, it is the lowest latency for PCIe clusters. However, on NVLink, the power of PipeFusion is weakened.
-2. DistriFusion is fast on NVLink at a cost with large overall memory cost usage and therefore has OOM for high-resolution images.
-3. PipeFusion and Tensor parallelism is able to generate high-resolution images due to their splitting on both parameters and activations. Tensor parallelism is fast on NVLink, while PipeFusion is fast on PCIe. 
-4. Sequence Parallelism is usually faster than tensor parallelism, but has OOM for 
-high-resolution images.
-
+<div align="center">
+    <img src="./assets/latency-T4.png" 
+    alt="latency-T4">
+</div>
 
 ##  PipeFusion: Displaced Patch Pipeline Parallelism
 
+PipeFusion is the innovative method first proposed by us.
+
 ### Overview
 
-As shown in the above table, PipeFusion significantly reduces memory usage and required communication bandwidth, not to mention it also hides communication overhead under the communication.
-It is the best parallel approach for DiT inference to be hosted on GPUs connected via PCIe.
+PipeFusion significantly reduces memory usage and required communication bandwidth, not to mention it also hides communication overhead under the communication.
+It is very suitable for DiT inference to be hosted on GPUs connected via PCIe.
 
 <div align="center">
     <img src="./assets/overview.jpg" alt="PipeFusion Image">
@@ -70,7 +93,6 @@ It splits an image into 2 patches and employs asynchronous allgather for activat
 (b) PipeFusion shards DiT parameters on two devices.
 It splits an image into 4 patches and employs asynchronous P2P for activations across two devices.
 
-
 PipeFusion partitions an input image into $M$ non-overlapping patches.
 The DiT network is partitioned into $N$ stages ($N$ < $L$), which are sequentially assigned to $N$ computational devices. 
 Note that $M$ and $N$ can be unequal, which is different from the image-splitting approaches used in sequence parallelism and DistriFusion.
@@ -79,15 +101,13 @@ Each device processes the computation task for one patch of its assigned stage i
 The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
 
 <div align="center">
-    <img src="./assets/pipefusion.jpg" alt="Pipeline Image">
+    <img src="./assets/pipefusion.png" alt="Pipeline Image">
 </div>
 
 
-### Usage
+### QuickStart
 
-1. install [long-context-attention](https://github.com/feifeibear/long-context-attention) to use sequence parallelism
-
-2. install pipefuison from local.
+1. install pipefuison from local.
 ```
 python setup.py install
 ```
@@ -105,16 +125,15 @@ from pipefusion.modules.opt.chunk_conv2d import PatchConv2d
 # parallelism choose from ["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
 distri_config = DistriConfig(
     parallelism="pipefusion",
-    pp_num_patch=2
+    pp_num_patch=4
 )
 
 pipeline = DistriPixArtAlphaPipeline.from_pretrained(
     distri_config=distri_config,
     pretrained_model_name_or_path=args.model_id,
+    enable_parallel_vae=True, # use patch parallel for VAE to avoid OOM on high-resolution image genration (2048px).
 )
 
-# use the following patch for memory efficient VAE
-# PatchConv2d(1024)(pipeline)
 pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
 
 output = pipeline(
@@ -127,10 +146,6 @@ if distri_config.rank == 0:
     output.save("astronaut.png")
 ```
 
-## Benchmark
-
-You can  adapt to [./scripts/benchmark.sh](./scripts/benchmark.sh) to benchmark latency and memory usage of different parallel approaches.
-
 ## Evaluation Image Quality
 
 To conduct the FID experiment, follow the detailed instructions provided in the assets/doc/FID.md documentation.
@@ -140,23 +155,19 @@ To conduct the FID experiment, follow the detailed instructions provided in the 
 </div>
 
 
-
 ## Other optimizations
 
-1. Memory Efficient VAE: 
+1. Avoid OOM in VAE module:
 
-The VAE decoder implementation in the diffusers library faces significant challenges when applied to high-resolution images (8192px and above). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
+The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
 
-To address this limitation, we developed [PatchVAE](https://github.com/PipeFusion/PatchVAE), an innovative solution that enables efficient processing of high-resolution images. Our approach incorporates two key strategies:
-
-
+To address this limitation, we developed [DistVAE](https://github.com/PipeFusion/DistVAE), an innovative solution that enables efficient processing of high-resolution images. Our approach incorporates two key strategies:
 
 * Patch Parallelization: We divide the feature maps in the latent space into multiple patches and perform parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/N, where N is the number of devices utilized.
 
+* Chunked Input Processing: Building on [MIT-patch-conv](https://hanlab.mit.edu/blog/patch-conv), we split the input feature map into chunks and feed them into convolution operator sequentially. This approach minimizes temporary memory consumption.
 
-* Sequential Patch Processing: Building on [previous research](https://hanlab.mit.edu/blog/patch-conv), we implemented a method to process portions of each patch sequentially on individual devices. This approach minimizes temporary memory consumption, further optimizing memory usage.
-
-By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240 × 10240 pixels - an impressive 11-fold increase compared to the conventional VAE approach.
+By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240px - an impressive 11-fold increase compared to the conventional VAE approach.
 
 This advancement represents a significant leap forward in high-resolution image processing, opening new possibilities for applications in various domains of computer vision and image generation.
 

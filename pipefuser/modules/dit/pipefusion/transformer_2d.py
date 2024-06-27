@@ -53,6 +53,18 @@ class DistriTransformer2DModel(BaseModule):
                 start_idx:end_idx
             ]
 
+        from onediff.infer_compiler import compile
+        # options = {"dynamic": True}
+        options = {}
+        compiled_blocks = torch.nn.ModuleList(
+            [
+                # torch.compile(block, options=options, dynamic=True)
+                compile(block, backend="nexfort", options=options)
+                for block in self.module.transformer_blocks
+            ]
+        )
+        self.module.transformer_blocks = compiled_blocks
+
         if distri_config.rank != 1:
             self.module.pos_embed = None
 
@@ -196,6 +208,8 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
+        if dist.get_rank() == 0:
+            print(f"before: shape: {hidden_states.shape}, hidden state: {hidden_states}")
         for block in module.transformer_blocks:
             hidden_states = block(
                 hidden_states,
@@ -206,6 +220,8 @@ class DistriTransformer2DModel(BaseModule):
                 cross_attention_kwargs=cross_attention_kwargs,
                 class_labels=class_labels,
             )
+        if dist.get_rank() == 0:
+            print(f"after: shape: {hidden_states.shape}, hidden state: {hidden_states}")
 
         # 3. Output
         if distri_config.rank == 0:

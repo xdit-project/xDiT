@@ -8,7 +8,7 @@ from torch import nn
 from torch import Tensor
 from torch.nn import functional as F
 from torch.nn.common_types import _size_2_t
-
+import os
 import logging
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,8 @@ class PatchParallelismConv2d(nn.Conv2d):
     def _all_gather(self, result: Tensor):
         b, c, h, w = result.shape
         world_size, rank = self.get_world_size_and_rank()
-        cuda = torch.device(f"cuda:{rank}")
+        local_rank = local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        cuda = torch.device(f"cuda:{local_rank}")
         if world_size == 1:
             return result
         tensor_list = [
@@ -179,7 +180,8 @@ class PatchParallelismConv2d(nn.Conv2d):
             inner_input = F.pad(inner_input, padding_list, mode="constant")
 
         b, c, h, w = inner_input.shape
-        cuda = torch.device(f"cuda:{rank}")
+        local_rank = local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        cuda = torch.device(f"cuda:{local_rank}")
         segment_list = [h]
         if world_size > 1:
             tensor_list = [

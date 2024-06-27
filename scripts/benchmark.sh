@@ -14,7 +14,6 @@ export N_GPUS=4
 # docker exec -it 98437bb20829 bash
 # export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 # export CUDA_VISIBLE_DEVICES="4,5,6,7"
-export CUDA_VISIBLE_DEVICES="7"
 
 export PYTHONPATH=$PWD:/mnt/fjr/long-context-attention
 
@@ -31,8 +30,7 @@ export SCRIPT=./pixart_example.py
 export MODEL_ID="/mnt/fjr/models/SD/PixArt-XL-2-1024-MS"
 
 
-
-for HEIGHT in 4096 2048 1024 512
+for HEIGHT in 2048 
 do
 for N_GPUS in 8;
 do
@@ -42,25 +40,25 @@ export TASK_SIZE="--height $HEIGHT --width $HEIGHT --no_use_resolution_binning"
 # Sequence Parallelism
 
 # sp u=1, ring
-# SYNC_MODE="full_sync"
-# export ACC_FLAG="--use_use_ulysses_low"
-# torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p sequence --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
+SYNC_MODE="full_sync"
+export ACC_FLAG="--ulysses_degree 1 --use_use_ulysses_low"
+torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p sequence --model_id $MODEL_ID --sync_mode $SYNC_MODE $ACC_FLAG $TASK_SIZE
 
-# Tensor Parallel
+# # Tensor Parallel
 # torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT -p "tensor" --model_id $MODEL_ID $TASK_SIZE
-
-
-# Patch Parallel
-
-# no sync idea, wrong results
+# 
+# 
+# # Patch Parallel
+# 
+# # no sync idea, wrong results
 # SYNC_MODE="no_sync"
 # torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $TASK_SIZE
-
-# DistrFusion
+# 
+# # DistrFusion
 # SYNC_MODE="corrected_async_gn"
 # torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $TASK_SIZE
-
-# Sync DistrFusion
+# 
+# # Sync DistrFusion
 # SYNC_MODE="full_sync"
 # torchrun --nproc_per_node=$N_GPUS scripts/$SCRIPT --model_id $MODEL_ID --sync_mode $SYNC_MODE $TASK_SIZE
 

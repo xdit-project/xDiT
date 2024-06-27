@@ -17,6 +17,7 @@ try:
     HAS_LONG_CTX_ATTN = True
 except ImportError:
     print("yunchang not found")
+import os
 
 
 def check_env():
@@ -126,7 +127,8 @@ class DistriConfig:
         self.height = height
         self.width = width
 
-        device = torch.device(f"cuda:{rank}")
+        local_rank = local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
         self.device = device
 
@@ -212,35 +214,49 @@ class PipelineParallelismCommManager:
         self.recv_buffer.append(
             torch.zeros(self.recv_shape, dtype=self.dtype, device=distri_config.device)
         )
-    
+
     def send_shape_comm(self, tensor: torch.Tensor, is_extra=False) -> torch.Size:
         distri_config = self.distri_config
         shape = torch.tensor(
             tensor.shape, dtype=torch.int32, device=distri_config.device
         )
-        dim = torch.tensor(
-            len(shape), dtype=torch.int32, device=distri_config.device
-        )
+        dim = torch.tensor(len(shape), dtype=torch.int32, device=distri_config.device)
         dist.send(dim, dst=self.next_rank, group=self.extra_group if is_extra else None)
-        dist.send(shape, dst=self.next_rank, group=self.extra_group if is_extra else None)
+        dist.send(
+            shape, dst=self.next_rank, group=self.extra_group if is_extra else None
+        )
         return torch.Size(list(shape))
-    
+
     def recv_shape_comm(self, is_extra=False) -> torch.Size:
         distri_config = self.distri_config
         dim = torch.tensor(0, dtype=torch.int32, device=distri_config.device)
         dist.recv(dim, src=self.prev_rank, group=self.extra_group if is_extra else None)
-        shape = torch.zeros(dim, dtype=torch.int32, device=distri_config.device,)
-        dist.recv(shape, src=self.prev_rank, group=self.extra_group if is_extra else None)
+        shape = torch.zeros(
+            dim,
+            dtype=torch.int32,
+            device=distri_config.device,
+        )
+        dist.recv(
+            shape, src=self.prev_rank, group=self.extra_group if is_extra else None
+        )
         return torch.Size(list(shape))
-    
+
     def send_to_next(self, tensor: torch.Tensor, is_extra=False):
         self.send_shape_comm(tensor)
-        dist.isend(tensor, dst=self.next_rank, group=self.extra_group if is_extra else None)
+        dist.isend(
+            tensor, dst=self.next_rank, group=self.extra_group if is_extra else None
+        )
 
-    def recv_from_prev(self, dtype: Optional[torch.dtype] = None, is_extra=False) -> torch.Size:
+    def recv_from_prev(
+        self, dtype: Optional[torch.dtype] = None, is_extra=False
+    ) -> torch.Size:
         shape = self.recv_shape_comm()
-        tensor = torch.zeros(shape, dtype=dtype or self.dtype, device=self.distri_config.device)
-        dist.recv(tensor, src=self.prev_rank, group=self.extra_group if is_extra else None)
+        tensor = torch.zeros(
+            shape, dtype=dtype or self.dtype, device=self.distri_config.device
+        )
+        dist.recv(
+            tensor, src=self.prev_rank, group=self.extra_group if is_extra else None
+        )
         return tensor
 
     def first_send_to_next(self, tensor: torch.Tensor):

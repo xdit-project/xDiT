@@ -32,9 +32,13 @@ except ImportError:
     logger.warning("ring flash attn not found")
 
 try:
-    from flash_attn import flash_attn_func
-
-    HAS_FLASH_ATTN = True
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    gpu_name = torch.cuda.get_device_name(device)
+    if "Turing" in gpu_name or "Tesla" in gpu_name or "T4" in gpu_name:
+        HAS_FLASH_ATTN = False
+    else:
+        from flash_attn import flash_attn_func
+        HAS_FLASH_ATTN = True
 except ImportError:
     HAS_FLASH_ATTN = False
 

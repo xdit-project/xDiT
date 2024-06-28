@@ -298,7 +298,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 else:
                     self.comm_manager.irecv_from_prev(dtype)
                     latents = self.comm_manager.get_data()
-                    if i == 0:
+                    if distri_config.rank != 1:
                         encoder_hidden_states = self.comm_manager.recv_from_prev(prompt_embeds.dtype, is_extra=True)
                 assert self._interrupt == False
                 # TBD
@@ -331,7 +331,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                 # if XLA_AVAILABLE:
                 #     xm.mark_step()
                 self.comm_manager.isend_to_next(latents)
-                if distri_config.rank != 0 and i == 0:
+                if distri_config.rank != 0:
                     self.comm_manager.send_to_next(next_encoder_hidden_states, is_extra=True)
 
             assert self.comm_manager.recv_queue == []
@@ -359,7 +359,7 @@ class DistriSD3PiP(StableDiffusion3Pipeline):
                     ori_latents = [None for _ in range(pp_num_patch)]
                 else:
                     latents = [None for _ in range(pp_num_patch)]
-
+            
             for i, t in enumerate(pip_timesteps):
 
                 assert self.interrupt == False

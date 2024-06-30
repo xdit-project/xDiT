@@ -171,6 +171,8 @@ def main():
         case_name = args.output_file + "_" + case_name
     if enable_parallel_vae:
         case_name += "_patchvae"
+    if args.use_split_batch:
+        case_name += "_split_batch"
 
     if args.use_profiler:
         start_time = time.time()

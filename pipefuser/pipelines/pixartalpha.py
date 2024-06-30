@@ -184,6 +184,7 @@ class DistriPixArtAlphaPipeline:
                 use_resolution_binning=distri_config.use_resolution_binning,
                 num_inference_steps=distri_config.warmup_steps + 2,
                 output_type="latent",
+                generator=torch.Generator(device="cuda").manual_seed(42),
             )
 
         else:

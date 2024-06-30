@@ -9,6 +9,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_512_BIN,
     ASPECT_RATIO_256_BIN,
 )
+import torch.distributed
 
 # from pipefuser.models.distri_sdxl_unet_tp import DistriUNetTP
 from pipefuser.pipelines.pip.distri_pixartalpha import DistriPixArtAlphaPiP
@@ -48,7 +49,7 @@ class DistriPixArtAlphaPipeline:
             )
 
         # assert module_config.do_classifier_free_guidance == False
-        assert module_config.split_batch == False
+        # assert module_config.split_batch == False
 
         self.distri_config = module_config
 
@@ -216,12 +217,23 @@ class DistriPixArtAlphaPipeline:
             )
 
             if distri_config.do_classifier_free_guidance:
-                prompt_embeds = torch.cat(
-                    [negative_prompt_embeds, prompt_embeds], dim=0
-                )
-                prompt_attention_mask = torch.cat(
-                    [negative_prompt_attention_mask, prompt_attention_mask], dim=0
-                )
+                if not distri_config.split_batch:
+                    prompt_embeds = torch.cat(
+                        [negative_prompt_embeds, prompt_embeds], dim=0
+                    )
+                    prompt_attention_mask = torch.cat(
+                        [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+                    )
+                else:
+                    if distri_config.batch_idx() == 0:
+                        prompt_embeds = negative_prompt_embeds
+                        prompt_attention_mask = negative_prompt_attention_mask
+                    elif distri_config.batch_idx() == 1:
+                        prompt_embeds = prompt_embeds
+                        prompt_attention_mask = prompt_attention_mask
+                    else:
+                        raise ValueError("Invalid batch_idx")
+                        
 
             # Prepare added time ids & embeddings
 
@@ -240,7 +252,9 @@ class DistriPixArtAlphaPipeline:
                 None,
             )
             latent_model_input = (
-                torch.cat([latents, latents], 0) if guidance_scale > 1 else latents
+                torch.cat([latents, latents], 0) 
+                if distri_config.do_classifier_free_guidance and guidance_scale > 1 and not distri_config.split_batch
+                else latents
             )
 
             # encoder_hidden_states.shape torch.Size([2, 120, 4096])
@@ -262,7 +276,7 @@ class DistriPixArtAlphaPipeline:
                 resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
                 aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
-                if distri_config.do_classifier_free_guidance:
+                if distri_config.do_classifier_free_guidance and not distri_config.split_batch:
                     resolution = torch.cat([resolution, resolution], dim=0)
                     aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 

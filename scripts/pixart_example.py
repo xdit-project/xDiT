@@ -1,5 +1,6 @@
 import argparse
 import torch
+import torch.distributed
 
 from pipefuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from pipefuser.utils import DistriConfig
@@ -90,6 +91,10 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+        "--use_split_batch",
+        action="store_true",
+    )
+    parser.add_argument(
         "--output_type",
         type=str,
         default="latent",
@@ -126,7 +131,7 @@ def main():
         width=args.width,
         warmup_steps=args.pipefusion_warmup_step,
         do_classifier_free_guidance=True,
-        split_batch=False,
+        split_batch=args.use_split_batch,
         parallelism=args.parallelism,
         mode=args.sync_mode,
         pp_num_patch=args.pp_num_patch,
@@ -145,7 +150,8 @@ def main():
         use_profiler=args.use_profiler,
     )
 
-    pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    rank = torch.distributed.get_rank()
+    pipeline.set_progress_bar_config(disable=rank != 0)
     torch.distributed.barrier()
     # warmup
     output = pipeline(
@@ -203,6 +209,8 @@ def main():
             num_inference_steps=args.num_inference_steps,
             output_type=args.output_type,
         )
+        if rank == 0:
+            print(210)
 
         end_time = time.time()
         # torch.cuda.memory._dump_snapshot(
@@ -215,7 +223,9 @@ def main():
     peak_memory = torch.cuda.max_memory_allocated(device="cuda")
     torch.distributed.barrier()
 
-    if distri_config.rank == 0:
+    # if rank == 0:
+    # if distri_config.rank == 0:
+    if torch.distributed.get_rank() == 0:
 
         print(
             f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"

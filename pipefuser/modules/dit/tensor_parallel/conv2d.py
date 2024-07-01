@@ -60,7 +60,7 @@ class DistriConv2dTP(BaseModule):
         dist.all_reduce(
             output,
             op=dist.ReduceOp.SUM,
-            group=distri_config.batch_group,
+            group=distri_config.batch_parallel_group,
             async_op=False,
         )
         if self.module.bias is not None:

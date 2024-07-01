@@ -46,6 +46,8 @@ class DistriConfig:
         width: int = 1024,
         do_classifier_free_guidance: bool = True,
         split_batch: bool = True,
+        pipefusion_degree: Optional[int] = None,
+        dp_degree: Optional[int] = None,
         warmup_steps: int = 4,
         comm_checkpoint: int = 1,
         mode: str = "corrected_async_gn",
@@ -84,20 +86,21 @@ class DistriConfig:
             # Initialize the process group
             dist.init_process_group("nccl")
             # Get the rank and world_size
-            rank = dist.get_rank()
+            self.rank = dist.get_rank()
             world_size = dist.get_world_size()
         except Exception as e:
-            rank = 0
+            self.rank = 0
             world_size = 1
             logger.warning(
                 f"Failed to initialize process group: {e}, falling back to single GPU"
             )
+            assert split_batch is False
 
         assert is_power_of_2(world_size) or parallelism == "pipefusion"
+        
         check_env()
 
         self.world_size = world_size
-        self.rank = rank
         self.height = height
         self.width = width
         self.do_classifier_free_guidance = do_classifier_free_guidance
@@ -115,6 +118,14 @@ class DistriConfig:
         self.verbose = verbose
         self.use_resolution_binning = use_resolution_binning
 
+        self.height = height
+        self.width = width
+
+        local_rank = local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+        self.device = device
+
         if do_classifier_free_guidance and split_batch:
             n_device_per_batch = world_size // 2
             if n_device_per_batch == 0:
@@ -124,31 +135,27 @@ class DistriConfig:
 
         self.n_device_per_batch = n_device_per_batch
 
-        self.height = height
-        self.width = width
-
-        local_rank = local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-        self.device = device
-
-        batch_group = None
-        split_group = None
         if do_classifier_free_guidance and split_batch and world_size >= 2:
-            batch_groups = []
+            self.rank = self.rank % n_device_per_batch
+            batch_idx = self.batch_idx()
+            batch_parallel_groups = []
             for i in range(2):
-                batch_groups.append(
+                batch_parallel_groups.append(
                     dist.new_group(
-                        list(range(i * (world_size // 2), (i + 1) * (world_size // 2)))
+                        list(range(i * n_device_per_batch, (i + 1) * n_device_per_batch))
                     )
                 )
-            batch_group = batch_groups[self.batch_idx()]
-            split_groups = []
+            self.batch_parallel_group = batch_parallel_groups[batch_idx]
+            self.batch_parallel_groups = batch_parallel_groups
+
+            dp_groups = []
             for i in range(world_size // 2):
-                split_groups.append(dist.new_group([i, i + world_size // 2]))
-            split_group = split_groups[self.split_idx()]
-        self.batch_group = batch_group
-        self.split_group = split_group
+                dp_groups.append(dist.new_group([i, i + n_device_per_batch]))
+            self.dp_group = dp_groups[self.rank]
+            self.dp_groups = dp_groups
+        else:
+            self.batch_parallel_group = dist.new_group()
+            self.dp_group = None
 
         self.pp_num_patch = pp_num_patch
 
@@ -164,9 +171,30 @@ class DistriConfig:
             ring_degree = self.world_size // ulysses_degree
             set_seq_parallel_pg(ulysses_degree, ring_degree, self.rank, self.world_size)
 
+    # def _setup_pipefusion(
+    #     self,
+    #     *,
+    #     pipeline_degree: Optional[int] = None,
+    #     dp_degree: Optional[int] = None,
+    # ):
+    #     assert self.parallelism == "pipefusion", "Parallel mode must be pipefusion parallelism to setup pipefusion"
+    #     if pipeline_degree is None and dp_degree is None:
+    #         self.pipeline_degree = self.world_size
+    #         self.dp_degree = 1
+    #     elif pipeline_degree is None and dp_degree is not None:
+    #         self.pipeline_degree = self.world_size // dp_degree
+    #         self.dp_degree = dp_degree
+    #     elif pipeline_degree is not None and dp_degree is None:
+    #         self.pipeline_degree = pipeline_degree
+    #         self.dp_degree = self.world_size // pipeline_degree
+    #     else:
+    #         assert pipeline_degree * dp_degree == self.world_sizw
+    #         self.pipeline_degree = pipeline_degree
+    #         self.dp_degree = dp_degree
+
     def batch_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:
-            rank = self.rank
+            rank = dist.get_rank()
         if self.do_classifier_free_guidance and self.split_batch:
             return 1 - int(rank < (self.world_size // 2))
         else:
@@ -174,7 +202,7 @@ class DistriConfig:
 
     def split_idx(self, rank: Optional[int] = None) -> int:
         if rank is None:
-            rank = self.rank
+            rank = dist.get_rank()
         return rank % self.n_device_per_batch
 
 
@@ -187,16 +215,41 @@ class PipelineParallelismCommManager:
         self.send_req = None
         self.recv_req = None
         self.recv_queue = []
-        self.next_rank = (distri_config.rank + 1) % distri_config.world_size
-        self.prev_rank = (
-            distri_config.rank - 1 + distri_config.world_size
-        ) % distri_config.world_size
         self.dtype = None
-        if distri_config.world_size == 2:
-            self.groups = [torch.distributed.new_group(), torch.distributed.new_group()]
+
+
+        batch_world_size = dist.get_world_size()
+        dp_world_size = 1
+        self.batch_parallel_group = distri_config.batch_parallel_group
+        self.dp_group = distri_config.dp_group
+
+        if distri_config.batch_parallel_group is not None and distri_config.dp_group is not None:
+            batch_world_size = dist.get_world_size(self.batch_parallel_group)
+            dp_world_size = dist.get_world_size(self.dp_group)
+
+        # create groups to avoid deadlock
+        if batch_world_size == 2:
+            groups = [
+                [
+                    dist.new_group(dist.get_process_group_ranks(distri_config.batch_parallel_groups[i])),
+                    dist.new_group(dist.get_process_group_ranks(distri_config.batch_parallel_groups[i]))
+                ] for i in range(dp_world_size)
+            ]
+            self.groups = groups[dist.get_rank(self.dp_group)]
         else:
             self.groups = None
-        self.extra_group = torch.distributed.new_group()
+
+        self.next_rank = dist.get_global_rank(
+            self.batch_parallel_group, 
+            (dist.get_rank(self.batch_parallel_group) + 1) % batch_world_size
+        )
+        self.prev_rank = dist.get_global_rank(
+            self.batch_parallel_group, 
+            (dist.get_rank(self.batch_parallel_group) - 1 + batch_world_size) % batch_world_size
+        )
+
+        self.extra_group = dist.new_group(dist.get_process_group_ranks(self.batch_parallel_group))
+
 
     def _creat_recv_buffer(self):
         distri_config = self.distri_config
@@ -221,30 +274,30 @@ class PipelineParallelismCommManager:
             tensor.shape, dtype=torch.int32, device=distri_config.device
         )
         dim = torch.tensor(len(shape), dtype=torch.int32, device=distri_config.device)
-        dist.send(dim, dst=self.next_rank, group=self.extra_group if is_extra else None)
+        dist.send(dim, dst=self.next_rank, group=self.extra_group if is_extra else self.batch_parallel_group)
         dist.send(
-            shape, dst=self.next_rank, group=self.extra_group if is_extra else None
+            shape, dst=self.next_rank, group=self.extra_group if is_extra else self.batch_parallel_group
         )
         return torch.Size(list(shape))
 
     def recv_shape_comm(self, is_extra=False) -> torch.Size:
         distri_config = self.distri_config
         dim = torch.tensor(0, dtype=torch.int32, device=distri_config.device)
-        dist.recv(dim, src=self.prev_rank, group=self.extra_group if is_extra else None)
+        dist.recv(dim, src=self.prev_rank, group=self.extra_group if is_extra else self.batch_parallel_group)
         shape = torch.zeros(
             dim,
             dtype=torch.int32,
             device=distri_config.device,
         )
         dist.recv(
-            shape, src=self.prev_rank, group=self.extra_group if is_extra else None
+            shape, src=self.prev_rank, group=self.extra_group if is_extra else self.batch_parallel_group
         )
         return torch.Size(list(shape))
 
     def send_to_next(self, tensor: torch.Tensor, is_extra=False):
         self.send_shape_comm(tensor)
         dist.isend(
-            tensor, dst=self.next_rank, group=self.extra_group if is_extra else None
+            tensor, dst=self.next_rank, group=self.extra_group if is_extra else self.batch_parallel_group
         )
 
     def recv_from_prev(
@@ -255,7 +308,7 @@ class PipelineParallelismCommManager:
             shape, dtype=dtype or self.dtype, device=self.distri_config.device
         )
         dist.recv(
-            tensor, src=self.prev_rank, group=self.extra_group if is_extra else None
+            tensor, src=self.prev_rank, group=self.extra_group if is_extra else self.batch_parallel_group
         )
         return tensor
 
@@ -283,7 +336,7 @@ class PipelineParallelismCommManager:
         group = (
             self.groups[(self.distri_config.rank + 1) % 2]
             if self.groups is not None
-            else None
+            else self.batch_parallel_group
         )
         self.send_req = dist.isend(tensor, dst=self.next_rank, group=group)
 
@@ -296,7 +349,7 @@ class PipelineParallelismCommManager:
             group = (
                 self.groups[self.distri_config.rank % 2]
                 if self.groups is not None
-                else None
+                else self.batch_parallel_group
             )
             if idx is None:
                 self.recv_req = dist.irecv(
@@ -402,7 +455,7 @@ class PatchParallelismCommManager:
         tensor = self.buffer_list[distri_config.split_idx()][start:end]
         buffer_list = [t[start:end] for t in self.buffer_list]
         handle = dist.all_gather(
-            buffer_list, tensor, group=self.distri_config.batch_group, async_op=True
+            buffer_list, tensor, group=self.distri_config.batch_parallel_group, async_op=True
         )
         for i in self.idx_queue:
             self.handles[i] = handle

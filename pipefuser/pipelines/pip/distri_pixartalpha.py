@@ -9,6 +9,8 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     retrieve_timesteps,
 )
 from typing import List, Optional, Union, Tuple, Callable, Dict, Final
+
+import torch.distributed as dist
 from pipefuser.utils import DistriConfig, PipelineParallelismCommManager
 from pipefuser.logger import init_logger
 
@@ -19,6 +21,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
     def init(self, distri_config: DistriConfig):
         # if distri_config.rank != 0 or distri_config.rank != distri_config.world_size - 1:
         # self.scheduler = None
+        # if torch.distributed.get_rank != 0:
         if distri_config.rank != 0:
             self.vae = None
             self.image_processor = None
@@ -48,7 +51,9 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
 
         if distri_config.rank == 1:
             latents = (
-                torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                torch.cat([latents] * 2) 
+                if do_classifier_free_guidance and not self.distri_config.split_batch 
+                else latents
             )
             latents = self.scheduler.scale_model_input(latents, t)
 
@@ -80,11 +85,19 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             added_cond_kwargs=added_cond_kwargs,
             return_dict=False,
         )[0]
-
         if distri_config.rank == 0:
             # perform guidance
             if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                if not self.distri_config.split_batch:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                else:
+                    noise_pred_uncond = torch.empty_like(noise_pred)
+                    noise_pred_text = torch.empty_like(noise_pred)
+                    dist.all_gather(
+                        [noise_pred_uncond, noise_pred_text],
+                        noise_pred,
+                        group=self.distri_config.dp_group
+                    )
                 noise_pred = noise_pred_uncond + guidance_scale * (
                     noise_pred_text - noise_pred_uncond
                 )
@@ -291,10 +304,20 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             max_sequence_length=max_sequence_length,
         )
         if do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            prompt_attention_mask = torch.cat(
-                [negative_prompt_attention_mask, prompt_attention_mask], dim=0
-            )
+            if not distri_config.split_batch:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                prompt_attention_mask = torch.cat(
+                    [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+                )
+            else:
+                if distri_config.batch_idx() == 0:
+                    prompt_embeds = negative_prompt_embeds
+                    prompt_attention_mask = negative_prompt_attention_mask
+                elif distri_config.batch_idx() == 1:
+                    prompt_embeds = prompt_embeds
+                    prompt_attention_mask = prompt_attention_mask
+                else:
+                    raise ValueError("Invalid batch_idx")
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -329,7 +352,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
             aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
-            if do_classifier_free_guidance:
+            if do_classifier_free_guidance and not distri_config.split_batch:
                 resolution = torch.cat([resolution, resolution], dim=0)
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 
@@ -361,7 +384,6 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 else:
                     self.comm_manager.irecv_from_prev(dtype)
                     latents = self.comm_manager.get_data()
-
                 latents = self.pip_forward(
                     latents,
                     prompt_embeds,
@@ -385,7 +407,6 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
                 ):
                     progress_bar.update()
-
                 self.comm_manager.isend_to_next(latents)
 
             assert self.comm_manager.recv_queue == []
@@ -457,7 +478,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 ):
                     progress_bar.update()
 
-            if distri_config.rank == 0:
+            if dist.get_rank() == 0:
                 latents = torch.cat(latents, dim=2)
             else:
                 return None

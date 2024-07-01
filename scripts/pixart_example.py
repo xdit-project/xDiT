@@ -1,5 +1,6 @@
 import argparse
 import torch
+import torch.distributed as dist
 
 from pipefuser.pipelines.pixartalpha import DistriPixArtAlphaPipeline
 from pipefuser.utils import DistriConfig
@@ -90,6 +91,10 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+        "--use_split_batch",
+        action="store_true",
+    )
+    parser.add_argument(
         "--output_type",
         type=str,
         default="latent",
@@ -126,7 +131,7 @@ def main():
         width=args.width,
         warmup_steps=args.pipefusion_warmup_step,
         do_classifier_free_guidance=True,
-        split_batch=False,
+        split_batch=args.use_split_batch,
         parallelism=args.parallelism,
         mode=args.sync_mode,
         pp_num_patch=args.pp_num_patch,
@@ -145,7 +150,8 @@ def main():
         use_profiler=args.use_profiler,
     )
 
-    pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    rank = dist.get_rank()
+    pipeline.set_progress_bar_config(disable=rank != 0)
     torch.distributed.barrier()
     # warmup
     output = pipeline(
@@ -165,6 +171,8 @@ def main():
         case_name = args.output_file + "_" + case_name
     if enable_parallel_vae:
         case_name += "_patchvae"
+    if args.use_split_batch:
+        case_name += "_split_batch"
 
     if args.use_profiler:
         start_time = time.time()
@@ -213,9 +221,11 @@ def main():
     elapsed_time = end_time - start_time
 
     peak_memory = torch.cuda.max_memory_allocated(device="cuda")
-    torch.distributed.barrier()
+    dist.barrier()
 
-    if distri_config.rank == 0:
+    # if rank == 0:
+    # if distri_config.rank == 0:
+    if dist.get_rank() == 0:
 
         print(
             f"{case_name} epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"

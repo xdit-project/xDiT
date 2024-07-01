@@ -20,15 +20,15 @@ class DistriTransformer2DModel(BaseModule):
     def __init__(self, module: Transformer2DModel, distri_config: DistriConfig):
         super().__init__(module, distri_config)
         current_rank = (
-            distri_config.rank - 1 + distri_config.world_size
-        ) % distri_config.world_size
+            distri_config.rank - 1 + distri_config.n_device_per_batch
+        ) % distri_config.n_device_per_batch
 
         # logger.info(f"attn_num {distri_config.attn_num}")
         # logger.info(f"{len{self.module.transformer_blocks}}")
 
         if distri_config.attn_num is not None:
             assert sum(distri_config.attn_num) == len(self.module.transformer_blocks)
-            assert len(distri_config.attn_num) == distri_config.world_size
+            assert len(distri_config.attn_num) == distri_config.n_device_per_batch
 
             if current_rank == 0:
                 self.module.transformer_blocks = self.module.transformer_blocks[
@@ -43,8 +43,8 @@ class DistriTransformer2DModel(BaseModule):
         else:
 
             block_len = (
-                len(self.module.transformer_blocks) + distri_config.world_size - 1
-            ) // distri_config.world_size
+                len(self.module.transformer_blocks) + distri_config.n_device_per_batch - 1
+            ) // distri_config.n_device_per_batch
             start_idx = block_len * current_rank
             end_idx = min(
                 block_len * (current_rank + 1), len(self.module.transformer_blocks)

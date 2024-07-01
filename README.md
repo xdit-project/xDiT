@@ -157,7 +157,7 @@ To conduct the FID experiment, follow the detailed instructions provided in the 
 
 ## Other optimizations
 
-1. Avoid OOM in VAE module:
+### 1. Avoid OOM in VAE module:
 
 The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
 
@@ -170,6 +170,10 @@ To address this limitation, we developed [DistVAE](https://github.com/PipeFusion
 By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240px - an impressive 11-fold increase compared to the conventional VAE approach.
 
 This advancement represents a significant leap forward in high-resolution image processing, opening new possibilities for applications in various domains of computer vision and image generation.
+
+### 2. Split batch
+
+Due to the implementation of classifier-free guidance, during inference, the batch size dimension in the forward pass of the backbone network for each diffusion step is consistently 2. The final result for each step is obtained through a single computation between these two samples after the forward pass is completed. Consequently, we have devised a strategy to distribute these two samples across different GPUs for parallel computation. Following each forward pass, we execute an all_gather operation to ensure accuracy. By employing this method, we have achieved a 1.7-fold increase in the generation speed of 1024 x 1024 pixel images, utilizing the same number of devices.
 
 
 ## Cite Us

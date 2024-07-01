@@ -43,7 +43,7 @@ class DistriPixArtAlphaPipeline:
         use_profiler: bool = False,
     ):
         self.pipeline = pipeline
-        if enable_parallel_vae:
+        if enable_parallel_vae and self.pipeline.vae is not None:
             self.pipeline.vae.decoder = DecoderAdapter(
                 self.pipeline.vae.decoder, use_profiler=use_profiler
             )

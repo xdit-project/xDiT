@@ -136,6 +136,7 @@ def main():
         scheduler=args.scheduler,
         ulysses_degree=args.ulysses_degree,
     )
+    torch.distributed.barrier()
 
     pipeline = DistriPixArtAlphaPipeline.from_pretrained(
         distri_config=distri_config,
@@ -145,6 +146,7 @@ def main():
     )
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+    torch.distributed.barrier()
     # warmup
     output = pipeline(
         prompt=args.prompt,
@@ -211,6 +213,7 @@ def main():
     elapsed_time = end_time - start_time
 
     peak_memory = torch.cuda.max_memory_allocated(device="cuda")
+    torch.distributed.barrier()
 
     if distri_config.rank == 0:
 
@@ -220,6 +223,7 @@ def main():
         if args.output_type == "pil":
             print(f"save images to ./results/{case_name}.png")
             output.images[0].save(f"./results/{case_name}.png")
+
 
 
 if __name__ == "__main__":

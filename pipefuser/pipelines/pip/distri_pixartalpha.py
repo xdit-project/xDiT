@@ -10,7 +10,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
 )
 from typing import List, Optional, Union, Tuple, Callable, Dict, Final
 
-import torch.distributed
+import torch.distributed as dist
 from pipefuser.utils import DistriConfig, PipelineParallelismCommManager
 from pipefuser.logger import init_logger
 
@@ -93,10 +93,10 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 else:
                     noise_pred_uncond = torch.empty_like(noise_pred)
                     noise_pred_text = torch.empty_like(noise_pred)
-                    torch.distributed.all_gather(
+                    dist.all_gather(
                         [noise_pred_uncond, noise_pred_text],
                         noise_pred,
-                        group=self.distri_config.split_group
+                        group=self.distri_config.dp_group
                     )
                 noise_pred = noise_pred_uncond + guidance_scale * (
                     noise_pred_text - noise_pred_uncond
@@ -478,7 +478,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 ):
                     progress_bar.update()
 
-            if torch.distributed.get_rank() == 0:
+            if dist.get_rank() == 0:
                 latents = torch.cat(latents, dim=2)
             else:
                 return None

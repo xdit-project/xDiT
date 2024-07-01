@@ -135,7 +135,7 @@ class DistriConv2dPP(BaseModule):
                         dist.all_gather(
                             self.buffer_list,
                             boundary,
-                            group=distri_config.batch_group,
+                            group=distri_config.batch_parallel_group,
                             async_op=False,
                         )
                         padded_x = create_padded_x()

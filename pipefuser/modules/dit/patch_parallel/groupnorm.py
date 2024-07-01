@@ -54,7 +54,7 @@ class DistriGroupNorm(BaseModule):
                 dist.all_gather(
                     self.buffer_list,
                     slice_mean,
-                    group=distri_config.batch_group,
+                    group=distri_config.batch_parallel_group,
                     async_op=False,
                 )
                 full_mean = sum(self.buffer_list) / distri_config.n_device_per_batch
@@ -100,7 +100,7 @@ class DistriGroupNorm(BaseModule):
                 )  # [1, num_groups, 1, 1, 1]
                 mean = torch.stack([x_mean, x2_mean], dim=0)
                 dist.all_reduce(
-                    mean, op=dist.ReduceOp.SUM, group=distri_config.batch_group
+                    mean, op=dist.ReduceOp.SUM, group=distri_config.batch_parallel_group
                 )
                 mean = mean / distri_config.n_device_per_batch
                 x_mean = mean[0]

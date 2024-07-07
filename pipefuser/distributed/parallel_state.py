@@ -61,9 +61,9 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
-_PP: Optional[GroupCoordinator] = None
+_PP: Optional[PipelineGroupCoordinator] = None
 
-def get_pp_group() -> GroupCoordinator:
+def get_pp_group() -> PipelineGroupCoordinator:
     assert _PP is not None, (
         "pipeline model parallel group is not initialized")
     return _PP
@@ -155,11 +155,11 @@ def init_distributed_environment(
 
 
 def initialize_model_parallel(
-    tensor_parallel_degree: int = 1,
-    sequence_parallel_degree: int = 1,
-    pipeline_parallel_degree: int = 1,
-    classifier_free_guidance_degree: int = 1,
     data_parallel_degree: int = 1,
+    classifier_free_guidance_degree: int = 1,
+    sequence_parallel_degree: int = 1,
+    tensor_parallel_degree: int = 1,
+    pipeline_parallel_degree: int = 1,
     backend: Optional[str] = None,
 ) -> None:
     """

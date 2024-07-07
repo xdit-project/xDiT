@@ -4,6 +4,11 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, List
 
+import torch
+import torch.distributed
+
+from pipefuser.logger import init_logger
+from pipefuser.distributed.parallel_state import init_distributed_environment
 from pipefuser.config.config import (
     EngineConfig,
     ParallelConfig,
@@ -15,6 +20,8 @@ from pipefuser.config.config import (
     DataConfig,
     RuntimeConfig
 )
+
+logger = init_logger(__name__)
 
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
@@ -174,6 +181,10 @@ class EngineArgs:
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
+        if not torch.distributed.is_initialized():
+            logger.warning("Distributed environment is not initialized. "
+                           "Initializing...")
+            init_distributed_environment()
 
         model_config = ModelConfig(
             model=self.model,

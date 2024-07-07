@@ -169,32 +169,47 @@ class GroupCoordinator:
             torch.distributed.all_reduce(input_, group=self.device_group)
         return input_
 
-    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    def all_gather(
+        self, 
+        input_: torch.Tensor, 
+        dim: int = -1, 
+        separate_tensors: bool = False
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-        if dim < 0:
-            # Convert negative dim to positive.
-            dim += input_.dim()
         input_size = input_.size()
-        # Allocate output tensor.
-        output_tensor = torch.empty((world_size, ) + input_size,
-                                    dtype=input_.dtype,
-                                    device=input_.device)
-        # All-gather.
-        torch.distributed.all_gather_into_tensor(output_tensor,
-                                                 input_,
-                                                 group=self.device_group)
-        # Reshape
-        output_tensor = output_tensor.movedim(0, dim)
-        output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size *
-                                               input_size[dim], ) +
-                                              input_size[dim + 1:])
-        return output_tensor
+        if not separate_tensors:
+            if dim < 0:
+                # Convert negative dim to positive.
+                dim += input_.dim()
+            # Allocate output tensor.
+            output_tensor = torch.empty((world_size, ) + input_size,
+                                        dtype=input_.dtype,
+                                        device=input_.device)
+            # All-gather.
+            torch.distributed.all_gather_into_tensor(output_tensor,
+                                                     input_,
+                                                     group=self.device_group)
+            # Reshape
+            output_tensor = output_tensor.movedim(0, dim)
+            output_tensor = output_tensor.reshape(input_size[:dim] +
+                                                  (world_size *
+                                                   input_size[dim], ) +
+                                                  input_size[dim + 1:])
+            return output_tensor
+        else:
+            # Allocate output tensors.
+            output_tensors = [torch.empty_like(input_) 
+                              for _ in range(world_size)]
+            # All-gather.
+            torch.distributed.all_gather(output_tensors,
+                                        input_,
+                                        group=self.device_group)
+            return output_tensors
 
     def gather(self,
                input_: torch.Tensor,
@@ -674,7 +689,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.num_pipefusion_patches = num_pipefusion_patches
         self.hyper_parameters_set = True
     
-    def pipeline_send(self, tensor: torch.Tensor) -> None:
+    def pipeline_isend(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
         assert self.hyper_parameters_set, (
             "hyper parameters must be set before sending tensors")
@@ -682,10 +697,11 @@ class PipelineGroupCoordinator(GroupCoordinator):
             self._init_shape_and_send_metadata(tensor)
         self._pipeline_isend(tensor)
 
-    def add_pipeline_recv_task_for_patch(
-        self, 
-        idx: Optional[int] = None,
-    ) -> torch.Tensor:
+    def pipeline_recv(self, idx: Optional[int]) -> torch.Tensor:
+        self.add_pipeline_recv_task_for_patch(idx)
+        return self.get_receiving_task_data(idx)
+
+    def add_pipeline_recv_task_for_patch(self, idx: Optional[int] = None):
         assert self.hyper_parameters_set, (
             "hyper parameters must be set before receiving tensors")
         if self.recv_buffer is None:
@@ -696,7 +712,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
     def get_receiving_task_data(
         self, 
         idx: Optional[int]
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor:
         if self.receiving_task is not None:
             self.receiving_task.wait()
             self.receiving_task = None

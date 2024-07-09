@@ -25,14 +25,12 @@ from pipefuser.distributed.parallel_state import (
     get_pp_group,
     get_cfg_group,
 )
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.modules.pipefusion.base_pipeline import PipeFuserBasePipeline
+from pipefuser.config.config import EngineConfig, ParallelConfig, RuntimeConfig
+from pipefuser.modules.parallel_utils.pipelines.base_pipeline import PipeFuserBasePipeline
 
 
 @PipeFuserPipelineClasses.register(PixArtAlphaPipeline)
 class PipeFuserPixArtAlphaPipeline(PipeFuserBasePipeline, PixArtAlphaPipeline):
-    parallel_config: Optional[ParallelConfig] = None
-    runtime_config: Optional[RuntimeConfig] = None
 
     def __init__(
         self,
@@ -42,7 +40,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserBasePipeline, PixArtAlphaPipeline):
         transformer: PixArtTransformer2DModel,
         scheduler: DPMSolverMultistepScheduler,
         #!TEST: config
-        parallel_config: Optional[ParallelConfig],
+        engine_config: EngineConfig,
     ):
         kwargs = {
             "tokenizer": tokenizer,
@@ -51,7 +49,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserBasePipeline, PixArtAlphaPipeline):
             "transformer": transformer,
             "scheduler": scheduler,
         }
-        super().__init__(parallel_config=parallel_config, **kwargs)
+        super().__init__(engine_config=engine_config, **kwargs)
 
     def set_config(
         self, 
@@ -181,7 +179,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserBasePipeline, PixArtAlphaPipeline):
                     "the pipeline")
         #* check pp world size
         if get_pipeline_parallel_world_size() == 1:
-            return super(PipeFuserBasePipeline, self).__call__(
+            return PixArtAlphaPipeline.__call__(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 num_inference_steps=num_inference_steps,

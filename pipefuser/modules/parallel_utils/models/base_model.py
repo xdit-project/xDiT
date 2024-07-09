@@ -28,6 +28,9 @@ class PipeFuserModelBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
     def __getattr__(self, name: str):
         return getattr(self.module, name)
 
+    def __setattr__(self, name: str, value):
+        setattr(self.module, name, value)
+
     def __call__(self, *args, **kwargs):
         if callable(self.module):
             return self.module(*args, **kwargs)

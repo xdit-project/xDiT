@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from pipefuser.logger import init_logger
-from pipefuser.modules.parallel_utils.transformer import (
+from pipefuser.modules.parallel_utils.models.transformers import (
     PipeFuserTransformerBaseWrapper
 )
 
@@ -17,16 +17,16 @@ class PipeFuserTransformerWrappers:
 
     @classmethod
     def register(cls, origin_transformer_class: Type[nn.Module]):
-        def decorator(pipefusion_transformer_class: Type[nn.Module]):
-            if not issubclass(pipefusion_transformer_class, 
+        def decorator(pipefuser_transformer_class: Type[nn.Module]):
+            if not issubclass(pipefuser_transformer_class, 
                               PipeFuserTransformerBaseWrapper):
                 raise ValueError(
-                    f"{pipefusion_transformer_class.__class__.__name__} is not "
+                    f"{pipefuser_transformer_class.__class__.__name__} is not "
                     f"a subclass of PipeFuserTransformerBaseWrapper"
                 )
             cls._PIPEFUSER_TRANSFORMER_MAPPING[origin_transformer_class] = \
-                pipefusion_transformer_class
-            return pipefusion_transformer_class
+                pipefuser_transformer_class
+            return pipefuser_transformer_class
         return decorator
 
     @classmethod
@@ -34,10 +34,17 @@ class PipeFuserTransformerWrappers:
         cls, 
         transformer: nn.Module
     ) -> PipeFuserTransformerBaseWrapper:
+        candidate = None
         for (origin_transformer_class,
              wrapper_class) in cls._PIPEFUSER_TRANSFORMER_MAPPING.items():
-             #TODO check if subclass is legally
             if isinstance(transformer, origin_transformer_class):
-                return wrapper_class
-        raise ValueError(f"Transformer class {transformer.__class__.__name__} "
+                if (candidate is None or 
+                    origin_transformer_class == transformer.__class__ or
+                    issubclass(origin_transformer_class, candidate)):
+                    candidate = wrapper_class
+
+        if candidate is None:
+            raise ValueError(f"Transformer class {transformer.__class__.__name__} "
                          f"is not supported by PipeFuser")
+        else:
+            return candidate

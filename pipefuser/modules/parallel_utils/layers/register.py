@@ -33,10 +33,17 @@ class PipeFuserLayerWrappers:
         cls, 
         layer: nn.Module
     ) -> PipeFuserLayerBaseWrapper:
+        candidate = None
         for (origin_layer_class, 
              pipefusion_layer_wrapper) in cls._PIPEFUSER_LAYER_MAPPING.items():
-             #TODO check if subclass is legally
             if isinstance(layer, origin_layer_class):
-                return pipefusion_layer_wrapper
-        raise ValueError(f"Layer class {layer.__class__.__name__} "
+                if (candidate is None or 
+                    origin_layer_class == layer.__class__ or
+                    issubclass(origin_layer_class, candidate)):
+                    candidate = pipefusion_layer_wrapper
+    
+        if candidate is None:
+            raise ValueError(f"Layer class {layer.__class__.__name__} "
                          f"is not supported by PipeFuser")
+        else:
+            return candidate

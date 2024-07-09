@@ -10,20 +10,20 @@ from diffusers.models.transformers.transformer_2d import (
     Transformer2DModelOutput)
 from diffusers.utils import is_torch_version
 
-from pipefuser.modules.parallel_utils.transformer import (
+from pipefuser.modules.parallel_utils.models.transformers import (
     PipeFuserTransformerBaseWrapper
 )
 from .register import PipeFuserTransformerWrappers
 from pipefuser.config.config import InputConfig, ParallelConfig, RuntimeConfig
 from pipefuser.distributed.parallel_state import (
     get_pipeline_parallel_rank,
+    get_pipeline_parallel_world_size,
 )
 from pipefuser.modules.parallel_utils.parallel import P
 from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-#! use only when pp > 1
 @PipeFuserTransformerWrappers.register(Transformer2DModel)
 class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
     def __init__(
@@ -94,6 +94,18 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             If `return_dict` is True, an [`~models.transformers.transformer_2d.Transformer2DModelOutput`] is returned,
             otherwise a `tuple` where the first element is the sample tensor.
         """
+        if get_pipeline_parallel_world_size() == 1:
+            return self.module(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                timestep=timestep,
+                added_cond_kwargs=added_cond_kwargs,
+                class_labels=class_labels,
+                cross_attention_kwargs=cross_attention_kwargs,
+                attention_mask=attention_mask,
+                encoder_attention_mask=encoder_attention_mask,
+                return_dict=return_dict,
+            )
         assert not self.is_input_continuous, (
             "Continuous inputs are not supported in pipeline parallelism yet")
         if cross_attention_kwargs is not None:

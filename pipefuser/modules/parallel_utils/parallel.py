@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from pipefuser.modules.pipefusion.pipefusion_pixart_alpha import (
+from pipefuser.modules.parallel_utils.pipelines.pixart_alpha import (
     PixArtAlphaPipelinePP,
 )
 from pipefuser.distributed.parallel_state import (
@@ -13,8 +13,8 @@ from pipefuser.distributed.parallel_state import (
 )
 from pipefuser.config.config import EngineConfig, ParallelConfig
 from pipefuser.logger import init_logger
-from pipefuser.modules.pipefusion.base_pipeline import PipeFuserBasePipeline
-from pipefuser.modules.parallel_utils.transformer import (
+from pipefuser.modules.parallel_utils.pipelines.base_pipeline import PipeFuserBasePipeline
+from pipefuser.modules.parallel_utils.models.transformers import (
     PipeFuserTransformerBaseWrapper
 )
 

@@ -44,7 +44,7 @@ class ModelConfig:
     scheduler: Optional[str] = "dpmsolver_multistep"
 
 @dataclass
-class DataConfig:
+class InputConfig:
     height: int = 1024
     width: int = 1024
     batch_size: Optional[int] = None
@@ -123,7 +123,7 @@ class TensorParallelConfig():
 @dataclass(frozen=True)
 class PipeFusionParallelConfig():
     pp_degree: int = 1
-    pipeline_patch_num: Optional[int] = None
+    num_pipeline_patch: Optional[int] = None
     attn_layer_num_for_pp: Optional[List[int]] = None,
 
     def __post_init__(self):
@@ -131,8 +131,8 @@ class PipeFusionParallelConfig():
             "pipefusion_degree must be set and greater than 1 to use pipefusion"
         assert self.pp_degree <= dist.get_world_size(), \
             "pipefusion_degree must be less than or equal to world_size"
-        if pipeline_patch_num is None:
-            pipeline_patch_num = self.pp_degree
+        if num_pipeline_patch is None:
+            num_pipeline_patch = self.pp_degree
             logger.info(
                 f"Pipeline patch number not set, "
                 f"using default value {self.pp_degree}"
@@ -193,7 +193,7 @@ class ParallelConfig():
 @dataclass(frozen=True)
 class EngineConfig:
     model_config: ModelConfig
-    data_config: DataConfig
+    input_config: InputConfig
     runtime_config: RuntimeConfig
     parallel_config: ParallelConfig
 

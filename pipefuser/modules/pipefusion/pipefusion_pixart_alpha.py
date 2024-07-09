@@ -12,6 +12,10 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
 )
 from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
+from diffusers.models import AutoencoderKL, PixArtTransformer2DModel
+from diffusers.schedulers import DPMSolverMultistepScheduler
+from transformers import T5EncoderModel, T5Tokenizer
+
 from pipefuser.modules.parallel_utils.parallel import PipeFuserPipelineClasses
 from pipefuser.distributed.parallel_state import (
     get_pipeline_parallel_rank,
@@ -22,17 +26,38 @@ from pipefuser.distributed.parallel_state import (
     get_cfg_group,
 )
 from pipefuser.config.config import ParallelConfig, RuntimeConfig
+from pipefuser.modules.pipefusion.base_pipeline import PipeFuserBasePipeline
 
 
 @PipeFuserPipelineClasses.register(PixArtAlphaPipeline)
-class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
-    parallel_config: ParallelConfig = None
-    runtime_config: RuntimeConfig = None
+class PipeFuserPixArtAlphaPipeline(PipeFuserBasePipeline, PixArtAlphaPipeline):
+    parallel_config: Optional[ParallelConfig] = None
+    runtime_config: Optional[RuntimeConfig] = None
+
+    def __init__(
+        self,
+        tokenizer: T5Tokenizer,
+        text_encoder: T5EncoderModel,
+        vae: AutoencoderKL,
+        transformer: PixArtTransformer2DModel,
+        scheduler: DPMSolverMultistepScheduler,
+        #!TEST: config
+        parallel_config: Optional[ParallelConfig],
+    ):
+        kwargs = {
+            "tokenizer": tokenizer,
+            "text_encoder": text_encoder,
+            "vae": vae,
+            "transformer": transformer,
+            "scheduler": scheduler,
+        }
+        super().__init__(parallel_config=parallel_config, **kwargs)
 
     def set_config(
         self, 
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig
+        *,
+        parallel_config: Optional[ParallelConfig] = None,
+        runtime_config: Optional[RuntimeConfig] = None,
     ):
         self.parallel_config = parallel_config
         self.runtime_config = runtime_config
@@ -156,7 +181,7 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
                     "the pipeline")
         #* check pp world size
         if get_pipeline_parallel_world_size() == 1:
-            return super().__call__(
+            return super(PipeFuserBasePipeline, self).__call__(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 num_inference_steps=num_inference_steps,
@@ -313,6 +338,7 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
         )
         num_pipeline_warmup_steps = self.runtime_config.warmup_steps
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            #* warmup stage
             latents = self._sync_pipeline(
                 latents=latents, 
                 prompt_embeds=prompt_embeds,
@@ -326,6 +352,7 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
                 callback=callback,
                 callback_steps=callback_steps,
             )
+            #* pipefusion stage
             latents = self._async_pipeline(
                 latents=latents,
                 prompt_embeds=prompt_embeds,
@@ -427,7 +454,7 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
             get_pp_group().pipeline_isend(latents)
         return latents
 
-
+    #* implement of pipefusion
     def _async_pipeline(
         self, 
         latents: torch.Tensor,
@@ -443,12 +470,12 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
                            ] = None,
         callback_steps: int = 1,
     ):
-        pipeline_patch_num = self.parallel_config.pp_config.pipeline_patch_num
+        num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         patch_latents = self._init_async_pipeline(num_timesteps=len(timesteps), 
                                                   latents=latents)
-        last_patch_latents = [None for _ in range(pipeline_patch_num)]
+        last_patch_latents = [None for _ in range(num_pipeline_patch)]
         for i, t in enumerate(timesteps):
-            for patch_idx in range(pipeline_patch_num):
+            for patch_idx in range(num_pipeline_patch):
                 if get_pipeline_parallel_rank() == 0:
                     last_patch_latents[patch_idx] = patch_latents[patch_idx]
                 if get_pipeline_parallel_rank() and i == 0:
@@ -505,9 +532,9 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
         recv_timesteps = (num_timesteps - 1 
                           if get_pipeline_parallel_rank() == 1 
                           else num_timesteps)
-        pipeline_patch_num = self.parallel_config.pp_config.pipeline_patch_num
+        num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
         for _ in range(recv_timesteps):
-            for patch_idx in range(pipeline_patch_num):
+            for patch_idx in range(num_pipeline_patch):
                 get_pp_group().add_pipeline_recv_task_for_patch(patch_idx)
 
         if get_pipeline_parallel_rank() == 1:
@@ -515,18 +542,18 @@ class PixArtAlphaPipelinePP(PixArtAlphaPipeline):
             latents = get_pp_group().pipeline_recv()
             # ignore latents after the last timestep
             patch_latents = list(
-                latents.split(latents.shape[2] // pipeline_patch_num, dim=2))
+                latents.split(latents.shape[2] // num_pipeline_patch, dim=2))
         elif get_pipeline_parallel_rank() == 0:
-            assert latents.shape[2] % pipeline_patch_num == 0, (
+            assert latents.shape[2] % num_pipeline_patch == 0, (
                 "height dim of latents should be divisible by "
-                "pipeline_patch_num")
-            patch_height = latents.shape[2] // pipeline_patch_num
+                "num_pipeline_patch")
+            patch_height = latents.shape[2] // num_pipeline_patch
             patch_latents = [
                 latents[..., i * patch_height:(i + 1) * patch_height, :]
-                for i in range(pipeline_patch_num)
+                for i in range(num_pipeline_patch)
             ]
         else:
-            patch_latents = [None for _ in range(pipeline_patch_num)]
+            patch_latents = [None for _ in range(num_pipeline_patch)]
         return patch_latents
     
     def _backbone_forward(

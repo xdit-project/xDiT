@@ -17,7 +17,7 @@ from pipefuser.config.config import (
     SequenceParallelConfig,
     DataParallelConfig,
     ModelConfig,
-    DataConfig,
+    InputConfig,
     RuntimeConfig
 )
 
@@ -84,7 +84,7 @@ class EngineArgs:
     split_scheme: Optional[str] = 'row'
         # pipefusion parallel
     pipefusion_parallel_degree: int = 1
-    pipeline_patch_num: Optional[int] = None
+    num_pipeline_patch: Optional[int] = None
     attn_layer_num_for_pp: Optional[List[int]] = None
 
 
@@ -163,7 +163,7 @@ class EngineArgs:
         parser.add_argument("--pipefusion_parallel_degree",
                             type=int,
                             default=1)
-        parser.add_argument("--pipeline_patch_num",
+        parser.add_argument("--num_pipeline_patch",
                             type=int,
                             default=None)
         parser.add_argument("--attn_layer_num_for_pp",
@@ -193,7 +193,7 @@ class EngineArgs:
             scheduler=self.scheduler,
         )
         
-        data_config = DataConfig(
+        input_config = InputConfig(
             height=self.height,
             width=self.width,
             batch_size=self.batch_size,
@@ -224,14 +224,14 @@ class EngineArgs:
             ),
             pp_config=PipeFusionParallelConfig(
                 pp_degree=self.pipefusion_parallel_degree,
-                pipeline_patch_num=self.pipeline_patch_num,
+                num_pipeline_patch=self.num_pipeline_patch,
                 attn_layer_num_for_pp=self.attn_layer_num_for_pp,
             ),
         )
 
         return EngineConfig(
             model_config=model_config,
-            data_config=data_config,
+            input_config=input_config,
             runtime_config=runtime_config,
             parallel_config=parallel_config,
         )

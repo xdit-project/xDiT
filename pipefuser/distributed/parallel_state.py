@@ -223,8 +223,12 @@ def initialize_model_parallel(
         ranks = list(range(i * num_data_parallel_devices,
                           (i + 1) * num_data_parallel_devices))
         group_ranks.append(ranks)
-    _DP = init_model_parallel_group(group_ranks,
-                                    get_world_group().local_rank, backend)
+    _DP = init_model_parallel_group(
+        group_ranks=group_ranks,
+        local_rank=get_world_group().local_rank, 
+        backend=backend,
+        parallel_mode="data"
+    )
 
     # Build the classifier_free_guidance parallel groups. (split batch)
     num_cfg_parallel_groups: int = (world_size //
@@ -244,8 +248,12 @@ def initialize_model_parallel(
             for j in range(classifier_free_guidance_degree)
         ]
         group_ranks.append(ranks)
-    _CFG = init_model_parallel_group(group_ranks,
-                                    get_world_group().local_rank, backend)
+    _CFG = init_model_parallel_group(
+        group_ranks=group_ranks,
+        local_rank=get_world_group().local_rank, 
+        backend=backend,
+        parallel_mode="classifier_free_guidance"
+    )
     
     # Build the sequence-parallel groups.
     num_sequence_parallel_devices: int = sequence_parallel_degree
@@ -259,8 +267,12 @@ def initialize_model_parallel(
         ranks = list(range(i * sequence_parallel_degree,
                           (i + 1) * sequence_parallel_degree))
         group_ranks.append(ranks)
-    _SP = init_model_parallel_group(group_ranks,
-                                    get_world_group().local_rank, backend)
+    _SP = init_model_parallel_group(
+        group_ranks=group_ranks,
+        local_rank=get_world_group().local_rank, 
+        backend=backend,
+        parallel_mode="sequence"
+    )
 
     #TODO: implement tensor parallel groups
     assert tensor_parallel_degree == 1, "Tensor parallelism is not implemented"
@@ -288,22 +300,23 @@ def initialize_model_parallel(
     global _PP
     assert _PP is None, (
         "pipeline model parallel group is already initialized")
-    if num_pipeline_parallel_devices > 1:
-        group_ranks = []
-        for i in range(num_pipeline_parallel_groups):
-            start_rank = (
-                i // num_pipeline_per_stage_devices * num_splited_batch_devices 
-                + i % num_pipeline_parallel_devices
-            )
-            ranks = [
-                start_rank + j * num_pipeline_per_stage_devices
-                for j in range(num_pipeline_parallel_devices)
-            ]
-            group_ranks.append(ranks)
-        _PP = init_model_parallel_group(group_ranks,
-                                        get_world_group().local_rank, backend)
-    else:
-        _PP = None
+    group_ranks = []
+    for i in range(num_pipeline_parallel_groups):
+        start_rank = (
+            i // num_pipeline_per_stage_devices * num_splited_batch_devices 
+            + i % num_pipeline_per_stage_devices
+        )
+        ranks = [
+            start_rank + j * num_pipeline_per_stage_devices
+            for j in range(num_pipeline_parallel_devices)
+        ]
+        group_ranks.append(ranks)
+    _PP = init_model_parallel_group(
+        group_ranks=group_ranks,
+        local_rank=get_world_group().local_rank, 
+        backend=backend,
+        parallel_mode="pipeline"
+    )
 
 
 def ensure_model_parallel_initialized(
@@ -336,7 +349,10 @@ def ensure_model_parallel_initialized(
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_DP is not None and _CFG is not None)
+    return (_DP is not None and 
+            _CFG is not None and 
+            _SP is not None and 
+            _PP is not None)
 
 
 _TP_STATE_PATCHED = False
@@ -378,17 +394,11 @@ def get_tensor_model_parallel_rank():
 
 def get_pipeline_parallel_world_size():
     """Return world size for the pipeline model parallel group."""
-    if get_pp_group() is None:
-        return 1
-    else:
-        return get_pp_group().world_size
+    return get_pp_group().world_size
 
 def get_pipeline_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
-    if get_pp_group() is None:
-        return 0
-    else:
-        return get_pp_group().rank_in_group
+    return get_pp_group().rank_in_group
 
 
 def get_classifier_free_guidance_world_size():

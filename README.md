@@ -36,7 +36,7 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 </div>
 
 ### Updates
-* **Junly 10, 2024**: Support HunyuanDiT. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
+* **Junly 10, 2024**: Support HunyuanDiT. The inference script is [scripts/sd3_example.py](./scripts/hunyuandit_example.py).
 * **Junly 1, 2024**: Split batch for Classifier Free Guidance.
 * **June 26, 2024**: Support Stable Diffusion 3. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
 * **May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py).

@@ -96,7 +96,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                     dist.all_gather(
                         [noise_pred_uncond, noise_pred_text],
                         noise_pred,
-                        group=self.distri_config.dp_group
+                        group=self.distri_config.local_dp_group
                     )
                 noise_pred = noise_pred_uncond + guidance_scale * (
                     noise_pred_text - noise_pred_uncond

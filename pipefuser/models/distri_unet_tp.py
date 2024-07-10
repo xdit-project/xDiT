@@ -183,7 +183,7 @@ class DistriUNetTP(BaseModel):  # for Patch Parallelism
                 dist.all_gather(
                     self.buffer_list,
                     output.contiguous(),
-                    group=distri_config.dp_group(),
+                    group=distri_config.local_dp_group(),
                     async_op=False,
                 )
                 torch.cat(self.buffer_list, dim=0, out=self.output_buffer)

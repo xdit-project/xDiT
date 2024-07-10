@@ -210,7 +210,7 @@ class DistriSelfAttentionPP(DistriAttentionPP):
                     dist.all_gather(
                         self.buffer_list,
                         kv,
-                        group=distri_config.batch_parallel_group,
+                        group=distri_config.local_batch_parallel_group,
                         async_op=False,
                     )
                     full_kv = torch.cat(self.buffer_list, dim=1)

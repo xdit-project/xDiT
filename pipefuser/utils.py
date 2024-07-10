@@ -145,21 +145,21 @@ class DistriConfig:
                         list(range(i * n_device_per_batch, (i + 1) * n_device_per_batch))
                     )
                 )
-            self.batch_parallel_group = batch_parallel_groups[batch_idx]
-            self.batch_parallel_groups = batch_parallel_groups
+            self.local_batch_parallel_group = batch_parallel_groups[batch_idx]
+            self.global_batch_parallel_groups = batch_parallel_groups
 
             dp_groups = []
             for i in range(world_size // 2):
                 dp_groups.append(dist.new_group([i, i + n_device_per_batch]))
-            self.dp_group = dp_groups[self.rank]
-            self.dp_groups = dp_groups
+            self.local_dp_group = dp_groups[self.rank]
+            self.global_dp_groups = dp_groups
         else:
-            self.batch_parallel_group = dist.new_group()
-            self.batch_parallel_groups = [self.batch_parallel_group]
-            self.dp_groups = [
+            self.local_batch_parallel_group = dist.new_group()
+            self.global_batch_parallel_groups = [self.local_batch_parallel_group]
+            self.global_dp_groups = [
                 dist.new_group([i]) for i in range(world_size)
             ]
-            self.dp_group = self.dp_groups[self.rank]
+            self.local_dp_group = self.global_dp_groups[self.rank]
 
         self.pp_num_patch = pp_num_patch
 
@@ -228,10 +228,10 @@ class PipelineParallelismCommManager:
 
         batch_world_size = dist.get_world_size()
         dp_world_size = 1
-        self.batch_parallel_group = distri_config.batch_parallel_group
-        self.dp_group = distri_config.dp_group
+        self.batch_parallel_group = distri_config.local_batch_parallel_group
+        self.dp_group = distri_config.local_dp_group
 
-        if distri_config.batch_parallel_group is not None and distri_config.dp_group is not None:
+        if distri_config.local_batch_parallel_group is not None and distri_config.local_dp_group is not None:
             batch_world_size = dist.get_world_size(self.batch_parallel_group)
             dp_world_size = dist.get_world_size(self.dp_group)
 
@@ -239,8 +239,8 @@ class PipelineParallelismCommManager:
         if batch_world_size == 2:
             groups = [
                 [
-                    dist.new_group(dist.get_process_group_ranks(distri_config.batch_parallel_groups[i])),
-                    dist.new_group(dist.get_process_group_ranks(distri_config.batch_parallel_groups[i]))
+                    dist.new_group(dist.get_process_group_ranks(distri_config.global_batch_parallel_groups[i])),
+                    dist.new_group(dist.get_process_group_ranks(distri_config.global_batch_parallel_groups[i]))
                 ] for i in range(dp_world_size)
             ]
             self.groups = groups[dist.get_rank(self.dp_group)]
@@ -555,7 +555,7 @@ class PatchParallelismCommManager:
         tensor = self.buffer_list[distri_config.split_idx()][start:end]
         buffer_list = [t[start:end] for t in self.buffer_list]
         handle = dist.all_gather(
-            buffer_list, tensor, group=self.distri_config.batch_parallel_group, async_op=True
+            buffer_list, tensor, group=self.distri_config.local_batch_parallel_group, async_op=True
         )
         for i in self.idx_queue:
             self.handles[i] = handle

@@ -161,6 +161,7 @@ class DistriConfig:
             ]
             self.local_dp_group = self.global_dp_groups[self.rank]
 
+
         self.pp_num_patch = pp_num_patch
 
         self.attn_num = attn_num

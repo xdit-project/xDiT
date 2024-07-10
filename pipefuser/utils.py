@@ -217,6 +217,10 @@ class PipelineParallelismCommManager:
         self.recv_queue = []
         self.dtype = None
 
+        self.skip_shape: Optional[torch.Size] = None
+        self.recv_skip_buffer: Optional[List[torch.Tensor]] = None
+        self.recv_skip_queue = []
+        self.recv_skip_req = None
 
         batch_world_size = dist.get_world_size()
         dp_world_size = 1
@@ -246,6 +250,10 @@ class PipelineParallelismCommManager:
         self.prev_rank = dist.get_global_rank(
             self.batch_parallel_group, 
             (dist.get_rank(self.batch_parallel_group) - 1 + batch_world_size) % batch_world_size
+        )
+        self.skip_rank = dist.get_global_rank(
+            self.batch_parallel_group,
+            (batch_world_size - 1 - dist.get_rank(self.batch_parallel_group) + 2) % batch_world_size
         )
 
         self.extra_group = dist.new_group(dist.get_process_group_ranks(self.batch_parallel_group))
@@ -380,6 +388,94 @@ class PipelineParallelismCommManager:
             return self.recv_buffer[-1]
         else:
             return self.recv_buffer[idx]
+    
+    def first_send_to_skip(self, tensor: torch.Tensor, is_extra=False):
+        distri_config = self.distri_config
+        if self.skip_shape is None:
+            shape = torch.tensor(
+                tensor.shape, dtype=torch.int32, device=distri_config.device
+            )
+            dim = torch.tensor(len(shape), dtype=torch.int32, device=distri_config.device)
+            dist.send(dim, dst=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group)
+            dist.send(
+                shape, dst=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group
+            )
+            self.skip_shape = torch.Size(list(shape))
+        else:
+            logger.warning(f"Skip buffer is already initialized, skip sending skip shape.")
+    
+    def send_to_skip(self, tensor: torch.Tensor, is_extra=False):
+        tensor = tensor.contiguous()
+        if self.skip_shape is None:
+            self.first_send_to_skip(tensor, is_extra)
+        dist.isend(
+            tensor, dst=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group
+        )
+        # print("send_to_skip: ", tensor.shape, ", rank:", self.distri_config.rank, "to", self.skip_rank)
+    
+    def first_recv_from_skip(self, dtype: Optional[torch.dtype] = None, is_extra=False):
+        distri_config = self.distri_config
+        if self.recv_skip_buffer is None:
+            dim = torch.tensor(0, dtype=torch.int32, device=distri_config.device)
+            dist.recv(dim, src=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group)
+            shape = torch.zeros(
+                dim,
+                dtype=torch.int32,
+                device=distri_config.device,
+            )
+            dist.recv(
+                shape, src=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group
+            )
+            self.skip_shape = torch.Size(list(shape))
+            self.dtype = dtype
+            
+            shape = list(self.skip_shape)
+            shape[-2] = shape[-2] // distri_config.pp_num_patch
+            self.recv_skip_buffer = [
+                torch.zeros(
+                    shape,
+                    dtype=self.dtype,
+                    device=distri_config.device,
+                )
+                for _ in range(distri_config.pp_num_patch)
+            ]
+            self.recv_skip_buffer.append(
+                torch.zeros(self.skip_shape, dtype=self.dtype, device=distri_config.device)
+            )
+        else:
+            logger.warning(f"Recv skip buffer is already initialized, skip receiving skip shape.")
+    
+    def _irecv_skip_add_req(self, is_extra=False):
+        if self.recv_skip_req is None and len(self.recv_skip_queue) > 0:
+            idx = self.recv_skip_queue.pop(0)
+            if idx is None:
+                self.recv_skip_req = dist.irecv(
+                    self.recv_skip_buffer[-1], src=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group
+                )
+            else:
+                self.recv_skip_req = dist.irecv(
+                    self.recv_skip_buffer[idx], src=self.skip_rank, group=self.extra_group if is_extra else self.batch_parallel_group
+                )
+    
+    def recv_from_skip(
+        self, dtype: Optional[torch.dtype] = None, idx: Optional[int] = None, is_extra=False
+    ):
+        if self.recv_skip_buffer is None:
+            self.first_recv_from_skip(dtype, is_extra)
+        self.recv_skip_queue.append(idx)
+        self._irecv_skip_add_req(is_extra)
+            
+    def get_skip_data(self, idx: Optional[int] = None, is_extra=False) -> torch.Tensor:
+        if self.recv_skip_req is not None:
+            self.recv_skip_req.wait()
+            # print("finish, recv_from_skip, rank:", self.distri_config.rank)
+            self.recv_skip_req = None
+            self._irecv_skip_add_req(is_extra)
+
+        if idx is None:
+            return self.recv_skip_buffer[-1]
+        else:
+            return self.recv_skip_buffer[idx]
 
 
 class PatchParallelismCommManager:

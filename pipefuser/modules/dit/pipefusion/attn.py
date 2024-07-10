@@ -228,6 +228,140 @@ class DistriSelfAttentionPiP(DistriAttentionPiP):
         return output
 
 
+class DistriHunyuanAttnPiP(DistriAttentionPiP):
+    def __init__(self, module: Attention, distri_config: DistriConfig):
+        super(DistriHunyuanAttnPiP, self).__init__(module, distri_config)
+
+    def _forward(self, hidden_states: torch.FloatTensor, encoder_hidden_states: torch.FloatTensor, 
+                 image_rotary_emb: torch.FloatTensor, scale: float = 1.0):
+        from diffusers.models.embeddings import apply_rotary_emb
+        attn = self.module
+        distri_config = self.distri_config
+        assert isinstance(attn, Attention)
+
+        residual = hidden_states
+
+        batch_size, sequence_length, _ = hidden_states.shape
+
+        query = attn.to_q(hidden_states)
+
+        if not attn.is_cross_attention:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+        
+        kv = self.to_kv(encoder_hidden_states)
+
+        if attn.is_cross_attention:
+            full_kv = kv
+        else:
+            # the distributed sparse attention from pipefuser
+            if distri_config.pp_num_patch == 1:
+                full_kv = kv
+            else:
+                if (
+                    distri_config.mode == "full_sync"
+                    or self.counter <= distri_config.warmup_steps
+                ):
+                    full_kv = kv
+                else:
+                    full_kv = self.buffer_list
+                    # _, c, _ = full_kv.shape
+                    _, c, _ = kv.shape
+                    # assert c % distri_config.pp_num_patch == 0
+                    full_kv[:, c * self.batch_idx : c * (self.batch_idx + 1), :] = kv
+
+                self.buffer_list = full_kv
+
+        # naive attn
+        key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+        
+        # Apply RoPE if needed
+        if image_rotary_emb is not None:
+            if distri_config.pp_num_patch == 1:
+                query = apply_rotary_emb(query, image_rotary_emb)
+            else:
+                if (
+                    distri_config.mode == "full_sync"
+                    or self.counter <= distri_config.warmup_steps
+                ):
+                    query = apply_rotary_emb(query, image_rotary_emb)
+                else:
+                    if isinstance(image_rotary_emb, tuple):
+                        cos, sin = image_rotary_emb
+                        c, _ = cos.shape
+                        start = (c // distri_config.pp_num_patch) * self.batch_idx
+                        end = (c // distri_config.pp_num_patch) * (self.batch_idx + 1)
+                        query = apply_rotary_emb(query, tuple((cos[start : end, :], sin[start : end, :])))
+                    else:
+                        c, _ = image_rotary_emb.shape
+                        start = (c // distri_config.pp_num_patch) * self.batch_idx
+                        end = (c // distri_config.pp_num_patch) * (self.batch_idx + 1)
+                        query = apply_rotary_emb(query, image_rotary_emb[start : end, :])
+            if not attn.is_cross_attention:
+                key = apply_rotary_emb(key, image_rotary_emb)
+
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        # TODO: add support for attn.scale when we move to Torch 2.1
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=0.0, is_causal=False
+        )
+
+        hidden_states = hidden_states.transpose(1, 2).reshape(
+            batch_size, -1, attn.heads * head_dim
+        )
+        hidden_states = hidden_states.to(query.dtype)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
+    def forward(
+        self,
+        hidden_states: torch.FloatTensor,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        image_rotary_emb: Optional[torch.FloatTensor] = None,
+        scale: float = 1.0,
+        *args,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        distri_config = self.distri_config
+        output = self._forward(hidden_states, encoder_hidden_states=encoder_hidden_states, 
+                               image_rotary_emb=image_rotary_emb, scale=scale)
+
+        if (
+            distri_config.mode == "full_sync"
+            or self.counter <= distri_config.warmup_steps
+        ):
+            self.counter += 1
+        else:
+            self.batch_idx += 1
+            if self.batch_idx == distri_config.pp_num_patch:
+                self.counter += 1
+                self.batch_idx = 0
+        return output
+
+
 class DistriJointAttnPiP(DistriAttentionPiP):
     def __init__(self, module: Attention, distri_config: DistriConfig):
         super(DistriJointAttnPiP, self).__init__(module, distri_config)

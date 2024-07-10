@@ -41,6 +41,7 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 * 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
 * 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py).
 
+
 ### 🎯 Supported DiTs:
 -  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
 -  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)

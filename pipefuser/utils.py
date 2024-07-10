@@ -155,7 +155,11 @@ class DistriConfig:
             self.dp_groups = dp_groups
         else:
             self.batch_parallel_group = dist.new_group()
-            self.dp_group = None
+            self.batch_parallel_groups = [self.batch_parallel_group]
+            self.dp_groups = [
+                dist.new_group([i]) for i in range(world_size)
+            ]
+            self.dp_group = self.dp_groups[self.rank]
 
         self.pp_num_patch = pp_num_patch
 

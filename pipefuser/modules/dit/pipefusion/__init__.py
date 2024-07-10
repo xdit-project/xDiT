@@ -9,3 +9,7 @@ from .attn import DistriCrossAttentionPiP, DistriSelfAttentionPiP, DistriJointAt
 from .conv2d import DistriConv2dPiP
 from .patchembed import DistriPatchEmbed
 
+if Version('0.30.0.dev0') <= Version(diffusers.__version__):
+    from .transformer_hunyuan import DistriHunyuanTransformer2DModel
+    from .attn import DistriHunyuanAttnPiP
+

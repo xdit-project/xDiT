@@ -15,7 +15,7 @@ if __name__ == "__main__":
         packages=find_packages(),
         install_requires=[
             "torch>=2.2",
-            "diffusers==0.29.0",
+            "diffusers==0.30.0.dev0",
             "transformers",
             "sentencepiece",
             "accelerate",

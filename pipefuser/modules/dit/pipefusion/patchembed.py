@@ -52,6 +52,9 @@ class DistriPatchEmbed(BaseModule):
 
         # [2, 4096 / c, 1152]
 
+        if module.pos_embed is None:
+            return latent.to(latent.dtype)
+
         # Interpolate positional embeddings if needed.
         # (For PixArt-Alpha: https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L162C151-L162C160)
 

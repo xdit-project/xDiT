@@ -7,3 +7,6 @@ if Version('0.29.0') <= Version(diffusers.__version__):
 from .sdxl import DistriSDXLPipeline
 from .dit import DistriDiTPipeline
 from .pixartalpha import DistriPixArtAlphaPipeline
+
+if Version('0.30.0.dev0') <= Version(diffusers.__version__):
+    from .hunyuandit import DistriHunyuanDiTPipeline

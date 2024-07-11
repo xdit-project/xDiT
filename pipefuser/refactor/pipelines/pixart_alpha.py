@@ -2,6 +2,7 @@ import os
 from typing import Dict, List, Tuple, Callable, Optional, Union
 
 import torch
+import torch.nn as nn
 from diffusers import PixArtAlphaPipeline
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_256_BIN,
@@ -26,7 +27,7 @@ from pipefuser.refactor.distributed.parallel_state import (
     get_pp_group,
     get_cfg_group,
 )
-from pipefuser.refactor.config.config import EngineConfig, ParallelConfig, RuntimeConfig
+from pipefuser.refactor.config.config import EngineConfig
 from pipefuser.refactor.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
 
 
@@ -41,7 +42,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             pipeline=pipeline,
             engine_config=engine_config,
         )
-        self._prepare_run()
+        # self._prepare_run()
 
     @classmethod
     def from_pretrained(
@@ -68,7 +69,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             output_type="latent",
             generator=torch.Generator().manual_seed(self.runtime_config.seed),
         )
-        
+
 
     @torch.no_grad()
     def __call__(

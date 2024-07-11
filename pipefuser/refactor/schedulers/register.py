@@ -3,24 +3,24 @@ import torch
 import torch.nn as nn
 
 from pipefuser.logger import init_logger
-from pipefuser.refactor.models import PipeFuserModelBaseWrapper
+from pipefuser.refactor.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
 
 logger = init_logger(__name__)
 
 class PipeFuserSchedulerWrappersRegister:
     _PIPEFUSER_SCHEDULER_MAPPING: Dict[
         Type[nn.Module], 
-        Type[PipeFuserModelBaseWrapper]
+        Type[PipeFuserSchedulerBaseWrapper]
     ] = {}
 
     @classmethod
     def register(cls, origin_scheduler_class: Type[nn.Module]):
         def decorator(pipefusion_scheduler_class: Type[nn.Module]):
             if not issubclass(pipefusion_scheduler_class, 
-                              PipeFuserModelBaseWrapper):
+                              PipeFuserSchedulerBaseWrapper):
                 raise ValueError(
                     f"{pipefusion_scheduler_class.__class__.__name__} is not "
-                    f"a subclass of PipeFuserModelBaseWrapper"
+                    f"a subclass of PipeFuserSchedulerBaseWrapper"
                 )
             cls._PIPEFUSER_SCHEDULER_MAPPING[origin_scheduler_class] = \
                 pipefusion_scheduler_class
@@ -31,7 +31,7 @@ class PipeFuserSchedulerWrappersRegister:
     def get_wrapper(
         cls, 
         transformer: nn.Module
-    ) -> PipeFuserModelBaseWrapper:
+    ) -> PipeFuserSchedulerBaseWrapper:
         candidate = None
         candidate_origin = None
         for (origin_scheduler_class,

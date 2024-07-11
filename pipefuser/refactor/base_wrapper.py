@@ -1,22 +1,19 @@
 from abc import abstractmethod, ABCMeta
-from typing import Optional
+from typing import Any, Optional
 from torch import nn
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 
 
-class PipeFuserBaseWrapper(nn.Module, metaclass=ABCMeta):
+class PipeFuserBaseWrapper(metaclass=ABCMeta):
 
     def __init__(
         self, 
-        module: nn.Module,
+        module: Any,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
-        super().__init__()
-        print(22, module)
         self.module = module
-        print(24, self.module)
         self.parallel_config = parallel_config
         self.runtime_config = runtime_config
         self.forward_round_counter = 0
@@ -62,20 +59,3 @@ class PipeFuserBaseWrapper(nn.Module, metaclass=ABCMeta):
 
     def in_warmup_stage(self) -> bool:
         return self.forward_round_counter < self.runtime_config.warmup_steps
-
-    # def __getattr__(self, name: str):
-    #     module = super().__getattr__("module")
-    #     # module = self.__dict__["module"]
-    #     return getattr(module, name)
-
-    # def __call__(self, *args, **kwargs):
-    #     if callable(self.module):
-    #         return self.module(*args, **kwargs)
-    #     raise TypeError("Inner 'Transformer' object is not callable")
-
-    # def __str__(self):
-    #     return str(self.module)
-
-    @abstractmethod
-    def forward(self, *args, **kwargs):
-        pass

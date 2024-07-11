@@ -7,15 +7,14 @@ from diffusers.utils.torch_utils import randn_tensor
 import torch
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.refactor.models.schedulers import (
-    PipeFuserSchedulerWrappersRegister
+from pipefuser.refactor.distributed.parallel_state import get_pipeline_parallel_world_size
+from pipefuser.refactor.schedulers import (
+    PipeFuserSchedulerWrappersRegister,
 )
-from pipefuser.refactor.models.base_model import (
-    PipeFuserModelBaseWrapper
-)
+from pipefuser.refactor.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
 
 @PipeFuserSchedulerWrappersRegister.register(DPMSolverMultistepScheduler)
-class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserModelBaseWrapper):
+class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper):
     def __init__(
         self,
         scheduler: DPMSolverMultistepScheduler,
@@ -38,6 +37,16 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserModelBaseWrapper):
         return_dict: bool = True,
         patch_idx: Union[int] = None,
     ) -> Union[SchedulerOutput, Tuple]:
+
+        if get_pipeline_parallel_world_size() == 1:
+            return self.module.step(
+                model_output=model_output,
+                timestep=timestep,
+                sample=sample,
+                generator=generator,
+                variance_noise=variance_noise,
+                return_dict=return_dict,
+            )
 
         if self.num_inference_steps is None:
             raise ValueError(
@@ -140,6 +149,3 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserModelBaseWrapper):
             return (prev_sample,)
 
         return SchedulerOutput(prev_sample=prev_sample)
-    
-    def forward(self):
-        pass

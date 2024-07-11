@@ -33,13 +33,11 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
             submodule_name_to_wrap=submodule_name_to_wrap,
             submodule_addition_args=submodule_addition_args
         )
-        print(41, transformer)
         super().__init__(
             module=transformer,
             parallel_config=parallel_config,
             runtime_config=runtime_config,
         )
-        print(40, self.module)
 
 
     def set_input_config(self, input_config: InputConfig):

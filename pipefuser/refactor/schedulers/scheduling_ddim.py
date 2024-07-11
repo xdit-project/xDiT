@@ -3,15 +3,14 @@ from typing import Union, Tuple, Optional
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler, DDIMSchedulerOutput
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.refactor.models.schedulers import (
-    PipeFuserSchedulerWrappersRegister
-)
-from pipefuser.refactor.models.base_model import (
-    PipeFuserModelBaseWrapper
+from pipefuser.refactor.schedulers import (
+    PipeFuserSchedulerWrappersRegister,
+    PipeFuserSchedulerBaseWrapper
 )
 
+
 @PipeFuserSchedulerWrappersRegister.register(DDIMScheduler)
-class PipeFuserDDIMSchedulerWrapper(PipeFuserModelBaseWrapper):
+class PipeFuserDDIMSchedulerWrapper(PipeFuserSchedulerBaseWrapper):
     def __init__(
         self,
         scheduler: DDIMScheduler,

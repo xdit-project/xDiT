@@ -8,8 +8,6 @@ from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
 
 class PipeFuserLayerBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
-    activation_cache: torch.Tensor
-    num_pipeline_patch: int
     
     def __init__(
         self, 

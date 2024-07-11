@@ -12,9 +12,10 @@ from pipefuser.refactor.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
     model_parallel_is_initialized,
+    set_random_seed,
 )
 from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
-from pipefuser.refactor.models.schedulers import *
+from pipefuser.refactor.schedulers import *
 from pipefuser.refactor.models.transformers import *
 
 
@@ -31,7 +32,10 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
     ):
         self.engine_config = engine_config
         self.input_config = engine_config.input_config
-        self._check_distributed_env(engine_config.parallel_config)
+        self._check_distributed_env(
+            engine_config.parallel_config,
+            engine_config.runtime_config
+        )
         # backbone
         transformer = getattr(pipeline, 'transformer', None)
         unet = getattr(pipeline, 'unet', None)
@@ -40,26 +44,30 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
         # scheduler
         scheduler = getattr(pipeline, 'scheduler', None)
 
-        if scheduler is not None:
-            pipeline.scheduler = self._convert_scheduler(scheduler)
         if transformer is not None:
             pipeline.transformer = \
-                self._convert_transformer_backbone(transformer)
-            print(47, pipeline.transformer)
+                self._convert_transformer_backbone(transformer).to('cuda:0')
         elif unet is not None:
             pipeline.unet = self._convert_unet_backbone(unet)
 
+        if scheduler is not None:
+            pipeline.scheduler = self._convert_scheduler(scheduler)
 
         super().__init__(
             module=pipeline,
             parallel_config=engine_config.parallel_config,
             runtime_config=engine_config.runtime_config,
         )
-    
+
     def set_input_config(self, input_config: InputConfig):
         self.input_config = input_config
 
-    def _check_distributed_env(self, parallel_config: ParallelConfig):
+    def _check_distributed_env(
+        self, 
+        parallel_config: ParallelConfig,
+        runtime_config: RuntimeConfig,
+    ):
+        set_random_seed(runtime_config.seed)
         if not model_parallel_is_initialized():
             logger.warning("Model parallel is not initialized, initializing...")
             init_distributed_environment()
@@ -79,7 +87,6 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
     ):
         logger.info('Transformer backbone found, paralleling transformer...')
         wrapper = PipeFuserTransformerWrappersRegister.get_wrapper(transformer)
-        print(83, wrapper)
         transformer = wrapper(
             transformer=transformer,
             parallel_config=self.engine_config.parallel_config,

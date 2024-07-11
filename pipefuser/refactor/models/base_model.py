@@ -9,29 +9,40 @@ from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-class PipeFuserModelBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
+# class PipeFuserModelBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
+class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMeta):
     def __init__(
         self,
         module: nn.Module,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
-        super().__init__(
+        # super().__init__(
+        #     module=module,
+        #     parallel_config=parallel_config, 
+        #     runtime_config=runtime_config
+        # )
+        super().__init__()
+        super(nn.Module, self).__init__(
             module=module,
             parallel_config=parallel_config, 
             runtime_config=runtime_config
         )
 
-    # def __getattr__(self, name: str):
-    #     return getattr(self.module, name)
-        
-    # def __call__(self, *args, **kwargs):
-    #     if callable(self.module):
-    #         return self.module(*args, **kwargs)
-    #     raise TypeError("Inner 'Transformer' object is not callable")
-
-    # def __str__(self):
-    #     return str(self.module)
+    def __getattr__(self, name: str):
+        if '_parameters' in self.__dict__:
+            _parameters = self.__dict__['_parameters']
+            if name in _parameters:
+                return _parameters[name]
+        if '_buffers' in self.__dict__:
+            _buffers = self.__dict__['_buffers']
+            if name in _buffers:
+                return _buffers[name]
+        if '_modules' in self.__dict__:
+            modules = self.__dict__['_modules']
+            if name in modules:
+                return modules[name]
+        return getattr(self.module, name)
 
     def _wrap_layers(
         self, 

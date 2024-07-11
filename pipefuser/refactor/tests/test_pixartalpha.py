@@ -12,13 +12,14 @@ def main():
     pipe = PipeFuserPixArtAlphaPipeline.from_pretrained(
         engine_config.model_config.model,
         engine_config=engine_config
-    )
-    pipe(
-        prompt="A beautiful sunset over the ocean.",
+    ).to("cuda:0")
+    output = pipe(
+        prompt="A small dog",
         generator=torch.Generator(device="cuda").manual_seed(engine_config.runtime_config.seed),
         num_inference_steps=engine_config.input_config.num_inference_steps,
-        output_type="image",
+        output_type="pil",
     )
+    output.images[0].save("./results/test.png")
 
 
 if __name__ == '__main__':

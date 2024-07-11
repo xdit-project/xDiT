@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from typing import List, Optional
 
+import random
 import torch
 import torch.distributed
 import pipefuser.refactor.envs as envs
@@ -16,6 +17,11 @@ logger = init_logger(__name__)
 
 _WORLD: Optional[GroupCoordinator] = None
 
+def set_random_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, ("world group is not initialized")
@@ -110,8 +116,6 @@ def graph_capture():
     with get_tp_group().graph_capture() as context, get_pp_group(
     ).graph_capture(context):
         yield context
-
-
 
 
 def init_distributed_environment(

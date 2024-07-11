@@ -35,16 +35,18 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 
 </div>
 
-### Updates
-* **Junly 10, 2024**: Support HunyuanDiT. The inference script is [scripts/sd3_example.py](./scripts/hunyuandit_example.py).
-* **Junly 1, 2024**: Split batch for Classifier Free Guidance.
-* **June 26, 2024**: Support Stable Diffusion 3. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
-* **May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py).
+### 📢 Updates
+* 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [scripts/hunyuandit_example.py](./scripts/hunyuandit_example.py).
+* 🎉**July 1, 2024**: Split batch for Classifier Free Guidance.
+* 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
+* 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py).
 
-### Supported DiTs:
--  [PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
--  [Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
--  [DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256) 
+
+### 🎯 Supported DiTs:
+-  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
+-  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
+-  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
+-  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
 
 ### Benchmark Results on Pixart-Alpha
@@ -159,7 +161,7 @@ To conduct the FID experiment, follow the detailed instructions provided in the 
 
 ## Other optimizations
 
-### 1. Avoid OOM in VAE module:
+### 1. Avoid OOM in VAE Module:
 
 The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
 
@@ -173,10 +175,9 @@ By synergizing these two methods, we have dramatically expanded the capabilities
 
 This advancement represents a significant leap forward in high-resolution image processing, opening new possibilities for applications in various domains of computer vision and image generation.
 
-### 2. Split batch
+### 2. Split Batch for Classifier-Free Guidance
 
-Due to the implementation of classifier-free guidance, during inference, the batch size dimension in the forward pass of the backbone network for each diffusion step is consistently 2. The final result for each step is obtained through a single computation between these two samples after the forward pass is completed. Consequently, we have devised a strategy to distribute these two samples across different GPUs for parallel computation. Following each forward pass, we execute an all_gather operation to ensure accuracy. By employing this method, we have achieved a 1.7-fold increase in the generation speed of 1024 x 1024 pixel images, utilizing the same number of devices.
-
+During inference with classifier-free guidance, the batch size for inputs to DiT blocks remains fixed at 2. We prioritize batch parallelization before integrating other parallel strategies. For instance, on an 8-GPU setup, we can set a batch parallel degree of 2 and a pipefuse parallel degree of 4. This approach has resulted in a 1.7x speedup in generating 1024 x 1024 pixel images, using the same number of devices.
 
 ## Cite Us
 ```

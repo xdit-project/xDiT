@@ -30,14 +30,12 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         transformer: Transformer2DModel,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
-        input_config: Optional[InputConfig] = None,
     ):
         super().__init__(
             self,
             transformer=transformer,
             parallel_config=parallel_config,
             runtime_config=runtime_config,
-            input_config=input_config,
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn1"],
         )
@@ -54,6 +52,7 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
+        use_async: bool = False,
     ):
         """
         The [`Transformer2DModel`] forward method.
@@ -140,13 +139,13 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         if self.is_input_continuous:
             #TODO residual processing (rank 1 to rank 0 p2p...)
             residual = hidden_states
-            if get_pipeline_parallel_rank() == 1:
+            if get_pipeline_parallel_rank() == 0:
                 hidden_states, inner_dim = \
                     self._operate_on_continuous_inputs(hidden_states)
             else:
                 _, inner_dim = self._operate_on_continuous_inputs(hidden_states)
         elif self.is_input_vectorized:
-            if get_pipeline_parallel_rank() == 1:
+            if get_pipeline_parallel_rank() == 0:
                 hidden_states = self.latent_image_embedding(hidden_states)
         elif self.is_input_patches:
             (hidden_states, encoder_hidden_states, timestep, embedded_timestep
@@ -195,7 +194,7 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 )
 
         # 3. Output
-        if get_pipeline_parallel_rank() == 0:
+        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
             if self.is_input_continuous:
                 batch_size = hidden_states.shape[0]
                 height, width = (
@@ -218,7 +217,7 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                     self.input_config.height // self.patch_size // 8, 
                     self.input_config.width // self.patch_size // 8
                 )
-                if not self.in_warmup_stage():
+                if use_async:
                     height //= self.parallel_config.pp_config.num_pipeline_patch
                  
                 output = self._get_output_for_patched_inputs(
@@ -232,10 +231,10 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         else:
             output = hidden_states
 
-        if self.in_warmup_stage():
-            self.round_step()
-        else:
-            self.patch_step()
+        # if self.in_warmup_stage():
+        #     self.round_step()
+        # else:
+        #     self.patch_step()
 
         if not return_dict:
             return (output,)
@@ -264,7 +263,7 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         batch_size = hidden_states.shape[0]
         embedded_timestep = None
 
-        if get_pipeline_parallel_rank() == 1:
+        if get_pipeline_parallel_rank() == 0:
             hidden_states = self.pos_embed(hidden_states)
 
         if self.adaln_single is not None:

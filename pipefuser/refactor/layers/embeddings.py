@@ -21,15 +21,16 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
         runtime_config: RuntimeConfig,
     ):
         super().__init__(
+            module=patch_embedding,
             parallel_config=parallel_config,
             runtime_config=runtime_config
         )
         self.pos_embed = None
 
-    def forward(self, latent):
-        is_warmup = self.in_warmup_stage()
+    def forward(self, latent, use_async: bool = False):
+        # is_warmup = self.in_warmup_stage()
 
-        if is_warmup:
+        if not use_async:
             if getattr(self.module, "pos_embed_max_size", None
                        ) is not None:
                 height, width = latent.shape[-2:]
@@ -84,14 +85,14 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
                 pos_embed = self.module.pos_embed
         b, c, h = pos_embed.shape
 
-        if not is_warmup:
+        if use_async:
             pos_embed = pos_embed.view(b, self.num_pipeline_patch, -1, h)[
                 :, self.current_patch_idx
             ]
 
-        if self.in_warmup_stage():
-            self.round_step()
-        else:
-            self.patch_step()
+        # if self.in_warmup_stage():
+        #     self.round_step()
+        # else:
+        #     self.patch_step()
 
         return (latent + pos_embed).to(latent.dtype)

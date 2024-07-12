@@ -35,7 +35,7 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         generator=None,
         variance_noise: Optional[torch.FloatTensor] = None,
         return_dict: bool = True,
-        patch_idx: Union[int] = None,
+        patch_idx: Optional[int] = None,
     ) -> Union[SchedulerOutput, Tuple]:
 
         if get_pipeline_parallel_world_size() == 1:
@@ -126,6 +126,8 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
             or self.lower_order_nums < 2
             or lower_order_second
         ):
+            # print(129, self.config.solver_order)
+            # print(model_outputs)
             prev_sample = self.multistep_dpm_solver_second_order_update(
                 model_outputs, sample=sample, noise=noise
             )

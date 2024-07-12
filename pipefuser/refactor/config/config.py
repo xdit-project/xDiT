@@ -65,6 +65,7 @@ class InputConfig:
 class RuntimeConfig:
     seed: int = 42
     warmup_steps: int = 1
+    dtype: torch.dtype = torch.float16
     use_cuda_graph: bool = True
     use_parallel_vae: bool = False
     use_profiler: bool = False
@@ -81,19 +82,18 @@ class DataParallelConfig():
     do_classifier_free_guidance: bool = True
 
     def __post_init__(self):
-        assert self.dp_degree >= 1, "dp_degree must greater than 1"
-        if self.use_split_batch and self.do_classifier_free_guidance:
-            assert self.dp_degree * 2 <= dist.get_world_size(), \
-                ("dp_degree * 2 must be less than or equal to world_size "
-                "because of classifier free guidance")
-        else:
-            assert self.dp_degree <= dist.get_world_size(), \
-                "dp_degree must be less than or equal to world_size"
+        assert self.dp_degree >= 1, "dp_degree must greater than or equal to 1"
+
         # set classifier_free_guidance_degree parallel for split batch
         if self.use_split_batch and self.do_classifier_free_guidance:
             self.cfg_degree = 2
         else:
             self.cfg_degree = 1
+        assert self.dp_degree * self.cfg_degree <= dist.get_world_size(), \
+            ("dp_degree * cfg_degree must be less than or equal to "
+             "world_size because of classifier free guidance")
+        assert dist.get_world_size() % (self.dp_degree * self.cfg_degree)== 0, (
+            "world_size must be divisible by dp_degree * cfg_degree")
             
 
 @dataclass
@@ -149,10 +149,17 @@ class PipeFusionParallelConfig():
                 f"using default value {self.pp_degree}"
             )
         if self.attn_layer_num_for_pp is not None:
+            logger.info(f"attn_layer_num_for_pp set, splitting attention layers"
+                        f"to {self.attn_layer_num_for_pp}")
             assert len(self.attn_layer_num_for_pp) == self.pp_degree, (
                 "attn_layer_num_for_pp must have the same "
                 "length as pp_degree if not None"
             )
+        if self.pp_degree == 1 and self.num_pipeline_patch > 1:
+            logger.warning(f"Pipefusion degree is 1, pipeline will not be used,"
+                           f"num_pipeline_patch will be ignored")
+            self.num_pipeline_patch = 1
+        
 
 
 @dataclass

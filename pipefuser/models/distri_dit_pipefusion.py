@@ -27,6 +27,7 @@ class DistriDiTPipeFusion(BaseModel):  # for Pipeline Parallelism
     def __init__(self, model: ModelMixin, distri_config: DistriConfig):
         assert isinstance(model, ModelMixin), f"{type(model)} is not ModelMixin"
         model = DistriTransformer2DModel(model, distri_config)
+        print(model.named_modules())
         for name, module in model.named_modules():
             if isinstance(module, BaseModule):
                 continue

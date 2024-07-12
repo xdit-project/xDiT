@@ -1,9 +1,11 @@
 from abc import abstractmethod, ABCMeta
 from typing import Dict, List, Optional, Type, Union
+from functools import wraps
 
 import torch.nn as nn
-from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
+from pipefuser.refactor.config.config import InputConfig, ParallelConfig, RuntimeConfig
 from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.refactor.distributed.parallel_state import get_pp_group
 from pipefuser.refactor.layers import *
 from pipefuser.logger import init_logger
 
@@ -17,11 +19,6 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
-        # super().__init__(
-        #     module=module,
-        #     parallel_config=parallel_config, 
-        #     runtime_config=runtime_config
-        # )
         super().__init__()
         super(nn.Module, self).__init__(
             module=module,
@@ -42,10 +39,16 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
             modules = self.__dict__['_modules']
             if name in modules:
                 return modules[name]
-        return getattr(self.module, name)
+        try:
+            return getattr(self.module, name)
+        except RecursionError:
+            raise AttributeError(f"module {type(self.module).__name__} has no "
+                                 f"attribute {name}")
 
     def _wrap_layers(
         self, 
+        parallel_config: ParallelConfig,
+        runtime_config: RuntimeConfig,
         model: Optional[nn.Module] = None, 
         submodule_classes_to_wrap: List[Type] = [],
         submodule_name_to_wrap: List[str] = [],
@@ -61,7 +64,7 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
                 continue
 
             for subname, submodule in module.named_children():
-                need_wrap = subname in submodule_name_to_wrap.keys()
+                need_wrap = subname in submodule_name_to_wrap
                 for class_to_wrap in submodule_classes_to_wrap:
                     if isinstance(submodule, class_to_wrap):
                         need_wrap = True
@@ -71,27 +74,27 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
                     wrapper = PipeFuserLayerWrappersRegister.get_wrapper(submodule)
                     additional_args = submodule_addition_args.get(subname, {})
                     logger.info(f"Wrapping {name}.{subname} in model class: "
-                                f"{self.module.__class__.__name__} with "
+                                f"{model.__class__.__name__} with "
                                 f"{wrapper.__name__}")
                     if additional_args is not {}:
                         setattr(
-                            obj=module,
-                            name=subname, 
-                            value=wrapper(
+                            module,
+                            subname, 
+                            wrapper(
                                 submodule, 
-                                self.parallel_config, 
-                                self.runtime_config,
+                                parallel_config, 
+                                runtime_config,
                                 **additional_args
                             )
                         )
                     else:
                         setattr(
-                            obj=module,
-                            name=subname, 
-                            value=wrapper(
+                            module,
+                            subname, 
+                            wrapper(
                                 submodule, 
-                                self.parallel_config, 
-                                self.runtime_config,
+                                parallel_config, 
+                                runtime_config,
                             )
                         )
         if wrap_self_module:
@@ -99,6 +102,11 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
         else:
             return model
 
+    def set_input_config(self, input_config: InputConfig):
+        self.input_config = input_config
+        for submodule in self.module.modules():
+            if hasattr(submodule, 'set_input_config'):
+                submodule.set_input_config(input_config)
 
     @abstractmethod
     def forward(self, *args, **kwargs):

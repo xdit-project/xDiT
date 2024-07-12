@@ -68,14 +68,20 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
             padding="valid",
         )
 
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        use_async: bool = False, 
+        *args, 
+        **kwargs
+    ) -> torch.Tensor:
         if (get_pipeline_parallel_world_size() == 1 or 
             self.module.kernel_size == (1, 1) or 
             self.module.kernel_size == 1):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
-                if self.in_warmup_stage() or self.num_pipeline_patch == 1:
+                if not use_async or self.num_pipeline_patch == 1:
                     self.activation_cache = x
                     output = self.naive_forward(x)
                     # [2, 1152, 64, 64]
@@ -161,8 +167,8 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
             #             if distri_config.mode != "no_sync":
             #                 self.comm_manager.enqueue(self.idx, boundary)
 
-        if self.in_warmup_stage():
-            self.round_step()
-        else:
-            self.patch_step()
+        # if self.in_warmup_stage():
+        #     self.round_step()
+        # else:
+        #     self.patch_step()
         return output

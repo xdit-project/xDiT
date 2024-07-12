@@ -5,10 +5,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.modules.base_module import BaseModule
 from pipefuser.refactor.layers.base_layer import PipeFuserLayerBaseWrapper
 from pipefuser.refactor.layers.register import PipeFuserLayerWrappersRegister
-from pipefuser.utils import DistriConfig
 from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -86,7 +84,12 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             runtime_config=runtime_config,
         )
 
-    def _forward(self, hidden_states: torch.FloatTensor, scale: float = 1.0):
+    def _forward(
+        self, 
+        hidden_states: torch.FloatTensor, 
+        scale: float = 1.0,
+        use_async: bool = False,
+    ):
         assert isinstance(self.module, Attention)
 
         residual = hidden_states
@@ -102,7 +105,7 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         if self.num_pipeline_patch == 1:
             full_kv = kv
         else:
-            if self.in_warmup_stage():
+            if not use_async:
                 full_kv = kv
             else:
                 full_kv = self.activation_cache
@@ -151,14 +154,14 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         hidden_states: torch.FloatTensor,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         scale: float = 1.0,
+        use_async: bool = False,
         *args,
         **kwargs,
     ) -> torch.FloatTensor:
-        distri_config = self.distri_config
-        output = self._forward(hidden_states, scale=scale)
+        output = self._forward(hidden_states, scale=scale, use_async=use_async)
 
-        if self.in_warmup_stage():
-            self.round_step()
-        else:
-            self.patch_step()
+        # if self.in_warmup_stage():
+        #     self.round_step()
+        # else:
+        #     self.patch_step()
         return output

@@ -36,11 +36,11 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
+                    key = '--' + key[len('--'):].replace('-', '_')
                     processed_args.append(f'{key}={value}')
                 else:
                     processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
+                                          arg[len('--'):].replace('-', '_'))
             else:
                 processed_args.append(arg)
 
@@ -127,12 +127,12 @@ class EngineArgs:
                             help="The width of image")
         parser.add_argument("--prompt",
                             type=str,
-                            action='append',
+                            nargs="*",
                             default="",
                             help="Prompt for the model.")
         parser.add_argument("--negative_prompt",
                             type=str,
-                            action='append',
+                            nargs="*",
                             default="",
                             help="Negative prompt for the model.")
         parser.add_argument("--num_inference_steps",

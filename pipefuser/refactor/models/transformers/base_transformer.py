@@ -1,10 +1,9 @@
 from abc import abstractmethod, ABCMeta
-from functools import wraps
 from typing import Dict, List, Optional, Type
 import torch
 import torch.nn as nn
 
-from pipefuser.refactor.config.config import ParallelConfig, InputConfig, RuntimeConfig
+from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.refactor.distributed.parallel_state import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
@@ -21,14 +20,14 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
         transformer: nn.Module, 
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
-        input_config: Optional[InputConfig] = None,
         submodule_classes_to_wrap: List[Type] = [],
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
     ):
-        self.input_config = input_config
         transformer = self._convert_transformer_for_pipeline(
             transformer,
+            parallel_config=parallel_config,
+            runtime_config=runtime_config,
             submodule_classes_to_wrap=submodule_classes_to_wrap,
             submodule_name_to_wrap=submodule_name_to_wrap,
             submodule_addition_args=submodule_addition_args
@@ -40,12 +39,11 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
         )
 
 
-    def set_input_config(self, input_config: InputConfig):
-        self.input_config = input_config
-
     def _convert_transformer_for_pipeline(
         self,
         transformer: nn.Module,
+        parallel_config: ParallelConfig,
+        runtime_config: RuntimeConfig,
         submodule_classes_to_wrap: List[Type] = [],
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
@@ -53,8 +51,13 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
         if get_pipeline_parallel_world_size() == 1:
             return transformer
         else:
-            transformer = self._split_transformer_blocks(transformer)
+            transformer = self._split_transformer_blocks(
+                transformer, 
+                parallel_config=parallel_config
+            )
             return self._wrap_layers(
+                parallel_config=parallel_config,
+                runtime_config=runtime_config,
                 model=transformer,
                 submodule_classes_to_wrap=submodule_classes_to_wrap,
                 submodule_name_to_wrap=submodule_name_to_wrap,
@@ -62,7 +65,11 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
             )
 
 
-    def _split_transformer_blocks(self, transformer: nn.Module):
+    def _split_transformer_blocks(
+        self, 
+        transformer: nn.Module,
+        parallel_config: ParallelConfig,
+    ):
         if not hasattr(transformer, "transformer_blocks"):
             raise AttributeError(
                 f"'{transformer.__class__.__name__}' object has no attribute "
@@ -74,9 +81,9 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
         # transformer layer split
         pp_rank = get_pipeline_parallel_rank()
         pp_world_size = get_pipeline_parallel_world_size()
-        if self.parallel_config.pp_config.attn_layer_num_for_pp is not None:
+        if parallel_config.pp_config.attn_layer_num_for_pp is not None:
             attn_layer_num_for_pp = \
-                self.parallel_config.pp_config.attn_layer_num_for_pp
+                parallel_config.pp_config.attn_layer_num_for_pp
             assert (sum(attn_layer_num_for_pp) ==
                     len(transformer.transformer_blocks)), (
                         "Sum of attn_layer_num_for_pp should be equal to the "
@@ -101,20 +108,12 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
                 start_idx:end_idx
             ]
         # position embedding
-        if pp_rank != 1:
+        if pp_rank != 0:
             transformer.pos_embed = None
         return transformer
 
     
-    @staticmethod
-    def forward_check_condition(func):
-        @wraps(func)
-        def check_condition_fn(self, *args, **kwargs):
-            if self.input_config is None:
-                raise ValueError("InputConfig is not set, please set it before "
-                                 "calling forward")
-            return func(self, *args, **kwargs)
-        return check_condition_fn
+
 
     @abstractmethod
     def forward(self, *args, **kwargs):

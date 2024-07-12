@@ -357,6 +357,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 
             added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
+            print(resolution.shape, aspect_ratio.shape)
 
         # 7. Denoising loop
         num_warmup_steps = max(

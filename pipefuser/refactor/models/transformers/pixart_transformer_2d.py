@@ -1,5 +1,6 @@
 from typing import Optional, Dict, Any
 import torch
+import torch.distributed
 import torch.nn as nn
 
 from diffusers import PixArtTransformer2DModel
@@ -8,6 +9,7 @@ from diffusers.models.transformers.transformer_2d import (
     Transformer2DModelOutput)
 from diffusers.utils import is_torch_version
 
+from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
 from pipefuser.refactor.models.transformers import (
     PipeFuserTransformerBaseWrapper
 )
@@ -28,18 +30,16 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         transformer: PixArtTransformer2DModel, 
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
-        input_config: Optional[InputConfig] = None,
     ):
         super().__init__(
             transformer=transformer,
             parallel_config=parallel_config,
             runtime_config=runtime_config,
-            input_config=input_config,
-            submodule_addition_args=[],
-            submodule_name_to_wrap=[],
+            submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
+            submodule_name_to_wrap=['attn1'],
         )
 
-    @PipeFuserTransformerBaseWrapper.forward_check_condition
+    @PipeFuserBaseWrapper.forward_check_condition
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -50,6 +50,7 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
+        use_async: bool = False,
     ):
         """
         The [`PixArtTransformer2DModel`] forward method.
@@ -116,27 +117,38 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             #   (1 = keep,      0 = discard)
             # convert mask into a bias that can be added to attention scores:
             #       (keep = +0,     discard = -10000.0)
-            attention_mask = (1 - attention_mask.to(hidden_states.dtype)) * -10000.0
+            attention_mask = \
+                (1 - attention_mask.to(hidden_states.dtype)) * -10000.0
             attention_mask = attention_mask.unsqueeze(1)
 
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
-        if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
+        if (encoder_attention_mask is not None and 
+            encoder_attention_mask.ndim == 2):
+            encoder_attention_mask = \
+                (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
         batch_size = hidden_states.shape[0]
+        if get_pipeline_parallel_rank() == 0:
+            print(f"134, {hidden_states.shape}", flush=True)
 
-        if get_pipeline_parallel_rank() == 1:
+        if get_pipeline_parallel_rank() == 0:
             hidden_states = self.pos_embed(hidden_states)
-
+        if get_pipeline_parallel_rank() == 0:
+            print(f"139, {hidden_states.shape}", flush=True)
         timestep, embedded_timestep = self.adaln_single(
-            timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype
+            timestep, added_cond_kwargs, batch_size=batch_size, 
+            hidden_dtype=hidden_states.dtype
         )
 
         if self.caption_projection is not None:
-            encoder_hidden_states = self.caption_projection(encoder_hidden_states)
-            encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
+            encoder_hidden_states = \
+                self.caption_projection(encoder_hidden_states)
+            encoder_hidden_states = encoder_hidden_states.view(
+                batch_size, -1, hidden_states.shape[-1])
+        if get_pipeline_parallel_rank() == 0:
+            print(f"149, {hidden_states.shape}", flush=True)
 
         # 2. Blocks
         for block in self.transformer_blocks:
@@ -173,9 +185,12 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                     cross_attention_kwargs=cross_attention_kwargs,
                     class_labels=None,
                 )
+        if get_pipeline_parallel_rank() == 0:
+            print(f"187, {hidden_states.shape}", flush=True)
+        
 
         # 3. Output
-        if get_pipeline_parallel_rank() == 0:
+        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
             shift, scale = (
                 self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
             ).chunk(2, dim=1)
@@ -190,7 +205,7 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 self.input_config.height // self.config.patch_size // 8,
                 self.input_config.height // self.config.patch_size // 8,
             )
-            if not self.in_warmup_stage():
+            if use_async:
                 height //= self.parallel_config.pp_config.num_pipeline_patch
             # unpatchify
             hidden_states = hidden_states.reshape(
@@ -203,10 +218,10 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         else:
             output = hidden_states
 
-        if self.in_warmup_stage():
-            self.round_step()
-        else:
-            self.patch_step()
+        # if self.in_warmup_stage():
+        #     self.round_step()
+        # else:
+        #     self.patch_step()
 
         if not return_dict:
             return (output,)

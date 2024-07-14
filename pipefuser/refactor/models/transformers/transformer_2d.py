@@ -52,7 +52,6 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
-        use_async: bool = False,
     ):
         """
         The [`Transformer2DModel`] forward method.
@@ -217,7 +216,7 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                     self.input_config.height // self.patch_size // 8, 
                     self.input_config.width // self.patch_size // 8
                 )
-                if use_async:
+                if self.patched_mode:
                     height //= self.parallel_config.pp_config.num_pipeline_patch
                  
                 output = self._get_output_for_patched_inputs(

@@ -59,7 +59,6 @@ class DistriConv2dPiP(BaseModule):
         # [2, 4, 128, 128]
 
         distri_config = self.distri_config
-
         if distri_config.pp_num_patch == 1:
             output = self.naive_forward(x)
         else:

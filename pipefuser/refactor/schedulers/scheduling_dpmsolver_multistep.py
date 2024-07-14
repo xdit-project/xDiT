@@ -5,6 +5,7 @@ from diffusers.schedulers.scheduling_dpmsolver_multistep import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 import torch
+import torch.distributed
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.refactor.distributed.parallel_state import get_pipeline_parallel_world_size
@@ -126,8 +127,6 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
             or self.lower_order_nums < 2
             or lower_order_second
         ):
-            # print(129, self.config.solver_order)
-            # print(model_outputs)
             prev_sample = self.multistep_dpm_solver_second_order_update(
                 model_outputs, sample=sample, noise=noise
             )
@@ -143,7 +142,7 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        if (patch_idx is None or patch_idx == 
+        if (patch_idx is None or patch_idx == \
             self.parallel_config.pp_config.num_pipeline_patch - 1):
             self._step_index += 1
 

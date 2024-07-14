@@ -50,15 +50,14 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
-        use_async: bool = False,
     ):
         """
         The [`PixArtTransformer2DModel`] forward method.
 
         Args:
-            hidden_states (`torch.FloatTensor` of shape `(batch size, channel, height, width)`):
+            hidden_states (`torch.Tensor` of shape `(batch size, channel, height, width)`):
                 Input `hidden_states`.
-            encoder_hidden_states (`torch.FloatTensor` of shape `(batch size, sequence len, embed dims)`, *optional*):
+            encoder_hidden_states (`torch.Tensor` of shape `(batch size, sequence len, embed dims)`, *optional*):
                 Conditional embeddings for cross attention layer. If not given, cross-attention defaults to
                 self-attention.
             timestep (`torch.LongTensor`, *optional*):
@@ -130,13 +129,9 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
 
         # 1. Input
         batch_size = hidden_states.shape[0]
-        if get_pipeline_parallel_rank() == 0:
-            print(f"134, {hidden_states.shape}", flush=True)
 
         if get_pipeline_parallel_rank() == 0:
             hidden_states = self.pos_embed(hidden_states)
-        if get_pipeline_parallel_rank() == 0:
-            print(f"139, {hidden_states.shape}", flush=True)
         timestep, embedded_timestep = self.adaln_single(
             timestep, added_cond_kwargs, batch_size=batch_size, 
             hidden_dtype=hidden_states.dtype
@@ -147,11 +142,9 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 self.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(
                 batch_size, -1, hidden_states.shape[-1])
-        if get_pipeline_parallel_rank() == 0:
-            print(f"149, {hidden_states.shape}", flush=True)
 
         # 2. Blocks
-        for block in self.transformer_blocks:
+        for i, block in enumerate(self.transformer_blocks):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
@@ -185,8 +178,6 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                     cross_attention_kwargs=cross_attention_kwargs,
                     class_labels=None,
                 )
-        if get_pipeline_parallel_rank() == 0:
-            print(f"187, {hidden_states.shape}", flush=True)
         
 
         # 3. Output
@@ -205,7 +196,7 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 self.input_config.height // self.config.patch_size // 8,
                 self.input_config.height // self.config.patch_size // 8,
             )
-            if use_async:
+            if self.patched_mode:
                 height //= self.parallel_config.pp_config.num_pipeline_patch
             # unpatchify
             hidden_states = hidden_states.reshape(

@@ -1,7 +1,9 @@
 from contextlib import contextmanager
+import datetime
 from typing import List, Optional
 
 import random
+import numpy as np
 import torch
 import torch.distributed
 import pipefuser.refactor.envs as envs
@@ -19,6 +21,7 @@ _WORLD: Optional[GroupCoordinator] = None
 
 def set_random_seed(seed: int):
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -138,7 +141,8 @@ def init_distributed_environment(
             backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
-            rank=rank)
+            rank=rank,
+            timeout=datetime.timedelta(seconds=10))
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816

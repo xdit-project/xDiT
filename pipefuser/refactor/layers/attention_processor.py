@@ -66,8 +66,6 @@ class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
 
         self.to_kv = to_kv
 
-        self.batch_idx = 0
-
 #TODO(Eigensystem): implement PipeFuserAttentionWrapper to replace this
 #!WARNING: ONLY AVAILABLE FOR PIX_ART_ALPHA, TAKE ALL ATTENTION MODULES AS INPUT
 @PipeFuserLayerWrappersRegister.register(Attention)
@@ -88,7 +86,6 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         self, 
         hidden_states: torch.FloatTensor, 
         scale: float = 1.0,
-        use_async: bool = False,
     ):
         assert isinstance(self.module, Attention)
 
@@ -105,14 +102,14 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         if self.num_pipeline_patch == 1:
             full_kv = kv
         else:
-            if not use_async:
+            if not self.patched_mode:
                 full_kv = kv
             else:
                 full_kv = self.activation_cache
                 # _, c, _ = full_kv.shape
                 _, c, _ = kv.shape
                 # assert c % distri_config.pp_num_patch == 0
-                full_kv[:, c * self.batch_idx : c * (self.batch_idx + 1), :] = kv
+                full_kv[:, c * self.current_patch_idx : c * (self.current_patch_idx + 1), :] = kv
 
             self.activation_cache = full_kv
 
@@ -154,14 +151,11 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         hidden_states: torch.FloatTensor,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         scale: float = 1.0,
-        use_async: bool = False,
         *args,
         **kwargs,
     ) -> torch.FloatTensor:
-        output = self._forward(hidden_states, scale=scale, use_async=use_async)
+        output = self._forward(hidden_states, scale=scale)
 
-        # if self.in_warmup_stage():
-        #     self.round_step()
-        # else:
-        #     self.patch_step()
+        if self.patched_mode:
+            self.patch_step()
         return output

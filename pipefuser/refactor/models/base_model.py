@@ -5,7 +5,7 @@ from functools import wraps
 import torch.nn as nn
 from pipefuser.refactor.config.config import InputConfig, ParallelConfig, RuntimeConfig
 from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
-from pipefuser.refactor.distributed.parallel_state import get_pp_group
+from pipefuser.refactor.distributed.parallel_state import get_pp_group, get_world_group
 from pipefuser.refactor.layers import *
 from pipefuser.logger import init_logger
 
@@ -13,6 +13,8 @@ logger = init_logger(__name__)
 
 # class PipeFuserModelBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
 class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMeta):
+    wrapped_layers: List[PipeFuserLayerBaseWrapper]
+
     def __init__(
         self,
         module: nn.Module,
@@ -25,6 +27,7 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
             parallel_config=parallel_config, 
             runtime_config=runtime_config
         )
+        self.patched_mode = False
 
     def __getattr__(self, name: str):
         if '_parameters' in self.__dict__:
@@ -45,6 +48,15 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
             raise AttributeError(f"module {type(self.module).__name__} has no "
                                  f"attribute {name}")
 
+    def set_patched_mode(self, patched: bool):
+        self.patched_mode = patched
+        for layer in self.wrapped_layers:
+            layer.set_patched_mode(patched)
+
+    def reset_patch_idx(self):
+        for layer in self.wrapped_layers:
+            layer.reset_patch_idx()
+
     def _wrap_layers(
         self, 
         parallel_config: ParallelConfig,
@@ -54,6 +66,7 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
         submodule_name_to_wrap: List[str] = [],
         submodule_addition_args: Dict[str, Dict] = {},
     ) -> Union[nn.Module, None]:
+        wrapped_layers = []
         wrap_self_module = False
         if model is None:
             wrap_self_module = True
@@ -73,13 +86,14 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
                 if need_wrap:
                     wrapper = PipeFuserLayerWrappersRegister.get_wrapper(submodule)
                     additional_args = submodule_addition_args.get(subname, {})
-                    logger.info(f"Wrapping {name}.{subname} in model class: "
+                    logger.info(f"[RANK {get_world_group().rank}] "
+                                f"Wrapping {name}.{subname} in model class "
                                 f"{model.__class__.__name__} with "
                                 f"{wrapper.__name__}")
                     if additional_args is not {}:
                         setattr(
                             module,
-                            subname, 
+                            subname,
                             wrapper(
                                 submodule, 
                                 parallel_config, 
@@ -97,6 +111,9 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
                                 runtime_config,
                             )
                         )
+                    # if isinstance(getattr(module, subname), PipeFuserPatchEmbedWrapper):
+                    wrapped_layers.append(getattr(module, subname))
+        self.wrapped_layers = wrapped_layers
         if wrap_self_module:
             self.module = model
         else:

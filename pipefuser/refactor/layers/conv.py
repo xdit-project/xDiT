@@ -42,7 +42,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
     #TODO implementation problems in sliced_forward
     def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
-        assert h % self.um_pipeline_patch == 0
+        assert h % self.num_pipeline_patch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
@@ -60,19 +60,19 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
             final_padding[3] = padding
         sliced_input = x[:, :, h_begin:h_end, :]
         padded_input = F.pad(sliced_input, final_padding, mode="constant")
-        return F.conv2d(
+        result = F.conv2d(
             padded_input,
             self.module.weight,
             self.module.bias,
             stride=stride,
             padding="valid",
         )
+        return result
 
     def forward(
         self, 
         x: torch.Tensor, 
-        use_async: bool = False, 
-        *args, 
+        *args,
         **kwargs
     ) -> torch.Tensor:
         if (get_pipeline_parallel_world_size() == 1 or 
@@ -81,9 +81,9 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
-                if not use_async or self.num_pipeline_patch == 1:
+                if not self.patched_mode or self.num_pipeline_patch == 1:
                     self.activation_cache = x
-                    output = self.naive_forward(x)
+                    output = self.naive_forward(self.activation_cache)
                     # [2, 1152, 64, 64]
                 else:
                     if self.activation_cache is None:
@@ -92,7 +92,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
                             x.shape[1], 
                             x.shape[2] * self.num_pipeline_patch,
                             x.shape[3]
-                        ])
+                        ], dtype=x.dtype, device=x.device)
                     activation_cache_height = self.activation_cache.shape[2]
                     hidden_state_height = x.shape[2]
                     if (activation_cache_height // self.num_pipeline_patch == 
@@ -167,8 +167,6 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
             #             if distri_config.mode != "no_sync":
             #                 self.comm_manager.enqueue(self.idx, boundary)
 
-        # if self.in_warmup_stage():
-        #     self.round_step()
-        # else:
-        #     self.patch_step()
+        if self.patched_mode:
+            self.patch_step()
         return output

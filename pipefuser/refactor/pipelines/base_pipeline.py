@@ -78,6 +78,34 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
             hasattr(self.module.scheduler, 'set_input_config'):
             self.module.scheduler.set_input_config(input_config)
 
+    def set_patched_mode(self, patched: bool):
+        if hasattr(self.module, 'transformer') and \
+            hasattr(self.module.transformer, 'set_patched_mode'):
+            self.module.transformer.set_patched_mode(patched)
+        if hasattr(self.module, 'unet') and \
+            hasattr(self.module.unet, 'set_patched_mode'):
+            self.module.unet.set_patched_mode(patched)
+        if hasattr(self.module, 'vae') and \
+            hasattr(self.module.vae, 'set_patched_mode'):
+            self.module.vae.set_patched_mode(patched)
+        if hasattr(self.module, 'scheduler') and \
+            hasattr(self.module.scheduler, 'set_patched_mode'):
+            self.module.scheduler.set_patched_mode(patched)
+
+    def reset_patch_idx(self):
+        if hasattr(self.module, 'transformer') and \
+            hasattr(self.module.transformer, 'reset_patch_idx'):
+            self.module.transformer.reset_patch_idx()
+        if hasattr(self.module, 'unet') and \
+            hasattr(self.module.unet, 'reset_patch_idx'):
+            self.module.unet.reset_patch_idx()
+        if hasattr(self.module, 'vae') and \
+            hasattr(self.module.vae, 'reset_patch_idx'):
+            self.module.vae.reset_patch_idx()
+        if hasattr(self.module, 'scheduler') and \
+            hasattr(self.module.scheduler, 'reset_patch_idx'):
+            self.module.scheduler.reset_patch_idx()
+
     def to(self, *args, **kwargs):
         self.module = self.module.to(*args, **kwargs)
         return self

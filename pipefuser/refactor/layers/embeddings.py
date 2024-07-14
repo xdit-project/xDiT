@@ -2,6 +2,7 @@
 import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
+import torch.distributed
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.modules.base_module import BaseModule
 from pipefuser.refactor.layers.base_layer import PipeFuserLayerBaseWrapper
@@ -27,10 +28,9 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
         )
         self.pos_embed = None
 
-    def forward(self, latent, use_async: bool = False):
+    def forward(self, latent):
         # is_warmup = self.in_warmup_stage()
-
-        if not use_async:
+        if not self.patched_mode:
             if getattr(self.module, "pos_embed_max_size", None
                        ) is not None:
                 height, width = latent.shape[-2:]
@@ -62,6 +62,9 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
 
         # [2, 4096 / c, 1152]
 
+        if self.module.pos_embed is None:
+            return latent.to(latent.dtype)
+
         # Interpolate positional embeddings if needed.
         # (For PixArt-Alpha: https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L162C151-L162C160)
 
@@ -85,14 +88,15 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
                 pos_embed = self.module.pos_embed
         b, c, h = pos_embed.shape
 
-        if use_async:
+        if self.patched_mode:
             pos_embed = pos_embed.view(b, self.num_pipeline_patch, -1, h)[
                 :, self.current_patch_idx
             ]
 
         # if self.in_warmup_stage():
-        #     self.round_step()
+            # self.round_step()
         # else:
-        #     self.patch_step()
+        if self.patched_mode:
+            self.patch_step()
 
         return (latent + pos_embed).to(latent.dtype)

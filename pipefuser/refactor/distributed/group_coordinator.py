@@ -708,6 +708,14 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.num_pipefusion_patches = num_pipefusion_patches or \
             self.num_pipefusion_patches
         self.hyper_parameters_set = True
+
+    def pipeline_send(self, tensor: torch.Tensor) -> None:
+        tensor = tensor.contiguous()
+        assert self.hyper_parameters_set, (
+            "hyper parameters must be set before sending tensors")
+        if self.send_shape is None:
+            self._init_shape_and_send_metadata(tensor)
+        self._pipeline_isend(tensor).wait()
     
     def pipeline_isend(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
@@ -737,7 +745,6 @@ class PipelineGroupCoordinator(GroupCoordinator):
         if self.receiving_task is not None:
             self.receiving_task.wait()
             self.receiving_task = None
-            self.recv_next()
         if idx is None:
             return self.recv_buffer[-1]
         else:
@@ -754,39 +761,6 @@ class PipelineGroupCoordinator(GroupCoordinator):
             idx = self.recv_tasks_queue.pop(0)
             self.receiving_task = self._pipeline_irecv(self.recv_buffer[idx])
         
-        
-    # def _set_receiving_task(self):
-    #     if len(self.recv_tasks_queue) > 0 and self.receiving_task is None:
-    #         idx = self.recv_tasks_queue.pop(0)
-    #         if torch.distributed.get_rank() == 0:
-    #             print("size:", len(self.recv_tasks_queue))
-    #         self.receiving_task = self._pipeline_irecv(
-    #             self.recv_buffer[idx] if idx is not None 
-    #             else self.recv_buffer[-1]
-    #         )
-
-    # def add_pipeline_recv_task_for_patch(self, idx: Optional[int] = None):
-    #     assert self.hyper_parameters_set, (
-    #         "hyper parameters must be set before receiving tensors")
-    #     if self.recv_buffer is None:
-    #         self._recv_metadata_and_init_buffer()
-    #     self.recv_tasks_queue.append(idx)
-    #     self._set_receiving_task()
-
-    # def get_receiving_task_data(
-    #     self, 
-    #     idx: Optional[int] = None
-    # ) -> torch.Tensor:
-    #     if self.receiving_task is not None:
-    #         self.receiving_task.wait()
-    #         self.receiving_task = None
-    #         self._set_receiving_task()
-        
-    #     if idx is None:
-    #         return self.recv_buffer[-1]
-    #     else:
-    #         return self.recv_buffer[idx]
-
     def _init_shape_and_send_metadata(self, tensor: torch.Tensor) -> None:
         if self.send_shape is None:
             shape = torch.tensor(tensor.shape, dtype=torch.int32, 

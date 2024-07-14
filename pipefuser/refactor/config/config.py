@@ -84,6 +84,10 @@ class DataParallelConfig():
     def __post_init__(self):
         assert self.dp_degree >= 1, "dp_degree must greater than or equal to 1"
 
+        if self.use_split_batch and not self.do_classifier_free_guidance:
+            logger.warning(f"Split batch is enabled, "
+                           f"set classifier_free_guidance to True")
+            self.do_classifier_free_guidance = True
         # set classifier_free_guidance_degree parallel for split batch
         if self.use_split_batch and self.do_classifier_free_guidance:
             self.cfg_degree = 2

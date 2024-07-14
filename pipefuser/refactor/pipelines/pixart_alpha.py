@@ -15,9 +15,6 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
 )
 from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
-from diffusers.models import AutoencoderKL, PixArtTransformer2DModel
-from diffusers.schedulers import DPMSolverMultistepScheduler
-from transformers import T5EncoderModel, T5Tokenizer
 
 from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
 
@@ -29,6 +26,7 @@ from pipefuser.refactor.distributed.parallel_state import (
     get_classifier_free_guidance_rank,
     get_pp_group,
     get_cfg_group,
+    get_world_group,
 )
 from pipefuser.refactor.config.config import EngineConfig, ParallelConfig, RuntimeConfig
 from pipefuser.refactor.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
@@ -74,7 +72,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             num_pipeline_warmup_steps=sync_steps,
             output_type="latent",
-            generator=torch.Generator().manual_seed(self.runtime_config.seed),
+            generator=torch.Generator(device="cuda").manual_seed(self.runtime_config.seed),
         )
 
 
@@ -285,6 +283,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             clean_caption=clean_caption,
             max_sequence_length=max_sequence_length,
         )
+
         #* dealing with cfg degree
         if do_classifier_free_guidance:
             if get_classifier_free_guidance_world_size() == 1:
@@ -351,14 +350,14 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             self.runtime_config.warmup_steps
         )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if get_pipeline_parallel_world_size() > 1:
+            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
                 #* warmup stage
                 latents = self._sync_pipeline(
                     latents=latents, 
                     prompt_embeds=prompt_embeds,
                     prompt_attention_mask=prompt_attention_mask,
                     guidance_scale=guidance_scale,
-                    timesteps=timesteps[: num_pipeline_warmup_steps+1],
+                    timesteps=timesteps[: num_pipeline_warmup_steps],
                     num_warmup_steps=num_warmup_steps,
                     extra_step_kwargs=extra_step_kwargs,
                     added_cond_kwargs=added_cond_kwargs,
@@ -372,7 +371,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     prompt_embeds=prompt_embeds,
                     prompt_attention_mask=prompt_attention_mask,
                     guidance_scale=guidance_scale,
-                    timesteps=timesteps[num_pipeline_warmup_steps+1:],
+                    timesteps=timesteps[num_pipeline_warmup_steps: ],
                     num_warmup_steps=num_warmup_steps,
                     num_pipeline_warmup_steps=num_pipeline_warmup_steps,
                     extra_step_kwargs=extra_step_kwargs,
@@ -394,6 +393,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     progress_bar=progress_bar,
                     callback=callback,
                     callback_steps=callback_steps,
+                    sync_only=True,
                 )
 
         # 8. Decode latents (only rank 0)
@@ -439,7 +439,10 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]
                            ] = None,
         callback_steps: int = 1,
+        sync_only: bool = False,
     ):
+        self.set_patched_mode(patched = False)
+        self.reset_patch_idx()
         for i, t in enumerate(timesteps):
             if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
                 last_timestep_latents = latents
@@ -462,12 +465,10 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 added_cond_kwargs=added_cond_kwargs,
                 t=t,
                 guidance_scale=guidance_scale,
-                use_async=False,
             )
 
+
             if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
-                print(i, torch.distributed.get_rank(), latents.shape, last_timestep_latents.shape, flush=True)
-                print(461, "{", latents.shape, last_timestep_latents.shape, t, extra_step_kwargs, "}", flush=True)
                 latents = self._scheduler_step(
                     latents,
                     last_timestep_latents,
@@ -483,8 +484,13 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     step_idx = i // getattr(self.scheduler, "order", 1)
                     callback(step_idx, t, latents)
 
-            if get_pipeline_parallel_world_size() > 1:
-                get_pp_group().pipeline_isend(latents)
+            if (sync_only and 
+                get_pipeline_parallel_rank() == \
+                    get_pipeline_parallel_world_size() - 1 and 
+                i == len(timesteps) - 1):
+                pass
+            elif get_pipeline_parallel_world_size() > 1:
+                get_pp_group().pipeline_send(latents)
         return latents
 
     #* implement of pipefusion
@@ -518,20 +524,27 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 get_pipeline_parallel_world_size() - 1) 
             else None
         )
+
+        first_async_recv = True
         for i, t in enumerate(timesteps):
             for patch_idx in range(num_pipeline_patch):
-                print(f"523 [{torch.distributed.get_rank()}, {i}, {patch_idx}]", flush=True)
                 if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
                     last_patch_latents[patch_idx] = patch_latents[patch_idx]
 
                 if get_pipeline_parallel_rank() == 0 and i == 0:
                     pass
                 else:
+                    if first_async_recv:
+                        get_pp_group().recv_next()
+                        first_async_recv = False
                     patch_latents[patch_idx] = (
                         get_pp_group().get_pipeline_recv_data(idx=patch_idx))
-                print(f"532 [{torch.distributed.get_rank()}, {i}, {patch_idx}]", flush=True)
+                    if (i == len(timesteps) - 1 and 
+                        patch_idx == num_pipeline_patch - 1):
+                        pass
+                    else:
+                        get_pp_group().recv_next()
 
-                print(f"recv end, [rank, i, patch_idx]: [{torch.distributed.get_rank()}, {i}, {patch_idx}], latent: {patch_latents[patch_idx].shape}", flush=True)
                 patch_latents[patch_idx] = self._backbone_forward(
                     latents=patch_latents[patch_idx],
                     prompt_embeds=prompt_embeds,
@@ -539,11 +552,8 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     added_cond_kwargs=added_cond_kwargs,
                     t=t,
                     guidance_scale=guidance_scale,
-                    use_async=True,
                 )
-                print(f"544 [{torch.distributed.get_rank()}, {i}, {patch_idx}]", flush=True)
                 if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
-                    print(527, patch_latents[patch_idx].shape, last_patch_latents[patch_idx].shape)
                     patch_latents[patch_idx] = self._scheduler_step(
                         patch_latents[patch_idx],
                         last_patch_latents[patch_idx],
@@ -552,11 +562,9 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                         patch_idx
                     )
                     if i != len(timesteps) - 1:
-                        print(f"send, {torch.distributed.get_rank()}, {i}", flush=True)
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
                 else:
                     get_pp_group().pipeline_isend(patch_latents[patch_idx])
-                print(f"559 [{torch.distributed.get_rank()}, {i}, {patch_idx}]", flush=True)
             
             num_pipeline_warmup_steps = self.runtime_config.warmup_steps
             if i == len(timesteps) - 1 or (
@@ -571,12 +579,10 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     step_idx = ((i + num_pipeline_warmup_steps) 
                                 // getattr(self.scheduler, "order", 1))
                     callback(step_idx, t, patch_latents[patch_idx])
-            print(f"574 [{torch.distributed.get_rank()}, {i}, {patch_idx}]", flush=True)
 
         latents = None
         if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
             latents = torch.cat(patch_latents, dim=2)
-        print(f"579 [{torch.distributed.get_rank()}, {i}, {patch_idx}]", flush=True)
         return latents
 
     def _init_async_pipeline(
@@ -585,6 +591,8 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         latents: torch.Tensor,
         num_pipeline_warmup_steps: int,
     ):
+        self.set_patched_mode(patched = True)
+        self.reset_patch_idx()
         num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
 
         if get_pipeline_parallel_rank() == 0:
@@ -614,29 +622,23 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         for _ in range(recv_timesteps):
             for patch_idx in range(num_pipeline_patch):
                 get_pp_group().add_pipeline_recv_task(patch_idx)
-        get_pp_group().recv_next()
-        if torch.distributed.get_rank() == 0:
-            print(599, len(get_pp_group().recv_tasks_queue))
 
         return patch_latents
     
     def _backbone_forward(
         self,
-        latents: torch.FloatTensor,
-        prompt_embeds: torch.FloatTensor,
-        prompt_attention_mask: torch.FloatTensor,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
         added_cond_kwargs: Dict,
         t: Union[float, torch.Tensor],
         guidance_scale: float,
-        use_async: bool = False,
     ):
         if get_pipeline_parallel_rank() == 0:
             latents = torch.cat(
                 [latents] * (2 // get_classifier_free_guidance_world_size()))
             latents = self.scheduler.scale_model_input(latents, t)
 
-        if get_pipeline_parallel_rank() == 0:
-            print(f"639", flush=True)
         current_timestep = t
         if not torch.is_tensor(current_timestep):
             # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
@@ -652,8 +654,6 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             )
         elif len(current_timestep.shape) == 0:
             current_timestep = current_timestep[None].to(latents.device)
-        if get_pipeline_parallel_rank() == 0:
-            print(f"656, {latents.shape}", flush=True)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         current_timestep = current_timestep.expand(latents.shape[0])
         noise_pred = self.transformer(
@@ -663,10 +663,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             timestep=current_timestep,
             added_cond_kwargs=added_cond_kwargs,
             return_dict=False,
-            use_async=use_async,
         )[0]
-        if get_pipeline_parallel_rank() == 0:
-            print(f"669, {latents.shape}", flush=True)
         
         # classifier free guidance
         if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
@@ -683,16 +680,14 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 latents = latents.chunk(2, dim=1)[0]
         else:
             latents = noise_pred
-        if get_pipeline_parallel_rank() == 0:
-            print(f"687", flush=True)
             
         return latents
 
 
     def _scheduler_step(
         self,
-        noise_pred: torch.FloatTensor,
-        latents: torch.FloatTensor,
+        noise_pred: torch.Tensor,
+        latents: torch.Tensor,
         t: Union[float, torch.Tensor],
         extra_step_kwargs: Dict,
         patch_idx: Optional[int] = None,

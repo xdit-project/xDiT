@@ -17,8 +17,24 @@ class PipeFuserSchedulerBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
             runtime_config=runtime_config
         )
 
+    def __setattr__(self, name, value):
+        if name == 'module':
+            super().__setattr__(name, value)
+        elif (hasattr(self, 'module') and 
+              self.module is not None and 
+              hasattr(self.module, name)):
+            setattr(self.module, name, value)
+        else:
+            super().__setattr__(name, value)
+
     def set_input_config(self, input_config: InputConfig):
         self.input_config = input_config
+
+    def set_patched_mode(self, patched: bool):
+        pass
+
+    def reset_patch_idx(self):
+        pass
 
     @abstractmethod
     def step(self, *args, **kwargs):

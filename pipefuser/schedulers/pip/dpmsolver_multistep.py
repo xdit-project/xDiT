@@ -93,7 +93,6 @@ class DPMSolverMultistepSchedulerPiP(DPMSolverMultistepScheduler):
                 )
         else:
             model_outputs = self.model_outputs
-
         if (
             self.config.solver_order == 1
             or self.lower_order_nums < 1

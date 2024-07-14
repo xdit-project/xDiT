@@ -85,6 +85,7 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             added_cond_kwargs=added_cond_kwargs,
             return_dict=False,
         )[0]
+
         if distri_config.rank == 0:
             # perform guidance
             if do_classifier_free_guidance:
@@ -357,7 +358,6 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 
             added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
-            print(resolution.shape, aspect_ratio.shape)
 
         # 7. Denoising loop
         num_warmup_steps = max(
@@ -373,6 +373,8 @@ class DistriPixArtAlphaPiP(PixArtAlphaPipeline):
             if distri_config.mode != "full_sync":
                 warmup_timesteps = timesteps[: distri_config.warmup_steps + 1]
                 pip_timesteps = timesteps[distri_config.warmup_steps + 1 :]
+                # warmup_timesteps = timesteps[: distri_config.warmup_steps]
+                # pip_timesteps = timesteps[distri_config.warmup_steps:]
             else:
                 warmup_timesteps = timesteps
                 pip_timesteps = None

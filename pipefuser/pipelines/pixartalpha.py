@@ -171,7 +171,7 @@ class DistriPixArtAlphaPipeline:
         device = distri_config.device
 
         batch_size = distri_config.batch_size or 1
-        prompt = [""] * batch_size if batch_size > 1 else ""
+        prompt = ["A small dog"] * batch_size if batch_size > 1 else "A small dog"
         num_images_per_prompt = 1
 
         if distri_config.parallelism == "pipefusion":

@@ -24,6 +24,20 @@ class PipeFuserLayerBaseWrapper(nn.Module ,PipeFuserBaseWrapper, metaclass=ABCMe
         self.activation_cache = None
         self.num_pipeline_patch = \
             self.parallel_config.pp_config.num_pipeline_patch
+        self.patched_mode = False
+        self.current_patch_idx = 0
+
+    def set_patched_mode(self, patched: bool):
+        self.patched_mode = patched
+
+    def reset_patch_idx(self):
+        self.current_patch_idx = 0
+
+    def patch_step(self):
+        self.current_patch_idx += 1
+        if self.current_patch_idx == \
+                self.parallel_config.pp_config.num_pipeline_patch:
+            self.current_patch_idx = 0
 
     def __getattr__(self, name: str):
         if '_parameters' in self.__dict__:

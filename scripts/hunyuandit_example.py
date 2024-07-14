@@ -163,9 +163,9 @@ def main():
     torch.cuda.reset_peak_memory_stats()
 
     if args.parallelism == "pipefusion":
-        case_name = f"hunyuandit_{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch}_warm{args.pipefusion_warmup_step}"
+        case_name = f"hunyuandit_{args.parallelism}_hw_{args.height}_{args.width}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}_mb{args.pp_num_patch}_warm{args.pipefusion_warmup_step}"
     else:
-        case_name = f"hunyuandit_{args.parallelism}_hw_{args.height}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}"
+        case_name = f"hunyuandit_{args.parallelism}_hw_{args.height}_{args.width}_sync_{args.sync_mode}_u{args.ulysses_degree}_w{distri_config.world_size}"
     if args.output_file:
         case_name = args.output_file + "_" + case_name
     if enable_parallel_vae:

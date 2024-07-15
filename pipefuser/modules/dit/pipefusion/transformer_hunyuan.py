@@ -148,6 +148,7 @@ class DistriHunyuanTransformer2DModel(BaseModule):
                     image_rotary_emb=image_rotary_emb,
                     skip=skip,
                 )  # (N, L, D)
+            assert len(skips) == 0
         else:
             skips = []
             for layer, block in enumerate(module.blocks):

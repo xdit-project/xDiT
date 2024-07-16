@@ -70,6 +70,14 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         )
 
         model_output = self.convert_model_output(model_output, sample=sample)
+        if patch_idx == 0 and self.model_outputs[-1] is None:
+            self.model_outputs[-1] = torch.zeros([
+                model_output.shape[0],
+                model_output.shape[1],
+                model_output.shape[2] * \
+                    self.parallel_config.pp_config.num_pipeline_patch,
+                model_output.shape[3],
+            ], device=model_output.device, dtype=model_output.dtype)
         if patch_idx is None or patch_idx == 0:
             for i in range(self.config.solver_order - 1):
                 self.model_outputs[i] = self.model_outputs[i + 1]

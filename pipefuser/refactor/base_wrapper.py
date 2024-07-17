@@ -37,6 +37,13 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
             if self.input_config is None:
                 raise ValueError("InputConfig is not set, please set it before "
                                  "calling forward")
+            if (self.input_config.height % 
+                self.parallel_config.pp_config.num_pipeline_patch != 0):
+                raise ValueError(
+                    f"height; {self.input_config.height} must be divisible by "
+                    f"num_pipeline_patch: "
+                    f"{self.parallel_config.pp_config.num_pipeline_patch}"
+                )
             return func(self, *args, **kwargs)
         return check_condition_fn
 

@@ -1,33 +1,22 @@
-import torch
+from typing import Optional
 
-from diffusers.models.attention import Attention
+import torch
 from torch import nn
 from torch.nn import functional as F
+from diffusers.models.attention import Attention
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.refactor.layers.base_layer import PipeFuserLayerBaseWrapper
 from pipefuser.refactor.layers.register import PipeFuserLayerWrappersRegister
 from pipefuser.logger import init_logger
+from pipefuser.refactor.envs import PACKAGES_CHECKER
 
 logger = init_logger(__name__)
 
+env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
+HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
-HAS_FLASH_ATTN = False
-from typing import Optional
-
-HAS_LONG_CTX_ATTN = False
-try:
-    from yunchang import (
-        ring_flash_attn_func,
-        UlyssesAttention,
-        LongContextAttention,
-        LongContextAttentionQKVPacked,
-    )
-
-    HAS_LONG_CTX_ATTN = True
-except ImportError:
-    logger.warning("ring flash attn not found")
-    
 class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
     def __init__(
         self, 
@@ -81,6 +70,12 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             parallel_config=parallel_config,
             runtime_config=runtime_config,
         )
+        if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
+            from yunchang import LongContextAttention, UlyssesAttention
+            if HAS_FLASH_ATTN:
+                self.hybrid_seq_parallel_attn = LongContextAttention()
+            else:
+                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
 
     def _forward(
         self, 
@@ -119,19 +114,31 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         inner_dim = key.shape[-1]
         head_dim = inner_dim // self.module.heads
 
-        query = query.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
+        if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
+            query = query.view(batch_size, -1, self.module.heads, head_dim)
+            key = key.view(batch_size, -1, self.module.heads, head_dim)
+            value = value.view(batch_size, -1, self.module.heads, head_dim)
+            hidden_states = self.hybrid_seq_parallel_attn(
+                query, key, value, dropout_p=0.0, causal=False
+            )
+            hidden_states = hidden_states.reshape(
+                batch_size, -1, self.module.heads * head_dim
+            )
+        
+        else:
+            query = query.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
 
-        # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        # TODO: add support for self.module.scale when we move to Torch 2.1
-        hidden_states = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=0.0, is_causal=False
-        )
+            # the output of sdp = (batch, num_heads, seq_len, head_dim)
+            # TODO: add support for self.module.scale when we move to Torch 2.1
+            hidden_states = F.scaled_dot_product_attention(
+                query, key, value, dropout_p=0.0, is_causal=False
+            )
+            hidden_states = hidden_states.transpose(1, 2).reshape(
+                batch_size, -1, self.module.heads * head_dim
+            )
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(
-            batch_size, -1, self.module.heads * head_dim
-        )
         hidden_states = hidden_states.to(query.dtype)
 
         # linear proj

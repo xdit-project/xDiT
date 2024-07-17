@@ -31,6 +31,7 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
+        self._check_model_and_parallel_config(pipeline, parallel_config)
         self._check_distributed_env(parallel_config, runtime_config)
         # backbone
         transformer = getattr(pipeline, 'transformer', None)
@@ -125,6 +126,8 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
                 classifier_free_guidance_degree=
                     parallel_config.cfg_degree,
                 sequence_parallel_degree=parallel_config.sp_degree,
+                ulysses_degree=parallel_config.ulysses_degree,
+                ring_degree=parallel_config.ring_degree,
                 tensor_parallel_degree=parallel_config.tp_degree,
                 pipeline_parallel_degree=parallel_config.pp_degree,
             )
@@ -134,6 +137,20 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper):
                     parallel_config.pp_config.num_pipeline_patch,
             )
 
+    def _check_model_and_parallel_config(
+        self,
+        pipeline: DiffusionPipeline,
+        parallel_config: ParallelConfig,
+    ):
+        if hasattr(pipeline, 'transformer'):
+            num_heads = pipeline.transformer.config.num_attention_heads
+            ulysses_degree = parallel_config.sp_config.ulysses_degree
+            if num_heads % ulysses_degree != 0 or num_heads < ulysses_degree:
+                raise RuntimeError(
+                    f"transformer backbone has {num_heads} heads, which is not "
+                    f"divisible by or smaller than ulysses_degree "
+                    f"{ulysses_degree}.")
+        
 
     def _convert_transformer_backbone(
         self,

@@ -8,26 +8,24 @@ from torch import distributed as dist
 
 from pipefuser.logger import init_logger
 import pipefuser.refactor.envs as envs
+from pipefuser.refactor.envs import CUDA_VERSION, TORCH_VERSION, PACKAGES_CHECKER
 
 logger = init_logger(__name__)
 
 from typing import Union, Optional, List
 
-
-try:
-    from yunchang import set_seq_parallel_pg
-    HAS_LONG_CTX_ATTN = True
-except ImportError:
-    HAS_LONG_CTX_ATTN = False
+env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
+HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
 
 def check_env():
 # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html
-    if envs.CUDA_VERSION < version.parse("11.3"):
+    if CUDA_VERSION < version.parse("11.3"):
         raise RuntimeError(
             "NCCL CUDA Graph support requires CUDA 11.3 or above")
-    if envs.TORCH_VERSION < version.parse("2.2.0"):
+    if TORCH_VERSION < version.parse("2.2.0"):
         # https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/
         raise RuntimeError(
             "CUDAGraph with NCCL support requires PyTorch 2.2.0 or above. "
@@ -121,7 +119,9 @@ class SequenceParallelConfig():
         self.sp_degree = self.ulysses_degree * self.ring_degree
 
         if not HAS_LONG_CTX_ATTN and self.sp_degree > 1:
-            raise RuntimeError("sequence parallel kit yunchang not found")
+            raise ImportError(f"Sequence Parallel kit 'yunchang' not found but "
+                              f"sp_degree is {self.dp_degree}, please set it "
+                              f"to 1 or install 'yunchang' to use it")
 
 
 @dataclass
@@ -210,6 +210,9 @@ class ParallelConfig():
         self.sp_degree = self.sp_config.sp_degree
         self.pp_degree = self.pp_config.pp_degree
         self.tp_degree = self.tp_config.tp_degree
+
+        self.ulysses_degree = self.sp_config.ulysses_degree
+        self.ring_degree = self.sp_config.ring_degree
         
 
 @dataclass(frozen=True)

@@ -22,6 +22,8 @@ class Parallel:
             classifier_free_guidance_degree=
                 engine_config.parallel_config.cfg_degree,
             sequence_parallel_degree=engine_config.parallel_config.sp_degree,
+            ulysses_degree=engine_config.parallel_config.ulysses_degree,
+            ring_degree=engine_config.parallel_config.ring_degree,
             tensor_parallel_degree=engine_config.parallel_config.tp_degree,
             pipefusion_parallel_degree=engine_config.parallel_config.pp_degree,
         )

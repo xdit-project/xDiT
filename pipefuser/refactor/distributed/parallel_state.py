@@ -14,6 +14,9 @@ from pipefuser.refactor.distributed.group_coordinator import (
     PipelineGroupCoordinator,
 )
 
+env_info = envs.PACKAGES_CHECKER.get_packages_info()
+HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
+HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 logger = init_logger(__name__)
 
@@ -79,6 +82,8 @@ def get_pp_group() -> PipelineGroupCoordinator:
 
 
 _SP: Optional[GroupCoordinator] = None
+_ULYSSES_PG = None
+_RING_PG = None
 
 def get_sp_group() -> GroupCoordinator:
     assert _SP is not None, (
@@ -166,6 +171,8 @@ def initialize_model_parallel(
     data_parallel_degree: int = 1,
     classifier_free_guidance_degree: int = 1,
     sequence_parallel_degree: int = 1,
+    ulysses_degree: int = 1,
+    ring_degree: int = 1,
     tensor_parallel_degree: int = 1,
     pipeline_parallel_degree: int = 1,
     backend: Optional[str] = None,
@@ -282,6 +289,18 @@ def initialize_model_parallel(
         parallel_mode="sequence"
     )
 
+    if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
+        global _ULYSSES_PG
+        global _RING_PG
+        from yunchang import set_seq_parallel_pg
+        set_seq_parallel_pg(
+            sp_ulysses_degree=ulysses_degree,
+            sp_ring_degree=ring_degree,
+            rank=get_world_group().rank_in_group,
+            world_size=get_world_group().world_size,
+        )
+    
+
     #TODO: implement tensor parallel groups
     assert tensor_parallel_degree == 1, "Tensor parallelism is not implemented"
     # # Build the tensor model-parallel groups.
@@ -325,34 +344,6 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="pipeline"
     )
-
-
-def ensure_model_parallel_initialized(
-    tensor_parallel_degree: int,
-    pipeline_parallel_degree: int,
-    backend: Optional[str] = None,
-) -> None:
-    """Helper to initialize model parallel groups if they are not initialized,
-    or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
-    values if the model parallel groups are initialized.
-    """
-    backend = backend or torch.distributed.get_backend(
-        get_world_group().device_group)
-    if not model_parallel_is_initialized():
-        initialize_model_parallel(tensor_parallel_degree,
-                                  pipeline_parallel_degree, backend)
-        return
-
-    assert (
-        get_tensor_model_parallel_world_size() == tensor_parallel_degree
-    ), ("tensor parallel group already initialized, but of unexpected size: "
-        f"{get_tensor_model_parallel_world_size()=} vs. "
-        f"{tensor_parallel_degree=}")
-    pp_world_size = get_pp_group().world_size
-    assert (pp_world_size == pipeline_parallel_degree), (
-        "pipeline parallel group already initialized, but of unexpected size: "
-        f"{pp_world_size=} vs. "
-        f"{pipeline_parallel_degree=}")
 
 
 def model_parallel_is_initialized():

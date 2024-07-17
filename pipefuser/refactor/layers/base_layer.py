@@ -24,6 +24,9 @@ class PipeFuserLayerBaseWrapper(nn.Module ,PipeFuserBaseWrapper, metaclass=ABCMe
         self.activation_cache = None
         self.num_pipeline_patch = \
             self.parallel_config.pp_config.num_pipeline_patch
+        # Whether the layer is in patched mode. Patched mode is used for 
+        #   splitting the feature map into multiple patches for pipefusion 
+        #   pipeline
         self.patched_mode = False
         self.current_patch_idx = 0
 

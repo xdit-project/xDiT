@@ -25,7 +25,7 @@ def main():
         num_inference_steps=engine_config.input_config.num_inference_steps,
         output_type="pil",
     )
-    if get_world_group().rank == 1:
+    if get_world_group().rank == get_world_group().world_size - 1:
         output.images[0].save("./results/new_split_batch.png")
 
 

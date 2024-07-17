@@ -397,8 +397,10 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 )
 
         # 8. Decode latents (only rank 0)
-        if (get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1 and 
-            get_classifier_free_guidance_rank() == 0):
+        if (get_pipeline_parallel_rank() == \
+                get_pipeline_parallel_world_size() - 1 and 
+            get_classifier_free_guidance_rank() == \
+                get_classifier_free_guidance_world_size() - 1):
             if not output_type == "latent":
                 image = self.vae.decode(
                     latents / self.vae.config.scaling_factor, 

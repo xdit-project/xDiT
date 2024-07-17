@@ -16,15 +16,15 @@ logger = init_logger(__name__)
 @PipeFuserLayerWrappersRegister.register(PatchEmbed)
 class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
     def __init__(
-        self, 
-        patch_embedding: PatchEmbed, 
+        self,
+        patch_embedding: PatchEmbed,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
         super().__init__(
             module=patch_embedding,
             parallel_config=parallel_config,
-            runtime_config=runtime_config
+            runtime_config=runtime_config,
         )
         self.module: PatchEmbed
         self.pos_embed = None
@@ -32,8 +32,7 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
     def forward(self, latent):
         # is_warmup = self.in_warmup_stage()
         if not self.patched_mode:
-            if getattr(self.module, "pos_embed_max_size", None
-                       ) is not None:
+            if getattr(self.module, "pos_embed_max_size", None) is not None:
                 height, width = latent.shape[-2:]
             else:
                 height, width = (
@@ -41,16 +40,16 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
                     latent.shape[-1] // self.module.patch_size,
                 )
         else:
-            if getattr(self.module, "pos_embed_max_size", None
-                       ) is not None:
+            if getattr(self.module, "pos_embed_max_size", None) is not None:
                 height, width = (
                     latent.shape[-2] * self.num_pipeline_patch,
                     latent.shape[-1],
                 )
             else:
                 height, width = (
-                    latent.shape[-2] // self.module.patch_size * \
-                        self.num_pipeline_patch,
+                    latent.shape[-2]
+                    // self.module.patch_size
+                    * self.num_pipeline_patch,
                     latent.shape[-1] // self.module.patch_size,
                 )
 

@@ -39,7 +39,6 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         generator=None,
         variance_noise: Optional[torch.FloatTensor] = None,
         return_dict: bool = True,
-        patch_idx: Optional[int] = None,
     ) -> Union[SchedulerOutput, Tuple]:
 
         if get_pipeline_parallel_world_size() == 1:
@@ -73,34 +72,37 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         )
 
         model_output = self.convert_model_output(model_output, sample=sample)
-        if patch_idx == 0 and self.model_outputs[-1] is None:
+        if (
+            self.patched_mode
+            and self.current_patch_idx == 0
+            and self.model_outputs[-1] is None
+        ):
             self.model_outputs[-1] = torch.zeros(
                 [
                     model_output.shape[0],
                     model_output.shape[1],
                     self.patches_start_line_idx[-1],
-                    # model_output.shape[2] * \
-                    #     self.parallel_config.pp_config.num_pipeline_patch,
                     model_output.shape[3],
                 ],
                 device=model_output.device,
                 dtype=model_output.dtype,
             )
-        if patch_idx is None or patch_idx == 0:
+        if self.current_patch_idx == 0:
             for i in range(self.config.solver_order - 1):
                 self.model_outputs[i] = self.model_outputs[i + 1]
 
         _, _, c, _ = model_output.shape
 
-        if patch_idx == 0:
+        if self.patched_mode and self.current_patch_idx == 0:
             assert len(self.model_outputs) >= 2
             self.model_outputs[-1] = torch.zeros_like(self.model_outputs[-2])
-        if patch_idx is not None:
+        if self.patched_mode:
             self.model_outputs[-1][
                 :,
                 :,
-                self.patches_start_line_idx[patch_idx] : 
-                self.patches_start_line_idx[patch_idx + 1],
+                self.patches_start_line_idx[
+                    self.current_patch_idx
+                ] : self.patches_start_line_idx[self.current_patch_idx + 1],
                 :,
             ] = model_output
         else:
@@ -125,11 +127,18 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
 
         # logger.info(f"batch_idx {batch_idx}")
 
-        if patch_idx is not None:
+        if self.patched_mode:
             model_outputs = []
             for output in self.model_outputs:
                 model_outputs.append(
-                    output[:, :, self.patches_start_line_idx[patch_idx] : self.patches_start_line_idx[patch_idx+1], :]
+                    output[
+                        :,
+                        :,
+                        self.patches_start_line_idx[
+                            self.current_patch_idx
+                        ] : self.patches_start_line_idx[self.current_patch_idx + 1],
+                        :,
+                    ]
                 )
         else:
             model_outputs = self.model_outputs
@@ -162,8 +171,14 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        if patch_idx is None or patch_idx == self.num_pipeline_patch - 1:
+        if (
+            not self.patched_mode
+            or self.current_patch_idx == self.num_pipeline_patch - 1
+        ):
             self._step_index += 1
+
+        if self.patched_mode:
+            self.patch_step()
 
         if not return_dict:
             return (prev_sample,)

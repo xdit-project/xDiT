@@ -32,10 +32,10 @@ class PipeFuserSchedulerBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
         self.input_config = input_config
 
     def set_patched_mode(self, patched: bool):
-        pass
+        self.patched_mode = patched
 
     def reset_patch_idx(self):
-        pass
+        self.current_patch_idx = 0
 
     def set_num_pipeline_patch_and_patches_height(
         self, 

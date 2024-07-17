@@ -587,7 +587,6 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                         last_patch_latents[patch_idx],
                         t,
                         extra_step_kwargs,
-                        patch_idx,
                     )
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
@@ -723,7 +722,6 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         latents: torch.Tensor,
         t: Union[float, torch.Tensor],
         extra_step_kwargs: Dict,
-        patch_idx: Optional[int] = None,
     ):
 
         # compute previous image: x_t -> x_t-1
@@ -733,5 +731,4 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             latents,
             **extra_step_kwargs,
             return_dict=False,
-            patch_idx=patch_idx,
         )[0]

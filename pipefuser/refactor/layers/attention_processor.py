@@ -29,6 +29,12 @@ class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
             parallel_config=parallel_config,
             runtime_config=runtime_config,
         )
+        if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
+            from yunchang import LongContextAttention, UlyssesAttention
+            if HAS_FLASH_ATTN:
+                self.hybrid_seq_parallel_attn = LongContextAttention()
+            else:
+                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
 
         to_k = self.module.to_k
         to_v = self.module.to_v
@@ -70,12 +76,7 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             parallel_config=parallel_config,
             runtime_config=runtime_config,
         )
-        if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
-            from yunchang import LongContextAttention, UlyssesAttention
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = LongContextAttention()
-            else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+
 
     def _forward(
         self, 

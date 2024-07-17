@@ -8,11 +8,14 @@ import torch
 import torch.distributed
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.refactor.distributed.parallel_state import get_pipeline_parallel_world_size
+from pipefuser.refactor.distributed.parallel_state import (
+    get_pipeline_parallel_world_size,
+)
 from pipefuser.refactor.schedulers import (
     PipeFuserSchedulerWrappersRegister,
 )
 from pipefuser.refactor.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
+
 
 @PipeFuserSchedulerWrappersRegister.register(DPMSolverMultistepScheduler)
 class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper):
@@ -25,7 +28,7 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         super().__init__(
             module=scheduler,
             parallel_config=parallel_config,
-            runtime_config=runtime_config
+            runtime_config=runtime_config,
         )
 
     def step(
@@ -71,13 +74,18 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
 
         model_output = self.convert_model_output(model_output, sample=sample)
         if patch_idx == 0 and self.model_outputs[-1] is None:
-            self.model_outputs[-1] = torch.zeros([
-                model_output.shape[0],
-                model_output.shape[1],
-                model_output.shape[2] * \
-                    self.parallel_config.pp_config.num_pipeline_patch,
-                model_output.shape[3],
-            ], device=model_output.device, dtype=model_output.dtype)
+            self.model_outputs[-1] = torch.zeros(
+                [
+                    model_output.shape[0],
+                    model_output.shape[1],
+                    self.patches_start_line_idx[-1],
+                    # model_output.shape[2] * \
+                    #     self.parallel_config.pp_config.num_pipeline_patch,
+                    model_output.shape[3],
+                ],
+                device=model_output.device,
+                dtype=model_output.dtype,
+            )
         if patch_idx is None or patch_idx == 0:
             for i in range(self.config.solver_order - 1):
                 self.model_outputs[i] = self.model_outputs[i + 1]
@@ -89,7 +97,11 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
             self.model_outputs[-1] = torch.zeros_like(self.model_outputs[-2])
         if patch_idx is not None:
             self.model_outputs[-1][
-                :, :, c * patch_idx : c * (patch_idx + 1), :
+                :,
+                :,
+                self.patches_start_line_idx[patch_idx] : 
+                self.patches_start_line_idx[patch_idx + 1],
+                :,
             ] = model_output
         else:
             self.model_outputs[-1] = model_output
@@ -117,7 +129,7 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
             model_outputs = []
             for output in self.model_outputs:
                 model_outputs.append(
-                    output[:, :, c * patch_idx : c * (patch_idx + 1), :]
+                    output[:, :, self.patches_start_line_idx[patch_idx] : self.patches_start_line_idx[patch_idx+1], :]
                 )
         else:
             model_outputs = self.model_outputs
@@ -150,8 +162,7 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        if (patch_idx is None or patch_idx == \
-            self.parallel_config.pp_config.num_pipeline_patch - 1):
+        if patch_idx is None or patch_idx == self.num_pipeline_patch - 1:
             self._step_index += 1
 
         if not return_dict:

@@ -3,19 +3,16 @@ from torch import nn
 from torch.nn import functional as F
 
 from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.refactor.layers.base_layer import (
-    PipeFuserLayerBaseWrapper
-)
+from pipefuser.refactor.layers.base_layer import PipeFuserLayerBaseWrapper
 from pipefuser.logger import init_logger
-from pipefuser.refactor.layers.register import (
-    PipeFuserLayerWrappersRegister
-)
+from pipefuser.refactor.layers.register import PipeFuserLayerWrappersRegister
 from pipefuser.refactor.distributed.parallel_state import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
 )
 
 logger = init_logger(__name__)
+
 
 @PipeFuserLayerWrappersRegister.register(nn.Conv2d)
 class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
@@ -30,7 +27,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         super().__init__(
             module=conv2d,
             parallel_config=parallel_config,
-            runtime_config=runtime_config
+            runtime_config=runtime_config,
         )
         self.is_first_layer = is_first_layer
 
@@ -39,18 +36,18 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         output = self.module(x)
         return output
 
-    #TODO implementation problems in sliced_forward
-    def sliced_forward(self, x: torch.Tensor, sliced_height: int) -> torch.Tensor:
+    # TODO fix implementation problems in sliced_forward
+    # only available for patchify process
+    def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
-        # assert h % self.num_pipeline_patch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
         output_h = h // self.num_pipeline_patch // stride
         idx = self.current_patch_idx
-        h_begin = output_h * stride * idx - padding
-        h_end = output_h * stride * idx + sliced_height + padding
+        h_begin = self.patches_start_line_idx[idx] - padding
+        h_end = self.patches_start_line_idx[idx + 1] + padding
         final_padding = [padding, padding, 0, 0]
         if h_begin < 0:
             h_begin = 0
@@ -58,7 +55,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         if h_end > h:
             h_end = h
             final_padding[3] = padding
-        sliced_input = x[:, :, h_begin: h_end, :]
+        sliced_input = x[:, :, h_begin:h_end, :]
         padded_input = F.pad(sliced_input, final_padding, mode="constant")
         result = F.conv2d(
             padded_input,
@@ -69,52 +66,40 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         )
         return result
 
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        *args,
-        **kwargs
-    ) -> torch.Tensor:
-        if (get_pipeline_parallel_world_size() == 1 or 
-            self.module.kernel_size == (1, 1) or 
-            self.module.kernel_size == 1):
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        if (
+            get_pipeline_parallel_world_size() == 1
+            or self.module.kernel_size == (1, 1)
+            or self.module.kernel_size == 1
+        ):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
                 if not self.patched_mode or self.num_pipeline_patch == 1:
                     self.activation_cache = x
                     output = self.naive_forward(self.activation_cache)
-                    # [2, 1152, 64, 64]
                 else:
                     if self.activation_cache is None:
-                        self.activation_cache = torch.zeros([
-                            x.shape[0], 
-                            x.shape[1], 
-                            x.shape[2] * self.num_pipeline_patch,
-                            x.shape[3]
-                        ], dtype=x.dtype, device=x.device)
-                    activation_cache_height = self.activation_cache.shape[2]
-                    hidden_state_height = x.shape[2]
-                    print(self.activation_cache.shape)
-                    print(x.shape)
-                    print(self.num_pipeline_patch)
-                    # if (activation_cache_height // self.num_pipeline_patch == 
-                    #     hidden_state_height and 
-                    #     activation_cache_height % self.num_pipeline_patch == 0):
-                    if ((activation_cache_height + self.num_pipeline_patch - 1) // self.num_pipeline_patch == 
-                        hidden_state_height):
-                        self.activation_cache[
-                            :,
-                            :,
-                            hidden_state_height * self.current_patch_idx : 
-                            hidden_state_height * self.current_patch_idx + x.shape[-2],
-                            :
-                        ] = x
-                        # print(self.activation_cache.shape)
-                        output = self.sliced_forward(self.activation_cache, x.shape[-2])
-                    else:
-                        raise RuntimeError("Hidden state height does not match "
-                                           "activation cache height")
+                        self.activation_cache = torch.zeros(
+                            [
+                                x.shape[0],
+                                x.shape[1],
+                                x.shape[2] * self.num_pipeline_patch,
+                                x.shape[3],
+                            ],
+                            dtype=x.dtype,
+                            device=x.device,
+                        )
+
+                    self.activation_cache[
+                        :,
+                        :,
+                        self.patches_start_line_idx[
+                            self.current_patch_idx
+                        ] : self.patches_start_line_idx[self.current_patch_idx + 1] :,
+                    ] = x
+                    output = self.sliced_forward(self.activation_cache)
+
             else:
                 raise NotImplementedError
 

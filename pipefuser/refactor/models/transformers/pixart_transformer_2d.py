@@ -201,7 +201,10 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 self.input_config.height // self.config.patch_size // 8,
             )
             if self.patched_mode:
-                height //= self.num_pipeline_patch
+                height = (
+                    self.patches_height[self.current_patch_idx]
+                    // self.config.patch_size
+                )
             # unpatchify
             hidden_states = hidden_states.reshape(
                 shape=(
@@ -224,6 +227,9 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             )
         else:
             output = hidden_states
+
+        if self.patched_mode:
+            self.patch_step()
 
         if not return_dict:
             return (output,)

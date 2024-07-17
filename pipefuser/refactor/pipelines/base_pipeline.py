@@ -87,33 +87,33 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
         ):
             self.module.scheduler.set_input_config(input_config)
 
-    def adjust_num_pipeline_patch_and_patches_height(
+    def set_num_pipeline_patch_and_patches_height(
         self, num_pipeline_patch: int, patches_height: List[int]
     ):
         self.num_pipeline_patch = num_pipeline_patch
         self.patches_height = patches_height
         if hasattr(self.module, "transformer") and hasattr(
-            self.module.transformer, "adjust_num_pipeline_patch_and_patches_height"
+            self.module.transformer, "set_num_pipeline_patch_and_patches_height"
         ):
-            self.module.transformer.adjust_num_pipeline_patch_and_patches_height(
+            self.module.transformer.set_num_pipeline_patch_and_patches_height(
                 num_pipeline_patch, patches_height
             )
         if hasattr(self.module, "unet") and hasattr(
-            self.module.unet, "adjust_num_pipeline_patch_and_patches_height"
+            self.module.unet, "set_num_pipeline_patch_and_patches_height"
         ):
-            self.module.unet.adjust_num_pipeline_patch_and_patches_height(
+            self.module.unet.set_num_pipeline_patch_and_patches_height(
                 num_pipeline_patch, patches_height
             )
         if hasattr(self.module, "vae") and hasattr(
-            self.module.vae, "adjust_num_pipeline_patch_and_patches_height"
+            self.module.vae, "set_num_pipeline_patch_and_patches_height"
         ):
-            self.module.vae.adjust_num_pipeline_patch_and_patches_height(
+            self.module.vae.set_num_pipeline_patch_and_patches_height(
                 num_pipeline_patch, patches_height
             )
         if hasattr(self.module, "scheduler") and hasattr(
-            self.module.scheduler, "adjust_num_pipeline_patch_and_patches_height"
+            self.module.scheduler, "set_num_pipeline_patch_and_patches_height"
         ):
-            self.module.scheduler.adjust_num_pipeline_patch_and_patches_height(
+            self.module.scheduler.set_num_pipeline_patch_and_patches_height(
                 num_pipeline_patch, patches_height
             )
 
@@ -296,9 +296,9 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
                 or pipeline_patches_height_list != self.patches_height
             ):
                 # sublayers activation cache reset
-                # self.adjust_num_pipeline_patch_and_patches_height(
-                #     pipeline_patches_num, pipeline_patches_height_list
-                # )
+                self.set_num_pipeline_patch_and_patches_height(
+                    pipeline_patches_num, pipeline_patches_height_list
+                )
                 if get_pipeline_parallel_rank() != 0:
                     batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
                     hidden_dim = self.module.transformer.inner_dim

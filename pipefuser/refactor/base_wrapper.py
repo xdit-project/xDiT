@@ -18,8 +18,12 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
         self.module_type = type(module)
         self.parallel_config = parallel_config
         self.runtime_config = runtime_config
-        self.num_pipeline_patch = parallel_config.pp_config.num_pipeline_patch
+
+        self.patched_mode = False
+        self.current_patch_idx = 0
+        self.num_pipeline_patch: int = parallel_config.pp_config.num_pipeline_patch
         self.patches_height: Optional[List[int]] = None
+        self.patches_start_line_idx = [0]
         self.input_config: Optional[InputConfig] = None
 
     def __getattr__(self, name: str):
@@ -39,14 +43,14 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
             if self.input_config is None:
                 raise ValueError("InputConfig is not set, please set it before "
                                  "calling forward")
-            if self.input_config.height % self.num_pipeline_patch != 0:
-                raise ValueError(
-                    f"height; {self.input_config.height} must be divisible by "
-                    f"num_pipeline_patch: "
-                    f"{self.num_pipeline_patch}"
-                )
             return func(self, *args, **kwargs)
         return check_condition_fn
+
+    def patch_step(self):
+        self.current_patch_idx += 1
+        if self.current_patch_idx == \
+                self.num_pipeline_patch:
+            self.current_patch_idx = 0
 
     @abstractmethod
     def set_input_config(self, input_config: InputConfig):
@@ -61,7 +65,7 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def adjust_num_pipeline_patch_and_patches_height(
+    def set_num_pipeline_patch_and_patches_height(
         self, 
         num_pipeline_patch: int,
         patches_height: List[int]

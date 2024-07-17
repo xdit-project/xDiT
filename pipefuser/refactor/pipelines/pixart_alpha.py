@@ -220,6 +220,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             )
 
         # 0. parallel environment setting
+        # TODO(Eigensystem) move check to decorator
         height = (
             height
             or self.input_config.height
@@ -622,7 +623,6 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
     ):
         self.set_patched_mode(patched=True)
         self.reset_patch_idx()
-        num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
 
         if get_pipeline_parallel_rank() == 0:
             # get latents computed in warmup stage
@@ -633,23 +633,23 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 if num_pipeline_warmup_steps > 0
                 else latents
             )
-            patch_height = (
-                latents.shape[2] + num_pipeline_patch - 1
-            ) // num_pipeline_patch
-            patch_latents = list(latents.split(patch_height, dim=2))
+            # patch_height = (
+            #     latents.shape[2] + num_pipeline_patch - 1
+            # ) // num_pipeline_patch
+            patch_latents = list(latents.split(self.patches_height, dim=2))
         elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
-            patch_height = (
-                latents.shape[2] + num_pipeline_patch - 1
-            ) // num_pipeline_patch
-            patch_latents = list(latents.split(patch_height, dim=2))
+            # patch_height = (
+            #     latents.shape[2] + num_pipeline_patch - 1
+            # ) // num_pipeline_patch
+            patch_latents = list(latents.split(self.patches_height, dim=2))
         else:
-            patch_latents = [None for _ in range(num_pipeline_patch)]
+            patch_latents = [None for _ in range(self.num_pipeline_patch)]
 
         recv_timesteps = (
             num_timesteps - 1 if get_pipeline_parallel_rank() == 0 else num_timesteps
         )
         for _ in range(recv_timesteps):
-            for patch_idx in range(num_pipeline_patch):
+            for patch_idx in range(self.num_pipeline_patch):
                 get_pp_group().add_pipeline_recv_task(patch_idx)
 
         return patch_latents

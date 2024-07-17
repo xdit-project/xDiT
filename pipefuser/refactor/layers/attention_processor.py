@@ -17,9 +17,10 @@ env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
+
 class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
     def __init__(
-        self, 
+        self,
         attn: Attention,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
@@ -31,6 +32,7 @@ class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
         )
         if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
             from yunchang import LongContextAttention, UlyssesAttention
+
             if HAS_FLASH_ATTN:
                 self.hybrid_seq_parallel_attn = LongContextAttention()
             else:
@@ -61,13 +63,14 @@ class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
 
         self.to_kv = to_kv
 
-#TODO(Eigensystem): implement PipeFuserAttentionWrapper to replace this
+
+# TODO(Eigensystem): implement PipeFuserAttentionWrapper to replace this
 #!WARNING: ONLY AVAILABLE FOR PIX_ART_ALPHA, TAKE ALL ATTENTION MODULES AS INPUT
 @PipeFuserLayerWrappersRegister.register(Attention)
 class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
     def __init__(
-        self, 
-        attn: Attention, 
+        self,
+        attn: Attention,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
@@ -77,10 +80,9 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             runtime_config=runtime_config,
         )
 
-
     def _forward(
-        self, 
-        hidden_states: torch.FloatTensor, 
+        self,
+        hidden_states: torch.FloatTensor,
         scale: float = 1.0,
     ):
         assert isinstance(self.module, Attention)
@@ -102,10 +104,19 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
                 full_kv = kv
             else:
                 full_kv = self.activation_cache
-                # _, c, _ = full_kv.shape
-                _, c, _ = kv.shape
+                _, c, _ = full_kv.shape
+                token_start_idx = (
+                    c
+                    // self.patches_start_line_idx[-1]
+                    * self.patches_start_line_idx[self.current_patch_idx]
+                )
+                token_end_idx = (
+                    c
+                    // self.patches_start_line_idx[-1]
+                    * self.patches_start_line_idx[self.current_patch_idx + 1]
+                )
                 # assert c % distri_config.pp_num_patch == 0
-                full_kv[:, c * self.current_patch_idx : c * (self.current_patch_idx + 1), :] = kv
+                full_kv[:, token_start_idx:token_end_idx, :] = kv
 
             self.activation_cache = full_kv
 
@@ -125,10 +136,11 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             hidden_states = hidden_states.reshape(
                 batch_size, -1, self.module.heads * head_dim
             )
-        
+
         else:
             if HAS_FLASH_ATTN:
                 from flash_attn import flash_attn_func
+
                 query = query.view(batch_size, -1, self.module.heads, head_dim)
                 key = key.view(batch_size, -1, self.module.heads, head_dim)
                 value = value.view(batch_size, -1, self.module.heads, head_dim)
@@ -138,11 +150,17 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
                 hidden_states = hidden_states.reshape(
                     batch_size, -1, self.module.heads * head_dim
                 )
-                
+
             else:
-                query = query.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
-                key = key.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
-                value = value.view(batch_size, -1, self.module.heads, head_dim).transpose(1, 2)
+                query = query.view(
+                    batch_size, -1, self.module.heads, head_dim
+                ).transpose(1, 2)
+                key = key.view(batch_size, -1, self.module.heads, head_dim).transpose(
+                    1, 2
+                )
+                value = value.view(
+                    batch_size, -1, self.module.heads, head_dim
+                ).transpose(1, 2)
 
                 # the output of sdp = (batch, num_heads, seq_len, head_dim)
                 # TODO: add support for self.module.scale when we move to Torch 2.1

@@ -1,4 +1,5 @@
 from abc import abstractmethod, ABCMeta
+from typing import List
 
 from diffusers.schedulers import SchedulerMixin
 from pipefuser.refactor.base_wrapper import PipeFuserBaseWrapper
@@ -35,6 +36,14 @@ class PipeFuserSchedulerBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
 
     def reset_patch_idx(self):
         pass
+
+    def adjust_num_pipeline_patch_and_patches_height(
+        self, 
+        num_pipeline_patch: int,
+        patches_height: List[int]
+    ):
+        self.num_pipeline_patch = num_pipeline_patch
+        self.patches_height = patches_height
 
     @abstractmethod
     def step(self, *args, **kwargs):

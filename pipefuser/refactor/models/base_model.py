@@ -53,9 +53,28 @@ class PipeFuserModelBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
         for layer in self.wrapped_layers:
             layer.set_patched_mode(patched)
 
+    def adjust_num_pipeline_patch_and_patches_height(
+        self, 
+        num_pipeline_patch: int,
+        patched_height: List[int]
+    ):
+        self.num_pipeline_patch = num_pipeline_patch
+        self.patched_height = patched_height
+        for layer in self.wrapped_layers:
+            layer.adjust_num_pipeline_patch_and_patches_height(
+                num_pipeline_patch, patched_height)
+
     def reset_patch_idx(self):
         for layer in self.wrapped_layers:
             layer.reset_patch_idx()
+
+    def reset_activation_cache(self):
+        for layer in self.wrapped_layers:
+            if hasattr(layer, "activation_cache"):
+                layer.activation_cache = None
+            else:
+                logger.info(f"layer {type(layer)} has no attribute "
+                            f"activation_cache, do not need to reset")
 
     def _wrap_layers(
         self, 

@@ -1,6 +1,6 @@
 from abc import abstractmethod, ABCMeta
 from functools import wraps
-from typing import Any, Optional
+from typing import Any, List, Optional
 from torch import nn
 
 from pipefuser.refactor.config.config import InputConfig, ParallelConfig, RuntimeConfig
@@ -18,7 +18,9 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
         self.module_type = type(module)
         self.parallel_config = parallel_config
         self.runtime_config = runtime_config
-        self.input_config: InputConfig = None
+        self.num_pipeline_patch = parallel_config.pp_config.num_pipeline_patch
+        self.patches_height: Optional[List[int]] = None
+        self.input_config: Optional[InputConfig] = None
 
     def __getattr__(self, name: str):
         try:
@@ -37,15 +39,18 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
             if self.input_config is None:
                 raise ValueError("InputConfig is not set, please set it before "
                                  "calling forward")
-            if (self.input_config.height % 
-                self.parallel_config.pp_config.num_pipeline_patch != 0):
+            if self.input_config.height % self.num_pipeline_patch != 0:
                 raise ValueError(
                     f"height; {self.input_config.height} must be divisible by "
                     f"num_pipeline_patch: "
-                    f"{self.parallel_config.pp_config.num_pipeline_patch}"
+                    f"{self.num_pipeline_patch}"
                 )
             return func(self, *args, **kwargs)
         return check_condition_fn
+
+    @abstractmethod
+    def set_input_config(self, input_config: InputConfig):
+        pass
 
     @abstractmethod
     def set_patched_mode(self, patched: bool):
@@ -56,5 +61,9 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def set_input_config(self, input_config: InputConfig):
+    def adjust_num_pipeline_patch_and_patches_height(
+        self, 
+        num_pipeline_patch: int,
+        patches_height: List[int]
+    ):
         pass

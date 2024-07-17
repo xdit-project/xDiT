@@ -26,6 +26,7 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
             parallel_config=parallel_config,
             runtime_config=runtime_config
         )
+        self.module: PatchEmbed
         self.pos_embed = None
 
     def forward(self, latent):
@@ -93,9 +94,6 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
                 :, self.current_patch_idx
             ]
 
-        # if self.in_warmup_stage():
-            # self.round_step()
-        # else:
         if self.patched_mode:
             self.patch_step()
 

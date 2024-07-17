@@ -10,9 +10,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_512_BIN,
     ASPECT_RATIO_1024_BIN,
 )
-from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
-    retrieve_timesteps
-)
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import retrieve_timesteps
 from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
@@ -45,7 +43,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             parallel_config=parallel_config,
             runtime_config=runtime_config,
         )
-    
+
     @classmethod
     def from_pretrained(
         cls,
@@ -60,10 +58,12 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         return cls(pipeline, parallel_config, runtime_config)
 
     @PipeFuserBaseWrapper.forward_check_condition
-    def prepare_run(self, steps:int = 3, sync_steps:int = 1):
-        prompt = ([""] * self.input_config.batch_size 
-                  if self.input_config.batch_size > 1 
-                  else "")
+    def prepare_run(self, steps: int = 3, sync_steps: int = 1):
+        prompt = (
+            [""] * self.input_config.batch_size
+            if self.input_config.batch_size > 1
+            else ""
+        )
         self.__call__(
             height=self.input_config.height,
             width=self.input_config.width,
@@ -72,9 +72,10 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             num_pipeline_warmup_steps=sync_steps,
             output_type="latent",
-            generator=torch.Generator(device="cuda").manual_seed(self.runtime_config.seed),
+            generator=torch.Generator(device="cuda").manual_seed(
+                self.runtime_config.seed
+            ),
         )
-
 
     @PipeFuserBaseWrapper.forward_check_condition
     @torch.no_grad()
@@ -186,10 +187,11 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
                 returned where the first element is a list with the generated images
         """
-        self._check_size_changes(height, width)
-        #* check pp world size
-        if (get_pipeline_parallel_world_size() == 1 and 
-            get_classifier_free_guidance_world_size() == 1):
+        # * check pp world size
+        if (
+            get_pipeline_parallel_world_size() == 1
+            and get_classifier_free_guidance_world_size() == 1
+        ):
             return self.module(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
@@ -217,14 +219,30 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 **kwargs,
             )
 
+        # 0. parallel environment setting
+        height = (
+            height
+            or self.input_config.height
+            or self.transformer.config.sample_size * self.vae_scale_factor
+        )
+        width = (
+            width
+            or self.input_config.width
+            or self.transformer.config.sample_size * self.vae_scale_factor
+        )
+        if isinstance(prompt, str):
+            self._check_input_change_and_adjust(
+                batch_size=1, height=height, width=width
+            )
+        elif isinstance(prompt, List):
+            self._check_input_change_and_adjust(
+                batch_size=len(prompt), height=height, width=width
+            )
         if "mask_feature" in kwargs:
             deprecation_message = "The use of `mask_feature` is deprecated. It is no longer used in any computation and that doesn't affect the end results. It will be removed in a future version."
             deprecate("mask_feature", "1.0.0", deprecation_message, standard_warn=False)
+
         # 1. Check inputs. Raise error if not correct
-        height = height or self.input_config.height \
-            or self.transformer.config.sample_size * self.vae_scale_factor
-        width = width or self.input_config.width \
-            or self.transformer.config.sample_size * self.vae_scale_factor
         if use_resolution_binning:
             if self.transformer.config.sample_size == 128:
                 aspect_ratio_bin = ASPECT_RATIO_1024_BIN
@@ -236,7 +254,8 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
             height, width = self.image_processor.classify_height_width_bin(
-                height, width, ratios=aspect_ratio_bin)
+                height, width, ratios=aspect_ratio_bin
+            )
 
         self.check_inputs(
             prompt,
@@ -284,14 +303,15 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
         )
 
-        #* dealing with cfg degree
+        # * dealing with cfg degree
         if do_classifier_free_guidance:
             if get_classifier_free_guidance_world_size() == 1:
                 prompt_embeds = torch.cat(
-                    [negative_prompt_embeds, prompt_embeds], dim=0)
+                    [negative_prompt_embeds, prompt_embeds], dim=0
+                )
                 prompt_attention_mask = torch.cat(
-                    [negative_prompt_attention_mask, 
-                     prompt_attention_mask], dim=0)
+                    [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+                )
             elif get_classifier_free_guidance_rank() == 0:
                 prompt_embeds = negative_prompt_embeds
                 prompt_attention_mask = negative_prompt_attention_mask
@@ -326,38 +346,43 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
         if self.transformer.config.sample_size == 128:
             resolution = torch.tensor([height, width]).repeat(
-                batch_size * num_images_per_prompt, 1)
+                batch_size * num_images_per_prompt, 1
+            )
             aspect_ratio = torch.tensor([float(height / width)]).repeat(
-                batch_size * num_images_per_prompt, 1)
+                batch_size * num_images_per_prompt, 1
+            )
             resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
-            aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, 
-                                           device=device)
+            aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
-            if (do_classifier_free_guidance and 
-                get_classifier_free_guidance_world_size() == 1):
+            if (
+                do_classifier_free_guidance
+                and get_classifier_free_guidance_world_size() == 1
+            ):
                 resolution = torch.cat([resolution, resolution], dim=0)
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 
-            added_cond_kwargs = {"resolution": resolution, 
-                                 "aspect_ratio": aspect_ratio}
+            added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
 
         # 7. Denoising loop
         num_warmup_steps = max(
             len(timesteps) - num_inference_steps * self.scheduler.order, 0
         )
         num_pipeline_warmup_steps = (
-            kwargs.pop('num_pipeline_warmup_steps', None) or 
-            self.runtime_config.warmup_steps
+            kwargs.pop("num_pipeline_warmup_steps", None)
+            or self.runtime_config.warmup_steps
         )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            if get_pipeline_parallel_world_size() > 1 and len(timesteps) > num_pipeline_warmup_steps:
-                #* warmup stage
+            if (
+                get_pipeline_parallel_world_size() > 1
+                and len(timesteps) > num_pipeline_warmup_steps
+            ):
+                # * warmup stage
                 latents = self._sync_pipeline(
-                    latents=latents, 
+                    latents=latents,
                     prompt_embeds=prompt_embeds,
                     prompt_attention_mask=prompt_attention_mask,
                     guidance_scale=guidance_scale,
-                    timesteps=timesteps[: num_pipeline_warmup_steps],
+                    timesteps=timesteps[:num_pipeline_warmup_steps],
                     num_warmup_steps=num_warmup_steps,
                     extra_step_kwargs=extra_step_kwargs,
                     added_cond_kwargs=added_cond_kwargs,
@@ -365,13 +390,13 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     callback=callback,
                     callback_steps=callback_steps,
                 )
-                #* pipefusion stage
+                # * pipefusion stage
                 latents = self._async_pipeline(
                     latents=latents,
                     prompt_embeds=prompt_embeds,
                     prompt_attention_mask=prompt_attention_mask,
                     guidance_scale=guidance_scale,
-                    timesteps=timesteps[num_pipeline_warmup_steps: ],
+                    timesteps=timesteps[num_pipeline_warmup_steps:],
                     num_warmup_steps=num_warmup_steps,
                     num_pipeline_warmup_steps=num_pipeline_warmup_steps,
                     extra_step_kwargs=extra_step_kwargs,
@@ -382,7 +407,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 )
             else:
                 latents = self._sync_pipeline(
-                    latents=latents, 
+                    latents=latents,
                     prompt_embeds=prompt_embeds,
                     prompt_attention_mask=prompt_attention_mask,
                     guidance_scale=guidance_scale,
@@ -397,24 +422,24 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 )
 
         # 8. Decode latents (only rank 0)
-        if (get_pipeline_parallel_rank() == \
-                get_pipeline_parallel_world_size() - 1 and 
-            get_classifier_free_guidance_rank() == \
-                get_classifier_free_guidance_world_size() - 1):
+        if (
+            get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1
+            and get_classifier_free_guidance_rank()
+            == get_classifier_free_guidance_world_size() - 1
+        ):
             if not output_type == "latent":
                 image = self.vae.decode(
-                    latents / self.vae.config.scaling_factor, 
-                    return_dict=False
+                    latents / self.vae.config.scaling_factor, return_dict=False
                 )[0]
                 if use_resolution_binning:
                     image = self.image_processor.resize_and_crop_tensor(
-                        image, orig_width, orig_height)
+                        image, orig_width, orig_height
+                    )
             else:
                 image = latents
 
             if not output_type == "latent":
-                image = self.image_processor.postprocess(
-                    image, output_type=output_type)
+                image = self.image_processor.postprocess(image, output_type=output_type)
 
             # Offload all models
             self.maybe_free_model_hooks()
@@ -428,7 +453,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
 
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
-        self, 
+        self,
         latents: torch.Tensor,
         prompt_embeds: torch.Tensor,
         prompt_attention_mask: torch.Tensor,
@@ -438,22 +463,21 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         extra_step_kwargs: List,
         added_cond_kwargs: Dict,
         progress_bar,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]
-                           ] = None,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
         sync_only: bool = False,
     ):
-        self.set_patched_mode(patched = False)
+        self.set_patched_mode(patched=False)
         self.reset_patch_idx()
         for i, t in enumerate(timesteps):
             if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
                 last_timestep_latents = latents
-            
+
             # when there is only one pp stage, no need to recv
             if get_pipeline_parallel_world_size() == 1:
                 pass
-            # all ranks should recv the latent from the previous rank except 
-            #   the first rank in the first pipeline forward which should use 
+            # all ranks should recv the latent from the previous rank except
+            #   the first rank in the first pipeline forward which should use
             #   the input latent
             elif get_pipeline_parallel_rank() == 0 and i == 0:
                 pass
@@ -469,35 +493,32 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 guidance_scale=guidance_scale,
             )
 
-
             if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
                 latents = self._scheduler_step(
-                    latents,
-                    last_timestep_latents,
-                    t,
-                    extra_step_kwargs
+                    latents, last_timestep_latents, t, extra_step_kwargs
                 )
             if i == len(timesteps) - 1 or (
-                (i + 1) > num_warmup_steps and 
-                (i + 1) % self.scheduler.order == 0
+                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
             ):
                 progress_bar.update()
                 if callback is not None and i % callback_steps == 0:
                     step_idx = i // getattr(self.scheduler, "order", 1)
                     callback(step_idx, t, latents)
 
-            if (sync_only and 
-                get_pipeline_parallel_rank() == \
-                    get_pipeline_parallel_world_size() - 1 and 
-                i == len(timesteps) - 1):
+            if (
+                sync_only
+                and get_pipeline_parallel_rank()
+                == get_pipeline_parallel_world_size() - 1
+                and i == len(timesteps) - 1
+            ):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
         return latents
 
-    #* implement of pipefusion
+    # * implement of pipefusion
     def _async_pipeline(
-        self, 
+        self,
         latents: torch.Tensor,
         prompt_embeds: torch.Tensor,
         prompt_attention_mask: torch.Tensor,
@@ -508,29 +529,30 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         extra_step_kwargs: List,
         added_cond_kwargs: Dict,
         progress_bar,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]
-                           ] = None,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
     ):
         if len(timesteps) == 0:
             return latents
-        num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
+        num_pipeline_patch = self.num_pipeline_patch
         patch_latents = self._init_async_pipeline(
-            num_timesteps=len(timesteps), 
+            num_timesteps=len(timesteps),
             latents=latents,
-            num_pipeline_warmup_steps=num_pipeline_warmup_steps
+            num_pipeline_warmup_steps=num_pipeline_warmup_steps,
         )
         last_patch_latents = (
-            [None for _ in range(num_pipeline_patch)] 
-            if (get_pipeline_parallel_rank() == 
-                get_pipeline_parallel_world_size() - 1) 
+            [None for _ in range(num_pipeline_patch)]
+            if (get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1)
             else None
         )
 
         first_async_recv = True
         for i, t in enumerate(timesteps):
             for patch_idx in range(num_pipeline_patch):
-                if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+                if (
+                    get_pipeline_parallel_rank()
+                    == get_pipeline_parallel_world_size() - 1
+                ):
                     last_patch_latents[patch_idx] = patch_latents[patch_idx]
 
                 if get_pipeline_parallel_rank() == 0 and i == 0:
@@ -539,10 +561,10 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     if first_async_recv:
                         get_pp_group().recv_next()
                         first_async_recv = False
-                    patch_latents[patch_idx] = (
-                        get_pp_group().get_pipeline_recv_data(idx=patch_idx))
-                    if (i == len(timesteps) - 1 and 
-                        patch_idx == num_pipeline_patch - 1):
+                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
+                        idx=patch_idx
+                    )
+                    if i == len(timesteps) - 1 and patch_idx == num_pipeline_patch - 1:
                         pass
                     else:
                         get_pp_group().recv_next()
@@ -555,31 +577,36 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                     t=t,
                     guidance_scale=guidance_scale,
                 )
-                if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+                if (
+                    get_pipeline_parallel_rank()
+                    == get_pipeline_parallel_world_size() - 1
+                ):
                     patch_latents[patch_idx] = self._scheduler_step(
                         patch_latents[patch_idx],
                         last_patch_latents[patch_idx],
                         t,
                         extra_step_kwargs,
-                        patch_idx
+                        patch_idx,
                     )
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
                 else:
                     get_pp_group().pipeline_isend(patch_latents[patch_idx])
-            
+
             num_pipeline_warmup_steps = self.runtime_config.warmup_steps
             if i == len(timesteps) - 1 or (
-                (i + num_pipeline_warmup_steps + 1) > num_warmup_steps and 
-                (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
+                (i + num_pipeline_warmup_steps + 1) > num_warmup_steps
+                and (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
             ):
                 progress_bar.update()
-                assert callback is None, ("callback not supported in async "
-                                          "pipeline")
-                if (callback is not None and 
-                    i + num_pipeline_warmup_steps % callback_steps == 0):
-                    step_idx = ((i + num_pipeline_warmup_steps) 
-                                // getattr(self.scheduler, "order", 1))
+                assert callback is None, "callback not supported in async " "pipeline"
+                if (
+                    callback is not None
+                    and i + num_pipeline_warmup_steps % callback_steps == 0
+                ):
+                    step_idx = (i + num_pipeline_warmup_steps) // getattr(
+                        self.scheduler, "order", 1
+                    )
                     callback(step_idx, t, patch_latents[patch_idx])
 
         latents = None
@@ -593,40 +620,40 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         latents: torch.Tensor,
         num_pipeline_warmup_steps: int,
     ):
-        self.set_patched_mode(patched = True)
+        self.set_patched_mode(patched=True)
         self.reset_patch_idx()
         num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
 
         if get_pipeline_parallel_rank() == 0:
             # get latents computed in warmup stage
-            #! if no warmup stage, use the input latents
-            latents = (get_pp_group().pipeline_recv()
-                       if num_pipeline_warmup_steps > 0 
-                       else latents)
             # ignore latents after the last timestep
-            patch_latents = list(
-                latents.split(latents.shape[2] // num_pipeline_patch, dim=2))
+            #! if no warmup stage, use the input latents
+            latents = (
+                get_pp_group().pipeline_recv()
+                if num_pipeline_warmup_steps > 0
+                else latents
+            )
+            patch_height = (
+                latents.shape[2] + num_pipeline_patch - 1
+            ) // num_pipeline_patch
+            patch_latents = list(latents.split(patch_height, dim=2))
         elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
-            assert latents.shape[2] % num_pipeline_patch == 0, (
-                "height dim of latents should be divisible by "
-                "num_pipeline_patch")
-            patch_height = latents.shape[2] // num_pipeline_patch
-            patch_latents = [
-                latents[..., i * patch_height:(i + 1) * patch_height, :]
-                for i in range(num_pipeline_patch)
-            ]
+            patch_height = (
+                latents.shape[2] + num_pipeline_patch - 1
+            ) // num_pipeline_patch
+            patch_latents = list(latents.split(patch_height, dim=2))
         else:
             patch_latents = [None for _ in range(num_pipeline_patch)]
 
-        recv_timesteps = (num_timesteps - 1 
-                          if get_pipeline_parallel_rank() == 0 
-                          else num_timesteps)
+        recv_timesteps = (
+            num_timesteps - 1 if get_pipeline_parallel_rank() == 0 else num_timesteps
+        )
         for _ in range(recv_timesteps):
             for patch_idx in range(num_pipeline_patch):
                 get_pp_group().add_pipeline_recv_task(patch_idx)
 
         return patch_latents
-    
+
     def _backbone_forward(
         self,
         latents: torch.Tensor,
@@ -638,7 +665,8 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
     ):
         if get_pipeline_parallel_rank() == 0:
             latents = torch.cat(
-                [latents] * (2 // get_classifier_free_guidance_world_size()))
+                [latents] * (2 // get_classifier_free_guidance_world_size())
+            )
             latents = self.scheduler.scale_model_input(latents, t)
 
         current_timestep = t
@@ -666,25 +694,28 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             added_cond_kwargs=added_cond_kwargs,
             return_dict=False,
         )[0]
-        
+
         # classifier free guidance
         if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
             if get_classifier_free_guidance_world_size() == 1:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             elif get_classifier_free_guidance_world_size() == 2:
                 noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
-                    noise_pred, separate_tensors=True)
+                    noise_pred, separate_tensors=True
+                )
             latents = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond)
+                noise_pred_text - noise_pred_uncond
+            )
 
-            if (self.transformer.config.out_channels // 2 == 
-                self.transformer.config.in_channels):
+            if (
+                self.transformer.config.out_channels // 2
+                == self.transformer.config.in_channels
+            ):
                 latents = latents.chunk(2, dim=1)[0]
         else:
             latents = noise_pred
-            
-        return latents
 
+        return latents
 
     def _scheduler_step(
         self,

@@ -677,9 +677,9 @@ class PipelineGroupCoordinator(GroupCoordinator):
         else:
             self.device = torch.device("cpu")
 
-        self.hyper_parameters_set: bool = False
-        self.recv_shape: Optional[torch.Size] = None
-        self.send_shape: Optional[torch.Size] = None
+        self.recv_buffer_set: bool = False
+        # self.recv_shape: Optional[torch.Size] = None
+        # self.send_shape: Optional[torch.Size] = None
         self.recv_tasks_queue: List[int] = []
         self.receiving_task: Optional[torch.distributed.Work] = None
         self.recv_buffer: Optional[Union[List[torch.Tensor], torch.Tensor]] \
@@ -694,54 +694,79 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.receiving_task = None
         self.recv_buffer = None
         
-    def set_hyper_parameters(
-        self, 
-        dtype: Optional[torch.dtype] = None, 
-        num_pipefusion_patches: Optional[int] = None,
+    # def set_hyper_parameters(
+    #     self, 
+    #     dtype: Optional[torch.dtype] = None, 
+    #     num_pipefusion_patches: Optional[int] = None,
+    # ):
+    #     assert isinstance(dtype, torch.dtype), (
+    #         "dtype must be a torch.dtype object")
+    #     assert (isinstance(num_pipefusion_patches, int) and 
+    #             num_pipefusion_patches >= 1), (
+    #                 "num_pipefusion_patches must be greater than or equal to 1")
+    #     self.dtype = dtype or self.dtype
+    #     self.num_pipefusion_patches = num_pipefusion_patches or \
+    #         self.num_pipefusion_patches
+        # self.recv_buffer_set = True
+
+    def set_recv_buffer(
+        self,
+        num_pipefusion_patches: int,
+        patches_shape_list: List[List[int]],
+        feature_map_shape: List[int],
+        dtype: torch.dtype,
     ):
         assert isinstance(dtype, torch.dtype), (
             "dtype must be a torch.dtype object")
         assert (isinstance(num_pipefusion_patches, int) and 
                 num_pipefusion_patches >= 1), (
                     "num_pipefusion_patches must be greater than or equal to 1")
-        self.dtype = dtype or self.dtype
-        self.num_pipefusion_patches = num_pipefusion_patches or \
-            self.num_pipefusion_patches
-        self.hyper_parameters_set = True
+        self.dtype = dtype
+        self.num_pipefusion_patches = num_pipefusion_patches
+        self.recv_buffer = [
+            torch.zeros(*shape, dtype=self.dtype, device=self.device)
+            for shape in patches_shape_list
+        ]
+        self.recv_buffer.append(
+            torch.zeros(*feature_map_shape, dtype=self.dtype, device=self.device)
+        )
+        self.recv_buffer_set = True
 
     def pipeline_send(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
-        assert self.hyper_parameters_set, (
-            "hyper parameters must be set before sending tensors")
-        if self.send_shape is None:
-            self._init_shape_and_send_metadata(tensor)
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before sending tensors")
+        # if self.send_shape is None:
+        #     self._init_shape_and_send_metadata(tensor)
         self._pipeline_isend(tensor).wait()
     
     def pipeline_isend(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
-        assert self.hyper_parameters_set, (
-            "hyper parameters must be set before sending tensors")
-        if self.send_shape is None:
-            self._init_shape_and_send_metadata(tensor)
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before sending tensors")
+        # if self.send_shape is None:
+        #     self._init_shape_and_send_metadata(tensor)
         self._pipeline_isend(tensor)
 
     def pipeline_recv(self, idx: Optional[int] = None) -> torch.Tensor:
-        assert self.hyper_parameters_set, (
-            "hyper parameters must be set before receiving tensors")
-        if self.recv_buffer is None:
-            self._recv_metadata_and_init_buffer() 
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before receiving tensors")
+        # if self.recv_buffer is None:
+        #     self._recv_metadata_and_init_buffer() 
         idx = idx or -1
         self._pipeline_irecv(self.recv_buffer[idx]).wait()
         return self.recv_buffer[idx]
 
     def add_pipeline_recv_task(self, idx: Optional[int] = None):
-        assert self.hyper_parameters_set, (
-            "hyper parameters must be set before receiving tensors")
-        if self.recv_buffer is None:
-            self._recv_metadata_and_init_buffer()
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before receiving tensors")
+        # if self.recv_buffer is None:
+        #     self._recv_metadata_and_init_buffer()
         self.recv_tasks_queue.append(idx if idx is not None else -1)
 
     def get_pipeline_recv_data(self, idx: Optional[int] = None) -> torch.Tensor:
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before receiving tensors")
         if self.receiving_task is not None:
             self.receiving_task.wait()
             self.receiving_task = None
@@ -751,6 +776,8 @@ class PipelineGroupCoordinator(GroupCoordinator):
             return self.recv_buffer[idx]
 
     def recv_next(self):
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before receiving tensors")
         if len(self.recv_tasks_queue) == 0:
             raise ValueError("No more tasks to receive")
         elif len(self.recv_tasks_queue) > 0:
@@ -761,37 +788,37 @@ class PipelineGroupCoordinator(GroupCoordinator):
             idx = self.recv_tasks_queue.pop(0)
             self.receiving_task = self._pipeline_irecv(self.recv_buffer[idx])
         
-    def _init_shape_and_send_metadata(self, tensor: torch.Tensor) -> None:
-        if self.send_shape is None:
-            shape = torch.tensor(tensor.shape, dtype=torch.int32, 
-                                 device=self.device)
-            dim = torch.tensor(len(tensor.shape), dtype=torch.int32, 
-                               device=self.device)
-            self._pipeline_isend(dim).wait()
-            self._pipeline_isend(shape).wait()
-            self.send_shape = torch.Size(shape)
-        else:
-            logger.warning("Send shape is already initialized, "
-                           "skip sending shape.")
+    # def _init_shape_and_send_metadata(self, tensor: torch.Tensor) -> None:
+    #     if self.send_shape is None:
+    #         shape = torch.tensor(tensor.shape, dtype=torch.int32, 
+    #                              device=self.device)
+    #         dim = torch.tensor(len(tensor.shape), dtype=torch.int32, 
+    #                            device=self.device)
+    #         self._pipeline_isend(dim).wait()
+    #         self._pipeline_isend(shape).wait()
+    #         self.send_shape = torch.Size(shape)
+    #     else:
+    #         logger.warning("Send shape is already initialized, "
+    #                        "skip sending shape.")
 
-    def _recv_metadata_and_init_buffer(self) -> Optional[torch.Tensor]:
-        if self.recv_buffer is None:
-            dim = self.recv(size=[1], dtype=torch.int32)
-            shape = self.recv(size=dim, dtype=torch.int32)
-            patch_shape = shape.clone()
-            patch_shape[-2] = patch_shape[-2] // self.num_pipefusion_patches
-            self.recv_buffer = [
-                torch.zeros(*patch_shape, dtype=self.dtype, device=self.device)
-                for _ in range(self.num_pipefusion_patches)
-            ]
-            self.recv_buffer.append(
-                torch.zeros(*shape, dtype=self.dtype, device=self.device)
-            )
-            self.recv_shape = torch.Size(shape)
-            self.recv_tasks_queue = []
-        else:
-            logger.warning("Recv buffer is already initialized, "
-                           "skip receiving shape.")
+    # def _recv_metadata_and_init_buffer(self) -> Optional[torch.Tensor]:
+    #     if self.recv_buffer is None:
+    #         dim = self.recv(size=[1], dtype=torch.int32)
+    #         shape = self.recv(size=dim, dtype=torch.int32)
+    #         patch_shape = shape.clone()
+    #         patch_shape[-2] = patch_shape[-2] // self.num_pipefusion_patches
+    #         self.recv_buffer = [
+    #             torch.zeros(*patch_shape, dtype=self.dtype, device=self.device)
+    #             for _ in range(self.num_pipefusion_patches)
+    #         ]
+    #         self.recv_buffer.append(
+    #             torch.zeros(*shape, dtype=self.dtype, device=self.device)
+    #         )
+    #         self.recv_shape = torch.Size(shape)
+    #         self.recv_tasks_queue = []
+    #     else:
+    #         logger.warning("Recv buffer is already initialized, "
+    #                        "skip receiving shape.")
 
 
                 

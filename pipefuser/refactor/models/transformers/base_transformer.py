@@ -7,6 +7,7 @@ from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.refactor.distributed.parallel_state import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
+    get_pp_group,
 )
 from pipefuser.logger import init_logger
 from pipefuser.refactor.models.base_model import PipeFuserModelBaseWrapper

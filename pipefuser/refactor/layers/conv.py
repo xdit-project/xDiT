@@ -40,17 +40,17 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         return output
 
     #TODO implementation problems in sliced_forward
-    def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def sliced_forward(self, x: torch.Tensor, sliced_height: int) -> torch.Tensor:
         b, c, h, w = x.shape
-        assert h % self.num_pipeline_patch == 0
+        # assert h % self.num_pipeline_patch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
         output_h = h // self.num_pipeline_patch // stride
         idx = self.current_patch_idx
-        h_begin = output_h * idx * stride - padding
-        h_end = output_h * (idx + 1) * stride + padding
+        h_begin = output_h * stride * idx - padding
+        h_end = output_h * stride * idx + sliced_height + padding
         final_padding = [padding, padding, 0, 0]
         if h_begin < 0:
             h_begin = 0
@@ -58,7 +58,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         if h_end > h:
             h_end = h
             final_padding[3] = padding
-        sliced_input = x[:, :, h_begin:h_end, :]
+        sliced_input = x[:, :, h_begin: h_end, :]
         padded_input = F.pad(sliced_input, final_padding, mode="constant")
         result = F.conv2d(
             padded_input,
@@ -95,17 +95,23 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
                         ], dtype=x.dtype, device=x.device)
                     activation_cache_height = self.activation_cache.shape[2]
                     hidden_state_height = x.shape[2]
-                    if (activation_cache_height // self.num_pipeline_patch == 
-                        hidden_state_height and 
-                        activation_cache_height % self.num_pipeline_patch == 0):
+                    print(self.activation_cache.shape)
+                    print(x.shape)
+                    print(self.num_pipeline_patch)
+                    # if (activation_cache_height // self.num_pipeline_patch == 
+                    #     hidden_state_height and 
+                    #     activation_cache_height % self.num_pipeline_patch == 0):
+                    if ((activation_cache_height + self.num_pipeline_patch - 1) // self.num_pipeline_patch == 
+                        hidden_state_height):
                         self.activation_cache[
                             :,
                             :,
                             hidden_state_height * self.current_patch_idx : 
-                            hidden_state_height * (self.current_patch_idx + 1),
+                            hidden_state_height * self.current_patch_idx + x.shape[-2],
                             :
                         ] = x
-                        output = self.sliced_forward(self.activation_cache)
+                        # print(self.activation_cache.shape)
+                        output = self.sliced_forward(self.activation_cache, x.shape[-2])
                     else:
                         raise RuntimeError("Hidden state height does not match "
                                            "activation cache height")

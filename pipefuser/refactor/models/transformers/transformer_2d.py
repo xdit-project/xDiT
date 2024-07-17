@@ -217,7 +217,7 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                     self.input_config.width // self.patch_size // 8
                 )
                 if self.patched_mode:
-                    height //= self.parallel_config.pp_config.num_pipeline_patch
+                    height //= self.num_pipeline_patch
                  
                 output = self._get_output_for_patched_inputs(
                     hidden_states=hidden_states,

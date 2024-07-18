@@ -17,8 +17,12 @@ class DDPMSchedulerPiP(DDPMScheduler):
 
     def step(
         self,
+        model_output,
+        timestep,
+        sample,
+        generator=None,
         *args,
         **kwargs
     ) -> Union[DDPMSchedulerOutput, Tuple]:
         batch_idx = kwargs.pop("batch_idx", None)
-        return super().step(*args, **kwargs)
+        return super().step(model_output, timestep, sample, generator, *args, **kwargs)

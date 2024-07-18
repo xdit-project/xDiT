@@ -1,43 +1,53 @@
 import torch
-from torch import distributed as dist
 from torch import nn
 from torch.nn import functional as F
 
-from pipefuser.modules.base_module import BaseModule
-from pipefuser.utils import DistriConfig
+from pipefuser.refactor.config.config import ParallelConfig, RuntimeConfig
+from pipefuser.refactor.layers.base_layer import PipeFuserLayerBaseWrapper
 from pipefuser.logger import init_logger
+from pipefuser.refactor.layers.register import PipeFuserLayerWrappersRegister
+from pipefuser.refactor.distributed.parallel_state import (
+    get_pipeline_parallel_rank,
+    get_pipeline_parallel_world_size,
+)
 
 logger = init_logger(__name__)
 
 
-class DistriConv2dPiP(BaseModule):
+@PipeFuserLayerWrappersRegister.register(nn.Conv2d)
+class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
     def __init__(
         self,
-        module: nn.Conv2d,
-        distri_config: DistriConfig,
-        is_first_layer: bool = False,
+        conv2d: nn.Conv2d,
+        parallel_config: ParallelConfig,
+        runtime_config: RuntimeConfig,
+        *,
+        is_first_layer: bool = True,
     ):
-        super(DistriConv2dPiP, self).__init__(module, distri_config)
+        super().__init__(
+            module=conv2d,
+            parallel_config=parallel_config,
+            runtime_config=runtime_config,
+        )
         self.is_first_layer = is_first_layer
-        self.batch_idx = 0
 
     def naive_forward(self, x: torch.Tensor) -> torch.Tensor:
         #  x: [B, C, H, W]
         output = self.module(x)
         return output
 
+    # TODO fix implementation problems in sliced_forward
+    # only available for patchify process
     def sliced_forward(self, x: torch.Tensor) -> torch.Tensor:
-        distri_config = self.distri_config
         b, c, h, w = x.shape
-        assert h % distri_config.pp_num_patch == 0
 
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
-        output_h = x.shape[2] // stride // distri_config.pp_num_patch
-        idx = self.batch_idx
-        h_begin = output_h * idx * stride - padding
-        h_end = output_h * (idx + 1) * stride + padding
+        output_h = h // self.num_pipeline_patch // stride
+        idx = self.current_patch_idx
+        h_begin = self.patches_start_line_idx[idx] - padding
+        h_end = self.patches_start_line_idx[idx + 1] + padding
         final_padding = [padding, padding, 0, 0]
         if h_begin < 0:
             h_begin = 0
@@ -47,47 +57,56 @@ class DistriConv2dPiP(BaseModule):
             final_padding[3] = padding
         sliced_input = x[:, :, h_begin:h_end, :]
         padded_input = F.pad(sliced_input, final_padding, mode="constant")
-        return F.conv2d(
+        result = F.conv2d(
             padded_input,
             self.module.weight,
             self.module.bias,
             stride=stride,
             padding="valid",
         )
+        return result
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        # [2, 4, 128, 128]
-
-        distri_config = self.distri_config
-        if distri_config.pp_num_patch == 1:
+        if (
+            get_pipeline_parallel_world_size() == 1
+            or self.module.kernel_size == (1, 1)
+            or self.module.kernel_size == 1
+        ):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
-                full_x = self.buffer_list
-                if (
-                    distri_config.mode == "full_sync"
-                    or self.counter <= distri_config.warmup_steps
-                ):
-                    full_x = x
-                    output = self.naive_forward(full_x)
-                    # [2, 1152, 64, 64]
+                if not self.patched_mode or self.num_pipeline_patch == 1:
+                    self.activation_cache = x
+                    output = self.naive_forward(self.activation_cache)
                 else:
-                    _, _, cc, _ = full_x.shape
-                    _, _, c, _ = x.shape
-                    assert cc // distri_config.pp_num_patch == c
-                    full_x[:, :, c * self.batch_idx : c * (self.batch_idx + 1), :] = x
-                    output = self.sliced_forward(full_x)
-                self.buffer_list = full_x
+                    if self.activation_cache is None:
+                        self.activation_cache = torch.zeros(
+                            [
+                                x.shape[0],
+                                x.shape[1],
+                                x.shape[2] * self.num_pipeline_patch,
+                                x.shape[3],
+                            ],
+                            dtype=x.dtype,
+                            device=x.device,
+                        )
+
+                    self.activation_cache[
+                        :,
+                        :,
+                        self.patches_start_line_idx[
+                            self.current_patch_idx
+                        ] : self.patches_start_line_idx[self.current_patch_idx + 1] :,
+                    ] = x
+                    output = self.sliced_forward(self.activation_cache)
+
             else:
                 raise NotImplementedError
 
             # else:
             #     boundary_size = self.module.padding[0]
             #     # if self.buffer_list is None:
-            #     #     if self.comm_manager.buffer_list is None:
-            #     #         self.idx = self.comm_manager.register_tensor(
-            #     #             shape=[2, x.shape[0], x.shape[1], boundary_size, x.shape[3]],
-            #     #             torch_dtype=x.dtype,
+            #     #     if self.comm_manager.buffer_list is None: #     #         self.idx = self.comm_manager.register_tensor( #     #             shape=[2, x.shape[0], x.shape[1], boundary_size, x.shape[3]], #     #             torch_dtype=x.dtype,
             #     #             layer_type="conv2d",
             #     #         )
             #     #     else:
@@ -139,14 +158,6 @@ class DistriConv2dPiP(BaseModule):
             #             if distri_config.mode != "no_sync":
             #                 self.comm_manager.enqueue(self.idx, boundary)
 
-        if (
-            distri_config.mode == "full_sync"
-            or self.counter <= distri_config.warmup_steps
-        ):
-            self.counter += 1
-        else:
-            self.batch_idx += 1
-            if self.batch_idx == distri_config.pp_num_patch:
-                self.counter += 1
-                self.batch_idx = 0
+        if self.patched_mode:
+            self.patch_step()
         return output

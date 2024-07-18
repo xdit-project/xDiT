@@ -196,7 +196,7 @@ class DistriTransformer2DModel(BaseModule):
                 batch_size, -1, hidden_states.shape[-1]
             )
 
-        for block in module.transformer_blocks:
+        for i, block in enumerate(module.transformer_blocks):
             hidden_states = block(
                 hidden_states,
                 attention_mask=attention_mask,

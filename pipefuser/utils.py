@@ -153,6 +153,14 @@ class DistriConfig:
                 dp_groups.append(dist.new_group([i, i + n_device_per_batch]))
             self.local_dp_group = dp_groups[self.rank]
             self.global_dp_groups = dp_groups
+            
+            extra_groups = []
+            for i in range(2):
+                extra_groups.append(
+                    dist.new_group(dist.get_process_group_ranks(batch_parallel_groups[i]))
+                )
+            self.local_extra_group = extra_groups[batch_idx]
+            self.global_extra_groups = extra_groups
         else:
             self.local_batch_parallel_group = dist.new_group()
             self.global_batch_parallel_groups = [self.local_batch_parallel_group]
@@ -160,6 +168,8 @@ class DistriConfig:
                 dist.new_group([i]) for i in range(world_size)
             ]
             self.local_dp_group = self.global_dp_groups[self.rank]
+            self.local_extra_group = dist.new_group(dist.get_process_group_ranks(self.local_batch_parallel_group))
+            self.global_extra_groups = [self.local_extra_group]    
 
 
         self.pp_num_patch = pp_num_patch
@@ -261,7 +271,7 @@ class PipelineParallelismCommManager:
             (batch_world_size - 1 - dist.get_rank(self.batch_parallel_group) + 2) % batch_world_size
         )
 
-        self.extra_group = dist.new_group(dist.get_process_group_ranks(self.batch_parallel_group))
+        self.extra_group = distri_config.local_extra_group
 
 
     def _creat_recv_buffer(self):

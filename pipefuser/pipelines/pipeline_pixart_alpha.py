@@ -77,6 +77,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         )
 
     @PipeFuserBaseWrapper.forward_check_condition
+    @PipeFuserPipelineBaseWrapper.enable_data_parallel
     @torch.no_grad()
     def __call__(
         self,

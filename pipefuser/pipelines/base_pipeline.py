@@ -1,4 +1,5 @@
 from abc import ABCMeta, abstractmethod
+from functools import wraps
 from typing import List, Optional
 import torch
 import torch.nn as nn
@@ -13,11 +14,13 @@ from pipefuser.config.config import (
 )
 from pipefuser.logger import init_logger
 from pipefuser.distributed import (
-    get_pipeline_parallel_rank,
     init_distributed_environment,
     initialize_model_parallel,
     model_parallel_is_initialized,
+    get_data_parallel_world_size,
+    get_pipeline_parallel_rank,
     get_pp_group,
+    get_world_group,
 )
 from pipefuser.base_wrapper import PipeFuserBaseWrapper
 from pipefuser.schedulers import *
@@ -335,6 +338,28 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
                     feature_map_shape=feature_map_shape,
                     dtype=self.runtime_config.dtype,
                 )
+
+    @staticmethod
+    def enable_data_parallel(func):
+        @wraps(func)
+        def data_parallel_fn(self, *args, **kwargs):
+            prompt = kwargs.get("prompt", None)
+            negative_prompt = kwargs.get("negative_prompt", "")
+            # dp_degree <= batch_size
+            batch_size = len(prompt) if isinstance(prompt, list) else 1
+            if batch_size > 1:
+                dp_degree = self.parallel_config.dp_degree
+                dp_group_rank = get_world_group().rank // get_data_parallel_world_size()
+                dp_group_batch_size = (batch_size + dp_degree - 1) // dp_degree
+                start_batch_idx = dp_group_rank * dp_group_batch_size
+                end_batch_idx = min((dp_group_rank + 1) * dp_group_batch_size, batch_size)
+                prompt = prompt[start_batch_idx:end_batch_idx]
+                if isinstance(negative_prompt, List):
+                    negative_prompt = negative_prompt[start_batch_idx:end_batch_idx]
+                kwargs["prompt"] = prompt
+                kwargs["negative_prompt"] = negative_prompt
+            return func(self, *args, **kwargs)
+        return data_parallel_fn
 
     def forward(self):
         pass

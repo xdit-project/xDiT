@@ -45,6 +45,8 @@ class ModelConfig:
 class InputConfig:
     height: int = 1024
     width: int = 1024
+    orig_height: Optional[int] = None
+    orig_width: Optional[int] = None
     batch_size: Optional[int] = None
     prompt: str = ""
     negative_prompt: str = ""

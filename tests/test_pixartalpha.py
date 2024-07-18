@@ -24,9 +24,11 @@ def main():
     start_time = time.time()
     output = pipe(
         prompt=engine_config.input_config.prompt,
-        generator=torch.Generator(device="cuda").manual_seed(engine_config.runtime_config.seed),
         num_inference_steps=engine_config.input_config.num_inference_steps,
         output_type="pil",
+        use_resolution_binning=engine_config.input_config.use_resolution_binning,
+        num_pipeline_warmup_steps=engine_config.runtime_config.warmup_steps,
+        generator=torch.Generator(device="cuda").manual_seed(engine_config.runtime_config.seed),
     )
     end_time = time.time()
     elapsed_time = end_time - start_time

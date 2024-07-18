@@ -1,5 +1,5 @@
 from abc import ABCMeta, abstractmethod
-from typing import List
+from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -248,16 +248,22 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
         batch_size: int,
         height: int,
         width: int,
+        orig_height: Optional[int] = None,
+        orig_width: Optional[int] = None,
     ):
         if (height is not None or width is not None) and (
             height != self.input_config.height or width != self.input_config.width
+        ) or (orig_height is not None or orig_width is not None) and (
+            orig_height != self.input_config.orig_height or orig_width != self.input_config.orig_width
         ):
+
             self.input_config.height = height or self.input_config.height
             self.input_config.width = width or self.input_config.width
+            self.input_config.orig_height = orig_height or self.input_config.orig_height
+            self.input_config.orig_width = orig_width or self.input_config.orig_width
             self.set_input_config(self.input_config)
 
             # TODO add shape & num_patch parameters
-            get_pp_group().reset_buffer()
             self.reset_activation_cache()
 
         if hasattr(self.module, "transformer"):

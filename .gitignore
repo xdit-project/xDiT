@@ -7,4 +7,5 @@ pipefuser.egg-info
 *.txt
 results/
 profile/
+.vscode/
 pipefusion.egg-info/

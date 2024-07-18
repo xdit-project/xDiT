@@ -17,5 +17,5 @@ class DDIMSchedulerPiP(DDIMScheduler):
         *args,
         **kwargs
     ) -> Union[DDIMSchedulerOutput, Tuple]:
-        batch_idx = kwargs.pop("batch_idx", None)
+        patch_idx = kwargs.pop("patch_idx", None)
         return super().step(*args, **kwargs)

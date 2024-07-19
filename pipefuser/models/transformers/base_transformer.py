@@ -7,6 +7,7 @@ from pipefuser.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
+    get_sequence_parallel_world_size,
 )
 from pipefuser.logger import init_logger
 from pipefuser.models.base_model import PipeFuserModelBaseWrapper
@@ -25,7 +26,7 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
     ):
-        transformer = self._convert_transformer_for_pipeline(
+        transformer = self._convert_transformer_for_parallel(
             transformer,
             parallel_config=parallel_config,
             runtime_config=runtime_config,
@@ -39,7 +40,7 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
             runtime_config=runtime_config,
         )
 
-    def _convert_transformer_for_pipeline(
+    def _convert_transformer_for_parallel(
         self,
         transformer: nn.Module,
         parallel_config: ParallelConfig,
@@ -48,7 +49,8 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
     ) -> nn.Module:
-        if get_pipeline_parallel_world_size() == 1:
+        if get_pipeline_parallel_world_size() == 1 \
+            and get_sequence_parallel_world_size() == 1:
             return transformer
         else:
             transformer = self._split_transformer_blocks(

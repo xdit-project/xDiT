@@ -36,13 +36,16 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 </div>
 
 ### 📢 Updates
-* 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [scripts/hunyuandit_example.py](./scripts/hunyuandit_example.py).
+* 🎉**July 18, 2024**: Implemented hybrid parallelism support for PixArt-Sigma. The inference script is [examples/pixartsigma_example.py](examples/pixartsigma_example.py)
+* 🎉**July 17, 2024**: Completed major project refactoring. Added hybrid parallelism support for PixArt-alpha. Support hybrid parallelism for PixArt-alpha. The inference script is [examples/pixartalpha_example.py](examples/pixartalpha_example.py)
+* 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [lagecy/scripts/hunyuandit_example.py](./lagecy/scripts/hunyuandit_example.py).
 * 🎉**July 1, 2024**: Split batch for Classifier Free Guidance.
-* 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [scripts/sd3_example.py](./scripts/sd3_example.py).
-* 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py).
+* 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [lagecy/scripts/sd3_example.py](./lagecy/scripts/sd3_example.py).
+* 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [lagecy/scripts/pixart_example.py](./lagecy/scripts/pixart_example.py), DiT [lagecy/scripts/ditxl_example.py](./lagecy/scripts/ditxl_example.py) and SDXL [lagecy/scripts/sdxl_example.py](./lagecy/scripts/sdxl_example.py).
 
 
 ### 🎯 Supported DiTs:
+-  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
 -  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
 -  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
 -  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
@@ -51,7 +54,7 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 
 ### Benchmark Results on Pixart-Alpha
 
-You can  adapt to [./scripts/benchmark.sh](./scripts/benchmark.sh) to benchmark latency and memory usage of different parallel approaches.
+You can  adapt to [./lagecy/scripts/benchmark.sh](./lagecy/scripts/benchmark.sh) to benchmark latency and memory usage of different parallel approaches.
 
 1. The Latency on 4xA100-80GB (PCIe)
 
@@ -111,44 +114,82 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
 
 ### QuickStart
 
-1. install pipefuison from local.
+1. Install pipefusion from local.
 ```
 python setup.py install
 ```
 
-3. Usage Example
-In [./scripts/pixart_example.py](./scripts/pixart_example.py), we provide a minimal script for running DiT with PipeFusion.
+2. Usage
 
-```python
-import torch
+We provide several examples demonstrating how to run models with PipeFusion in the ./examples/ directory.
 
-from pipefuser.pipelines import DistriPixArtAlphaPipeline
-from pipefuser.utils import DistriConfig
-from pipefusion.modules.opt.chunk_conv2d import PatchConv2d
+For instance, to view the available options for the PixArt-alpha example, use the following command:
+```bash
+python ./examples/pixartalpha_example.py -h
 
-# parallelism choose from ["patch", "naive_patch", "pipefusion", "tensor", "sequence"],
-distri_config = DistriConfig(
-    parallelism="pipefusion",
-    pp_num_patch=4
-)
+...
 
-pipeline = DistriPixArtAlphaPipeline.from_pretrained(
-    distri_config=distri_config,
-    pretrained_model_name_or_path=args.model_id,
-    enable_parallel_vae=True, # use patch parallel for VAE to avoid OOM on high-resolution image genration (2048px).
-)
+PipeFuser Arguments
 
-pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
+options:
+  -h, --help            show this help message and exit
 
-output = pipeline(
-        prompt="An astronaut riding a green horse",
-        generator=torch.Generator(device="cuda").manual_seed(42),
-        num_inference_steps=20,
-        output_type="pil,
-    )
-if distri_config.rank == 0:
-    output.save("astronaut.png")
+Model Options:
+  --model MODEL         Name or path of the huggingface model to use.
+  --download-dir DOWNLOAD_DIR
+                        Directory to download and load the weights, default to the default cache dir of huggingface.
+  --trust-remote-code   Trust remote code from huggingface.
+
+Input Options:
+  --height HEIGHT       The height of image
+  --width WIDTH         The width of image
+  --prompt [PROMPT ...]
+                        Prompt for the model.
+  --negative_prompt [NEGATIVE_PROMPT ...]
+                        Negative prompt for the model.
+  --num_inference_steps NUM_INFERENCE_STEPS
+                        Number of inference steps.
+  --no_use_resolution_binning
+
+Runtime Options:
+  --seed SEED           Random seed for operations.
+  --warmup_steps WARMUP_STEPS
+                        Warmup steps in generation.
+
+Parallel Processing Options:
+  --do_classifier_free_guidance
+  --use_split_batch     Use split batch in classifier_free_guidance
+  --data_parallel_degree DATA_PARALLEL_DEGREE
+                        Data parallel degree.
+  --ulysses_degree ULYSSES_DEGREE
+                        Ulysses sequence parallel degree. Used in attention layer.
+  --ring_degree RING_DEGREE
+                        Ring sequence parallel degree. Used in attention layer.
+  --pipefusion_parallel_degree PIPEFUSION_PARALLEL_DEGREE
+                        Pipefusion parallel degree. Indicates the number of pipeline stages.
+  --num_pipeline_patch NUM_PIPELINE_PATCH
+                        Number of patches the feature map should be segmented in pipefusion parallel.
+  --attn_layer_num_for_pp [ATTN_LAYER_NUM_FOR_PP ...]
+                        List representing the number of layers per stage of the pipeline in pipefusion parallel
+  --tensor_parallel_degree TENSOR_PARALLEL_DEGREE
+                        Tensor parallel degree.
+  --split_scheme SPLIT_SCHEME
+                        Split scheme for tensor parallel.
 ```
+
+Utilizing Various Parallelism Techniques You can leverage different types of parallelism to execute the model efficiently. It's crucial to ensure that the product of all parallel degrees equals the number of available devices. For example, you can employ a combination of split batch, PipeFusion parallel, and sequence parallel techniques with the following command to generate an image of a cute dog using hybrid parallelism::
+```bash
+torchrun --nproc_per_node=8 \
+examples/pixartalpha_example.py \
+--model models/PixArt-XL-2-1024-MS \
+--pipefusion_parallel_degree 2 \
+--ulysses_degree 2 \
+--num_inference_steps 20 \
+--warmup_steps 0 \
+--prompt "A small dog" \
+--use_split_batch
+```
+In this command, the equation ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8 is satisfied, allowing the hybrid parallelism to function correctly.
 
 ## Evaluation Image Quality
 
@@ -183,7 +224,7 @@ During inference with classifier-free guidance, the batch size for inputs to DiT
 ```
 @article{wang2024pipefusion,
       title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
-      author={Jiannan Wang and Jiarui Fang and Aoyu Li and PengCheng Yang},
+      author={Jiannan Wang and Jiarui Fang and Jinzhe Pan and Aoyu Li and PengCheng Yang},
       year={2024},
       eprint={2405.07719},
       archivePrefix={arXiv},

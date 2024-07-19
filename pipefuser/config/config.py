@@ -39,7 +39,6 @@ class ModelConfig:
     model: str
     download_dir: Optional[str] = None
     trust_remote_code: bool = False
-    scheduler: Optional[str] = "dpmsolver_multistep"
 
 @dataclass
 class InputConfig:
@@ -66,7 +65,7 @@ class RuntimeConfig:
     seed: int = 42
     warmup_steps: int = 1
     dtype: torch.dtype = torch.float16
-    use_cuda_graph: bool = True
+    use_cuda_graph: bool = False
     use_parallel_vae: bool = False
     use_profiler: bool = False
 

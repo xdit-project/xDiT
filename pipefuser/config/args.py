@@ -59,7 +59,6 @@ class EngineArgs:
     model: str
     download_dir: Optional[str] = None
     trust_remote_code: bool = False
-    scheduler: Optional[str] = "dpmsolver_multistep"
     # Input arguments
     height: int = 1024
     width: int = 1024
@@ -70,9 +69,9 @@ class EngineArgs:
     # Runtime arguments
     seed: int = 42
     warmup_steps: int = 1
-    use_cuda_graph: bool = True
-    use_parallel_vae: bool = False
-    use_profiler: bool = False
+    # use_cuda_graph: bool = True
+    # use_parallel_vae: bool = False
+    # use_profiler: bool = False
     # Parallel arguments
         # data parallel
     data_parallel_degree: int = 1
@@ -94,99 +93,40 @@ class EngineArgs:
     def add_cli_args(parser: FlexibleArgumentParser):
         """Shared CLI arguments for PipeFuser engine."""
         # Model arguments
-        parser.add_argument(
-            '--model',
-            type=str,
-            default="PixArt-alpha/PixArt-XL-2-1024-MS",
-            help='Name or path of the huggingface model to use.')
-        parser.add_argument('--download-dir',
-                            type=nullable_str,
-                            default=EngineArgs.download_dir,
-                            help='Directory to download and load the weights, '
-                            'default to the default cache dir of '
-                            'huggingface.')
-        parser.add_argument('--trust-remote-code',
-                            action='store_true',
-                            help='Trust remote code from huggingface.')
-        parser.add_argument("--scheduler",
-                            "-s",
-                            default="dpm-solver",
-                            type=str,
-                            choices=["dpm-solver", 
-                                     "ddim", 
-                                     "dpmsolver_multistep"],
-                            help="Scheduler to use.")
+        model_group = parser.add_argument_group('Model Options')
+        model_group.add_argument('--model', type=str, default="PixArt-alpha/PixArt-XL-2-1024-MS", help='Name or path of the huggingface model to use.')
+        model_group.add_argument('--download-dir', type=nullable_str, default=EngineArgs.download_dir, help='Directory to download and load the weights, default to the default cache dir of huggingface.')
+        model_group.add_argument('--trust-remote-code', action='store_true', help='Trust remote code from huggingface.')
+
         # Input arguments
-        parser.add_argument("--height",
-                            type=int,
-                            default=1024,
-                            help="The height of image")
-        parser.add_argument("--width",
-                            type=int,
-                            default=1024,
-                            help="The width of image")
-        parser.add_argument("--prompt",
-                            type=str,
-                            nargs="*",
-                            default="",
-                            help="Prompt for the model.")
-        parser.add_argument("--negative_prompt",
-                            type=str,
-                            nargs="*",
-                            default="",
-                            help="Negative prompt for the model.")
-        parser.add_argument("--num_inference_steps",
-                            type=int,
-                            default=20,
-                            help="Number of inference steps.")
-        parser.add_argument("--no_use_resolution_binning",
-                            action="store_true")
+        input_group = parser.add_argument_group('Input Options')
+        input_group.add_argument("--height", type=int, default=1024, help="The height of image")
+        input_group.add_argument("--width", type=int, default=1024, help="The width of image")
+        input_group.add_argument("--prompt", type=str, nargs="*", default="", help="Prompt for the model.")
+        input_group.add_argument("--negative_prompt", type=str, nargs="*", default="", help="Negative prompt for the model.")
+        input_group.add_argument("--num_inference_steps", type=int, default=20, help="Number of inference steps.")
+        input_group.add_argument("--no_use_resolution_binning", action="store_true")
+
         # Runtime arguments
-        parser.add_argument("--seed",
-                            type=int,
-                            default=42,
-                            help="Random seed for operations.")
-        parser.add_argument("--warmup_steps",
-                            type=int,
-                            default=1,
-                            help="Warmup steps.")
-        parser.add_argument("--use_cuda_graph",
-                            action="store_true")
-        parser.add_argument("--use_parallel_vae",
-                            action="store_true")
-        parser.add_argument("--use_profiler",
-                            action="store_true")
+        runtime_group = parser.add_argument_group('Runtime Options')
+        runtime_group.add_argument("--seed", type=int, default=42, help="Random seed for operations.")
+        runtime_group.add_argument("--warmup_steps", type=int, default=1, help="Warmup steps in generation.")
+        # runtime_group.add_argument("--use_cuda_graph", action="store_true")
+        # runtime_group.add_argument("--use_parallel_vae", action="store_true")
+        # runtime_group.add_argument("--use_profiler", action="store_true")
+
         # Parallel arguments
-        parser.add_argument("--data_parallel_degree",
-                            type=int,
-                            default=1,
-                            help="Data parallel degree.")
-        parser.add_argument("--use_split_batch",
-                            action="store_true")
-        parser.add_argument("--do_classifier_free_guidance",
-                            action="store_true")
-        parser.add_argument("--ulysses_degree",
-                            type=int,
-                            default=None)
-        parser.add_argument("--ring_degree",
-                            type=int,
-                            default=None)
-        parser.add_argument("--tensor_parallel_degree",
-                            type=int,
-                            default=1)
-        parser.add_argument("--split_scheme",
-                            type=str,
-                            default='row')
-        parser.add_argument("--pipefusion_parallel_degree",
-                            type=int,
-                            default=1)
-        parser.add_argument("--num_pipeline_patch",
-                            type=int,
-                            default=None)
-        parser.add_argument("--attn_layer_num_for_pp",
-                            default=None,
-                            nargs="*",
-                            type=int)
+        parallel_group = parser.add_argument_group('Parallel Processing Options')
+        parallel_group.add_argument("--do_classifier_free_guidance", action="store_true")
+        parallel_group.add_argument("--use_split_batch", action="store_true", help="Use split batch in classifier_free_guidance. cfg_degree will be 2 if set")
+        parallel_group.add_argument("--data_parallel_degree", type=int, default=1, help="Data parallel degree.")
+        parallel_group.add_argument("--ulysses_degree", type=int, default=None, help="Ulysses sequence parallel degree. Used in attention layer.")
+        parallel_group.add_argument("--ring_degree", type=int, default=None, help="Ring sequence parallel degree. Used in attention layer.")
+        parallel_group.add_argument("--pipefusion_parallel_degree", type=int, default=1, help="Pipefusion parallel degree. Indicates the number of pipeline stages.")
+        parallel_group.add_argument("--num_pipeline_patch", type=int, default=None, help="Number of patches the feature map should be segmented in pipefusion parallel.")
+        parallel_group.add_argument("--attn_layer_num_for_pp", default=None, nargs="*", type=int, help="List representing the number of layers per stage of the pipeline in pipefusion parallel")
+        parallel_group.add_argument("--tensor_parallel_degree", type=int, default=1, help="Tensor parallel degree.")
+        parallel_group.add_argument("--split_scheme", type=str, default='row', help="Split scheme for tensor parallel.")
         return parser
 
     @classmethod
@@ -207,7 +147,6 @@ class EngineArgs:
             model=self.model,
             download_dir=self.download_dir,
             trust_remote_code=self.trust_remote_code,
-            scheduler=self.scheduler,
         )
         
         input_config = InputConfig(
@@ -223,9 +162,9 @@ class EngineArgs:
         runtime_config = RuntimeConfig(
             seed=self.seed,
             warmup_steps=self.warmup_steps,
-            use_cuda_graph=self.use_cuda_graph,
-            use_parallel_vae=self.use_parallel_vae,
-            use_profiler=self.use_profiler,
+            # use_cuda_graph=self.use_cuda_graph,
+            # use_parallel_vae=self.use_parallel_vae,
+            # use_profiler=self.use_profiler,
         )
         
         parallel_config = ParallelConfig(

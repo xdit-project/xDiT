@@ -1,9 +1,13 @@
 import time
 import torch
 import torch.distributed
-from pipefuser.pipelines import PipeFuserPixArtAlphaPipeline
+from pipefuser.pipelines import PipeFuserPixArtSigmaPipeline
 from pipefuser.config import EngineArgs, FlexibleArgumentParser
-from pipefuser.distributed import get_world_group, get_data_parallel_rank, get_data_parallel_world_size
+from pipefuser.distributed import (
+    get_world_group, 
+    get_data_parallel_rank, 
+    get_data_parallel_world_size
+)
 
 
 def main():
@@ -12,7 +16,7 @@ def main():
     engine_args = EngineArgs.from_cli_args(args)
     engine_config = engine_args.create_engine_config()
     local_rank = get_world_group().local_rank
-    pipe = PipeFuserPixArtAlphaPipeline.from_pretrained(
+    pipe = PipeFuserPixArtSigmaPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         parallel_config=engine_config.parallel_config,
         runtime_config=engine_config.runtime_config,
@@ -43,7 +47,7 @@ def main():
     if get_data_parallel_rank() == dp_group_world_size - 1:
         for i, image in enumerate(output.images):
             image_rank = dp_group_index * dp_batch_size + i
-            image.save(f"./results/pixart_alpha_result_{image_rank}.png")
+            image.save(f"./results/pixart_sigma_result_{image_rank}.png")
         print(
             f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )

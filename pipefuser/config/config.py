@@ -45,9 +45,11 @@ class ModelConfig:
 class InputConfig:
     height: int = 1024
     width: int = 1024
+    orig_height: Optional[int] = None
+    orig_width: Optional[int] = None
     batch_size: Optional[int] = None
-    prompt: str = ""
-    negative_prompt: str = ""
+    prompt: Union[str, List[str]] = ""
+    negative_prompt: Union[str, List[str]] = ""
     num_inference_steps: int = 20
     use_resolution_binning: bool = True,
 
@@ -221,6 +223,11 @@ class EngineConfig:
     input_config: InputConfig
     runtime_config: RuntimeConfig
     parallel_config: ParallelConfig
+
+    def __post_init__(self):
+        assert self.input_config.batch_size >= self.parallel_config.dp_degree, (
+            "dp_degree must be less than or equal to batch_size"
+        )
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.

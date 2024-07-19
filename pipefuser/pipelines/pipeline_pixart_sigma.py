@@ -3,15 +3,14 @@ from typing import Dict, List, Tuple, Callable, Optional, Union
 
 import torch
 import torch.distributed
-import torch.nn as nn
-from diffusers import PixArtAlphaPipeline
-from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
+from diffusers import PixArtSigmaPipeline
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
     ASPECT_RATIO_256_BIN,
     ASPECT_RATIO_512_BIN,
     ASPECT_RATIO_1024_BIN,
+    ASPECT_RATIO_2048_BIN,
+    retrieve_timesteps,
 )
-from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import retrieve_timesteps
-from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from pipefuser.base_wrapper import PipeFuserBaseWrapper
@@ -29,11 +28,11 @@ from pipefuser.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
 from .register import PipeFuserPipelineWrapperRegister
 
 
-@PipeFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)
-class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
+@PipeFuserPipelineWrapperRegister.register(PixArtSigmaPipeline)
+class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
     def __init__(
         self,
-        pipeline: PixArtAlphaPipeline,
+        pipeline: PixArtSigmaPipeline,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
@@ -51,7 +50,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         runtime_config: RuntimeConfig,
         **kwargs,
     ):
-        pipeline = PixArtAlphaPipeline.from_pretrained(
+        pipeline = PixArtSigmaPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
         return cls(pipeline, parallel_config, runtime_config)
@@ -77,6 +76,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         )
 
     @PipeFuserBaseWrapper.forward_check_condition
+    @PipeFuserPipelineBaseWrapper.enable_data_parallel
     @torch.no_grad()
     def __call__(
         self,
@@ -102,7 +102,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         callback_steps: int = 1,
         clean_caption: bool = True,
         use_resolution_binning: bool = True,
-        max_sequence_length: int = 120,
+        max_sequence_length: int = 300,
         **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
         """
@@ -177,7 +177,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 If set to `True`, the requested height and width are first mapped to the closest resolutions using
                 `ASPECT_RATIO_1024_BIN`. After the produced latents are decoded into images, they are resized back to
                 the requested resolution. Useful for generating non-square images.
-            max_sequence_length (`int` defaults to 120): Maximum sequence length to use with the `prompt`.
+            max_sequence_length (`int` defaults to 300): Maximum sequence length to use with the `prompt`.
 
         Examples:
 
@@ -222,29 +222,23 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         # TODO(Eigensystem) move check to decorator
         height = (
             height
+            or self.input_config.orig_height
             or self.input_config.height
             or self.transformer.config.sample_size * self.vae_scale_factor
         )
         width = (
             width
+            or self.input_config.orig_width
             or self.input_config.width
             or self.transformer.config.sample_size * self.vae_scale_factor
         )
-        if isinstance(prompt, str):
-            self._check_input_change_and_adjust(
-                batch_size=1, height=height, width=width
-            )
-        elif isinstance(prompt, List):
-            self._check_input_change_and_adjust(
-                batch_size=len(prompt), height=height, width=width
-            )
-        if "mask_feature" in kwargs:
-            deprecation_message = "The use of `mask_feature` is deprecated. It is no longer used in any computation and that doesn't affect the end results. It will be removed in a future version."
-            deprecate("mask_feature", "1.0.0", deprecation_message, standard_warn=False)
-
         # 1. Check inputs. Raise error if not correct
+        orig_height = None
+        orig_width = None
         if use_resolution_binning:
-            if self.transformer.config.sample_size == 128:
+            if self.transformer.config.sample_size == 256:
+                aspect_ratio_bin = ASPECT_RATIO_2048_BIN
+            elif self.transformer.config.sample_size == 128:
                 aspect_ratio_bin = ASPECT_RATIO_1024_BIN
             elif self.transformer.config.sample_size == 64:
                 aspect_ratio_bin = ASPECT_RATIO_512_BIN
@@ -255,6 +249,14 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             orig_height, orig_width = height, width
             height, width = self.image_processor.classify_height_width_bin(
                 height, width, ratios=aspect_ratio_bin
+            )
+        if isinstance(prompt, str):
+            self._check_input_change_and_adjust(
+                batch_size=1, height=height, width=width, orig_height=orig_height, orig_width=orig_width,
+            )
+        elif isinstance(prompt, List):
+            self._check_input_change_and_adjust(
+                batch_size=len(prompt), height=height, width=width, orig_height=orig_height, orig_width=orig_width,
             )
 
         self.check_inputs(
@@ -344,24 +346,6 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
 
         # 6.1 Prepare micro-conditions.
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
-        if self.transformer.config.sample_size == 128:
-            resolution = torch.tensor([height, width]).repeat(
-                batch_size * num_images_per_prompt, 1
-            )
-            aspect_ratio = torch.tensor([float(height / width)]).repeat(
-                batch_size * num_images_per_prompt, 1
-            )
-            resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
-            aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
-
-            if (
-                do_classifier_free_guidance
-                and get_classifier_free_guidance_world_size() == 1
-            ):
-                resolution = torch.cat([resolution, resolution], dim=0)
-                aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
-
-            added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
 
         # 7. Denoising loop
         num_warmup_steps = max(
@@ -631,14 +615,8 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
                 if num_pipeline_warmup_steps > 0
                 else latents
             )
-            # patch_height = (
-            #     latents.shape[2] + num_pipeline_patch - 1
-            # ) // num_pipeline_patch
             patch_latents = list(latents.split(self.patches_height, dim=2))
         elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
-            # patch_height = (
-            #     latents.shape[2] + num_pipeline_patch - 1
-            # ) // num_pipeline_patch
             patch_latents = list(latents.split(self.patches_height, dim=2))
         else:
             patch_latents = [None for _ in range(self.num_pipeline_patch)]

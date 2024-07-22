@@ -69,6 +69,7 @@ class EngineArgs:
     # Runtime arguments
     seed: int = 42
     warmup_steps: int = 1
+    output_type: str = "pil"
     # use_cuda_graph: bool = True
     # use_parallel_vae: bool = False
     # use_profiler: bool = False
@@ -111,6 +112,7 @@ class EngineArgs:
         runtime_group = parser.add_argument_group('Runtime Options')
         runtime_group.add_argument("--seed", type=int, default=42, help="Random seed for operations.")
         runtime_group.add_argument("--warmup_steps", type=int, default=1, help="Warmup steps in generation.")
+        runtime_group.add_argument("--output_type", type=str, default="pil", help="Output type of the pipeline.")
         # runtime_group.add_argument("--use_cuda_graph", action="store_true")
         # runtime_group.add_argument("--use_parallel_vae", action="store_true")
         # runtime_group.add_argument("--use_profiler", action="store_true")
@@ -162,6 +164,7 @@ class EngineArgs:
         runtime_config = RuntimeConfig(
             seed=self.seed,
             warmup_steps=self.warmup_steps,
+            output_type=self.output_type,
             # use_cuda_graph=self.use_cuda_graph,
             # use_parallel_vae=self.use_parallel_vae,
             # use_profiler=self.use_profiler,

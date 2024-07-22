@@ -64,12 +64,15 @@ class InputConfig:
 class RuntimeConfig:
     seed: int = 42
     warmup_steps: int = 1
+    output_type: str = "pil"
     dtype: torch.dtype = torch.float16
     use_cuda_graph: bool = False
     use_parallel_vae: bool = False
     use_profiler: bool = False
 
     def __post_init__(self):
+        assert self.output_type in ["pil", "latent"], (
+            "output_pil must be either 'pil' or 'latent'")
         if self.use_cuda_graph:
             check_env()
 

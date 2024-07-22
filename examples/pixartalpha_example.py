@@ -26,7 +26,7 @@ def main():
     output = pipe(
         prompt=engine_config.input_config.prompt,
         num_inference_steps=engine_config.input_config.num_inference_steps,
-        output_type="pil",
+        output_type=engine_config.runtime_config.output_type,
         use_resolution_binning=engine_config.input_config.use_resolution_binning,
         num_pipeline_warmup_steps=engine_config.runtime_config.warmup_steps,
         generator=torch.Generator(device="cuda").manual_seed(engine_config.runtime_config.seed),
@@ -40,10 +40,13 @@ def main():
     dp_group_index = global_rank // dp_group_world_size
     num_dp_groups = engine_config.parallel_config.dp_degree
     dp_batch_size = (engine_config.input_config.batch_size + num_dp_groups - 1) // num_dp_groups
-    if get_data_parallel_rank() == dp_group_world_size - 1:
-        for i, image in enumerate(output.images):
-            image_rank = dp_group_index * dp_batch_size + i
-            image.save(f"./results/pixart_alpha_result_{image_rank}.png")
+    if engine_config.runtime_config.output_type == "pil":
+        if get_data_parallel_rank() == dp_group_world_size - 1:
+            for i, image in enumerate(output.images):
+                image_rank = dp_group_index * dp_batch_size + i
+                image.save(f"./results/pixart_alpha_result_{image_rank}.png")
+
+    if get_world_group().rank == get_world_group().world_size - 1:
         print(
             f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )

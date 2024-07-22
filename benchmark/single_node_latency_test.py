@@ -43,7 +43,7 @@ def main():
                 for num_pipeline_patches in [max(1, pp_degree // 2), pp_degree, pp_degree * 2]:
                     if num_pipeline_patches != last_num_patch:
                         print(f"Running test for size {size}, warmup_step {warmup_step}, pp_degree {pp_degree}, sp_degree {sp_degree}, num_pipeline_patches {num_pipeline_patches}")
-                        cmd = f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --model {MODEL_ID} " \
+                        cmd = f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} " \
                               f"--height {size} --width {size} --warmup_steps {warmup_step} " \
                               f"{RESOLUTION_BINNING} --use_split_batch --ulysses_degree {sp_degree} " \
                               f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} "

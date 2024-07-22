@@ -38,7 +38,6 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 ### 📢 Updates
 * 🎉**July 18, 2024**: Implemented hybrid parallelism support for PixArt-Sigma. The inference script is [examples/pixartsigma_example.py](examples/pixartsigma_example.py)
 * 🎉**July 17, 2024**: Completed major project refactoring. Added hybrid parallelism support for PixArt-alpha. Support hybrid parallelism for PixArt-alpha. The inference script is [examples/pixartalpha_example.py](examples/pixartalpha_example.py)
-
 * 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [legacy/scripts/hunyuandit_example.py](./legacy/scripts/hunyuandit_example.py).
 * 🎉**July 1, 2024**: Split batch for Classifier Free Guidance.
 * 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [legacy/scripts/sd3_example.py](./legacy/scripts/sd3_example.py).

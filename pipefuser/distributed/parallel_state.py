@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 
 _WORLD: Optional[GroupCoordinator] = None
 
+
 def set_random_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -29,13 +30,15 @@ def set_random_seed(seed: int):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+
 def get_world_group() -> GroupCoordinator:
-    assert _WORLD is not None, ("world group is not initialized")
+    assert _WORLD is not None, "world group is not initialized"
     return _WORLD
 
 
-def init_world_group(ranks: List[int], local_rank: int,
-                     backend: str) -> GroupCoordinator:
+def init_world_group(
+    ranks: List[int], local_rank: int, backend: str
+) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
         local_rank=local_rank,
@@ -43,20 +46,21 @@ def init_world_group(ranks: List[int], local_rank: int,
     )
 
 
-def init_model_parallel_group(group_ranks: List[List[int]], local_rank: int,
-                              backend: str, parallel_mode: str) -> GroupCoordinator:
+def init_model_parallel_group(
+    group_ranks: List[List[int]], local_rank: int, backend: str, parallel_mode: str
+) -> GroupCoordinator:
     assert parallel_mode in [
-        "data", 
-        "pipeline", 
-        "tensor", 
-        "sequence", 
-        "classifier_free_guidance"
+        "data",
+        "pipeline",
+        "tensor",
+        "sequence",
+        "classifier_free_guidance",
     ], f"parallel_mode {parallel_mode} is not supported"
     if parallel_mode == "pipeline":
         return PipelineGroupCoordinator(
             group_ranks=group_ranks,
             local_rank=local_rank,
-            torch_distributed_backend=backend
+            torch_distributed_backend=backend,
         )
     else:
         return GroupCoordinator(
@@ -68,16 +72,17 @@ def init_model_parallel_group(group_ranks: List[List[int]], local_rank: int,
 
 _TP: Optional[GroupCoordinator] = None
 
+
 def get_tp_group() -> GroupCoordinator:
-    assert _TP is not None, ("tensor model parallel group is not initialized")
+    assert _TP is not None, "tensor model parallel group is not initialized"
     return _TP
 
 
 _PP: Optional[PipelineGroupCoordinator] = None
 
+
 def get_pp_group() -> PipelineGroupCoordinator:
-    assert _PP is not None, (
-        "pipeline model parallel group is not initialized")
+    assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
 
 
@@ -85,24 +90,27 @@ _SP: Optional[GroupCoordinator] = None
 _ULYSSES_PG = None
 _RING_PG = None
 
+
 def get_sp_group() -> GroupCoordinator:
-    assert _SP is not None, (
-        "pipeline model parallel group is not initialized")
+    assert _SP is not None, "pipeline model parallel group is not initialized"
     return _SP
 
 
 _DP: Optional[GroupCoordinator] = None
 
+
 def get_dp_group() -> GroupCoordinator:
-    assert _DP is not None, (
-        "pipeline model parallel group is not initialized")
+    assert _DP is not None, "pipeline model parallel group is not initialized"
     return _DP
 
 
 _CFG: Optional[GroupCoordinator] = None
+
+
 def get_cfg_group() -> GroupCoordinator:
-    assert _CFG is not None, (
-        "classifier_free_guidance parallel group is not initialized")
+    assert (
+        _CFG is not None
+    ), "classifier_free_guidance parallel group is not initialized"
     return _CFG
 
 
@@ -121,8 +129,9 @@ def graph_capture():
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    with get_tp_group().graph_capture() as context, get_pp_group(
-    ).graph_capture(context):
+    with get_tp_group().graph_capture() as context, get_pp_group().graph_capture(
+        context
+    ):
         yield context
 
 
@@ -132,23 +141,31 @@ def init_distributed_environment(
     distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
-    random_seed: int = 42
+    random_seed: int = 42,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
-        "distributed_init_method=%s backend=%s random_seed=%d", world_size, rank, local_rank,
-        distributed_init_method, backend, random_seed)
+        "distributed_init_method=%s backend=%s random_seed=%d",
+        world_size,
+        rank,
+        local_rank,
+        distributed_init_method,
+        backend,
+        random_seed,
+    )
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
-            "distributed environment")
+            "distributed environment"
+        )
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank,
-            timeout=datetime.timedelta(seconds=10))
+            timeout=datetime.timedelta(seconds=10),
+        )
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -164,8 +181,9 @@ def init_distributed_environment(
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
     else:
-        assert _WORLD.world_size == torch.distributed.get_world_size(), (
-            "world group already initialized with a different world size")
+        assert (
+            _WORLD.world_size == torch.distributed.get_world_size()
+        ), "world group already initialized with a different world size"
     set_random_seed(random_seed)
 
 
@@ -183,26 +201,32 @@ def initialize_model_parallel(
     Initialize model parallel groups.
 
     Arguments:
-        tensor_parallel_degree: number of GPUs used for tensor parallelism.
-        sequence_parallel_degree: number of GPUs used for sequence parallelism.
-        pipeline_parallel_degree: number of GPUs used for pipeline parallelism.
         data_parallel_degree: number of data parallelism groups.
-        split_batch: whether to split the batch dimension to accelerate CFG.
+        classifier_free_guidance_degree: number of GPUs used for Classifier Free Guidance (CFG)
+        sequence_parallel_degree: number of GPUs used for sequence parallelism.
+        ulysses_degree: number of GPUs used for ulysses sequence parallelism.
+        ring_degree: number of GPUs used for ring sequence parallelism.
+        tensor_parallel_degree: number of GPUs used for tensor parallelism.
+        pipeline_parallel_degree: number of GPUs used for pipeline parallelism.
+        backend: distributed backend of pytorch collective comm.
 
     Let's say we have a total of 16 GPUs denoted by g0 ... g15 and we
     use 2 groups to parallelize the batch dim(dp), 2 groups to parallelize
-    splited batch caused by CFG, and 2 GPUs to parallelize sequence. 
-    The present function will create 2 data parallel-groups, 
-    8 CFG group, 8 pipeline-parallel group, and 
+    splited batch caused by CFG, and 2 GPUs to parallelize sequence.
+
+    dp_degree (2) * cfg_degree (2) * sp_degree (2) * pp_degree (2) = 16.
+
+    The present function will create 2 data parallel-groups,
+    8 CFG group, 8 pipeline-parallel group, and
     8 sequence-parallel groups:
         2 data-parallel groups:
-            [g0, g1, g2, g3, g4, g5, g6, g7], 
+            [g0, g1, g2, g3, g4, g5, g6, g7],
             [g8, g9, g10, g11, g12, g13, g14, g15]
         8 CFG-parallel groups:
             [g0, g4], [g1, g5], [g2, g6], [g3, g7],
             [g8, g12], [g9, g13], [g10, g14], [g11, g15]
         8 sequence-parallel groups:
-            [g0, g1], [g2, g3], [g4, g5], [g6, g7], 
+            [g0, g1], [g2, g3], [g4, g5], [g6, g7],
             [g8, g9], [g10, g11], [g12, g13], [g14, g15]
         8 pipeline-parallel groups:
             [g0, g2], [g4, g6], [g8, g10], [g12, g14],
@@ -215,51 +239,55 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-    backend = backend or torch.distributed.get_backend(
-        get_world_group().device_group)
+    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
-    if (world_size !=
-            data_parallel_degree * classifier_free_guidance_degree * 
-            sequence_parallel_degree * tensor_parallel_degree * 
-            pipeline_parallel_degree):
+    if (
+        world_size
+        != data_parallel_degree
+        * classifier_free_guidance_degree
+        * sequence_parallel_degree
+        * tensor_parallel_degree
+        * pipeline_parallel_degree
+    ):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_parallel_degree ({tensor_parallel_degree}) x "
             f"pipeline_parallel_degree ({pipeline_parallel_degree}) x"
             f"sequence_parallel_degree ({sequence_parallel_degree}) x"
-            f"classifier_free_guidance_degree " 
+            f"classifier_free_guidance_degree "
             f"({classifier_free_guidance_degree}) x"
-            f"data_parallel_degree ({data_parallel_degree})")
+            f"data_parallel_degree ({data_parallel_degree})"
+        )
 
     # Build the data-parallel groups.
     num_data_parallel_devices: int = world_size // data_parallel_degree
     global _DP
-    assert _DP is None, ("data parallel group is already initialized")
+    assert _DP is None, "data parallel group is already initialized"
     group_ranks = []
     for i in range(data_parallel_degree):
-        ranks = list(range(i * num_data_parallel_devices,
-                          (i + 1) * num_data_parallel_devices))
+        ranks = list(
+            range(i * num_data_parallel_devices, (i + 1) * num_data_parallel_devices)
+        )
         group_ranks.append(ranks)
     _DP = init_model_parallel_group(
         group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank, 
+        local_rank=get_world_group().local_rank,
         backend=backend,
-        parallel_mode="data"
+        parallel_mode="data",
     )
 
     # Build the classifier_free_guidance parallel groups. (split batch)
-    num_cfg_parallel_groups: int = (world_size //
-                                    classifier_free_guidance_degree)
-    num_splited_batch_devices: int = (num_data_parallel_devices // 
-                                      classifier_free_guidance_degree)
+    num_cfg_parallel_groups: int = world_size // classifier_free_guidance_degree
+    num_splited_batch_devices: int = (
+        num_data_parallel_devices // classifier_free_guidance_degree
+    )
     global _CFG
-    assert _CFG is None, (
-        "classifier_free_guidance group is already initialized")
+    assert _CFG is None, "classifier_free_guidance group is already initialized"
     group_ranks = []
     for i in range(num_cfg_parallel_groups):
-        start_rank = ((i // num_splited_batch_devices) * 
-                      num_data_parallel_devices + 
-                      i % num_splited_batch_devices)
+        start_rank = (
+            i // num_splited_batch_devices
+        ) * num_data_parallel_devices + i % num_splited_batch_devices
         ranks = [
             start_rank + j * num_splited_batch_devices
             for j in range(classifier_free_guidance_degree)
@@ -267,43 +295,42 @@ def initialize_model_parallel(
         group_ranks.append(ranks)
     _CFG = init_model_parallel_group(
         group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank, 
+        local_rank=get_world_group().local_rank,
         backend=backend,
-        parallel_mode="classifier_free_guidance"
+        parallel_mode="classifier_free_guidance",
     )
-    
+
     # Build the sequence-parallel groups.
     num_sequence_parallel_devices: int = sequence_parallel_degree
-    num_sequence_parallel_groups: int = (world_size // 
-                                         num_sequence_parallel_devices)
+    num_sequence_parallel_groups: int = world_size // num_sequence_parallel_devices
     global _SP
-    assert _SP is None, (
-        "sequence parallel group is already initialized")
+    assert _SP is None, "sequence parallel group is already initialized"
     group_ranks = []
     for i in range(num_sequence_parallel_groups):
-        ranks = list(range(i * sequence_parallel_degree,
-                          (i + 1) * sequence_parallel_degree))
+        ranks = list(
+            range(i * sequence_parallel_degree, (i + 1) * sequence_parallel_degree)
+        )
         group_ranks.append(ranks)
     _SP = init_model_parallel_group(
         group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank, 
+        local_rank=get_world_group().local_rank,
         backend=backend,
-        parallel_mode="sequence"
+        parallel_mode="sequence",
     )
 
     if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
         global _ULYSSES_PG
         global _RING_PG
         from yunchang import set_seq_parallel_pg
+
         set_seq_parallel_pg(
             sp_ulysses_degree=ulysses_degree,
             sp_ring_degree=ring_degree,
             rank=get_world_group().rank_in_group,
             world_size=get_world_group().world_size,
         )
-    
 
-    #TODO: implement tensor parallel groups
+    # TODO: implement tensor parallel groups
     assert tensor_parallel_degree == 1, "Tensor parallelism is not implemented"
     # # Build the tensor model-parallel groups.
     # num_tensor_model_parallel_groups: int = (world_size //
@@ -320,19 +347,21 @@ def initialize_model_parallel(
     #                                 get_world_group().local_rank, backend)
 
     # Build the pipeline model-parallel groups.
-    num_pipeline_per_stage_devices: int = (sequence_parallel_degree * 
-                                           tensor_parallel_degree)
+    num_pipeline_per_stage_devices: int = (
+        sequence_parallel_degree * tensor_parallel_degree
+    )
     num_pipeline_parallel_devices: int = pipeline_parallel_degree
-    num_pipeline_parallel_groups: int = (data_parallel_degree * 
-                                         classifier_free_guidance_degree * 
-                                         num_pipeline_per_stage_devices)
+    num_pipeline_parallel_groups: int = (
+        data_parallel_degree
+        * classifier_free_guidance_degree
+        * num_pipeline_per_stage_devices
+    )
     global _PP
-    assert _PP is None, (
-        "pipeline model parallel group is already initialized")
+    assert _PP is None, "pipeline model parallel group is already initialized"
     group_ranks = []
     for i in range(num_pipeline_parallel_groups):
         start_rank = (
-            i // num_pipeline_per_stage_devices * num_splited_batch_devices 
+            i // num_pipeline_per_stage_devices * num_splited_batch_devices
             + i % num_pipeline_per_stage_devices
         )
         ranks = [
@@ -342,18 +371,15 @@ def initialize_model_parallel(
         group_ranks.append(ranks)
     _PP = init_model_parallel_group(
         group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank, 
+        local_rank=get_world_group().local_rank,
         backend=backend,
-        parallel_mode="pipeline"
+        parallel_mode="pipeline",
     )
 
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_DP is not None and 
-            _CFG is not None and 
-            _SP is not None and 
-            _PP is not None)
+    return _DP is not None and _CFG is not None and _SP is not None and _PP is not None
 
 
 _TP_STATE_PATCHED = False
@@ -388,6 +414,7 @@ def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
+
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
@@ -396,6 +423,7 @@ def get_tensor_model_parallel_rank():
 def get_pipeline_parallel_world_size():
     """Return world size for the pipeline model parallel group."""
     return get_pp_group().world_size
+
 
 def get_pipeline_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
@@ -406,6 +434,7 @@ def get_classifier_free_guidance_world_size():
     """Return world size for the classifier_free_guidance parallel group."""
     return get_cfg_group().world_size
 
+
 def get_classifier_free_guidance_rank():
     """Return my rank for the classifier_free_guidance parallel group."""
     return get_cfg_group().rank_in_group
@@ -415,6 +444,7 @@ def get_sequence_parallel_world_size():
     """Return world size for the sequence parallel group."""
     return get_sp_group().world_size
 
+
 def get_sequence_parallel_rank():
     """Return my rank for the sequence parallel group."""
     return get_sp_group().rank_in_group
@@ -423,6 +453,7 @@ def get_sequence_parallel_rank():
 def get_data_parallel_world_size():
     """Return world size for the data parallel group."""
     return get_dp_group().world_size
+
 
 def get_data_parallel_rank():
     """Return my rank for the data parallel group."""
@@ -435,12 +466,12 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
-    
+
     global _CFG
     if _CFG:
         _CFG.destroy()
     _CFG = None
-    
+
     global _SP
     if _SP:
         _SP.destroy()
@@ -455,7 +486,6 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
-
 
 
 def destroy_distributed_environment():

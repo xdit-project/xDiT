@@ -615,9 +615,9 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                 if num_pipeline_warmup_steps > 0
                 else latents
             )
-            patch_latents = list(latents.split(self.patches_height, dim=2))
+            patch_latents = list(latents.split(self.pipeline_patches_height, dim=2))
         elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
-            patch_latents = list(latents.split(self.patches_height, dim=2))
+            patch_latents = list(latents.split(self.pipeline_patches_height, dim=2))
         else:
             patch_latents = [None for _ in range(self.num_pipeline_patch)]
 

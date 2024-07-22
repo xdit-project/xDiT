@@ -21,6 +21,7 @@ from pipefuser.distributed import (
     get_pipeline_parallel_world_size,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
+    get_sequence_parallel_world_size,
     get_pp_group,
     get_cfg_group,
 )
@@ -191,6 +192,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
         if (
             get_pipeline_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
+            and get_sequence_parallel_world_size() == 1
         ):
             return self.module(
                 prompt=prompt,
@@ -640,12 +642,12 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             # patch_height = (
             #     latents.shape[2] + num_pipeline_patch - 1
             # ) // num_pipeline_patch
-            patch_latents = list(latents.split(self.patches_height, dim=2))
+            patch_latents = list(latents.split(self.pipeline_patches_height, dim=2))
         elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
             # patch_height = (
             #     latents.shape[2] + num_pipeline_patch - 1
             # ) // num_pipeline_patch
-            patch_latents = list(latents.split(self.patches_height, dim=2))
+            patch_latents = list(latents.split(self.pipeline_patches_height, dim=2))
         else:
             patch_latents = [None for _ in range(self.num_pipeline_patch)]
 

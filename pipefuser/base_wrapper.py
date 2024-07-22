@@ -22,7 +22,7 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
         self.patched_mode = False
         self.current_patch_idx = 0
         self.num_pipeline_patch: int = parallel_config.pp_config.num_pipeline_patch
-        self.patches_height: Optional[List[int]] = None
+        self.pipeline_patches_height: Optional[List[int]] = None
         self.patches_start_line_idx = [0]
         self.input_config: Optional[InputConfig] = None
 
@@ -68,6 +68,6 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
     def set_num_pipeline_patch_and_patches_height(
         self, 
         num_pipeline_patch: int,
-        patches_height: List[int]
+        pipeline_patches_height: List[int]
     ):
         pass

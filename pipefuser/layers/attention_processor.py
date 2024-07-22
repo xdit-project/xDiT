@@ -6,6 +6,11 @@ from torch.nn import functional as F
 from diffusers.models.attention import Attention
 
 from pipefuser.config.config import ParallelConfig, RuntimeConfig
+from pipefuser.distributed import (
+    get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
+    get_sp_group,
+)
 from pipefuser.layers.base_layer import PipeFuserLayerBaseWrapper
 from pipefuser.layers.register import PipeFuserLayerWrappersRegister
 from pipefuser.logger import init_logger
@@ -127,6 +132,11 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         head_dim = inner_dim // self.module.heads
 
         if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
+            queries = torch.split(query, query.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
+            keys = torch.split(key, key.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
+            values = torch.split(value, value.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
+            query = queries[get_sequence_parallel_rank()]
+            key, value = keys[get_sequence_parallel_rank()], values[get_sequence_parallel_rank()]
             query = query.view(batch_size, -1, self.module.heads, head_dim)
             key = key.view(batch_size, -1, self.module.heads, head_dim)
             value = value.view(batch_size, -1, self.module.heads, head_dim)
@@ -136,6 +146,7 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             hidden_states = hidden_states.reshape(
                 batch_size, -1, self.module.heads * head_dim
             )
+            hidden_states = get_sp_group().all_gather(hidden_states, -2)
 
         else:
             if HAS_FLASH_ATTN:

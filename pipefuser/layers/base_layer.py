@@ -34,12 +34,12 @@ class PipeFuserLayerBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMe
         self.current_patch_idx = 0
 
     def set_num_pipeline_patch_and_patches_height(
-        self, num_pipeline_patch: int, patches_height: List[int]
+        self, num_pipeline_patch: int, pipeline_patches_height: List[int]
     ):
         self.num_pipeline_patch = num_pipeline_patch
-        self.patches_height = patches_height
+        self.pipeline_patches_height = pipeline_patches_height
         self.patches_start_line_idx = [0] + [
-            sum(patches_height[:i]) for i in range(1, num_pipeline_patch + 1)
+            sum(pipeline_patches_height[:i]) for i in range(1, num_pipeline_patch + 1)
         ]
 
     def __getattr__(self, name: str):

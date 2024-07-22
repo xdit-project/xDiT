@@ -90,33 +90,33 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
             self.module.scheduler.set_input_config(input_config)
 
     def set_num_pipeline_patch_and_patches_height(
-        self, num_pipeline_patch: int, patches_height: List[int]
+        self, num_pipeline_patch: int, pipeline_patches_height: List[int]
     ):
         self.num_pipeline_patch = num_pipeline_patch
-        self.patches_height = patches_height
+        self.pipeline_patches_height = pipeline_patches_height
         if hasattr(self.module, "transformer") and hasattr(
             self.module.transformer, "set_num_pipeline_patch_and_patches_height"
         ):
             self.module.transformer.set_num_pipeline_patch_and_patches_height(
-                num_pipeline_patch, patches_height
+                num_pipeline_patch, pipeline_patches_height
             )
         if hasattr(self.module, "unet") and hasattr(
             self.module.unet, "set_num_pipeline_patch_and_patches_height"
         ):
             self.module.unet.set_num_pipeline_patch_and_patches_height(
-                num_pipeline_patch, patches_height
+                num_pipeline_patch, pipeline_patches_height
             )
         if hasattr(self.module, "vae") and hasattr(
             self.module.vae, "set_num_pipeline_patch_and_patches_height"
         ):
             self.module.vae.set_num_pipeline_patch_and_patches_height(
-                num_pipeline_patch, patches_height
+                num_pipeline_patch, pipeline_patches_height
             )
         if hasattr(self.module, "scheduler") and hasattr(
             self.module.scheduler, "set_num_pipeline_patch_and_patches_height"
         ):
             self.module.scheduler.set_num_pipeline_patch_and_patches_height(
-                num_pipeline_patch, patches_height
+                num_pipeline_patch, pipeline_patches_height
             )
 
     def set_patched_mode(self, patched: bool):
@@ -279,28 +279,28 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
             pipeline_patches_height = (
                 (pipeline_patches_height + patch_size - 1) // patch_size
             ) * patch_size
-            pipeline_patches_num = (
+            num_pipeline_patch = (
                 latents_height + pipeline_patches_height - 1
             ) // pipeline_patches_height
             pipeline_patches_height_list = [
-                pipeline_patches_height for _ in range(pipeline_patches_num - 1)
+                pipeline_patches_height for _ in range(num_pipeline_patch - 1)
             ]
             pipeline_patches_height_list.append(
-                latents_height - pipeline_patches_height * (pipeline_patches_num - 1)
+                latents_height - pipeline_patches_height * (num_pipeline_patch - 1)
             )
-            if pipeline_patches_num != self.num_pipeline_patch:
+            if num_pipeline_patch != self.num_pipeline_patch:
                 logger.warning(
                     f"Pipeline patches num changed from "
-                    f"{self.num_pipeline_patch} to {pipeline_patches_num} due "
+                    f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                     f"to input size and model feature"
                 )
             if (
-                pipeline_patches_num != self.num_pipeline_patch
-                or pipeline_patches_height_list != self.patches_height
+                num_pipeline_patch != self.num_pipeline_patch
+                or pipeline_patches_height_list != self.pipeline_patches_height
             ):
                 # sublayers activation cache reset
                 self.set_num_pipeline_patch_and_patches_height(
-                    pipeline_patches_num, pipeline_patches_height_list
+                    num_pipeline_patch, pipeline_patches_height_list
                 )
                 if get_pipeline_parallel_rank() != 0:
                     batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
@@ -333,7 +333,7 @@ class PipeFuserPipelineBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):
 
                 # reset pipeline communicator buffer
                 get_pp_group().set_recv_buffer(
-                    num_pipefusion_patches=pipeline_patches_num,
+                    num_pipefusion_patches=num_pipeline_patch,
                     patches_shape_list=patches_shape,
                     feature_map_shape=feature_map_shape,
                     dtype=self.runtime_config.dtype,

@@ -202,7 +202,7 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             )
             if self.patched_mode:
                 height = (
-                    self.patches_height[self.current_patch_idx]
+                    self.pipeline_patches_height[self.current_patch_idx]
                     // self.config.patch_size
                 )
             # unpatchify

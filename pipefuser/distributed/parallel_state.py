@@ -164,7 +164,6 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank,
-            timeout=datetime.timedelta(seconds=10),
         )
     # set the local rank
     # local_rank is not available in torch ProcessGroup,

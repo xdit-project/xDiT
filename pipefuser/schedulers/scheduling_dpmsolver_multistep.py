@@ -81,7 +81,8 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
                 [
                     model_output.shape[0],
                     model_output.shape[1],
-                    self.patches_start_line_idx[-1],
+                    # self.pipeline_patches_start_idx[-1],
+                    self.pp_patches_start_idx_local[-1],
                     model_output.shape[3],
                 ],
                 device=model_output.device,
@@ -100,9 +101,9 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
             self.model_outputs[-1][
                 :,
                 :,
-                self.patches_start_line_idx[
+                self.pp_patches_start_idx_local[
                     self.current_patch_idx
-                ] : self.patches_start_line_idx[self.current_patch_idx + 1],
+                ] : self.pp_patches_start_idx_local[self.current_patch_idx + 1],
                 :,
             ] = model_output
         else:
@@ -134,9 +135,8 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
                     output[
                         :,
                         :,
-                        self.patches_start_line_idx[
-                            self.current_patch_idx
-                        ] : self.patches_start_line_idx[self.current_patch_idx + 1],
+                        self.pp_patches_start_idx_local[self.current_patch_idx]:
+                        self.pp_patches_start_idx_local[self.current_patch_idx + 1],
                         :,
                     ]
                 )

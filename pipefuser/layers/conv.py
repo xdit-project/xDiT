@@ -45,8 +45,8 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
 
         output_h = h // self.num_pipeline_patch // stride
         idx = self.current_patch_idx
-        h_begin = self.patches_start_line_idx[idx] - padding
-        h_end = self.patches_start_line_idx[idx + 1] + padding
+        h_begin = self.pp_patches_start_idx_local[idx] - padding
+        h_end = self.pp_patches_start_idx_local[idx + 1] + padding
         final_padding = [padding, padding, 0, 0]
         if h_begin < 0:
             h_begin = 0
@@ -83,7 +83,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
                             [
                                 x.shape[0],
                                 x.shape[1],
-                                x.shape[2] * self.num_pipeline_patch,
+                                self.pp_patches_start_idx_local[-1],
                                 x.shape[3],
                             ],
                             dtype=x.dtype,
@@ -93,9 +93,9 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
                     self.activation_cache[
                         :,
                         :,
-                        self.patches_start_line_idx[
-                            self.current_patch_idx
-                        ] : self.patches_start_line_idx[self.current_patch_idx + 1] :,
+                        self.pp_patches_start_idx_local[self.current_patch_idx]: 
+                        self.pp_patches_start_idx_local[self.current_patch_idx+1],
+                        :,
                     ] = x
                     output = self.sliced_forward(self.activation_cache)
 

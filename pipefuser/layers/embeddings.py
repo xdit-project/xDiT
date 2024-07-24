@@ -29,26 +29,23 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
 
     def forward(self, latent):
         # is_warmup = self.in_warmup_stage()
+        height = self.patches_start_idx[-1][-1]
+        width = latent.shape[-1]
         if not self.patched_mode:
             if getattr(self.module, "pos_embed_max_size", None) is not None:
-                height, width = latent.shape[-2:]
+                pass
             else:
                 height, width = (
-                    latent.shape[-2] // self.module.patch_size,
-                    latent.shape[-1] // self.module.patch_size,
+                    height // self.module.patch_size,
+                    width // self.module.patch_size,
                 )
         else:
             if getattr(self.module, "pos_embed_max_size", None) is not None:
-                height, width = (
-                    latent.shape[-2] * self.num_pipeline_patch,
-                    latent.shape[-1],
-                )
+                pass
             else:
                 height, width = (
-                    latent.shape[-2]
-                    // self.module.patch_size
-                    * self.num_pipeline_patch,
-                    latent.shape[-1] // self.module.patch_size,
+                    height // self.module.patch_size,
+                    width // self.module.patch_size,
                 )
 
         latent = self.module.proj(latent)
@@ -87,9 +84,23 @@ class PipeFuserPatchEmbedWrapper(PipeFuserLayerBaseWrapper):
         b, c, h = pos_embed.shape
 
         if self.patched_mode:
-            pos_embed = pos_embed.view(b, self.num_pipeline_patch, -1, h)[
-                :, self.current_patch_idx
+            pos_embed = pos_embed[
+                :, 
+                self.pp_patches_token_start_end_idx[self.current_patch_idx][0]:
+                self.pp_patches_token_start_end_idx[self.current_patch_idx][1],
+                :,
             ]
+        else:
+            pos_embed_list = [
+                pos_embed[
+                    :,
+                    self.pp_patches_token_start_end_idx[i][0]:
+                    self.pp_patches_token_start_end_idx[i][1],
+                    :,
+                ]
+                for i in range(self.num_pipeline_patch)
+            ]
+            pos_embed = torch.cat(pos_embed_list, dim=1)
 
         if self.patched_mode:
             self.patch_step()

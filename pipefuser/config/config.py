@@ -124,7 +124,7 @@ class SequenceParallelConfig():
 
         if not HAS_LONG_CTX_ATTN and self.sp_degree > 1:
             raise ImportError(f"Sequence Parallel kit 'yunchang' not found but "
-                              f"sp_degree is {self.dp_degree}, please set it "
+                              f"sp_degree is {self.sp_degree}, please set it "
                               f"to 1 or install 'yunchang' to use it")
 
 

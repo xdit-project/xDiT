@@ -193,6 +193,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
         if (
             get_pipeline_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
+            and get_sequence_parallel_world_size() == 1
         ):
             return self.module(
                 prompt=prompt,

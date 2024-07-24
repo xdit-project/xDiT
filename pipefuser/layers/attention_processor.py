@@ -103,40 +103,38 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
 
         # the distributed sparse attention from pipefuser
         if self.num_pipeline_patch == 1:
-            full_kv = kv
+            local_kv = kv
         else:
             if not self.patched_mode:
-                full_kv = kv
+                local_kv = kv
             else:
-                full_kv = self.activation_cache
-                _, c, _ = full_kv.shape
+                local_kv = self.activation_cache
+                _, c, _ = local_kv.shape
                 token_start_idx = (
                     c
-                    // self.patches_start_line_idx[-1]
-                    * self.patches_start_line_idx[self.current_patch_idx]
+                    // self.pp_patches_start_idx_local[-1]
+                    * self.pp_patches_start_idx_local[self.current_patch_idx]
                 )
                 token_end_idx = (
                     c
-                    // self.patches_start_line_idx[-1]
-                    * self.patches_start_line_idx[self.current_patch_idx + 1]
+                    // self.pp_patches_start_idx_local[-1]
+                    * self.pp_patches_start_idx_local[self.current_patch_idx + 1]
                 )
-                # assert c % distri_config.pp_num_patch == 0
-                full_kv[:, token_start_idx:token_end_idx, :] = kv
+                local_kv[:, token_start_idx:token_end_idx, :] = kv
 
-            self.activation_cache = full_kv
+            self.activation_cache = local_kv
 
-        # naive attn
-        key, value = torch.split(full_kv, full_kv.shape[-1] // 2, dim=-1)
+        key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // self.module.heads
 
         if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
-            queries = torch.split(query, query.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
-            keys = torch.split(key, key.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
-            values = torch.split(value, value.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
-            query = queries[get_sequence_parallel_rank()]
-            key, value = keys[get_sequence_parallel_rank()], values[get_sequence_parallel_rank()]
+            # queries = torch.split(query, query.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
+            # keys = torch.split(key, key.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
+            # values = torch.split(value, value.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
+            # query = queries[get_sequence_parallel_rank()]
+            # key, value = keys[get_sequence_parallel_rank()], values[get_sequence_parallel_rank()]
             query = query.view(batch_size, -1, self.module.heads, head_dim)
             key = key.view(batch_size, -1, self.module.heads, head_dim)
             value = value.view(batch_size, -1, self.module.heads, head_dim)
@@ -146,7 +144,7 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             hidden_states = hidden_states.reshape(
                 batch_size, -1, self.module.heads * head_dim
             )
-            hidden_states = get_sp_group().all_gather(hidden_states, -2)
+            # hidden_states = get_sp_group().all_gather(hidden_states, -2)
 
         else:
             if HAS_FLASH_ATTN:

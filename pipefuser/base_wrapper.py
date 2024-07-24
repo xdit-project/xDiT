@@ -22,8 +22,12 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
         self.patched_mode = False
         self.current_patch_idx = 0
         self.num_pipeline_patch: int = parallel_config.pp_config.num_pipeline_patch
-        self.pipeline_patches_height: Optional[List[int]] = None
-        self.patches_start_line_idx = [0]
+        self.patches_height: Optional[List[List[int]]] = None
+        self.patches_start_idx: Optional[List[List[int]]] = None
+        self.pp_patches_height: Optional[List[int]] = None
+        self.pp_patches_start_idx_local: Optional[List[int]] = None
+        self.pp_patches_start_end_idx: Optional[List[List[int]]] = None
+        self.pp_patches_token_start_end_idx: Optional[List[List[int]]] = None
         self.input_config: Optional[InputConfig] = None
 
     def __getattr__(self, name: str):
@@ -67,7 +71,12 @@ class PipeFuserBaseWrapper(metaclass=ABCMeta):
     @abstractmethod
     def set_num_pipeline_patch_and_patches_height(
         self, 
-        num_pipeline_patch: int,
-        pipeline_patches_height: List[int]
+        num_pipeline_patch: int, 
+        patches_height: List[List[int]], 
+        patches_start_idx: List[List[int]],
+        pp_patches_height: List[int],
+        pp_patches_start_idx_local: List[int],
+        pp_patches_start_end_idx: List[List[int]],
+        pp_patches_token_start_end_idx: List[List[int]],
     ):
         pass

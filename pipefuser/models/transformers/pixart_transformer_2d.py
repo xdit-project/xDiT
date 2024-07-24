@@ -15,6 +15,7 @@ from pipefuser.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
+    get_sequence_parallel_world_size,
 )
 from pipefuser.logger import init_logger
 
@@ -85,7 +86,7 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
-        if get_pipeline_parallel_world_size() == 1:
+        if get_pipeline_parallel_world_size() == 1 and get_sequence_parallel_world_size() == 1:
             return self.module(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
@@ -202,9 +203,11 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             )
             if self.patched_mode:
                 height = (
-                    self.pipeline_patches_height[self.current_patch_idx]
+                    self.pp_patches_height[self.current_patch_idx]
                     // self.config.patch_size
                 )
+            else:
+                height = sum(self.pp_patches_height) // self.config.patch_size
             # unpatchify
             hidden_states = hidden_states.reshape(
                 shape=(

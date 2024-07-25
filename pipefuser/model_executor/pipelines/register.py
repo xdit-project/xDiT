@@ -3,7 +3,7 @@ from typing import Dict, Type, Union
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from pipefuser.logger import init_logger
-from pipefuser.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
+from pipefuser.model_executor.pipelines import PipeFuserPipelineBaseWrapper
 
 logger = init_logger(__name__)
 

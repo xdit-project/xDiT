@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from pipefuser.config.config import InputConfig, ParallelConfig, RuntimeConfig
-from pipefuser.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 
 
 class PipeFuserLayerBaseWrapper(nn.Module, PipeFuserBaseWrapper, metaclass=ABCMeta):

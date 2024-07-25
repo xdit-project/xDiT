@@ -11,8 +11,8 @@ from pipefuser.distributed import (
     get_sequence_parallel_rank,
     get_sp_group,
 )
-from pipefuser.layers.base_layer import PipeFuserLayerBaseWrapper
-from pipefuser.layers.register import PipeFuserLayerWrappersRegister
+from pipefuser.model_executor.layers import PipeFuserLayerBaseWrapper
+from pipefuser.model_executor.layers import PipeFuserLayerWrappersRegister
 from pipefuser.logger import init_logger
 from pipefuser.envs import PACKAGES_CHECKER
 

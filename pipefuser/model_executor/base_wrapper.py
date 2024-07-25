@@ -1,9 +1,8 @@
 from abc import abstractmethod, ABCMeta
 from functools import wraps
 from typing import Any, List, Optional
-from torch import nn
 
-from pipefuser.config.config import InputConfig, ParallelConfig, RuntimeConfig
+from pipefuser.config import InputConfig, ParallelConfig, RuntimeConfig
 
 
 class PipeFuserBaseWrapper(metaclass=ABCMeta):

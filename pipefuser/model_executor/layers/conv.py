@@ -2,10 +2,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.layers.base_layer import PipeFuserLayerBaseWrapper
+from pipefuser.config import ParallelConfig, RuntimeConfig
+from pipefuser.model_executor.layers import PipeFuserLayerBaseWrapper
 from pipefuser.logger import init_logger
-from pipefuser.layers.register import PipeFuserLayerWrappersRegister
+from pipefuser.model_executor.layers import PipeFuserLayerWrappersRegister
 from pipefuser.distributed import (
     get_pipeline_parallel_world_size,
 )

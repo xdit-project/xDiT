@@ -3,17 +3,18 @@ from typing import Dict, List, Tuple, Callable, Optional, Union
 
 import torch
 import torch.distributed
-from diffusers import PixArtSigmaPipeline
-from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
+import torch.nn as nn
+from diffusers import PixArtAlphaPipeline
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
     ASPECT_RATIO_256_BIN,
     ASPECT_RATIO_512_BIN,
     ASPECT_RATIO_1024_BIN,
-    ASPECT_RATIO_2048_BIN,
-    retrieve_timesteps,
 )
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import retrieve_timesteps
+from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
-from pipefuser.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 
 from pipefuser.distributed import (
     get_pipeline_parallel_rank,
@@ -27,15 +28,15 @@ from pipefuser.distributed import (
     get_sp_group
 )
 from pipefuser.config import ParallelConfig, RuntimeConfig
-from pipefuser.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
+from pipefuser.model_executor.pipelines import PipeFuserPipelineBaseWrapper
 from .register import PipeFuserPipelineWrapperRegister
 
 
-@PipeFuserPipelineWrapperRegister.register(PixArtSigmaPipeline)
-class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
+@PipeFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)
+class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
     def __init__(
         self,
-        pipeline: PixArtSigmaPipeline,
+        pipeline: PixArtAlphaPipeline,
         parallel_config: ParallelConfig,
         runtime_config: RuntimeConfig,
     ):
@@ -53,7 +54,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
         runtime_config: RuntimeConfig,
         **kwargs,
     ):
-        pipeline = PixArtSigmaPipeline.from_pretrained(
+        pipeline = PixArtAlphaPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
         return cls(pipeline, parallel_config, runtime_config)
@@ -105,7 +106,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
         callback_steps: int = 1,
         clean_caption: bool = True,
         use_resolution_binning: bool = True,
-        max_sequence_length: int = 300,
+        max_sequence_length: int = 120,
         **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
         """
@@ -180,7 +181,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                 If set to `True`, the requested height and width are first mapped to the closest resolutions using
                 `ASPECT_RATIO_1024_BIN`. After the produced latents are decoded into images, they are resized back to
                 the requested resolution. Useful for generating non-square images.
-            max_sequence_length (`int` defaults to 300): Maximum sequence length to use with the `prompt`.
+            max_sequence_length (`int` defaults to 120): Maximum sequence length to use with the `prompt`.
 
         Examples:
 
@@ -236,13 +237,16 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
             or self.input_config.width
             or self.transformer.config.sample_size * self.vae_scale_factor
         )
+
+        if "mask_feature" in kwargs:
+            deprecation_message = "The use of `mask_feature` is deprecated. It is no longer used in any computation and that doesn't affect the end results. It will be removed in a future version."
+            deprecate("mask_feature", "1.0.0", deprecation_message, standard_warn=False)
+
         # 1. Check inputs. Raise error if not correct
         orig_height = None
         orig_width = None
         if use_resolution_binning:
-            if self.transformer.config.sample_size == 256:
-                aspect_ratio_bin = ASPECT_RATIO_2048_BIN
-            elif self.transformer.config.sample_size == 128:
+            if self.transformer.config.sample_size == 128:
                 aspect_ratio_bin = ASPECT_RATIO_1024_BIN
             elif self.transformer.config.sample_size == 64:
                 aspect_ratio_bin = ASPECT_RATIO_512_BIN
@@ -256,11 +260,11 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
             )
         if isinstance(prompt, str):
             self._check_input_change_and_adjust(
-                batch_size=1, height=height, width=width, orig_height=orig_height, orig_width=orig_width,
+                batch_size=1, height=height, width=width
             )
         elif isinstance(prompt, List):
             self._check_input_change_and_adjust(
-                batch_size=len(prompt), height=height, width=width, orig_height=orig_height, orig_width=orig_width,
+                batch_size=len(prompt), height=height, width=width
             )
 
         self.check_inputs(
@@ -350,6 +354,24 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
 
         # 6.1 Prepare micro-conditions.
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+        if self.transformer.config.sample_size == 128:
+            resolution = torch.tensor([height, width]).repeat(
+                batch_size * num_images_per_prompt, 1
+            )
+            aspect_ratio = torch.tensor([float(height / width)]).repeat(
+                batch_size * num_images_per_prompt, 1
+            )
+            resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
+            aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
+
+            if (
+                do_classifier_free_guidance
+                and get_classifier_free_guidance_world_size() == 1
+            ):
+                resolution = torch.cat([resolution, resolution], dim=0)
+                aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
+
+            added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
 
         # 7. Denoising loop
         num_warmup_steps = max(
@@ -521,7 +543,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                     for sp_patch_idx in range(sp_degree)
                 ]
             latents = torch.cat(latents_list, dim=-2)
-
+            
         return latents
 
     # * implement of pipefusion

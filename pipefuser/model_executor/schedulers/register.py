@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from pipefuser.logger import init_logger
-from pipefuser.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
+from pipefuser.model_executor.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
 
 logger = init_logger(__name__)
 

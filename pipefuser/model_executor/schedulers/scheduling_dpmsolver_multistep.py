@@ -7,14 +7,14 @@ from diffusers.utils.torch_utils import randn_tensor
 import torch
 import torch.distributed
 
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
+from pipefuser.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_pipeline_parallel_world_size,
 )
-from pipefuser.schedulers import (
+from pipefuser.model_executor.schedulers import (
     PipeFuserSchedulerWrappersRegister,
 )
-from pipefuser.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
+from pipefuser.model_executor.schedulers.base_scheduler import PipeFuserSchedulerBaseWrapper
 
 
 @PipeFuserSchedulerWrappersRegister.register(DPMSolverMultistepScheduler)

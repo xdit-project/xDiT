@@ -9,7 +9,7 @@ from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.utils import is_torch_version
 
-from pipefuser.models.transformers import PipeFuserTransformerBaseWrapper
+from pipefuser.model_executor.models.transformers import PipeFuserTransformerBaseWrapper
 from .register import PipeFuserTransformerWrappersRegister
 from pipefuser.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (

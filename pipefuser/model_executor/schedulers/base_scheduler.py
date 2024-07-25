@@ -2,7 +2,7 @@ from abc import abstractmethod, ABCMeta
 from typing import List
 
 from diffusers.schedulers import SchedulerMixin
-from pipefuser.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 from pipefuser.config.config import InputConfig, ParallelConfig, RuntimeConfig
 
 class PipeFuserSchedulerBaseWrapper(PipeFuserBaseWrapper, metaclass=ABCMeta):

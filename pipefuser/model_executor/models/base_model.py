@@ -3,10 +3,10 @@ from typing import Dict, List, Optional, Type, Union
 from functools import wraps
 
 import torch.nn as nn
-from pipefuser.config.config import InputConfig, ParallelConfig, RuntimeConfig
-from pipefuser.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.config import InputConfig, ParallelConfig, RuntimeConfig
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.model_executor.layers import *
 from pipefuser.distributed import get_world_group
-from pipefuser.layers import *
 from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)

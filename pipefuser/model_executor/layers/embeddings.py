@@ -3,9 +3,9 @@ import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
 import torch.distributed
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.layers.base_layer import PipeFuserLayerBaseWrapper
-from pipefuser.layers.register import PipeFuserLayerWrappersRegister
+from pipefuser.config import ParallelConfig, RuntimeConfig
+from pipefuser.model_executor.layers import PipeFuserLayerBaseWrapper
+from pipefuser.model_executor.layers import PipeFuserLayerWrappersRegister
 from pipefuser.logger import init_logger
 
 logger = init_logger(__name__)

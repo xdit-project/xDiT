@@ -25,9 +25,9 @@ from pipefuser.distributed import (
     get_pp_group,
     get_world_group,
 )
-from pipefuser.base_wrapper import PipeFuserBaseWrapper
-from pipefuser.schedulers import *
-from pipefuser.models.transformers import *
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
+from pipefuser.model_executor.schedulers import *
+from pipefuser.model_executor.models.transformers import *
 
 
 logger = init_logger(__name__)

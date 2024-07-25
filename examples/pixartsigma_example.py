@@ -1,7 +1,7 @@
 import time
 import torch
 import torch.distributed
-from pipefuser.pipelines import PipeFuserPixArtSigmaPipeline
+from pipefuser.model_executor.pipelines import PipeFuserPixArtSigmaPipeline
 from pipefuser.config import EngineArgs, FlexibleArgumentParser
 from pipefuser.distributed import (
     get_world_group, 

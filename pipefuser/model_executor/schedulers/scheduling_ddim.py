@@ -2,8 +2,8 @@ import torch
 from typing import Union, Tuple, Optional
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler, DDIMSchedulerOutput
 
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
-from pipefuser.schedulers import (
+from pipefuser.config import ParallelConfig, RuntimeConfig
+from pipefuser.model_executor.schedulers import (
     PipeFuserSchedulerWrappersRegister,
     PipeFuserSchedulerBaseWrapper
 )

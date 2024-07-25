@@ -10,7 +10,7 @@ from pipefuser.distributed import (
     get_sequence_parallel_world_size,
 )
 from pipefuser.logger import init_logger
-from pipefuser.models.base_model import PipeFuserModelBaseWrapper
+from pipefuser.model_executor.models import PipeFuserModelBaseWrapper
 
 logger = init_logger(__name__)
 

@@ -3,6 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from pipefuser.config import ParallelConfig, RuntimeConfig
+from pipefuser.distributed.parallel_state import get_sequence_parallel_world_size
+from pipefuser.distributed.runtime_state import get_runtime_state
 from pipefuser.model_executor.layers import PipeFuserLayerBaseWrapper
 from pipefuser.logger import init_logger
 from pipefuser.model_executor.layers import PipeFuserLayerWrappersRegister
@@ -18,16 +20,10 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
     def __init__(
         self,
         conv2d: nn.Conv2d,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
         *,
         is_first_layer: bool = True,
     ):
-        super().__init__(
-            module=conv2d,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
-        )
+        super().__init__(module=conv2d,)
         self.is_first_layer = is_first_layer
 
     def naive_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -43,10 +39,10 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
-        output_h = h // self.num_pipeline_patch // stride
-        idx = self.current_patch_idx
-        h_begin = self.pp_patches_start_idx_local[idx] - padding
-        h_end = self.pp_patches_start_idx_local[idx + 1] + padding
+        idx = get_runtime_state().pipeline_patch_idx
+        pp_patches_start_idx_local = get_runtime_state().pp_patches_start_idx_local
+        h_begin = pp_patches_start_idx_local[idx] - padding
+        h_end = pp_patches_start_idx_local[idx + 1] + padding
         final_padding = [padding, padding, 0, 0]
         if h_begin < 0:
             h_begin = 0
@@ -67,14 +63,17 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         if (
-            get_pipeline_parallel_world_size() == 1
+            (
+                get_pipeline_parallel_world_size() == 1 
+                and get_sequence_parallel_world_size() == 1
+            )
             or self.module.kernel_size == (1, 1)
             or self.module.kernel_size == 1
         ):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
-                if not self.patched_mode or self.num_pipeline_patch == 1:
+                if not get_runtime_state().patch_mode or get_runtime_state().num_pipeline_patch == 1:
                     self.activation_cache = x
                     output = self.naive_forward(self.activation_cache)
                 else:
@@ -83,7 +82,7 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
                             [
                                 x.shape[0],
                                 x.shape[1],
-                                self.pp_patches_start_idx_local[-1],
+                                get_runtime_state().pp_patches_start_idx_local[-1],
                                 x.shape[3],
                             ],
                             dtype=x.dtype,
@@ -93,8 +92,8 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
                     self.activation_cache[
                         :,
                         :,
-                        self.pp_patches_start_idx_local[self.current_patch_idx]: 
-                        self.pp_patches_start_idx_local[self.current_patch_idx+1],
+                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]: 
+                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx+1],
                         :,
                     ] = x
                     output = self.sliced_forward(self.activation_cache)
@@ -157,6 +156,4 @@ class PipeFuserConv2dWrapper(PipeFuserLayerBaseWrapper):
             #             if distri_config.mode != "no_sync":
             #                 self.comm_manager.enqueue(self.idx, boundary)
 
-        if self.patched_mode:
-            self.patch_step()
         return output

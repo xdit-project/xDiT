@@ -41,38 +41,14 @@ class ModelConfig:
     trust_remote_code: bool = False
 
 @dataclass
-class InputConfig:
-    height: int = 1024
-    width: int = 1024
-    orig_height: Optional[int] = None
-    orig_width: Optional[int] = None
-    batch_size: Optional[int] = None
-    prompt: Union[str, List[str]] = ""
-    negative_prompt: Union[str, List[str]] = ""
-    num_inference_steps: int = 20
-    use_resolution_binning: bool = True,
-
-    def __post_init__(self):
-        if isinstance(self.prompt, list):
-            assert (len(self.prompt) == len(self.negative_prompt) or 
-                    len(self.negative_prompt) == 0), (
-                "prompts and negative_prompts must have the same quantities"
-            )
-
-
-@dataclass
 class RuntimeConfig:
-    seed: int = 42
     warmup_steps: int = 1
-    output_type: str = "pil"
     dtype: torch.dtype = torch.float16
     use_cuda_graph: bool = False
     use_parallel_vae: bool = False
     use_profiler: bool = False
 
     def __post_init__(self):
-        assert self.output_type in ["pil", "latent"], (
-            "output_pil must be either 'pil' or 'latent'")
         if self.use_cuda_graph:
             check_env()
 
@@ -167,8 +143,6 @@ class PipeFusionParallelConfig():
             logger.warning(f"Pipefusion degree is 1, pipeline will not be used,"
                            f"num_pipeline_patch will be ignored")
             self.num_pipeline_patch = 1
-        
-
 
 @dataclass
 class ParallelConfig():
@@ -222,17 +196,32 @@ class ParallelConfig():
 @dataclass(frozen=True)
 class EngineConfig:
     model_config: ModelConfig
-    input_config: InputConfig
     runtime_config: RuntimeConfig
     parallel_config: ParallelConfig
-
-    def __post_init__(self):
-        assert self.input_config.batch_size >= self.parallel_config.dp_degree, (
-            "dp_degree must be less than or equal to batch_size"
-        )
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.
         """
         return dict(
             (field.name, getattr(self, field.name)) for field in fields(self))
+
+@dataclass
+class InputConfig:
+    height: int = 1024
+    width: int = 1024
+    use_resolution_binning: bool = True,
+    batch_size: Optional[int] = None
+    prompt: Union[str, List[str]] = ""
+    negative_prompt: Union[str, List[str]] = ""
+    num_inference_steps: int = 20
+    seed: int = 42
+    output_type: str = "pil"
+
+    def __post_init__(self):
+        if isinstance(self.prompt, list):
+            assert (len(self.prompt) == len(self.negative_prompt) or 
+                    len(self.negative_prompt) == 0), (
+                "prompts and negative_prompts must have the same quantities"
+            )
+        assert self.output_type in ["pil", "latent"], (
+            "output_pil must be either 'pil' or 'latent'")

@@ -5,12 +5,12 @@ from torch import nn
 from torch.nn import functional as F
 from diffusers.models.attention import Attention
 
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
 )
+from pipefuser.distributed.runtime_state import get_runtime_state
 from pipefuser.model_executor.layers import PipeFuserLayerBaseWrapper
 from pipefuser.model_executor.layers import PipeFuserLayerWrappersRegister
 from pipefuser.logger import init_logger
@@ -27,15 +27,9 @@ class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
     def __init__(
         self,
         attn: Attention,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
     ):
-        super().__init__(
-            module=attn,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
-        )
-        if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
+        super().__init__(module=attn)
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import LongContextAttention, UlyssesAttention
 
             if HAS_FLASH_ATTN:
@@ -76,14 +70,8 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
     def __init__(
         self,
         attn: Attention,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
     ):
-        super().__init__(
-            attn=attn,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
-        )
+        super().__init__(attn=attn)
 
     def _forward(
         self,
@@ -102,23 +90,23 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         kv = self.to_kv(encoder_hidden_states)
 
         # the distributed sparse attention from pipefuser
-        if self.num_pipeline_patch == 1:
+        if get_runtime_state().num_pipeline_patch == 1:
             local_kv = kv
         else:
-            if not self.patched_mode:
+            if not get_runtime_state().patch_mode:
                 local_kv = kv
             else:
                 local_kv = self.activation_cache
                 _, c, _ = local_kv.shape
                 token_start_idx = (
                     c
-                    // self.pp_patches_start_idx_local[-1]
-                    * self.pp_patches_start_idx_local[self.current_patch_idx]
+                    // get_runtime_state().pp_patches_start_idx_local[-1]
+                    * get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]
                 )
                 token_end_idx = (
                     c
-                    // self.pp_patches_start_idx_local[-1]
-                    * self.pp_patches_start_idx_local[self.current_patch_idx + 1]
+                    // get_runtime_state().pp_patches_start_idx_local[-1]
+                    * get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1]
                 )
                 local_kv[:, token_start_idx:token_end_idx, :] = kv
 
@@ -129,7 +117,7 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         inner_dim = key.shape[-1]
         head_dim = inner_dim // self.module.heads
 
-        if HAS_LONG_CTX_ATTN and self.parallel_config.sp_degree > 1:
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             # queries = torch.split(query, query.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
             # keys = torch.split(key, key.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
             # values = torch.split(value, value.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
@@ -144,7 +132,6 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
             hidden_states = hidden_states.reshape(
                 batch_size, -1, self.module.heads * head_dim
             )
-            # hidden_states = get_sp_group().all_gather(hidden_states, -2)
 
         else:
             if HAS_FLASH_ATTN:
@@ -203,7 +190,4 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         **kwargs,
     ) -> torch.FloatTensor:
         output = self._forward(hidden_states, scale=scale)
-
-        if self.patched_mode:
-            self.patch_step()
         return output

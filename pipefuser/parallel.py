@@ -7,8 +7,8 @@ from pipefuser.distributed import (
 )
 from pipefuser.config import EngineConfig
 from pipefuser.logger import init_logger
-from pipefuser.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
-from pipefuser.pipelines.register import PipeFuserPipelineWrapperRegister
+from pipefuser.model_executor.pipelines.base_pipeline import PipeFuserPipelineBaseWrapper
+from pipefuser.model_executor.pipelines.register import PipeFuserPipelineWrapperRegister
 
 logger = init_logger(__name__)
 

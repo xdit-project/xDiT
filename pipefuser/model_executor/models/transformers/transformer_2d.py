@@ -9,6 +9,7 @@ from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.utils import is_torch_version
 
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 from pipefuser.model_executor.models.transformers import PipeFuserTransformerBaseWrapper
 from .register import PipeFuserTransformerWrappersRegister
 from pipefuser.config import ParallelConfig, RuntimeConfig
@@ -26,19 +27,15 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
     def __init__(
         self,
         transformer: Transformer2DModel,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
     ):
         super().__init__(
             self,
             transformer=transformer,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn1"],
         )
 
-    @PipeFuserTransformerBaseWrapper.forward_check_condition
+    @PipeFuserBaseWrapper.forward_check_condition
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -229,11 +226,6 @@ class PipeFuserTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 )
         else:
             output = hidden_states
-
-        # if self.in_warmup_stage():
-        #     self.round_step()
-        # else:
-        #     self.patch_step()
 
         if not return_dict:
             return (output,)

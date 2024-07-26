@@ -1,14 +1,14 @@
 from abc import abstractmethod, ABCMeta
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Tuple, Type
 import torch
 import torch.nn as nn
 
-from pipefuser.config.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
 )
+from pipefuser.distributed.runtime_state import get_runtime_state
 from pipefuser.logger import init_logger
 from pipefuser.model_executor.models import PipeFuserModelBaseWrapper
 
@@ -20,31 +20,21 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
     def __init__(
         self,
         transformer: nn.Module,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
         submodule_classes_to_wrap: List[Type] = [],
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
     ):
         transformer = self._convert_transformer_for_parallel(
             transformer,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
             submodule_classes_to_wrap=submodule_classes_to_wrap,
             submodule_name_to_wrap=submodule_name_to_wrap,
             submodule_addition_args=submodule_addition_args,
         )
-        super().__init__(
-            module=transformer,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
-        )
+        super().__init__(module=transformer)
 
     def _convert_transformer_for_parallel(
         self,
         transformer: nn.Module,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
         submodule_classes_to_wrap: List[Type] = [],
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
@@ -53,12 +43,8 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
             and get_sequence_parallel_world_size() == 1:
             return transformer
         else:
-            transformer = self._split_transformer_blocks(
-                transformer, parallel_config=parallel_config
-            )
+            transformer = self._split_transformer_blocks(transformer)
             return self._wrap_layers(
-                parallel_config=parallel_config,
-                runtime_config=runtime_config,
                 model=transformer,
                 submodule_classes_to_wrap=submodule_classes_to_wrap,
                 submodule_name_to_wrap=submodule_name_to_wrap,
@@ -68,7 +54,6 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
     def _split_transformer_blocks(
         self,
         transformer: nn.Module,
-        parallel_config: ParallelConfig,
     ):
         if not hasattr(transformer, "transformer_blocks"):
             raise AttributeError(
@@ -79,10 +64,10 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
             )
 
         # transformer layer split
+        attn_layer_num_for_pp = get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
         pp_rank = get_pipeline_parallel_rank()
         pp_world_size = get_pipeline_parallel_world_size()
-        if parallel_config.pp_config.attn_layer_num_for_pp is not None:
-            attn_layer_num_for_pp = parallel_config.pp_config.attn_layer_num_for_pp
+        if attn_layer_num_for_pp is not None:
             assert sum(attn_layer_num_for_pp) == len(transformer.transformer_blocks), (
                 "Sum of attn_layer_num_for_pp should be equal to the "
                 "number of transformer blocks"
@@ -117,3 +102,17 @@ class PipeFuserTransformerBaseWrapper(PipeFuserModelBaseWrapper, metaclass=ABCMe
     @abstractmethod
     def forward(self, *args, **kwargs):
         pass
+
+    def _get_patch_height_width(self) -> Tuple[int, int]:
+        patch_size = get_runtime_state().backbone_patch_size
+        vae_scale_factor = get_runtime_state().vae_scale_factor
+        width = get_runtime_state().input_config.width // patch_size // vae_scale_factor
+        
+        if get_runtime_state().patch_mode:
+            height = (
+                get_runtime_state().pp_patches_height[get_runtime_state().pipeline_patch_idx]
+                // patch_size
+            )
+        else:
+            height = sum(get_runtime_state().pp_patches_height) // patch_size 
+        return height, width

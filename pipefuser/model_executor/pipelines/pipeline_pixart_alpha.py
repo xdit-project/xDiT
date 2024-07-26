@@ -14,6 +14,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import retrieve_time
 from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
+from pipefuser.config.config import EngineConfig
 from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 
 from pipefuser.distributed import (
@@ -37,27 +38,24 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
     def __init__(
         self,
         pipeline: PixArtAlphaPipeline,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
+        engine_config: EngineConfig,
     ):
         super().__init__(
             pipeline=pipeline,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
+            engine_config=engine_config
         )
 
     @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
+        engine_config: EngineConfig,
         **kwargs,
     ):
         pipeline = PixArtAlphaPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
-        return cls(pipeline, parallel_config, runtime_config)
+        return cls(pipeline, engine_config)
 
     @PipeFuserBaseWrapper.forward_check_condition
     def prepare_run(self, steps: int = 3, sync_steps: int = 1):
@@ -74,9 +72,7 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             num_pipeline_warmup_steps=sync_steps,
             output_type="latent",
-            generator=torch.Generator(device="cuda").manual_seed(
-                self.runtime_config.seed
-            ),
+            generator=torch.Generator(device="cuda").manual_seed(42),
         )
 
     @PipeFuserBaseWrapper.forward_check_condition
@@ -224,27 +220,14 @@ class PipeFuserPixArtAlphaPipeline(PipeFuserPipelineBaseWrapper):
             )
 
         # 0. parallel environment setting
-        # TODO(Eigensystem) move check to decorator
-        height = (
-            height
-            or self.input_config.orig_height
-            or self.input_config.height
-            or self.transformer.config.sample_size * self.vae_scale_factor
-        )
-        width = (
-            width
-            or self.input_config.orig_width
-            or self.input_config.width
-            or self.transformer.config.sample_size * self.vae_scale_factor
-        )
+        height = height or self.transformer.config.sample_size * self.vae_scale_factor
+        width = width or self.transformer.config.sample_size * self.vae_scale_factor
 
         if "mask_feature" in kwargs:
             deprecation_message = "The use of `mask_feature` is deprecated. It is no longer used in any computation and that doesn't affect the end results. It will be removed in a future version."
             deprecate("mask_feature", "1.0.0", deprecation_message, standard_warn=False)
 
         # 1. Check inputs. Raise error if not correct
-        orig_height = None
-        orig_width = None
         if use_resolution_binning:
             if self.transformer.config.sample_size == 128:
                 aspect_ratio_bin = ASPECT_RATIO_1024_BIN

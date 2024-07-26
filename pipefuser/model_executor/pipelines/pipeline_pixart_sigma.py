@@ -13,6 +13,8 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
 )
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
+from pipefuser.config.config import EngineConfig, InputConfig
+from pipefuser.distributed.runtime_state import get_runtime_state
 from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 
 from pipefuser.distributed import (
@@ -36,51 +38,47 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
     def __init__(
         self,
         pipeline: PixArtSigmaPipeline,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
+        engine_config: EngineConfig,
     ):
         super().__init__(
             pipeline=pipeline,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
+            engine_config=engine_config
         )
 
     @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
+        engine_config: EngineConfig,
         **kwargs,
     ):
         pipeline = PixArtSigmaPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
-        return cls(pipeline, parallel_config, runtime_config)
+        return cls(pipeline, engine_config)
 
-    @PipeFuserBaseWrapper.forward_check_condition
-    def prepare_run(self, steps: int = 3, sync_steps: int = 1):
+    def prepare_run(self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1):
         prompt = (
-            [""] * self.input_config.batch_size
-            if self.input_config.batch_size > 1
+            [""] * input_config.batch_size
+            if input_config.batch_size > 1
             else ""
         )
+        warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        get_runtime_state().runtime_config.warmup_steps = sync_steps
         self.__call__(
-            height=self.input_config.height,
-            width=self.input_config.width,
+            height=input_config.height,
+            width=input_config.width,
             prompt=prompt,
-            use_resolution_binning=self.input_config.use_resolution_binning,
+            use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
-            num_pipeline_warmup_steps=sync_steps,
             output_type="latent",
-            generator=torch.Generator(device="cuda").manual_seed(
-                self.runtime_config.seed
-            ),
+            generator=torch.Generator(device="cuda").manual_seed(42),
         )
+        get_runtime_state().runtime_config.warmup_steps = warmup_steps
 
-    @PipeFuserBaseWrapper.forward_check_condition
-    @PipeFuserPipelineBaseWrapper.enable_data_parallel
     @torch.no_grad()
+    @PipeFuserPipelineBaseWrapper.enable_data_parallel
+    @PipeFuserPipelineBaseWrapper.check_to_use_naive_forward
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -190,55 +188,41 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                 returned where the first element is a list with the generated images
         """
         # * check pp world size
-        if (
-            get_pipeline_parallel_world_size() == 1
-            and get_classifier_free_guidance_world_size() == 1
-            and get_sequence_parallel_world_size() == 1
-        ):
-            return self.module(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=num_inference_steps,
-                timesteps=timesteps,
-                sigmas=sigmas,
-                guidance_scale=guidance_scale,
-                num_images_per_prompt=num_images_per_prompt,
-                height=height,
-                width=width,
-                eta=eta,
-                generator=generator,
-                latents=latents,
-                prompt_embeds=prompt_embeds,
-                prompt_attention_mask=prompt_attention_mask,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_prompt_attention_mask=negative_prompt_attention_mask,
-                output_type=output_type,
-                return_dict=return_dict,
-                callback=callback,
-                callback_steps=callback_steps,
-                clean_caption=clean_caption,
-                use_resolution_binning=use_resolution_binning,
-                max_sequence_length=max_sequence_length,
-                **kwargs,
-            )
+        # if (
+        #     get_pipeline_parallel_world_size() == 1
+        #     and get_classifier_free_guidance_world_size() == 1
+        #     and get_sequence_parallel_world_size() == 1
+        # ):
+        #     return self.module(
+        #         prompt=prompt,
+        #         negative_prompt=negative_prompt,
+        #         num_inference_steps=num_inference_steps,
+        #         timesteps=timesteps,
+        #         sigmas=sigmas,
+        #         guidance_scale=guidance_scale,
+        #         num_images_per_prompt=num_images_per_prompt,
+        #         height=height,
+        #         width=width,
+        #         eta=eta,
+        #         generator=generator,
+        #         latents=latents,
+        #         prompt_embeds=prompt_embeds,
+        #         prompt_attention_mask=prompt_attention_mask,
+        #         negative_prompt_embeds=negative_prompt_embeds,
+        #         negative_prompt_attention_mask=negative_prompt_attention_mask,
+        #         output_type=output_type,
+        #         return_dict=return_dict,
+        #         callback=callback,
+        #         callback_steps=callback_steps,
+        #         clean_caption=clean_caption,
+        #         use_resolution_binning=use_resolution_binning,
+        #         max_sequence_length=max_sequence_length,
+        #         **kwargs,
+        #     )
 
-        # 0. parallel environment setting
-        # TODO(Eigensystem) move check to decorator
-        height = (
-            height
-            or self.input_config.orig_height
-            or self.input_config.height
-            or self.transformer.config.sample_size * self.vae_scale_factor
-        )
-        width = (
-            width
-            or self.input_config.orig_width
-            or self.input_config.width
-            or self.transformer.config.sample_size * self.vae_scale_factor
-        )
         # 1. Check inputs. Raise error if not correct
-        orig_height = None
-        orig_width = None
+        height = height or self.transformer.config.sample_size * self.vae_scale_factor
+        width = width or self.transformer.config.sample_size * self.vae_scale_factor
         if use_resolution_binning:
             if self.transformer.config.sample_size == 256:
                 aspect_ratio_bin = ASPECT_RATIO_2048_BIN
@@ -251,17 +235,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
             else:
                 raise ValueError("Invalid sample size")
             orig_height, orig_width = height, width
-            height, width = self.image_processor.classify_height_width_bin(
-                height, width, ratios=aspect_ratio_bin
-            )
-        if isinstance(prompt, str):
-            self._check_input_change_and_adjust(
-                batch_size=1, height=height, width=width, orig_height=orig_height, orig_width=orig_width,
-            )
-        elif isinstance(prompt, List):
-            self._check_input_change_and_adjust(
-                batch_size=len(prompt), height=height, width=width, orig_height=orig_height, orig_width=orig_width,
-            )
+            height, width = self.image_processor.classify_height_width_bin(height, width, ratios=aspect_ratio_bin)
 
         self.check_inputs(
             prompt,
@@ -282,12 +256,21 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
             batch_size = len(prompt)
         else:
             batch_size = prompt_embeds.shape[0]
+
         device = self._execution_device
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
+
+        #* set runtime state input parameters
+        get_runtime_state().set_input_parameters(
+            height=height,
+            width=width,
+            batch_size=batch_size,
+            num_inference_steps=num_inference_steps,
+        )
 
         # 3. Encode input prompt
         (
@@ -309,7 +292,7 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
         )
 
-        # * dealing with cfg degree
+        #* processing cfg degree
         if do_classifier_free_guidance:
             if get_classifier_free_guidance_world_size() == 1:
                 prompt_embeds = torch.cat(
@@ -352,13 +335,8 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
 
         # 7. Denoising loop
-        num_warmup_steps = max(
-            len(timesteps) - num_inference_steps * self.scheduler.order, 0
-        )
-        num_pipeline_warmup_steps = (
-            kwargs.pop("num_pipeline_warmup_steps", None)
-            or self.runtime_config.warmup_steps
-        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if (
                 get_pipeline_parallel_world_size() > 1
@@ -386,7 +364,6 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                     guidance_scale=guidance_scale,
                     timesteps=timesteps[num_pipeline_warmup_steps:],
                     num_warmup_steps=num_warmup_steps,
-                    num_pipeline_warmup_steps=num_pipeline_warmup_steps,
                     extra_step_kwargs=extra_step_kwargs,
                     added_cond_kwargs=added_cond_kwargs,
                     progress_bar=progress_bar,
@@ -509,13 +486,13 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
             latents_list = []
-            for pp_patch_idx in range(self.num_pipeline_patch):
+            for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                 latents_list += [
                     sp_latents_list[sp_patch_idx][
                         :,
                         :, 
-                        self.pp_patches_start_idx_local[pp_patch_idx]:
-                        self.pp_patches_start_idx_local[pp_patch_idx+1],
+                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
+                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
                         :
                     ]
                     for sp_patch_idx in range(sp_degree)
@@ -533,7 +510,6 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
         guidance_scale: float,
         timesteps: List[int],
         num_warmup_steps: int,
-        num_pipeline_warmup_steps: int,
         extra_step_kwargs: List,
         added_cond_kwargs: Dict,
         progress_bar,
@@ -542,7 +518,8 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
     ):
         if len(timesteps) == 0:
             return latents
-        num_pipeline_patch = self.num_pipeline_patch
+        num_pipeline_patch = get_runtime_state().num_pipeline_patch
+        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
         patch_latents = self._init_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
@@ -599,8 +576,9 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
                 else:
                     get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                
+                get_runtime_state().next_patch()
 
-            num_pipeline_warmup_steps = self.runtime_config.warmup_steps
             if i == len(timesteps) - 1 or (
                 (i + num_pipeline_warmup_steps + 1) > num_warmup_steps
                 and (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
@@ -623,12 +601,12 @@ class PipeFuserPixArtSigmaPipeline(PipeFuserPipelineBaseWrapper):
                 sp_degree = get_sequence_parallel_world_size()
                 sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
                 latents_list = []
-                for pp_patch_idx in range(self.num_pipeline_patch):
+                for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                     latents_list += [
                         sp_latents_list[sp_patch_idx][
                             ..., 
-                            self.pp_patches_start_idx_local[pp_patch_idx]:
-                            self.pp_patches_start_idx_local[pp_patch_idx+1],
+                            get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
+                            get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
                             :
                         ]
                         for sp_patch_idx in range(sp_degree)

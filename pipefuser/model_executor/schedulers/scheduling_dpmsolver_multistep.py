@@ -11,6 +11,8 @@ from pipefuser.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_pipeline_parallel_world_size,
 )
+from pipefuser.distributed.parallel_state import get_sequence_parallel_world_size
+from pipefuser.distributed.runtime_state import get_runtime_state
 from pipefuser.model_executor.schedulers import (
     PipeFuserSchedulerWrappersRegister,
 )
@@ -22,14 +24,8 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
     def __init__(
         self,
         scheduler: DPMSolverMultistepScheduler,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
     ):
-        super().__init__(
-            module=scheduler,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
-        )
+        super().__init__(module=scheduler)
 
     def step(
         self,
@@ -41,7 +37,7 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
 
-        if get_pipeline_parallel_world_size() == 1:
+        if get_pipeline_parallel_world_size() == 1 and get_sequence_parallel_world_size() == 1:
             return self.module.step(
                 model_output=model_output,
                 timestep=timestep,
@@ -73,37 +69,35 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
 
         model_output = self.convert_model_output(model_output, sample=sample)
         if (
-            self.patched_mode
-            and self.current_patch_idx == 0
+            get_runtime_state().patch_mode
+            and get_runtime_state().pipeline_patch_idx == 0
             and self.model_outputs[-1] is None
         ):
             self.model_outputs[-1] = torch.zeros(
                 [
                     model_output.shape[0],
                     model_output.shape[1],
-                    # self.pipeline_patches_start_idx[-1],
-                    self.pp_patches_start_idx_local[-1],
+                    get_runtime_state().pp_patches_start_idx_local[-1],
                     model_output.shape[3],
                 ],
                 device=model_output.device,
                 dtype=model_output.dtype,
             )
-        if self.current_patch_idx == 0:
+        if get_runtime_state().pipeline_patch_idx == 0:
             for i in range(self.config.solver_order - 1):
                 self.model_outputs[i] = self.model_outputs[i + 1]
 
         _, _, c, _ = model_output.shape
 
-        if self.patched_mode and self.current_patch_idx == 0:
+        if get_runtime_state().patch_mode and get_runtime_state().pipeline_patch_idx == 0:
             assert len(self.model_outputs) >= 2
             self.model_outputs[-1] = torch.zeros_like(self.model_outputs[-2])
-        if self.patched_mode:
+        if get_runtime_state().patch_mode:
             self.model_outputs[-1][
                 :,
                 :,
-                self.pp_patches_start_idx_local[
-                    self.current_patch_idx
-                ] : self.pp_patches_start_idx_local[self.current_patch_idx + 1],
+                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]: 
+                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
                 :,
             ] = model_output
         else:
@@ -128,15 +122,15 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
 
         # logger.info(f"batch_idx {batch_idx}")
 
-        if self.patched_mode:
+        if get_runtime_state().patch_mode:
             model_outputs = []
             for output in self.model_outputs:
                 model_outputs.append(
                     output[
                         :,
                         :,
-                        self.pp_patches_start_idx_local[self.current_patch_idx]:
-                        self.pp_patches_start_idx_local[self.current_patch_idx + 1],
+                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]:
+                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
                         :,
                     ]
                 )
@@ -172,13 +166,10 @@ class PipeFuserDPMSolverMultistepSchedulerWrapper(PipeFuserSchedulerBaseWrapper)
 
         # upon completion increase step index by one
         if (
-            not self.patched_mode
-            or self.current_patch_idx == self.num_pipeline_patch - 1
+            not get_runtime_state().patch_mode
+            or get_runtime_state().pipeline_patch_idx == get_runtime_state().num_pipeline_patch - 1
         ):
             self._step_index += 1
-
-        if self.patched_mode:
-            self.patch_step()
 
         if not return_dict:
             return (prev_sample,)

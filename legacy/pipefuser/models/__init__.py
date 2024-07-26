@@ -2,7 +2,7 @@ from packaging.version import Version
 import diffusers
 
 if Version("0.29.0") <= Version(diffusers.__version__):
-    from .distri_dit_sd3_pipefusion import DistriDiTSD3PipeFusion
+    from .distri_dit_sd3_pipefusion import DistriDiTSD3PipeFusion,DistriDiTSD3PipeFusionCN
 
 from .naive_patch_dit import NaivePatchDiT
 from .distri_dit_pp import DistriDiTPP

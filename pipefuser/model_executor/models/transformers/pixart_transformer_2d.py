@@ -8,17 +8,14 @@ from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.utils import is_torch_version
 
-from pipefuser.distributed.runtime_state import get_runtime_state
+from pipefuser.logger import init_logger
 from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
-from pipefuser.model_executor.models.transformers import PipeFuserTransformerBaseWrapper
-from .register import PipeFuserTransformerWrappersRegister
-from pipefuser.config import ParallelConfig, RuntimeConfig
 from pipefuser.distributed import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
 )
-from pipefuser.logger import init_logger
+from .register import PipeFuserTransformerWrappersRegister
+from .base_transformer import PipeFuserTransformerBaseWrapper
 
 logger = init_logger(__name__)
 

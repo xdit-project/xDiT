@@ -283,7 +283,6 @@ class DiTRuntimeState(RuntimeState):
         )
 
 
-
 # _RUNTIME: Optional[RuntimeState] = None
 #TODO: change to RuntimeState after implementing the unet
 _RUNTIME: Optional[DiTRuntimeState] = None

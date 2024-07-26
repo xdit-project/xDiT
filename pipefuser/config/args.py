@@ -53,7 +53,7 @@ def nullable_str(val: str):
     return val
 
 @dataclass
-class Args:
+class PipefuserArgs:
     """Arguments for PipeFuser engine."""
     # Model arguments
     model: str
@@ -96,7 +96,7 @@ class Args:
         # Model arguments
         model_group = parser.add_argument_group('Model Options')
         model_group.add_argument('--model', type=str, default="PixArt-alpha/PixArt-XL-2-1024-MS", help='Name or path of the huggingface model to use.')
-        model_group.add_argument('--download-dir', type=nullable_str, default=Args.download_dir, help='Directory to download and load the weights, default to the default cache dir of huggingface.')
+        model_group.add_argument('--download-dir', type=nullable_str, default=PipefuserArgs.download_dir, help='Directory to download and load the weights, default to the default cache dir of huggingface.')
         model_group.add_argument('--trust-remote-code', action='store_true', help='Trust remote code from huggingface.')
 
         # Runtime arguments

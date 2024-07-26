@@ -1,19 +1,18 @@
 import time
 import torch
 import torch.distributed
-from pipefuser.model_executor.pipelines import PipeFuserPixArtSigmaPipeline
-from pipefuser.config import Args, FlexibleArgumentParser
+from pipefuser import PipeFuserPixArtSigmaPipeline, PipefuserArgs
+from pipefuser.config import FlexibleArgumentParser
 from pipefuser.distributed import (
     get_world_group, 
     get_data_parallel_rank, 
     get_data_parallel_world_size
 )
 
-
 def main():
     parser = FlexibleArgumentParser(description="PipeFuser Arguments")
-    args = Args.add_cli_args(parser).parse_args()
-    engine_args = Args.from_cli_args(args)
+    args = PipefuserArgs.add_cli_args(parser).parse_args()
+    engine_args = PipefuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
     pipe = PipeFuserPixArtSigmaPipeline.from_pretrained(
@@ -26,6 +25,8 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     output = pipe(
+        height=input_config.height,
+        width=input_config.height,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,

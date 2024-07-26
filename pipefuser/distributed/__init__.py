@@ -16,6 +16,11 @@ from .parallel_state import (
     initialize_model_parallel,
     model_parallel_is_initialized,
 )
+from .runtime_state import (
+    get_runtime_state,
+    runtime_state_is_initialized,
+    initialize_runtime_state,
+)
 
 __all__ = [
     "get_world_group",
@@ -35,4 +40,7 @@ __all__ = [
     "init_model_parallel_group",
     "initialize_model_parallel",
     "model_parallel_is_initialized",
+    "get_runtime_state",
+    "runtime_state_is_initialized",
+    "initialize_runtime_state",
 ]

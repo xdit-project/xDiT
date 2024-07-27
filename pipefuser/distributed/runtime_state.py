@@ -66,6 +66,7 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_start_idx_local: Optional[List[int]]
     pp_patches_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_start_end_idx: Optional[List[List[int]]]
+    pp_patches_token_num: Optional[List[int]]
     
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
@@ -234,11 +235,16 @@ class DiTRuntimeState(RuntimeState):
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]
+        pp_patches_token_num = [
+            end - start for start, end in pp_patches_token_start_end_idx
+        ]
         self.num_pipeline_patch = num_pipeline_patch
         self.pp_patches_height = pp_patches_height
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_end_idx = pp_patches_token_start_end_idx
+        self.pp_patches_token_num = pp_patches_token_num
+
 
     def _reset_recv_buffer(self):
         # calc communicator buffer metadata

@@ -29,11 +29,16 @@ class PipeFuserAttentionBaseWrapper(PipeFuserLayerBaseWrapper):
         attn: Attention,
     ):
         super().__init__(module=attn)
+        self.use_long_ctx_attn_kvcache = True
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import LongContextAttention, UlyssesAttention
+            from yunchang import UlyssesAttention
+            from pipefuser.modules.long_context_attention import PipeFuserLongContextAttention
 
             if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = LongContextAttention()
+                # self.hybrid_seq_parallel_attn = LongContextAttention()
+                self.hybrid_seq_parallel_attn = PipeFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                )
             else:
                 self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
 
@@ -89,40 +94,34 @@ class PipeFuserSelfAttentionWrapper(PipeFuserAttentionBaseWrapper):
         encoder_hidden_states = hidden_states
         kv = self.to_kv(encoder_hidden_states)
 
-        # the distributed sparse attention from pipefuser
-        if get_runtime_state().num_pipeline_patch == 1:
-            local_kv = kv
+        if (
+            HAS_FLASH_ATTN 
+            and get_sequence_parallel_world_size() > 1
+            and self.use_long_ctx_attn_kvcache 
+        ):
+            key, value = torch.chunk(kv, 2, dim=-1)
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // self.module.heads
         else:
-            if not get_runtime_state().patch_mode:
+            # the distributed sparse attention from pipefuser
+            if get_runtime_state().num_pipeline_patch == 1:
                 local_kv = kv
             else:
-                local_kv = self.activation_cache
-                _, c, _ = local_kv.shape
-                token_start_idx = (
-                    c
-                    // get_runtime_state().pp_patches_start_idx_local[-1]
-                    * get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]
-                )
-                token_end_idx = (
-                    c
-                    // get_runtime_state().pp_patches_start_idx_local[-1]
-                    * get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1]
-                )
-                local_kv[:, token_start_idx:token_end_idx, :] = kv
+                if not get_runtime_state().patch_mode:
+                    local_kv = kv
+                else:
+                    local_kv = self.activation_cache
+                    token_start_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
+                    token_end_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx+1])
+                    local_kv[:, token_start_idx:token_end_idx, :] = kv
 
-            self.activation_cache = local_kv
+                self.activation_cache = local_kv
 
-        key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
-
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // self.module.heads
+            key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // self.module.heads
 
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            # queries = torch.split(query, query.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
-            # keys = torch.split(key, key.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
-            # values = torch.split(value, value.shape[-2] // get_sequence_parallel_world_size(), dim=-2)
-            # query = queries[get_sequence_parallel_rank()]
-            # key, value = keys[get_sequence_parallel_rank()], values[get_sequence_parallel_rank()]
             query = query.view(batch_size, -1, self.module.heads, head_dim)
             key = key.view(batch_size, -1, self.module.heads, head_dim)
             value = value.view(batch_size, -1, self.module.heads, head_dim)

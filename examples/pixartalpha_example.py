@@ -1,9 +1,9 @@
 import time
 import torch
 import torch.distributed
-from pipefuser import PipeFuserPixArtAlphaPipeline, PipefuserArgs
-from pipefuser.config import FlexibleArgumentParser
-from pipefuser.distributed import (
+from xfuser import xFuserPixArtAlphaPipeline, xFuserArgs
+from xfuser.config import FlexibleArgumentParser
+from xfuser.distributed import (
     get_world_group, 
     get_data_parallel_rank, 
     get_data_parallel_world_size
@@ -11,12 +11,12 @@ from pipefuser.distributed import (
 
 
 def main():
-    parser = FlexibleArgumentParser(description="PipeFuser Arguments")
-    args = PipefuserArgs.add_cli_args(parser).parse_args()
-    engine_args = PipefuserArgs.from_cli_args(args)
+    parser = FlexibleArgumentParser(description="xFuser Arguments")
+    args = xFuserArgs.add_cli_args(parser).parse_args()
+    engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
-    pipe = PipeFuserPixArtAlphaPipeline.from_pretrained(
+    pipe = xFuserPixArtAlphaPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.float16,

@@ -5,11 +5,11 @@ import os
 if __name__ == "__main__":
     with open("README.md", "r") as f:
         long_description = f.read()
-    fp = open("pipefuser/__version__.py", "r").read()
+    fp = open("xfuser/__version__.py", "r").read()
     version = eval(fp.strip().split()[-1])
 
     setup(
-        name="pipefusion",
+        name="xdit",
         author="Jiannan Wang, Jiarui Fang, Jinzhe Pan, Aoyu Li, Pengcheng Yang",
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
@@ -23,8 +23,8 @@ if __name__ == "__main__":
             "distvae",
             "ftfy",
         ],
-        url="https://github.com/PipeFusion/PipeFusion.",
-        description="PipeFusion: Parallel Inference Suite for Diffusion Transformers (DiTs)",
+        url="https://github.com/xdit-project/xDiT.",
+        description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",
         long_description=long_description,
         long_description_content_type="text/markdown",
         version=version,

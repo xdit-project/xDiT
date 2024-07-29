@@ -15,6 +15,7 @@ from xfuser.distributed import (
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
     get_classifier_free_guidance_world_size,
+    get_classifier_free_guidance_rank,
     get_pipeline_parallel_rank,
     get_pp_group,
     get_world_group,
@@ -160,7 +161,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         else:
             logger.info("Transformer backbone found, paralleling transformer...")
             wrapper = xFuserTransformerWrappersRegister.get_wrapper(transformer)
-            transformer = wrapper(transformer=transformer)
+            transformer = wrapper(transformer)
         return transformer
 
     def _convert_unet_backbone(
@@ -176,7 +177,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         logger.info("Scheduler found, paralleling scheduler...")
         wrapper = xFuserSchedulerWrappersRegister.get_wrapper(scheduler)
-        scheduler = wrapper(scheduler=scheduler)
+        scheduler = wrapper(scheduler)
         return scheduler
 
     @abstractmethod
@@ -224,6 +225,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 get_pp_group().add_pipeline_recv_task(patch_idx)
 
         return patch_latents
+    
+    def _process_cfg_split_batch(
+        self,
+        prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
+        negative_prompt_embeds: torch.Tensor,
+        negative_prompt_attention_mask: torch.Tensor,
+    ):
+        if get_classifier_free_guidance_world_size() == 1:
+            prompt_embeds = torch.cat(
+                [negative_prompt_embeds, prompt_embeds], dim=0
+            )
+            prompt_attention_mask = torch.cat(
+                [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+            )
+        elif get_classifier_free_guidance_rank() == 0:
+            prompt_embeds = negative_prompt_embeds
+            prompt_attention_mask = negative_prompt_attention_mask
+        elif get_classifier_free_guidance_rank() == 1:
+            prompt_embeds = prompt_embeds
+            prompt_attention_mask = prompt_attention_mask
+        else:
+            raise ValueError("Invalid classifier free guidance rank")
+        return prompt_embeds, prompt_attention_mask
 
     def _scheduler_step(
         self,

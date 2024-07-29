@@ -15,13 +15,11 @@ from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
 from xfuser.distributed import (
-    get_pipeline_parallel_rank,
-    get_pipeline_parallel_world_size,
+    get_data_parallel_world_size,
     get_classifier_free_guidance_world_size,
-    get_classifier_free_guidance_rank,
-    get_sequence_parallel_world_size, 
-    get_sequence_parallel_rank,
-    get_runtime_state
+    get_pipeline_parallel_world_size,
+    get_data_parallel_rank, 
+    get_runtime_state,
 )
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -197,6 +195,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
+#! ---------------------------------------- ADDED BELOW ----------------------------------------
         #* set runtime state input parameters
         get_runtime_state().set_input_parameters(
             height=height,
@@ -204,6 +203,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )
+#! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
         # 3. Encode input prompt
         (
@@ -225,23 +225,24 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
         )
 
+#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         # * dealing with cfg degree
         if do_classifier_free_guidance:
-            if get_classifier_free_guidance_world_size() == 1:
-                prompt_embeds = torch.cat(
-                    [negative_prompt_embeds, prompt_embeds], dim=0
-                )
-                prompt_attention_mask = torch.cat(
-                    [negative_prompt_attention_mask, prompt_attention_mask], dim=0
-                )
-            elif get_classifier_free_guidance_rank() == 0:
-                prompt_embeds = negative_prompt_embeds
-                prompt_attention_mask = negative_prompt_attention_mask
-            elif get_classifier_free_guidance_rank() == 1:
-                prompt_embeds = prompt_embeds
-                prompt_attention_mask = prompt_attention_mask
-            else:
-                raise ValueError("Invalid classifier free guidance rank")
+            (
+                prompt_embeds,
+                prompt_attention_mask,
+            ) = self._process_cfg_split_batch(
+                prompt_embeds, 
+                prompt_attention_mask, 
+                negative_prompt_embeds, 
+                negative_prompt_attention_mask
+            )
+
+        #! ORIGIN
+        # if do_classifier_free_guidance:
+        #     prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        #     prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
+#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -276,6 +277,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
             aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
 
+#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
             if (
                 do_classifier_free_guidance
                 and get_classifier_free_guidance_world_size() == 1
@@ -283,10 +285,17 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 resolution = torch.cat([resolution, resolution], dim=0)
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
 
+            #! ORIGIN
+            # if do_classifier_free_guidance:
+            #     resolution = torch.cat([resolution, resolution], dim=0)
+            #     aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
+#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+
             added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -337,13 +346,12 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                     callback_steps=callback_steps,
                     sync_only=True,
                 )
+#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         # 8. Decode latents (only rank 0)
-        if (
-            get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1
-            and get_classifier_free_guidance_rank() == get_classifier_free_guidance_world_size() - 1
-            and get_sequence_parallel_rank() == get_sequence_parallel_world_size() - 1
-        ):
+#! ---------------------------------------- ADD BELOW ----------------------------------------
+        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+#! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
                 if use_resolution_binning:
@@ -361,5 +369,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 return (image,)
 
             return ImagePipelineOutput(images=image)
+#! ---------------------------------------- ADD BELOW ----------------------------------------
         else:
             return None
+#! ---------------------------------------- ADD ABOVE ----------------------------------------

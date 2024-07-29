@@ -15,12 +15,9 @@ from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
 from xfuser.distributed import (
-    get_pipeline_parallel_rank,
+    get_data_parallel_world_size,
     get_pipeline_parallel_world_size,
-    get_classifier_free_guidance_world_size,
-    get_classifier_free_guidance_rank,
-    get_sequence_parallel_world_size, 
-    get_sequence_parallel_rank, 
+    get_data_parallel_rank, 
     get_runtime_state,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
@@ -228,21 +225,15 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
 
         #* processing cfg degree
         if do_classifier_free_guidance:
-            if get_classifier_free_guidance_world_size() == 1:
-                prompt_embeds = torch.cat(
-                    [negative_prompt_embeds, prompt_embeds], dim=0
-                )
-                prompt_attention_mask = torch.cat(
-                    [negative_prompt_attention_mask, prompt_attention_mask], dim=0
-                )
-            elif get_classifier_free_guidance_rank() == 0:
-                prompt_embeds = negative_prompt_embeds
-                prompt_attention_mask = negative_prompt_attention_mask
-            elif get_classifier_free_guidance_rank() == 1:
-                prompt_embeds = prompt_embeds
-                prompt_attention_mask = prompt_attention_mask
-            else:
-                raise ValueError("Invalid classifier free guidance rank")
+            (
+                prompt_embeds,
+                prompt_attention_mask,
+            ) = self._process_cfg_split_batch(
+                prompt_embeds, 
+                prompt_attention_mask, 
+                negative_prompt_embeds, 
+                negative_prompt_attention_mask
+            )
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -322,11 +313,7 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
                 )
 
         #* 8. Decode latents (only the last rank in a dp group)
-        if (
-            get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1
-            and get_classifier_free_guidance_rank() == get_classifier_free_guidance_world_size() - 1
-            and get_sequence_parallel_rank() == get_sequence_parallel_world_size() - 1
-        ):
+        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
                 if use_resolution_binning:

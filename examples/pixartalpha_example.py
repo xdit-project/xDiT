@@ -6,7 +6,8 @@ from xfuser.config import FlexibleArgumentParser
 from xfuser.distributed import (
     get_world_group, 
     get_data_parallel_rank, 
-    get_data_parallel_world_size
+    get_data_parallel_world_size,
+    get_runtime_state
 )
 
 
@@ -53,6 +54,7 @@ def main():
         print(
             f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
         )
+    get_runtime_state().destory_distributed_env()
 
 
 if __name__ == '__main__':

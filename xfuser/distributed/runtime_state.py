@@ -9,7 +9,17 @@ import torch.distributed
 
 from xfuser.config.config import ParallelConfig, RuntimeConfig, InputConfig, EngineConfig
 from xfuser.logger import init_logger
-from xfuser.distributed.parallel_state import get_pipeline_parallel_rank, get_pp_group, get_sequence_parallel_rank, get_sequence_parallel_world_size, init_distributed_environment, initialize_model_parallel, model_parallel_is_initialized
+from xfuser.distributed.parallel_state import (
+    destroy_distributed_environment, 
+    destroy_model_parallel, 
+    get_pipeline_parallel_rank, 
+    get_pp_group, 
+    get_sequence_parallel_rank, 
+    get_sequence_parallel_world_size, 
+    init_distributed_environment, 
+    initialize_model_parallel, 
+    model_parallel_is_initialized,
+)
     
 logger = init_logger(__name__)
 
@@ -55,6 +65,11 @@ class RuntimeState(metaclass=ABCMeta):
                 tensor_parallel_degree=parallel_config.tp_degree,
                 pipeline_parallel_degree=parallel_config.pp_degree,
             )
+    
+    def destory_distributed_env(self):
+        if model_parallel_is_initialized():
+            destroy_model_parallel()
+        destroy_distributed_environment()
 
 
 class DiTRuntimeState(RuntimeState):

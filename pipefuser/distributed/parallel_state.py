@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-import datetime
 from typing import List, Optional
 
 import random
@@ -21,14 +20,6 @@ HAS_FLASH_ATTN = env_info["has_flash_attn"]
 logger = init_logger(__name__)
 
 _WORLD: Optional[GroupCoordinator] = None
-
-
-def set_random_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
 
 
 def get_world_group() -> GroupCoordinator:
@@ -141,17 +132,15 @@ def init_distributed_environment(
     distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
-    random_seed: int = 42,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
-        "distributed_init_method=%s backend=%s random_seed=%d",
+        "distributed_init_method=%s backend=%s",
         world_size,
         rank,
         local_rank,
         distributed_init_method,
         backend,
-        random_seed,
     )
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
@@ -183,7 +172,6 @@ def init_distributed_environment(
         assert (
             _WORLD.world_size == torch.distributed.get_world_size()
         ), "world group already initialized with a different world size"
-    set_random_seed(random_seed)
 
 
 def initialize_model_parallel(

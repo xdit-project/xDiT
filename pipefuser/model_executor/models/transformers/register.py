@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from pipefuser.logger import init_logger
-from pipefuser.models.transformers.base_transformer import (
+from pipefuser.model_executor.models.transformers.base_transformer import (
     PipeFuserTransformerBaseWrapper,
 )
 

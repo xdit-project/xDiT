@@ -8,16 +8,14 @@ from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.utils import is_torch_version
 
-from pipefuser.base_wrapper import PipeFuserBaseWrapper
-from pipefuser.models.transformers import PipeFuserTransformerBaseWrapper
-from .register import PipeFuserTransformerWrappersRegister
-from pipefuser.config import ParallelConfig, RuntimeConfig
+from pipefuser.logger import init_logger
+from pipefuser.model_executor.base_wrapper import PipeFuserBaseWrapper
 from pipefuser.distributed import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
 )
-from pipefuser.logger import init_logger
+from .register import PipeFuserTransformerWrappersRegister
+from .base_transformer import PipeFuserTransformerBaseWrapper
 
 logger = init_logger(__name__)
 
@@ -27,13 +25,9 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
     def __init__(
         self,
         transformer: PixArtTransformer2DModel,
-        parallel_config: ParallelConfig,
-        runtime_config: RuntimeConfig,
     ):
         super().__init__(
             transformer=transformer,
-            parallel_config=parallel_config,
-            runtime_config=runtime_config,
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn1"],
         )
@@ -86,17 +80,6 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
-        if get_pipeline_parallel_world_size() == 1 and get_sequence_parallel_world_size() == 1:
-            return self.module(
-                hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                timestep=timestep,
-                added_cond_kwargs=added_cond_kwargs,
-                cross_attention_kwargs=cross_attention_kwargs,
-                attention_mask=attention_mask,
-                encoder_attention_mask=encoder_attention_mask,
-                return_dict=return_dict,
-            )
         if self.use_additional_conditions and added_cond_kwargs is None:
             raise ValueError(
                 "`added_cond_kwargs` cannot be None when using additional conditions for `adaln_single`."
@@ -122,28 +105,24 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
 
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
         if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (
-                1 - encoder_attention_mask.to(hidden_states.dtype)
-            ) * -10000.0
+            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
         batch_size = hidden_states.shape[0]
-
+        #* get height & width from runtime state
+        height, width = self._get_patch_height_width()
+        #* only pp rank 0 needs pos_embed (patchify)
         if get_pipeline_parallel_rank() == 0:
             hidden_states = self.pos_embed(hidden_states)
+
         timestep, embedded_timestep = self.adaln_single(
-            timestep,
-            added_cond_kwargs,
-            batch_size=batch_size,
-            hidden_dtype=hidden_states.dtype,
+            timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype,
         )
 
         if self.caption_projection is not None:
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
-            encoder_hidden_states = encoder_hidden_states.view(
-                batch_size, -1, hidden_states.shape[-1]
-            )
+            encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
 
         # 2. Blocks
         for i, block in enumerate(self.transformer_blocks):
@@ -158,9 +137,7 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -184,55 +161,27 @@ class PipeFuserPixArtTransformer2DWrapper(PipeFuserTransformerBaseWrapper):
                 )
 
         # 3. Output
+        #* only the last pp rank needs unpatchify
         if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
             shift, scale = (
-                self.scale_shift_table[None]
-                + embedded_timestep[:, None].to(self.scale_shift_table.device)
+                self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
             ).chunk(2, dim=1)
             hidden_states = self.norm_out(hidden_states)
             # Modulation
-            hidden_states = hidden_states * (
-                1 + scale.to(hidden_states.device)
-            ) + shift.to(hidden_states.device)
+            hidden_states = hidden_states * (1 + scale.to(hidden_states.device)) + shift.to(hidden_states.device)
             hidden_states = self.proj_out(hidden_states)
             hidden_states = hidden_states.squeeze(1)
 
-            height, width = (
-                self.input_config.height // self.config.patch_size // 8,
-                self.input_config.height // self.config.patch_size // 8,
-            )
-            if self.patched_mode:
-                height = (
-                    self.pp_patches_height[self.current_patch_idx]
-                    // self.config.patch_size
-                )
-            else:
-                height = sum(self.pp_patches_height) // self.config.patch_size
             # unpatchify
             hidden_states = hidden_states.reshape(
-                shape=(
-                    -1,
-                    height,
-                    width,
-                    self.config.patch_size,
-                    self.config.patch_size,
-                    self.out_channels,
-                )
+                shape=(-1, height, width, self.config.patch_size, self.config.patch_size, self.out_channels)
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
-                shape=(
-                    -1,
-                    self.out_channels,
-                    height * self.config.patch_size,
-                    width * self.config.patch_size,
-                )
+                shape=(-1, self.out_channels, height * self.config.patch_size, width * self.config.patch_size)
             )
         else:
             output = hidden_states
-
-        if self.patched_mode:
-            self.patch_step()
 
         if not return_dict:
             return (output,)

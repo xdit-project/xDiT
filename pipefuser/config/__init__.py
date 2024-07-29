@@ -1,4 +1,4 @@
-from .args import FlexibleArgumentParser, EngineArgs
+from .args import FlexibleArgumentParser, PipefuserArgs
 from .config import (
     EngineConfig,
     ParallelConfig,
@@ -13,7 +13,7 @@ from .config import (
 
 __all__ = [
     "FlexibleArgumentParser",
-    "EngineArgs",
+    "PipefuserArgs",
     "EngineConfig",
     "ParallelConfig",
     "TensorParallelConfig",

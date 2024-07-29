@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from pipefuser.logger import init_logger
-from pipefuser.layers.base_layer import PipeFuserLayerBaseWrapper
+from pipefuser.model_executor.layers.base_layer import PipeFuserLayerBaseWrapper
 
 logger = init_logger(__name__)
 

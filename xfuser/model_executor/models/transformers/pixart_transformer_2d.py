@@ -110,11 +110,20 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
         # 1. Input
         batch_size = hidden_states.shape[0]
+#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         #* get height & width from runtime state
         height, width = self._get_patch_height_width()
         #* only pp rank 0 needs pos_embed (patchify)
         if get_pipeline_parallel_rank() == 0:
             hidden_states = self.pos_embed(hidden_states)
+
+        #! ORIGIN
+        # height, width = (
+        #     hidden_states.shape[-2] // self.config.patch_size,
+        #     hidden_states.shape[-1] // self.config.patch_size,
+        # )
+        # hidden_states = self.pos_embed(hidden_states)
+#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         timestep, embedded_timestep = self.adaln_single(
             timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype,
@@ -162,7 +171,9 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
         # 3. Output
         #* only the last pp rank needs unpatchify
+#! ---------------------------------------- ADD BELOW ----------------------------------------
         if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+#! ---------------------------------------- ADD ABOVE ----------------------------------------
             shift, scale = (
                 self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
             ).chunk(2, dim=1)
@@ -180,8 +191,10 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
             output = hidden_states.reshape(
                 shape=(-1, self.out_channels, height * self.config.patch_size, width * self.config.patch_size)
             )
+#! ---------------------------------------- ADD BELOW ----------------------------------------
         else:
             output = hidden_states
+#! ---------------------------------------- ADD ABOVE ----------------------------------------
 
         if not return_dict:
             return (output,)

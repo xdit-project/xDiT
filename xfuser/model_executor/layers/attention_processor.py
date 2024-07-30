@@ -69,7 +69,7 @@ class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
 
 
 # TODO(Eigensystem): implement xFuserAttentionWrapper to replace this
-#!WARNING: ONLY AVAILABLE FOR PIX_ART_ALPHA, TAKE ALL ATTENTION MODULES AS INPUT
+#!WARNING: ONLY AVAILABLE FOR PIXART_TRANSFORMER_2D, TAKE ALL ATTENTION MODULES AS INPUT
 @xFuserLayerWrappersRegister.register(Attention)
 class xFuserSelfAttentionWrapper(xFuserAttentionBaseWrapper):
     def __init__(

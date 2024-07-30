@@ -1,5 +1,5 @@
 <div align="center">
-<h1>PipeFusion: A Suite for Parallel Inference Diffusion Transformers (DiTs)</h1>
+<h1>xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h1>
 
   <div align="center">
   <a href="https://opensource.org/licenses/Apache-2.0">
@@ -114,7 +114,7 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
 
 ### QuickStart
 
-1. Install pipefusion from local.
+1. Install xDiT from local.
 ```
 python setup.py install
 ```
@@ -129,7 +129,7 @@ python ./examples/pixartalpha_example.py -h
 
 ...
 
-PipeFuser Arguments
+xFuser Arguments
 
 options:
   -h, --help            show this help message and exit
@@ -140,25 +140,17 @@ Model Options:
                         Directory to download and load the weights, default to the default cache dir of huggingface.
   --trust-remote-code   Trust remote code from huggingface.
 
-Input Options:
-  --height HEIGHT       The height of image
-  --width WIDTH         The width of image
-  --prompt [PROMPT ...]
-                        Prompt for the model.
-  --negative_prompt [NEGATIVE_PROMPT ...]
-                        Negative prompt for the model.
-  --num_inference_steps NUM_INFERENCE_STEPS
-                        Number of inference steps.
-  --no_use_resolution_binning
-
 Runtime Options:
-  --seed SEED           Random seed for operations.
   --warmup_steps WARMUP_STEPS
                         Warmup steps in generation.
+  --use_parallel_vae
+  --seed SEED           Random seed for operations.
+  --output_type OUTPUT_TYPE
+                        Output type of the pipeline.
 
 Parallel Processing Options:
   --do_classifier_free_guidance
-  --use_split_batch     Use split batch in classifier_free_guidance
+  --use_split_batch     Use split batch in classifier_free_guidance. cfg_degree will be 2 if set
   --data_parallel_degree DATA_PARALLEL_DEGREE
                         Data parallel degree.
   --ulysses_degree ULYSSES_DEGREE
@@ -175,6 +167,17 @@ Parallel Processing Options:
                         Tensor parallel degree.
   --split_scheme SPLIT_SCHEME
                         Split scheme for tensor parallel.
+
+Input Options:
+  --height HEIGHT       The height of image
+  --width WIDTH         The width of image
+  --prompt [PROMPT ...]
+                        Prompt for the model.
+  --no_use_resolution_binning
+  --negative_prompt [NEGATIVE_PROMPT ...]
+                        Negative prompt for the model.
+  --num_inference_steps NUM_INFERENCE_STEPS
+                        Number of inference steps.
 ```
 
 Utilizing Various Parallelism Techniques You can leverage different types of parallelism to execute the model efficiently. It's crucial to ensure that the product of all parallel degrees equals the number of available devices. For example, you can employ a combination of split batch, PipeFusion parallel, and sequence parallel techniques with the following command to generate an image of a cute dog using hybrid parallelism::

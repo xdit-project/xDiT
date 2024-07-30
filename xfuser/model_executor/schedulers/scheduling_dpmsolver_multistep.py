@@ -20,32 +20,42 @@ from .base_scheduler import xFuserSchedulerBaseWrapper
 
 @xFuserSchedulerWrappersRegister.register(DPMSolverMultistepScheduler)
 class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
-    def __init__(
-        self,
-        scheduler: DPMSolverMultistepScheduler,
-    ):
-        super().__init__(module=scheduler)
 
+    @xFuserSchedulerBaseWrapper.check_to_use_naive_step
     def step(
         self,
-        model_output: torch.FloatTensor,
+        model_output: torch.Tensor,
         timestep: int,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         generator=None,
-        variance_noise: Optional[torch.FloatTensor] = None,
+        variance_noise: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
+        """
+        Predict the sample from the previous timestep by reversing the SDE. This function propagates the sample with
+        the multistep DPMSolver.
 
-        if get_pipeline_parallel_world_size() == 1 and get_sequence_parallel_world_size() == 1:
-            return self.module.step(
-                model_output=model_output,
-                timestep=timestep,
-                sample=sample,
-                generator=generator,
-                variance_noise=variance_noise,
-                return_dict=return_dict,
-            )
+        Args:
+            model_output (`torch.Tensor`):
+                The direct output from learned diffusion model.
+            timestep (`int`):
+                The current discrete timestep in the diffusion chain.
+            sample (`torch.Tensor`):
+                A current instance of a sample created by the diffusion process.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            variance_noise (`torch.Tensor`):
+                Alternative to generating noise with `generator` by directly providing the noise for the variance
+                itself. Useful for methods such as [`LEdits++`].
+            return_dict (`bool`):
+                Whether or not to return a [`~schedulers.scheduling_utils.SchedulerOutput`] or `tuple`.
 
+        Returns:
+            [`~schedulers.scheduling_utils.SchedulerOutput`] or `tuple`:
+                If return_dict is `True`, [`~schedulers.scheduling_utils.SchedulerOutput`] is returned, otherwise a
+                tuple is returned where the first element is the sample tensor.
+
+        """
         if self.num_inference_steps is None:
             raise ValueError(
                 "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
@@ -66,6 +76,7 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
 
         model_output = self.convert_model_output(model_output, sample=sample)
 
+#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         if (
             get_runtime_state().patch_mode
             and get_runtime_state().pipeline_patch_idx == 0
@@ -99,6 +110,12 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
         else:
             self.model_outputs[-1] = model_output
 
+        #! ORIGIN:
+        # for i in range(self.config.solver_order - 1):
+        #     self.model_outputs[i] = self.model_outputs[i + 1]
+        # self.model_outputs[-1] = model_output
+#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+
         # Upcast to avoid precision issues when computing prev_sample
         sample = sample.to(torch.float32)
         if self.config.algorithm_type in ["sde-dpmsolver", "sde-dpmsolver++"] and variance_noise is None:
@@ -110,8 +127,7 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
         else:
             noise = None
 
-        # logger.info(f"batch_idx {batch_idx}")
-
+#! ---------------------------------------- ADD BELOW ----------------------------------------
         if get_runtime_state().patch_mode:
             model_outputs = []
             for output in self.model_outputs:
@@ -126,6 +142,7 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
                 )
         else:
             model_outputs = self.model_outputs
+#! ---------------------------------------- ADD ABOVE ----------------------------------------
 
         if self.config.solver_order == 1 or self.lower_order_nums < 1 or lower_order_final:
             prev_sample = self.dpm_solver_first_order_update(model_output, sample=sample, noise=noise)

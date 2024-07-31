@@ -153,11 +153,11 @@ def main():
 
     pipeline.set_progress_bar_config(disable=distri_config.rank != 0)
     # warmup
-    output = pipeline(
-        prompt=args.prompt,
-        generator=torch.Generator(device="cuda").manual_seed(42),
-        output_type=args.output_type,
-    )
+    # output = pipeline(
+    #     prompt=args.prompt,
+    #     generator=torch.Generator(device="cuda").manual_seed(42),
+    #     output_type=args.output_type,
+    # )
 
     torch.cuda.reset_peak_memory_stats()
 
@@ -195,7 +195,7 @@ def main():
         start_time = time.time()
         output = pipeline(
             prompt=args.prompt,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device="cuda").manual_seed(0),
             num_inference_steps=args.num_inference_steps,
             output_type=args.output_type,
         )

@@ -685,18 +685,18 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.recv_buffer_set: bool = False
         # self.recv_shape: Optional[torch.Size] = None
         # self.send_shape: Optional[torch.Size] = None
-        self.recv_tasks_queue: List[int] = []
-        self.receiving_task: Optional[torch.distributed.Work] = None
-        self.recv_buffer: Optional[Union[List[torch.Tensor], torch.Tensor]] \
-            = None
+        self.recv_tasks_queue: List[Union[int, Tuple[str, int]]] = []
+        self.receiving_tasks: List[Tuple[torch.distributed.Work, str, int]] = []
+        self.recv_buffer: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
         self.dtype: Optional[torch.dtype] = None
         self.num_pipefusion_patches: Optional[int] = None
+        self.extra_tensors_recv_buffer: Dict[str, List[torch.Tensor]] = {}
 
     def reset_buffer(self):
         self.recv_shape = None
         self.send_shape = None
         self.recv_tasks_queue = []
-        self.receiving_task = None
+        self.receiving_tasks = []
         self.recv_buffer = None
         
     def set_recv_buffer(
@@ -722,6 +722,18 @@ class PipelineGroupCoordinator(GroupCoordinator):
         )
         self.recv_buffer_set = True
 
+    def set_extra_tensors_recv_buffer(
+        self,
+        name: str,
+        shape: List[int],
+        num_buffers: int = 1,
+        dtype: torch.dtype = torch.float16
+    ):
+        self.extra_tensors_recv_buffer[name] = [
+            torch.zeros(*shape, dtype=dtype, device=self.device)
+            for _ in range(num_buffers)
+        ]
+
     def pipeline_send(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
         assert self.recv_buffer_set, (
@@ -734,28 +746,47 @@ class PipelineGroupCoordinator(GroupCoordinator):
             "set_recv_buffer must be called before sending tensors")
         self._pipeline_isend(tensor)
 
-    def pipeline_recv(self, idx: Optional[int] = None) -> torch.Tensor:
+    def pipeline_recv(self, idx: Optional[int] = None, name: Optional[str] = None) -> torch.Tensor:
         assert self.recv_buffer_set, (
             "set_recv_buffer must be called before receiving tensors")
-        idx = idx or -1
-        self._pipeline_irecv(self.recv_buffer[idx]).wait()
-        return self.recv_buffer[idx]
-
-    def add_pipeline_recv_task(self, idx: Optional[int] = None):
-        assert self.recv_buffer_set, (
-            "set_recv_buffer must be called before receiving tensors")
-        self.recv_tasks_queue.append(idx if idx is not None else -1)
-
-    def get_pipeline_recv_data(self, idx: Optional[int] = None) -> torch.Tensor:
-        assert self.recv_buffer_set, (
-            "set_recv_buffer must be called before receiving tensors")
-        if self.receiving_task is not None:
-            self.receiving_task.wait()
-            self.receiving_task = None
         if idx is None:
-            return self.recv_buffer[-1]
-        else:
+            idx = -1
+        if name is None:
+            self._pipeline_irecv(self.recv_buffer[idx]).wait()
             return self.recv_buffer[idx]
+        else:
+            assert self.extra_tensors_recv_buffer.get(name, None) is not None, (
+                "extra tensor shape not set, call set_extra_tensors_recv_buffer first")
+            self._pipeline_irecv(self.extra_tensors_recv_buffer[name][idx]).wait()
+            return self.extra_tensors_recv_buffer[name][idx]
+
+    def add_pipeline_recv_task(self, idx: Optional[int] = None, name: Optional[str] = None):
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before receiving tensors")
+        if name is None:
+            self.recv_tasks_queue.append(idx if idx is not None else -1)
+        else:
+            assert self.extra_tensors_recv_buffer.get(name, None) is not None, (
+                "extra tensor shape not set, call set_extra_tensors_recv_buffer first")
+            self.recv_tasks_queue.append((name, idx if idx is not None else -1))
+
+    def get_pipeline_recv_data(self, idx: Optional[int] = None, name: Optional[str] = None) -> torch.Tensor:
+        assert self.recv_buffer_set, (
+            "set_recv_buffer must be called before receiving tensors")
+        assert len(self.receiving_tasks) > 0, (
+            "No tasks to receive, call add_pipeline_recv_task first")
+        if idx is None:
+            idx = -1
+        receiving_task = self.receiving_tasks.pop(0)
+        receiving_task[0].wait()
+        assert receiving_task[1] == name and receiving_task[2] == idx, (
+            "Received tensor does not match the requested")
+        if name is None:
+            return self.recv_buffer[idx]
+        else:
+            assert self.extra_tensors_recv_buffer.get(name, None) is not None, (
+                "extra tensor shape not set, call set_extra_tensors_recv_buffer first")
+            return self.extra_tensors_recv_buffer[name][idx]
 
     def recv_next(self):
         assert self.recv_buffer_set, (
@@ -763,13 +794,14 @@ class PipelineGroupCoordinator(GroupCoordinator):
         if len(self.recv_tasks_queue) == 0:
             raise ValueError("No more tasks to receive")
         elif len(self.recv_tasks_queue) > 0:
-            if self.receiving_task is not None:
-                logger.warning(f"Receiving task is not finished, waiting...")
-                self.receiving_task.wait()
-                self.receiving_task = None
-            idx = self.recv_tasks_queue.pop(0)
-            self.receiving_task = self._pipeline_irecv(self.recv_buffer[idx])
-        
+            task = self.recv_tasks_queue.pop(0)
+            if isinstance(task, int):
+                idx = task
+                self.receiving_tasks.append((self._pipeline_irecv(self.recv_buffer[idx]), None, idx))
+            elif isinstance(task, Tuple):
+                name, idx = task
+                self.receiving_tasks.append((self._pipeline_irecv(self.extra_tensors_recv_buffer[name][idx]), name, idx))
+
     def _pipeline_irecv(self, tensor: torch.tensor):
         return torch.distributed.irecv(
             tensor,

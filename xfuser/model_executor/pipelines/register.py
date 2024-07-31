@@ -14,13 +14,13 @@ class xFuserPipelineWrapperRegister:
 
     @classmethod
     def register(cls, origin_pipe_class: Type[DiffusionPipeline]):
-        def decorator(pipefusion_pipe_class: Type[xFuserPipelineBaseWrapper]):
-            if not issubclass(pipefusion_pipe_class, xFuserPipelineBaseWrapper):
-                raise ValueError(f"{pipefusion_pipe_class} is not a subclass of"
+        def decorator(xfuser_pipe_class: Type[xFuserPipelineBaseWrapper]):
+            if not issubclass(xfuser_pipe_class, xFuserPipelineBaseWrapper):
+                raise ValueError(f"{xfuser_pipe_class} is not a subclass of"
                                  f" xFuserPipelineBaseWrapper")
             cls._XFUSER_PIPE_MAPPING[origin_pipe_class] = \
-                pipefusion_pipe_class
-            return pipefusion_pipe_class
+                xfuser_pipe_class
+            return xfuser_pipe_class
         return decorator
 
     @classmethod

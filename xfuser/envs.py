@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     CUDA_HOME: Optional[str] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
-    PIPEFUSION_LOGGING_LEVEL: str = "INFO"
+    XDIT_LOGGING_LEVEL: str = "INFO"
     CUDA_VERSION: version.Version
     TORCH_VERSION: version.Version
 
@@ -46,8 +46,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
 
     # this is used for configuring the default logging level
-    "PIPEFUSION_LOGGING_LEVEL":
-    lambda: os.getenv("PIPEFUSION_LOGGING_LEVEL", "INFO"),
+    "XDIT_LOGGING_LEVEL":
+    lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
 }
 
 variables: Dict[str, Callable[[], Any]] = {

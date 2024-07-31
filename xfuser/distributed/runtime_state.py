@@ -1,6 +1,6 @@
 from abc import ABCMeta
 import random
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -82,7 +82,11 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_start_end_idx: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
-    
+    # Storing the shape of a tensor that is not latent but requires pp communication 
+    #   torch.Size: size of tensor
+    #   int: number of recv buffer it needs
+    pipeline_comm_extra_tensors_info: List[Tuple[str, List[int], int]]
+
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
         self.patch_mode = False
@@ -97,6 +101,7 @@ class DiTRuntimeState(RuntimeState):
             backbone_in_channel=pipeline.transformer.config.in_channels,
             backbone_inner_dim=pipeline.transformer.inner_dim,
         )
+        self.pipeline_comm_extra_tensors_info = []
 
     def set_input_parameters(
         self,
@@ -259,6 +264,7 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_end_idx = pp_patches_token_start_end_idx
         self.pp_patches_token_num = pp_patches_token_num
+        print(f"metadata:\n num_pipeline_patch: {num_pipeline_patch}\n pp_patches_height: {pp_patches_height}\n pp_patches_start_idx_local: {pp_patches_start_idx_local}\n pp_patches_start_end_idx_global: {pp_patches_start_end_idx_global}\n pp_patches_token_start_end_idx: {pp_patches_token_start_end_idx}\n pp_patches_token_num: {pp_patches_token_num}")
 
 
     def _reset_recv_buffer(self):

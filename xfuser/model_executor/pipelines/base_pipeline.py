@@ -211,7 +211,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         return latents
 
 
-    def _init_sd3_async_pipeline(
+    def _init_async_pipeline(
         self,
         num_timesteps: int,
         latents: torch.Tensor,
@@ -386,7 +386,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             return latents
         num_pipeline_patch = get_runtime_state().num_pipeline_patch
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
-        patch_latents = self._init_sd3_async_pipeline(
+        patch_latents = self._init_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,

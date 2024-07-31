@@ -407,6 +407,19 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         else:
             return None
 
+    def set_sd3_extra_comm_tensor(self, prompt_embeds: torch.Tensor):
+        prompt_embeds_shape = prompt_embeds.shape
+        encoder_hidden_states_shape = prompt_embeds_shape[:-1] + (self.transformer.config.caption_projection_dim,) 
+        self._set_extra_comm_tensor_for_pipeline(
+            [
+                (
+                    "encoder_hidden_states", 
+                    list(encoder_hidden_states_shape),
+                    get_runtime_state().num_pipeline_patch,
+                )
+            ]
+        )
+
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
         self,
@@ -420,6 +433,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
+        self.set_sd3_extra_comm_tensor(prompt_embeds)
         latents = self._init_sync_pipeline(latents)
         for i, t in enumerate(timesteps):
             if self.interrupt:
@@ -437,11 +451,16 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
+                if get_pipeline_parallel_rank() != 0:
+                    encoder_hidden_states = get_pp_group().pipeline_recv(0, "encoder_hidden_states")
+                if get_pipeline_parallel_rank() == 1:
+                    print(457, latents.shape, encoder_hidden_states.shape)
 
 
             latents, encoder_hidden_states = self._backbone_forward(
                 latents=latents,
-                encoder_hidden_states=prompt_embeds,
+                encoder_hidden_states=prompt_embeds 
+                if get_pipeline_parallel_rank() == 0 else encoder_hidden_states,
                 pooled_prompt_embeds=pooled_prompt_embeds,
                 t=t,
             )
@@ -482,6 +501,8 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
+                if get_pipeline_parallel_rank() != get_pipeline_parallel_world_size() - 1:
+                    get_pp_group().pipeline_send(encoder_hidden_states)
 
         if (sync_only and 
             get_sequence_parallel_world_size() > 1 and
@@ -505,6 +526,44 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
 
         return latents
 
+    def _init_sd3_async_pipeline(
+        self,
+        num_timesteps: int,
+        latents: torch.Tensor,
+        num_pipeline_warmup_steps: int,
+    ):
+        get_runtime_state().set_patched_mode(patch_mode=True)
+
+        if get_pipeline_parallel_rank() == 0:
+            # get latents computed in warmup stage
+            # ignore latents after the last timestep
+            latents = (
+                get_pp_group().pipeline_recv()
+                if num_pipeline_warmup_steps > 0
+                else latents
+            )
+            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
+        elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
+        else:
+            patch_latents = [None for _ in range(get_runtime_state().num_pipeline_patch)]
+
+        recv_timesteps = (
+            num_timesteps - 1 if get_pipeline_parallel_rank() == 0 else num_timesteps
+        )
+
+        if get_pipeline_parallel_rank() == 0:
+            for _ in range(recv_timesteps):
+                for patch_idx in range(get_runtime_state().num_pipeline_patch):
+                    get_pp_group().add_pipeline_recv_task(patch_idx)
+        else:
+            for _ in range(recv_timesteps):
+                for patch_idx in range(get_runtime_state().num_pipeline_patch):
+                    get_pp_group().add_pipeline_recv_task(patch_idx)
+                    get_pp_group().add_pipeline_recv_task(patch_idx, "encoder_hidden_states")
+
+        return patch_latents
+
     # * implement of pipefusion
     def _async_pipeline(
         self,
@@ -517,12 +576,12 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
     ):
-        print(509, timesteps)
         if len(timesteps) == 0:
             return latents
+        self.set_sd3_extra_comm_tensor(prompt_embeds)
         num_pipeline_patch = get_runtime_state().num_pipeline_patch
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
-        patch_latents = self._init_async_pipeline(
+        patch_latents = self._init_sd3_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,
@@ -549,18 +608,28 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 else:
                     if first_async_recv:
                         get_pp_group().recv_next()
+                        if get_pipeline_parallel_rank() != 0:
+                            get_pp_group().recv_next()
                         first_async_recv = False
                     patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
                         idx=patch_idx
                     )
+                    if get_pipeline_parallel_rank() != 0:
+                        encoder_hidden_states = get_pp_group().get_pipeline_recv_data(
+                            idx=patch_idx, name="encoder_hidden_states"
+                        )
                     if i == len(timesteps) - 1 and patch_idx == num_pipeline_patch - 1:
                         pass
+                    elif get_pipeline_parallel_rank() == 0:
+                        get_pp_group().recv_next()
                     else:
+                        get_pp_group().recv_next()
                         get_pp_group().recv_next()
 
                 patch_latents[patch_idx], encoder_hidden_states = self._backbone_forward(
                     latents=patch_latents[patch_idx],
-                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states=prompt_embeds
+                    if get_pipeline_parallel_rank() == 0 else encoder_hidden_states,
                     pooled_prompt_embeds=pooled_prompt_embeds,
                     t=t,
                 )
@@ -593,8 +662,8 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
                 else:
-                    get_pp_group().pipeline_isend(encoder_hidden_states)
                     get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                    get_pp_group().pipeline_isend(encoder_hidden_states)
                 
                 get_runtime_state().next_patch()
 

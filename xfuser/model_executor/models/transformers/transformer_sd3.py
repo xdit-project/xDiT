@@ -92,9 +92,10 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         # hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
 #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
         temb = self.time_text_embed(timestep, pooled_projections)
-        print(95, encoder_hidden_states.shape)
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
-        print(97, encoder_hidden_states.shape)
+#! ---------------------------------------- ADD BELOW ----------------------------------------
+        if get_pipeline_parallel_rank() == 0:
+#! ---------------------------------------- ADD ABOVE ----------------------------------------
+            encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
         for block in self.transformer_blocks:
             if self.training and self.gradient_checkpointing:
@@ -132,8 +133,6 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
             # unpatchify
             patch_size = self.config.patch_size
-            # height = height // patch_size
-            # width = width // patch_size
 
             hidden_states = hidden_states.reshape(
                 shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)

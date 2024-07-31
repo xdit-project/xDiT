@@ -264,7 +264,6 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_end_idx = pp_patches_token_start_end_idx
         self.pp_patches_token_num = pp_patches_token_num
-        print(f"metadata:\n num_pipeline_patch: {num_pipeline_patch}\n pp_patches_height: {pp_patches_height}\n pp_patches_start_idx_local: {pp_patches_start_idx_local}\n pp_patches_start_end_idx_global: {pp_patches_start_end_idx_global}\n pp_patches_token_start_end_idx: {pp_patches_token_start_end_idx}\n pp_patches_token_num: {pp_patches_token_num}")
 
 
     def _reset_recv_buffer(self):

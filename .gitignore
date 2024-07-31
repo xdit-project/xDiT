@@ -2,10 +2,9 @@
 .DS_Store
 build
 __pycache__
-pipefuser.egg-info
 *.log
 *.txt
 results/
 profile/
 .vscode/
-pipefusion.egg-info/
+xdit.egg-info/

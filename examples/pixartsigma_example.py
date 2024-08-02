@@ -38,6 +38,11 @@ def main():
     elapsed_time = end_time - start_time
     peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
+    parallel_info = (
+        f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"
+        f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"
+        f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
+    )
     if input_config.output_type == "pil":
         global_rank = get_world_group().rank
         dp_group_world_size = get_data_parallel_world_size()
@@ -47,7 +52,7 @@ def main():
         if get_data_parallel_rank() == dp_group_world_size - 1:
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
-                image.save(f"./results/pixart_sigma_result_{image_rank}.png")
+                image.save(f"./results/pixart_sigma_result_{parallel_info}_{image_rank}.png")
 
     if get_world_group().rank == get_world_group().world_size - 1:
         print(

@@ -1,7 +1,8 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
+import torch.distributed
 import torch.nn as nn
 
 from diffusers import DiffusionPipeline
@@ -184,6 +185,21 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def __call__(self):
         pass
 
+    def _set_extra_comm_tensor_for_pipeline(
+        self,
+        extra_tensors_shape_dict: List[Tuple[str, List[int], int]] = []
+    ):
+        if (
+            get_runtime_state().pipeline_comm_extra_tensors_info == \
+                extra_tensors_shape_dict
+        ):
+            return
+        for name, shape, cnt in extra_tensors_shape_dict:
+            get_pp_group().set_extra_tensors_recv_buffer(name, shape, cnt)
+        get_runtime_state().pipeline_comm_extra_tensors_info = extra_tensors_shape_dict
+
+        
+
     def _init_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
@@ -228,27 +244,27 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     
     def _process_cfg_split_batch(
         self,
-        prompt_embeds: torch.Tensor,
-        prompt_attention_mask: torch.Tensor,
-        negative_prompt_embeds: torch.Tensor,
-        negative_prompt_attention_mask: torch.Tensor,
+        concat_group_0_negative: torch.Tensor,
+        concat_group_0: torch.Tensor,
+        concat_group_1_negative: torch.Tensor,
+        concat_group_1: torch.Tensor,
     ):
         if get_classifier_free_guidance_world_size() == 1:
-            prompt_embeds = torch.cat(
-                [negative_prompt_embeds, prompt_embeds], dim=0
+            concat_group_0 = torch.cat(
+                [concat_group_0_negative, concat_group_0], dim=0
             )
-            prompt_attention_mask = torch.cat(
-                [negative_prompt_attention_mask, prompt_attention_mask], dim=0
+            concat_group_1 = torch.cat(
+                [concat_group_1_negative, concat_group_1], dim=0
             )
         elif get_classifier_free_guidance_rank() == 0:
-            prompt_embeds = negative_prompt_embeds
-            prompt_attention_mask = negative_prompt_attention_mask
+            concat_group_0 = concat_group_0_negative
+            concat_group_1 = concat_group_1_negative
         elif get_classifier_free_guidance_rank() == 1:
-            prompt_embeds = prompt_embeds
-            prompt_attention_mask = prompt_attention_mask
+            concat_group_0 = concat_group_0
+            concat_group_1 = concat_group_1
         else:
             raise ValueError("Invalid classifier free guidance rank")
-        return prompt_embeds, prompt_attention_mask
+        return concat_group_0, concat_group_1
 
     def _scheduler_step(
         self,
@@ -403,7 +419,6 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                         pass
                     else:
                         get_pp_group().recv_next()
-
                 patch_latents[patch_idx] = self._backbone_forward(
                     latents=patch_latents[patch_idx],
                     prompt_embeds=prompt_embeds,

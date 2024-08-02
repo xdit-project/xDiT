@@ -232,10 +232,10 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 prompt_embeds,
                 prompt_attention_mask,
             ) = self._process_cfg_split_batch(
-                prompt_embeds, 
-                prompt_attention_mask, 
                 negative_prompt_embeds, 
-                negative_prompt_attention_mask
+                prompt_embeds,
+                negative_prompt_attention_mask,
+                prompt_attention_mask
             )
 
         #! ORIGIN

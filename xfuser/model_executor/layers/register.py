@@ -9,20 +9,20 @@ logger = init_logger(__name__)
 
 
 class xFuserLayerWrappersRegister:
-    _XFUSER_LAYER_MAPPING: Dict[Type[nn.Module], Type[xFuserLayerBaseWrapper]] = (
-        {}
-    )
+    _XFUSER_LAYER_MAPPING: Dict[
+        Type[nn.Module], Type[xFuserLayerBaseWrapper]
+    ] = {}
 
     @classmethod
     def register(cls, origin_layer_class: Type[nn.Module]):
-        def decorator(pipefusion_layer_wrapper: Type[xFuserLayerBaseWrapper]):
-            if not issubclass(pipefusion_layer_wrapper, xFuserLayerBaseWrapper):
+        def decorator(xfuser_layer_wrapper: Type[xFuserLayerBaseWrapper]):
+            if not issubclass(xfuser_layer_wrapper, xFuserLayerBaseWrapper):
                 raise ValueError(
-                    f"{pipefusion_layer_wrapper.__class__.__name__} is not a "
+                    f"{xfuser_layer_wrapper.__class__.__name__} is not a "
                     f"subclass of xFuserLayerBaseWrapper"
                 )
-            cls._XFUSER_LAYER_MAPPING[origin_layer_class] = pipefusion_layer_wrapper
-            return pipefusion_layer_wrapper
+            cls._XFUSER_LAYER_MAPPING[origin_layer_class] = xfuser_layer_wrapper
+            return xfuser_layer_wrapper
 
         return decorator
 
@@ -32,7 +32,7 @@ class xFuserLayerWrappersRegister:
         candidate_origin = None
         for (
             origin_layer_class,
-            pipefusion_layer_wrapper,
+            xfuser_layer_wrapper,
         ) in cls._XFUSER_LAYER_MAPPING.items():
             if isinstance(layer, origin_layer_class):
                 if (
@@ -41,7 +41,7 @@ class xFuserLayerWrappersRegister:
                     or issubclass(origin_layer_class, candidate_origin)
                 ):
                     candidate_origin = origin_layer_class
-                    candidate = pipefusion_layer_wrapper
+                    candidate = xfuser_layer_wrapper
 
         if candidate is None:
             raise ValueError(

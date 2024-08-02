@@ -1,31 +1,64 @@
 <div align="center">
-<h1>xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h1>
+  <!-- <h1>KTransformers</h1> -->
+  <p align="center">
+  
+  <picture>
+    <img alt="xDiT" src="./assets/XDiTlogo.png" width=50%>
 
-  <div align="center">
-  <a href="https://opensource.org/licenses/Apache-2.0">
-    <img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-4E94CE.svg">
-  </a>
-  <a href="https://arxiv.org/abs/2405.14430">
-    <img src="https://img.shields.io/badge/Paper-Arixv-FFB000.svg" alt="Paper">
-  </a>
+  </picture>
+
+  </p>
+  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
+  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> </strong>
 </div>
-</div>
 
-***In the Sora Era, still spend money on NVLink and high-bandwidth networks for serving long-context Diffusion Models? With PipeFusion, PCIe and Ethernet are enough!***
+<h2 id="meet-xdit">🔥 Meet xDiT</h2>
 
-The project provides a suite of efficient parallel inference approaches for Diffusion Models.
-The backend networks of the diffusion model primarily include U-Net and Transformers (DiT). Both of these can be applied to DiT, and some methods can also be used for U-Net.
+Diffusion Transformers (DiTs), pivotal in text-to-image and text-to-video models, are driving advancements in high-quality image and video generation. 
+With the escalating input sequence length in DiTs, the computational demand of the Attention mechanism grows **quadratically**! 
+Consequently, multi-GPU and multi-machine deployments are essential to maintain real-time performance in online services.
 
-1. Tensor Parallelism. (DiT, U-Net)
-2. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach including DeepSpeed-Ulysses, Ring-Attention: (DiT)
-3. Displaced Patch Parallelism, named [DistriFusion](https://arxiv.org/abs/2402.19481): (DiT, U-Net)
-4. Displaced Patch Pipeline Paralelism, named [PipeFusion](https://arxiv.org/abs/2405.14430), first proposed in this repo. (DiT)
+To meet real-time demand for DiTs applications, parallel inference is a must.
+xDiT is an inference engine designed for the parallel deployment of DiTs on large scale. 
+xDiT provides a suite of efficient parallel inference approaches for Diffusion Models.
 
-The communication and memory cost of the above parallelism for DiT is listed in the following table. (* indicates comm. can be hidden by computation, but needs extra buffers.)
+1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention.
+
+2. [PipeFusion](https://arxiv.org/abs/2405.14430), a patch level pipeline parallelism using displaced patch by taking advantage of the diffusion model characteristics.
+
+3. Data Parallel: Processes multiple prompts or generates multiple images from a single prompt in parallel across images.
+
+4. CFG Parallel, also known as Split Batch: Activates when using classifier-free guidance (CFG) with a constant parallelism of 2.
+
+The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
+
+xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
+If the model you require is not available in the model zoo, developing it yourself is straightforward; please refer to our [Dev Guide](#dev-guide).
+
+
+We also have implemented the following parallel stategies for reference:
+
+1. Tensor Parallelism
+2. [DistriFusion](https://arxiv.org/abs/2402.19481)
+
+The communication and memory costs associated with the aforementioned parallelism in DiT are detailed in the table below. (* denotes that communication can be overlapped with computation.)
+
+
+PipeFusion and Sequence Parallel achieve optimal performance on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
+
+𝒑: Number of pixels;
+𝒉𝒔: Model hidden size;
+𝑳: Number of model layers;
+𝑷: Total model parameters;
+𝑵: Number of parallel devices;
+𝑴: Number of patch splits;
+𝑸𝑶: Query and Output parameter count;
+𝑲𝑽: KV Activation parameter count;
+𝑨 = 𝑸 = 𝑶 = 𝑲 = 𝑽: Equal parameters for Attention, Query, Output, Key, and Value;
 
 <div align="center">
 
-|          | attn-KV | communication cost | param | activations | extra buff |
+|          | attn-KV | communication cost | param memory | activations memory | extra buff memory |
 |:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
 | Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
 | DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $2AL = (KV)L$ |
@@ -35,16 +68,17 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 
 </div>
 
-### 📢 Updates
-* 🎉**July 18, 2024**: Implemented hybrid parallelism support for PixArt-Sigma. The inference script is [examples/pixartsigma_example.py](examples/pixartsigma_example.py)
-* 🎉**July 17, 2024**: Completed major project refactoring. Added hybrid parallelism support for PixArt-alpha. Support hybrid parallelism for PixArt-alpha. The inference script is [examples/pixartalpha_example.py](examples/pixartalpha_example.py)
+<h2 id="support-dits">📢 Updates</h2>
+
+* 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
+* 🎉**July 17, 2024**: Rename the project to xDiT. The project has evolved from a collection of parallel methods into a unified inference framework and supported the hybrid parallel for DiTs.
 * 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [legacy/scripts/hunyuandit_example.py](./legacy/scripts/hunyuandit_example.py).
-* 🎉**July 1, 2024**: Split batch for Classifier Free Guidance.
 * 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [legacy/scripts/sd3_example.py](./legacy/scripts/sd3_example.py).
 * 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [legacy/scripts/pixart_example.py](./legacy/scripts/pixart_example.py), DiT [legacy/scripts/ditxl_example.py](./legacy/scripts/ditxl_example.py) and SDXL [legacy/scripts/sdxl_example.py](./legacy/scripts/sdxl_example.py).
 
 
-### 🎯 Supported DiTs:
+<h2 id="support-dits">🎯 Supported DiTs</h2>
+
 -  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
 -  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
 -  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
@@ -52,8 +86,9 @@ The communication and memory cost of the above parallelism for DiT is listed in 
 -  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
 
-### Benchmark Results on Pixart-Alpha
+<h2 id="show-cases">📈 Performance</h2>
 
+Here present the benchmark Results on Pixart-Alpha with 20-step DPM solver as the scheduler.
 You can  adapt to [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh) to benchmark latency and memory usage of different parallel approaches.
 
 1. The Latency on 4xA100-80GB (PCIe)
@@ -81,49 +116,26 @@ You can  adapt to [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh)
     alt="latency-T4">
 </div>
 
-##  PipeFusion: Displaced Patch Pipeline Parallelism
 
-PipeFusion is the innovative method first proposed by us.
+<h2 id="QuickStart">🚀 QuickStart</h2>
 
-### Overview
+1. Install yunchang for sequence parallel.
 
-PipeFusion significantly reduces memory usage and required communication bandwidth, not to mention it also hides communication overhead under the communication.
-It is very suitable for DiT inference to be hosted on GPUs connected via PCIe.
+Install yunchang from [feifeibear/long-context-attention](https://github.com/feifeibear/long-context-attention).
+lease note that it has a dependency on flash attention and specific GPU model requirements. We recommend installing yunchang from the source code rather than using `pip install yunchang==0.2.0`.
 
-<div align="center">
-    <img src="./assets/overview.png" alt="PipeFusion Image">
-</div>
+2. Install xDiT
 
-The above picture compares DistriFusion and PipeFusion.
-(a) DistriFusion replicates DiT parameters on two devices. 
-It splits an image into 2 patches and employs asynchronous allgather for activations of every layer.
-(b) PipeFusion shards DiT parameters on two devices.
-It splits an image into 4 patches and employs asynchronous P2P for activations across two devices.
-
-PipeFusion partitions an input image into $M$ non-overlapping patches.
-The DiT network is partitioned into $N$ stages ($N$ < $L$), which are sequentially assigned to $N$ computational devices. 
-Note that $M$ and $N$ can be unequal, which is different from the image-splitting approaches used in sequence parallelism and DistriFusion.
-Each device processes the computation task for one patch of its assigned stage in a pipelined manner. 
-
-The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
-
-<div align="center">
-    <img src="./assets/workflow.png" alt="Pipeline Image">
-</div>
-
-
-### QuickStart
-
-1. Install xDiT from local.
 ```
 python setup.py install
 ```
 
-2. Usage
+3. Usage
 
-We provide several examples demonstrating how to run models with PipeFusion in the ./examples/ directory.
+We provide several examples demonstrating how to run models with PipeFusion in the [./examples/](./examples/) directory.
 
 For instance, to view the available options for the PixArt-alpha example, use the following command:
+
 ```bash
 python ./examples/pixartalpha_example.py -h
 
@@ -180,7 +192,11 @@ Input Options:
                         Number of inference steps.
 ```
 
-Utilizing Various Parallelism Techniques You can leverage different types of parallelism to execute the model efficiently. It's crucial to ensure that the product of all parallel degrees equals the number of available devices. For example, you can employ a combination of split batch, PipeFusion parallel, and sequence parallel techniques with the following command to generate an image of a cute dog using hybrid parallelism::
+Leveraging multiple parallelism techniques togather is essential for efficiently scaling. 
+It's important that the product of all parallel degrees matches the number of devices. 
+For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism:
+
+
 ```bash
 torchrun --nproc_per_node=8 \
 examples/pixartalpha_example.py \
@@ -194,36 +210,78 @@ examples/pixartalpha_example.py \
 ```
 In this command, the equation ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8 is satisfied, allowing the hybrid parallelism to function correctly.
 
-## Evaluation Image Quality
+⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
+The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution. 
+We observed that a warmup of 0 had no effect on the PixArt model.
+Users can tune this value according to their specific tasks.
 
-To conduct the FID experiment, follow the detailed instructions provided in the assets/doc/FID.md documentation.
+<h2 id="secrets">✨ the xDiT's secret weapons </h2>
+
+<h3 id="PipeFusion">1. PipeFusion </h3>
+
+PipeFusion is the innovative method first proposed by us. 
+It is a sequence-level pipeline parallel method, similar to [TeraPipe](https://proceedings.mlr.press/v139/li21y.html), demonstrates significant advantages in weakly interconnected network hardware such as PCIe/Ethernet. 
+
+PipeFusion innovatively harnesses input temporal redundancy—the similarity between inputs and activations across diffusion steps, a diffusion-specific characteristics also employed in DistriFusion. PipeFusion not only reduces communication volume but also streamlines pipeline parallelism with TeraPipe, avoiding the load balancing issues inherent in LLM models with Causal Attention.
+It significantly surpasses other methods in communication efficiency, particularly in multi-node setups connected via Ethernet and multi-GPU configurations linked with PCIe.
+
+<div align="center">
+    <img src="./assets/overview.png" alt="PipeFusion Image">
+</div>
+
+The above picture compares DistriFusion and PipeFusion.
+(a) DistriFusion replicates DiT parameters on two devices. 
+It splits an image into 2 patches and employs asynchronous allgather for activations of every layer.
+(b) PipeFusion shards DiT parameters on two devices.
+It splits an image into 4 patches and employs asynchronous P2P for activations across two devices.
+
+We briefly explain the workflow of PipeFusion. It partitions an input image into $M$ non-overlapping patches.
+The DiT network is partitioned into $N$ stages ($N$ < $L$), which are sequentially assigned to $N$ computational devices. 
+Note that $M$ and $N$ can be unequal, which is different from the image-splitting approaches used in sequence parallelism and DistriFusion.
+Each device processes the computation task for one patch of its assigned stage in a pipelined manner. 
+
+The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
+
+<div align="center">
+    <img src="./assets/workflow.png" alt="Pipeline Image">
+</div>
+
+
+We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown bolow. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](assets/doc/FID).md .
 
 <div align="center">
     <img src="./assets/image_quality.png" alt="image_quality">
 </div>
 
-
-## Other optimizations
-
-### 1. Avoid OOM in VAE Module:
+<h3 id="ParallelVAE">2. Parallel VAE </h3>
 
 The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
 
-To address this limitation, we developed [DistVAE](https://github.com/PipeFusion/DistVAE), an innovative solution that enables efficient processing of high-resolution images. Our approach incorporates two key strategies:
+To address this limitation, we developed [DistVAE](https://github.com/dit-project/DistVAE), an solution that enables efficient processing of high-resolution images in parallel. Our approach incorporates two key strategies:
 
-* Patch Parallelization: We divide the feature maps in the latent space into multiple patches and perform parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/N, where N is the number of devices utilized.
+* Patch Parallel: We divide the feature maps in the latent space into multiple patches and perform sequence parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/$N$, where N is the number of devices utilized.
 
-* Chunked Input Processing: Building on [MIT-patch-conv](https://hanlab.mit.edu/blog/patch-conv), we split the input feature map into chunks and feed them into convolution operator sequentially. This approach minimizes temporary memory consumption.
+* Chunked Input Processing: Similar to [MIT-patch-conv](https://hanlab.mit.edu/blog/patch-conv), we split the input feature map into chunks and feed them into convolution operator sequentially. This approach minimizes temporary memory consumption.
 
-By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240px - an impressive 11-fold increase compared to the conventional VAE approach.
+By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240px - an impressive 11-fold increase compared to the default VAE implmentation.
 
-This advancement represents a significant leap forward in high-resolution image processing, opening new possibilities for applications in various domains of computer vision and image generation.
 
-### 2. Split Batch for Classifier-Free Guidance
+<h2 id="dev-guide">📚  Develop Guide</h2>
+TBD
 
-During inference with classifier-free guidance, the batch size for inputs to DiT blocks remains fixed at 2. We prioritize batch parallelization before integrating other parallel strategies. For instance, on an 8-GPU setup, we can set a batch parallel degree of 2 and a pipefuse parallel degree of 4. This approach has resulted in a 1.7x speedup in generating 1024 x 1024 pixel images, using the same number of devices.
+<h2 id="dev-guide">🚧  History and Looking for Contributions</h2>
+We conducted a major upgrade of this project in August 2024.
 
-## Cite Us
+The latest APIs is located in the [xfuser/](./xfuser/) directory, supports hybrid parallelism. It offers clearer and more structured code but currently supports fewer models.
+
+The legacy APIs is in the [legacy/](./legacy/) directory, limited to single parallelism. It supports a richer of parallel methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel. CFG Parallel can be hybrid with PipeFusion but not with other parallel methods.
+
+For models not yet supported by the latest APIs, you can run the examples in the [legacy/scripts/](./legacy/scripts/) directory. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
+
+We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://https://github.com/xdit-project/xDiT/discussions).
+
+<h2 id="cite-us">📝 Cite Us</h2>
+
 ```
 @article{wang2024pipefusion,
       title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
@@ -235,5 +293,3 @@ During inference with classifier-free guidance, the batch size for inputs to DiT
 }
 ```
 
-## Acknowledgenments
-Our code is developed on [distrifuser](https://github.com/mit-han-lab/distrifuser) from MIT-HAN-LAB.

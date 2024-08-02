@@ -12,6 +12,21 @@
   <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> </strong>
 </div>
 
+<h2 id="agenda">Table of Contents</h2>
+
+- [🔥 Meet xDiT](#meet-xdit)
+- [📢 Updates](#updates)
+- [🎯 Supported DiTs](#support-dits)
+- [📈 Performance](#perf)
+- [🚀 QuickStart](#QuickStart)
+- [✨ the xDiT's secret weapons](#secrets)
+  - [PipeFusion](#PipeFusion)
+  - [Parallel VAE](#ParallelVAE)
+- [📚  Develop Guide](#dev-guide)
+- [🚧  History and Looking for Contributions](#history)
+- [📝 Cite Us](#cite-us)
+
+
 <h2 id="meet-xdit">🔥 Meet xDiT</h2>
 
 Diffusion Transformers (DiTs), pivotal in text-to-image and text-to-video models, are driving advancements in high-quality image and video generation. 
@@ -41,10 +56,10 @@ We also have implemented the following parallel stategies for reference:
 1. Tensor Parallelism
 2. [DistriFusion](https://arxiv.org/abs/2402.19481)
 
-The communication and memory costs associated with the aforementioned parallelism in DiT are detailed in the table below. (* denotes that communication can be overlapped with computation.)
+The communication and memory costs associated with the aforementioned parallelism, except for the CFG and DP, in DiTs are detailed in the table below. (* denotes that communication can be overlapped with computation.)
 
 
-PipeFusion and Sequence Parallel achieve optimal performance on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
+As we can see, PipeFusion and Sequence Parallel achieve lowest communication cost on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
 
 𝒑: Number of pixels;
 𝒉𝒔: Model hidden size;
@@ -68,7 +83,7 @@ PipeFusion and Sequence Parallel achieve optimal performance on different scales
 
 </div>
 
-<h2 id="support-dits">📢 Updates</h2>
+<h2 id="updates">📢 Updates</h2>
 
 * 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
 * 🎉**July 17, 2024**: Rename the project to xDiT. The project has evolved from a collection of parallel methods into a unified inference framework and supported the hybrid parallel for DiTs.
@@ -86,10 +101,11 @@ PipeFusion and Sequence Parallel achieve optimal performance on different scales
 -  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
 
-<h2 id="show-cases">📈 Performance</h2>
+<h2 id="perf">📈 Performance</h2>
 
-Here present the benchmark Results on Pixart-Alpha with 20-step DPM solver as the scheduler.
-You can  adapt to [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh) to benchmark latency and memory usage of different parallel approaches.
+Here are the benchmark results for Pixart-Alpha using the 20-step DPM solver as the scheduler across various image resolutions. To replicate these findings, please refer to the script at [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh).
+
+**TBD**: Updates results on hybrid parallelism.
 
 1. The Latency on 4xA100-80GB (PCIe)
 
@@ -122,7 +138,7 @@ You can  adapt to [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh)
 1. Install yunchang for sequence parallel.
 
 Install yunchang from [feifeibear/long-context-attention](https://github.com/feifeibear/long-context-attention).
-lease note that it has a dependency on flash attention and specific GPU model requirements. We recommend installing yunchang from the source code rather than using `pip install yunchang==0.2.0`.
+Please note that it has a dependency on flash attention and specific GPU model requirements. We recommend installing yunchang from the source code rather than using `pip install yunchang==0.2.0`.
 
 2. Install xDiT
 
@@ -132,9 +148,9 @@ python setup.py install
 
 3. Usage
 
-We provide several examples demonstrating how to run models with PipeFusion in the [./examples/](./examples/) directory.
+We provide examples demonstrating how to run models with PipeFusion in the [./examples/](./examples/) directory.
 
-For instance, to view the available options for the PixArt-alpha example, use the following command:
+For instance, to inspect the available options for the PixArt-alpha example, use the following command:
 
 ```bash
 python ./examples/pixartalpha_example.py -h
@@ -192,9 +208,10 @@ Input Options:
                         Number of inference steps.
 ```
 
-Leveraging multiple parallelism techniques togather is essential for efficiently scaling. 
+Hybriding multiple parallelism techniques togather is essential for efficiently scaling. 
 It's important that the product of all parallel degrees matches the number of devices. 
-For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism:
+For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
+Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8.
 
 
 ```bash
@@ -208,7 +225,7 @@ examples/pixartalpha_example.py \
 --prompt "A small dog" \
 --use_split_batch
 ```
-In this command, the equation ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8 is satisfied, allowing the hybrid parallelism to function correctly.
+
 
 ⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
 The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution. 
@@ -257,7 +274,7 @@ We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as s
 
 The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
 
-To address this limitation, we developed [DistVAE](https://github.com/dit-project/DistVAE), an solution that enables efficient processing of high-resolution images in parallel. Our approach incorporates two key strategies:
+To address this limitation, we developed [dit-project/DistVAE](https://github.com/dit-project/DistVAE), an solution that enables efficient processing of high-resolution images in parallel. Our approach incorporates two key strategies:
 
 * Patch Parallel: We divide the feature maps in the latent space into multiple patches and perform sequence parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/$N$, where N is the number of devices utilized.
 
@@ -269,7 +286,8 @@ By synergizing these two methods, we have dramatically expanded the capabilities
 <h2 id="dev-guide">📚  Develop Guide</h2>
 TBD
 
-<h2 id="dev-guide">🚧  History and Looking for Contributions</h2>
+<h2 id="history">🚧  History and Looking for Contributions</h2>
+
 We conducted a major upgrade of this project in August 2024.
 
 The latest APIs is located in the [xfuser/](./xfuser/) directory, supports hybrid parallelism. It offers clearer and more structured code but currently supports fewer models.

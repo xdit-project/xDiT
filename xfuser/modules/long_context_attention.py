@@ -2,6 +2,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
+import torch.distributed
 from yunchang import LongContextAttention
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
@@ -50,6 +51,9 @@ class xFuserLongContextAttention(LongContextAttention):
         alibi_slopes=None,
         deterministic=False,
         return_attn_probs=False,
+        joint_tensor_query=None,
+        joint_tensor_key=None,
+        joint_tensor_value=None,
         *args: Any,
     ) -> Tensor:
         """forward
@@ -66,6 +70,30 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
+        if joint_tensor_key is not None and joint_tensor_value is not None:
+            if joint_tensor_query is not None:
+                query = torch.cat([query, joint_tensor_query], dim=1)
+            ulysses_world_size = torch.distributed.get_world_size(self.ulysses_pg)
+            ulysses_rank = torch.distributed.get_rank(self.ulysses_pg)
+            attn_heads_per_ulysses_rank = joint_tensor_key.shape[-2] // ulysses_world_size
+            joint_tensor_key = joint_tensor_key[
+                ...,
+                attn_heads_per_ulysses_rank * ulysses_rank:
+                    attn_heads_per_ulysses_rank * (ulysses_rank + 1),
+                :,
+            ]
+            joint_tensor_value = joint_tensor_value[
+                ...,
+                attn_heads_per_ulysses_rank * ulysses_rank:
+                    attn_heads_per_ulysses_rank * (ulysses_rank + 1),
+                :,
+            ]
+        elif joint_tensor_query is None and joint_tensor_key is None and joint_tensor_value is None:
+            pass
+        else:
+            raise ValueError("joint query, key, value must be set together")
+
+
         if self.use_pack_qkv:
             # (3*bs, seq_len/N, head_cnt, head_size)
             qkv = torch.cat([query, key, value]).continous()
@@ -109,6 +137,9 @@ class xFuserLongContextAttention(LongContextAttention):
                     for rank in range(ulysses_world_size)
                     for pp_patch_idx in range(len(pp_patch_token_num))
                 ]
+                if joint_tensor_key is not None and joint_tensor_value is not None:
+                    cached_key.append(joint_tensor_key)
+                    cached_value.append(joint_tensor_value)
                 self.kv_cache = [
                     torch.cat(cached_key, dim=1),
                     torch.cat(cached_value, dim=1)
@@ -123,7 +154,13 @@ class xFuserLongContextAttention(LongContextAttention):
                 token_end_idx = ulysses_world_size * sum(pp_patch_token_num[:get_runtime_state().pipeline_patch_idx + 1])
                 cached_key[:, token_start_idx:token_end_idx, ...] = key_layer
                 cached_value[:, token_start_idx:token_end_idx, ...] = value_layer
-                self.kv_cache = [cached_key, cached_value]
+                if joint_tensor_key is not None and joint_tensor_value is not None:
+                    self.kv_cache = [
+                        torch.cat([cached_key, joint_tensor_key], dim=1), 
+                        torch.cat([cached_value, joint_tensor_value], dim=1)
+                    ]
+                else:
+                    self.kvcache = [cached_key, cached_value]
 
             out = self.ring_attn_fn(
                 query_layer,

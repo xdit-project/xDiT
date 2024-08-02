@@ -8,6 +8,7 @@ from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
 
+from xfuser.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.distributed import (
@@ -31,6 +32,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn"],
         )
+        self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
 
     def forward(
         self,
@@ -97,7 +99,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-        for block in self.transformer_blocks:
+        for i, block in enumerate(self.transformer_blocks):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
@@ -119,10 +121,19 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
                 )
 
             else:
-                encoder_hidden_states, hidden_states = block(
-                    hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
-                )
-
+                if get_runtime_state().patch_mode and get_runtime_state().pipeline_patch_idx == 0:
+                    self.encoder_hidden_states_cache[i] = encoder_hidden_states
+                    encoder_hidden_states, hidden_states = block(
+                        hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                    )
+                elif get_runtime_state().patch_mode:
+                    _, hidden_states = block(
+                        hidden_states=hidden_states, encoder_hidden_states=self.encoder_hidden_states_cache[i], temb=temb
+                    )
+                else:
+                    encoder_hidden_states, hidden_states = block(
+                        hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                    )
 
         #* only the last pp rank needs unpatchify
 #! ---------------------------------------- ADD BELOW ----------------------------------------
@@ -149,7 +160,6 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         else:
             output = hidden_states, encoder_hidden_states
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
-        
 
         if not return_dict:
             return (output,)

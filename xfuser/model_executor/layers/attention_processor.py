@@ -326,6 +326,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         kv = torch.cat([key, value], dim=-1)
 
 #! ---------------------------------------- KV CACHE ----------------------------------------
+        # if use sp, use the kvcache inside long_context_attention
         if (
             HAS_FLASH_ATTN 
             and get_sequence_parallel_world_size() > 1
@@ -333,7 +334,6 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         ):
             key, value = torch.chunk(kv, 2, dim=-1)
         else:
-            # the distributed sparse attention from xfuser
             if get_runtime_state().num_pipeline_patch == 1:
                 local_kv = kv
             else:
@@ -351,16 +351,10 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
 
         # `context` projections.
-        encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
+        if get_runtime_state().pipeline_patch_idx == 0:
+            encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
         encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
         encoder_hidden_states_value_proj = attn.add_v_proj(encoder_hidden_states)
-
-        # attention
-        # print(359, query.shape, key.shape)
-        query = torch.cat([query, encoder_hidden_states_query_proj], dim=1)
-        key = torch.cat([key, encoder_hidden_states_key_proj], dim=1)
-        value = torch.cat([value, encoder_hidden_states_value_proj], dim=1)
-        # print(363, query.shape, key.shape)
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
@@ -370,12 +364,26 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
             query = query.view(batch_size, -1, attn.heads, head_dim)
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
+            if get_runtime_state().pipeline_patch_idx == 0:
+                encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(batch_size, -1, attn.heads, head_dim)
+            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(batch_size, -1, attn.heads, head_dim)
+            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(batch_size, -1, attn.heads, head_dim)
             hidden_states = attn.hybrid_seq_parallel_attn(
-                query, key, value, dropout_p=0.0, causal=False
+                query, key, value, dropout_p=0.0, causal=False,
+                joint_tensor_query=encoder_hidden_states_query_proj
+                if get_runtime_state().pipeline_patch_idx == 0
+                else None,
+                joint_tensor_key=encoder_hidden_states_key_proj,
+                joint_tensor_value=encoder_hidden_states_value_proj,
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 
         else:
+            if get_runtime_state().pipeline_patch_idx == 0:
+                query = torch.cat([query, encoder_hidden_states_query_proj], dim=1)
+            key = torch.cat([key, encoder_hidden_states_key_proj], dim=1)
+            value = torch.cat([value, encoder_hidden_states_value_proj], dim=1)
+
             if HAS_FLASH_ATTN:
                 from flash_attn import flash_attn_func
 
@@ -386,7 +394,6 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                     query, key, value, dropout_p=0.0, causal=False
                 )
                 hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
-                # print(390, hidden_states.shape)
 
             else:
                 query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
@@ -414,10 +421,11 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         hidden_states = hidden_states.to(query.dtype)
 
         # Split the attention outputs.
-        hidden_states, encoder_hidden_states = (
-            hidden_states[:, : residual.shape[1]],
-            hidden_states[:, residual.shape[1] :],
-        )
+        if get_runtime_state().pipeline_patch_idx == 0:
+            hidden_states, encoder_hidden_states = (
+                hidden_states[:, : residual.shape[1]],
+                hidden_states[:, residual.shape[1] :],
+            )
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)

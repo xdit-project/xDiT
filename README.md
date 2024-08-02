@@ -278,7 +278,7 @@ The legacy APIs is in the [legacy/](./legacy/) directory, limited to single para
 
 For models not yet supported by the latest APIs, you can run the examples in the [legacy/scripts/](./legacy/scripts/) directory. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
 
-We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://https://github.com/xdit-project/xDiT/discussions).
+We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://github.com/xdit-project/xDiT/discussions).
 
 <h2 id="cite-us">📝 Cite Us</h2>
 

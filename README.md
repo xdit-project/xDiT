@@ -9,7 +9,7 @@
 
   </p>
   <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
-  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> </strong>
+  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> </strong>
 </div>
 
 <h2 id="agenda">Table of Contents</h2>
@@ -294,7 +294,7 @@ The legacy APIs is in the [legacy/](./legacy/) directory, limited to single para
 
 For models not yet supported by the latest APIs, you can run the examples in the [legacy/scripts/](./legacy/scripts/) directory. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
 
-We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://https://github.com/xdit-project/xDiT/discussions).
+We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://github.com/xdit-project/xDiT/discussions).
 
 <h2 id="cite-us">📝 Cite Us</h2>
 

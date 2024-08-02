@@ -458,10 +458,16 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
 
         if distri_config.rank == 1:
             encoder_hidden_states = prompt_embeds
-            next_control_block_samples = [prompt_embeds,prompt_embeds,prompt_embeds]
+            if distri_config.world_size>2:
+                next_control_block_samples = [prompt_embeds,prompt_embeds]
+            else: 
+                next_control_block_samples = [prompt_embeds,prompt_embeds,prompt_embeds]
         else:
             encoder_hidden_states = None
-            next_control_block_samples = [prompt_embeds,prompt_embeds,prompt_embeds]
+            if distri_config.world_size>2:
+                next_control_block_samples = [prompt_embeds,prompt_embeds]
+            else: 
+                next_control_block_samples = [prompt_embeds,prompt_embeds,prompt_embeds]
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if distri_config.mode != "full_sync":
@@ -489,7 +495,7 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         # print("collect?")
                     if distri_config.rank != 1:
                         print("collect?",distri_config.rank)
-                        for items in range(3):
+                        for items in range(len(next_control_block_samples)):
                             print(items)
                             next_control_block_samples[items] = self.comm_manager.recv_from_prev(
                                 prompt_embeds.dtype, is_extra=True
@@ -524,7 +530,9 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         control_image = control_image,
                         controlnet_pooled_projections = controlnet_pooled_projections
                     )
-                    print("the length",len(next_control_block_samples))
+                    # print("the length",len(next_control_block_samples))
+                    # if len(next_control_block_samples) ==3:
+                    #     next_control_block_samples = next_control_block_samples[:2]
                 # print(len(next_control_block_samples))
                 # exit()
 
@@ -582,7 +590,7 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         next_encoder_hidden_states, is_extra=True
                     )
                 if distri_config.rank !=0:
-                    for items in range(3):
+                    for items in range(len(next_control_block_samples)):
                         self.comm_manager.send_to_next(
                             next_control_block_samples[items], is_extra=True
                         )
@@ -636,7 +644,7 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         prompt_embeds.dtype, is_extra=True
                     )
                     
-                    for items in range(3):
+                    for items in range(len(next_control_block_samples)):
                         next_control_block_samples[items] = self.comm_manager.recv_from_prev(
                             prompt_embeds.dtype, is_extra=True
                         )
@@ -678,7 +686,8 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         controlnet_pooled_projections = controlnet_pooled_projections
 
                         )
-                    
+                        # if len(next_control_block_samples) ==3:
+                        #     next_control_block_samples = next_control_block_samples[:2]
                     
                     latents[batch_idx], next_encoder_hidden_states = self.pip_forward(
                     latents[batch_idx],

@@ -32,18 +32,6 @@ class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
         attention: Attention,
     ):
         super().__init__(module=attention)
-        self.use_long_ctx_attn_kvcache = True
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import UlyssesAttention
-            from xfuser.modules.long_context_attention import xFuserLongContextAttention
-
-            if HAS_FLASH_ATTN:
-                # self.hybrid_seq_parallel_attn = LongContextAttention()
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache
-                )
-            else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
 
         to_k = self.module.to_k
         to_v = self.module.to_v
@@ -148,6 +136,23 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
 
 @xFuserAttentionProcessorRegister.register(AttnProcessor2_0)
 class xFuserAttnProcessor2_0(AttnProcessor2_0):
+    def __init__(self):
+        super().__init__()
+        self.use_long_ctx_attn_kvcache = True
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            from yunchang import UlyssesAttention
+            from xfuser.modules.long_context_attention import xFuserLongContextAttention
+
+            if HAS_FLASH_ATTN:
+                # self.hybrid_seq_parallel_attn = LongContextAttention()
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                )
+            else:
+                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+        else:
+            self.hybrid_seq_parallel_attn = None
+
     def __call__(
         self,
         attn: Attention,
@@ -198,7 +203,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         if (
             HAS_FLASH_ATTN 
             and get_sequence_parallel_world_size() > 1
-            and attn.use_long_ctx_attn_kvcache 
+            and self.use_long_ctx_attn_kvcache
         ):
             key, value = torch.chunk(kv, 2, dim=-1)
             inner_dim = key.shape[-1]
@@ -228,7 +233,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             query = query.view(batch_size, -1, attn.heads, head_dim)
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
-            hidden_states = attn.hybrid_seq_parallel_attn(
+            hidden_states = self.hybrid_seq_parallel_attn(
                 query, key, value, dropout_p=0.0, causal=False
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
@@ -289,11 +294,19 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 
 @xFuserAttentionProcessorRegister.register(JointAttnProcessor2_0)
 class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
-    """Attention processor used typically in processing the SD3-like self-attention projections."""
-
     def __init__(self):
-        if not hasattr(F, "scaled_dot_product_attention"):
-            raise ImportError("AttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+        super().__init__()
+        self.use_long_ctx_attn_kvcache = True
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            from yunchang import UlyssesAttention
+            from xfuser.modules.long_context_attention import xFuserLongContextAttention
+
+            if HAS_FLASH_ATTN:
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                )
+            else:
+                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
 
     def __call__(
         self,
@@ -319,21 +332,20 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 
         # `sample` projections.
         query = attn.to_q(hidden_states)
-        # kv = attn.to_kv(hidden_states)
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
 
-        kv = torch.cat([key, value], dim=-1)
 
 #! ---------------------------------------- KV CACHE ----------------------------------------
         # if use sp, use the kvcache inside long_context_attention
         if (
             HAS_FLASH_ATTN 
             and get_sequence_parallel_world_size() > 1
-            and attn.use_long_ctx_attn_kvcache 
+            and self.use_long_ctx_attn_kvcache 
         ):
-            key, value = torch.chunk(kv, 2, dim=-1)
+            pass
         else:
+            kv = torch.cat([key, value], dim=-1)
             if get_runtime_state().num_pipeline_patch == 1:
                 local_kv = kv
             else:
@@ -368,7 +380,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                 encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(batch_size, -1, attn.heads, head_dim)
             encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(batch_size, -1, attn.heads, head_dim)
             encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(batch_size, -1, attn.heads, head_dim)
-            hidden_states = attn.hybrid_seq_parallel_attn(
+            hidden_states = self.hybrid_seq_parallel_attn(
                 query, key, value, dropout_p=0.0, causal=False,
                 joint_tensor_query=encoder_hidden_states_query_proj
                 if get_runtime_state().pipeline_patch_idx == 0

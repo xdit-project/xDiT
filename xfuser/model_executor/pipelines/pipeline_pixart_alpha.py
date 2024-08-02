@@ -14,13 +14,7 @@ from diffusers.utils import deprecate
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
-from xfuser.distributed import (
-    get_data_parallel_world_size,
-    get_classifier_free_guidance_world_size,
-    get_pipeline_parallel_world_size,
-    get_data_parallel_rank, 
-    get_runtime_state,
-)
+from xfuser.distributed import ps, rs
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 
@@ -197,7 +191,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
 #! ---------------------------------------- ADDED BELOW ----------------------------------------
         #* set runtime state input parameters
-        get_runtime_state().set_input_parameters(
+        rs.get_runtime_state().set_input_parameters(
             height=height,
             width=width,
             batch_size=batch_size,
@@ -232,7 +226,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 prompt_embeds,
                 prompt_attention_mask,
             ) = self._process_cfg_split_batch(
-                negative_prompt_embeds, 
+                negative_prompt_embeds,
                 prompt_embeds,
                 negative_prompt_attention_mask,
                 prompt_attention_mask
@@ -280,7 +274,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
             if (
                 do_classifier_free_guidance
-                and get_classifier_free_guidance_world_size() == 1
+                and ps.get_classifier_free_guidance_world_size() == 1
             ):
                 resolution = torch.cat([resolution, resolution], dim=0)
                 aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
@@ -296,11 +290,11 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
-        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        num_pipeline_warmup_steps = rs.get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if (
-                get_pipeline_parallel_world_size() > 1
+                ps.get_pipeline_parallel_world_size() > 1
                 and len(timesteps) > num_pipeline_warmup_steps
             ):
                 # * warmup stage
@@ -350,7 +344,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
         # 8. Decode latents (only rank 0)
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+        if ps.get_data_parallel_rank() == ps.get_data_parallel_world_size() - 1:
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

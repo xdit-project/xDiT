@@ -6,7 +6,8 @@ import torch.distributed
 from yunchang import LongContextAttention
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
-from xfuser.distributed import get_runtime_state
+from xfuser.distributed import rs
+
 
 
 class xFuserLongContextAttention(LongContextAttention):
@@ -35,7 +36,7 @@ class xFuserLongContextAttention(LongContextAttention):
         )
         self.use_kv_cache = use_kv_cache
         self.kv_cache = None
-        
+
 
     def forward(
         self,
@@ -151,14 +152,14 @@ class xFuserLongContextAttention(LongContextAttention):
                         "xFuserLongContextAttention kvcache is None in patch mode"
                     )
                 cached_key, cached_value = self.kv_cache
-                token_start_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
-                token_end_idx = ulysses_world_size * sum(pp_patches_token_num[:get_runtime_state().pipeline_patch_idx + 1])
+                token_start_idx = ulysses_world_size * sum(pp_patches_token_num[:rs.get_runtime_state().pipeline_patch_idx])
+                token_end_idx = ulysses_world_size * sum(pp_patches_token_num[:rs.get_runtime_state().pipeline_patch_idx + 1])
                 cached_key[:, token_start_idx:token_end_idx, ...] = key_layer
                 cached_value[:, token_start_idx:token_end_idx, ...] = value_layer
                 self.kv_cache = [cached_key, cached_value]
                 if joint_tensor_key is not None and joint_tensor_value is not None:
                     ring_key, ring_value = (
-                        torch.cat([cached_key, joint_tensor_key], dim=1), 
+                        torch.cat([cached_key, joint_tensor_key], dim=1),
                         torch.cat([cached_value, joint_tensor_value], dim=1)
                     )
                 else:

@@ -1,9 +1,9 @@
-from abc import abstractmethod, ABCMeta
+from abc import  ABCMeta
 from functools import wraps
-from typing import Any, List, Optional
+from typing import Any
 
-from xfuser.distributed.parallel_state import get_classifier_free_guidance_world_size, get_pipeline_parallel_world_size, get_sequence_parallel_world_size
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.distributed import ps, rs
+
 
 class xFuserBaseWrapper(metaclass=ABCMeta):
 
@@ -26,12 +26,12 @@ class xFuserBaseWrapper(metaclass=ABCMeta):
         @wraps(func)
         def check_condition_fn(self, *args, **kwargs):
             if (
-                get_pipeline_parallel_world_size() == 1
-                and get_classifier_free_guidance_world_size() == 1
-                and get_sequence_parallel_world_size() == 1
+                ps.get_pipeline_parallel_world_size() == 1
+                and ps.get_classifier_free_guidance_world_size() == 1
+                and ps.get_sequence_parallel_world_size() == 1
             ):
                 return func(self, *args, **kwargs)
-            if not get_runtime_state().is_ready():
+            if not rs.get_runtime_state().is_ready():
                 raise ValueError(
                     "Runtime state is not ready, please call RuntimeState.set_input_parameters "
                     "before calling forward"

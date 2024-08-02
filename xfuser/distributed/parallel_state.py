@@ -421,6 +421,14 @@ def get_pipeline_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
     return get_pp_group().rank_in_group
 
+def is_pipeline_first_stage():
+    """Return True if in the first pipeline model parallel stage, False otherwise."""
+    return get_pipeline_parallel_rank() == 0
+
+
+def is_pipeline_last_stage():
+    """Return True if in the last pipeline model parallel stage, False otherwise."""
+    return get_pipeline_parallel_rank() == (get_pipeline_parallel_world_size() - 1)
 
 def get_classifier_free_guidance_world_size():
     """Return world size for the classifier_free_guidance parallel group."""

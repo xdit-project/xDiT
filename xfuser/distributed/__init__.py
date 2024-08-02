@@ -22,6 +22,9 @@ from .runtime_state import (
     initialize_runtime_state,
 )
 
+import xfuser.distributed.parallel_state as ps
+import xfuser.distributed.runtime_state as rs
+
 __all__ = [
     "get_world_group",
     "get_dp_group",

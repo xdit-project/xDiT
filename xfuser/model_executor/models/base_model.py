@@ -1,12 +1,10 @@
 from abc import abstractmethod, ABCMeta
 from typing import Dict, List, Optional, Type, Union
-from functools import wraps
 
 import torch.nn as nn
-from xfuser.config import InputConfig, ParallelConfig, RuntimeConfig
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.model_executor.layers import *
-from xfuser.distributed import get_world_group
+from xfuser.distributed import ps
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -78,7 +76,7 @@ class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
                     wrapper = xFuserLayerWrappersRegister.get_wrapper(submodule)
                     additional_args = submodule_addition_args.get(subname, {})
                     logger.info(
-                        f"[RANK {get_world_group().rank}] "
+                        f"[RANK {ps.get_world_group().rank}] "
                         f"Wrapping {name}.{subname} in model class "
                         f"{model.__class__.__name__} with "
                         f"{wrapper.__name__}"

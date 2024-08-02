@@ -9,18 +9,8 @@ import torch.distributed
 
 from xfuser.config.config import ParallelConfig, RuntimeConfig, InputConfig, EngineConfig
 from xfuser.logger import init_logger
-from xfuser.distributed.parallel_state import (
-    destroy_distributed_environment, 
-    destroy_model_parallel, 
-    get_pipeline_parallel_rank, 
-    get_pp_group, 
-    get_sequence_parallel_rank, 
-    get_sequence_parallel_world_size, 
-    init_distributed_environment, 
-    initialize_model_parallel, 
-    model_parallel_is_initialized,
-)
-    
+from xfuser.distributed import parallel_state as ps
+
 logger = init_logger(__name__)
 
 def set_random_seed(seed: int):
@@ -52,11 +42,11 @@ class RuntimeState(metaclass=ABCMeta):
         self,
         parallel_config: ParallelConfig,
     ):
-        if not model_parallel_is_initialized():
+        if not ps.model_parallel_is_initialized():
             logger.warning("Model parallel is not initialized, initializing...")
             if not torch.distributed.is_initialized():
-                init_distributed_environment()
-            initialize_model_parallel(
+                ps.init_distributed_environment()
+            ps.initialize_model_parallel(
                 data_parallel_degree=parallel_config.dp_degree,
                 classifier_free_guidance_degree=parallel_config.cfg_degree,
                 sequence_parallel_degree=parallel_config.sp_degree,
@@ -65,11 +55,11 @@ class RuntimeState(metaclass=ABCMeta):
                 tensor_parallel_degree=parallel_config.tp_degree,
                 pipeline_parallel_degree=parallel_config.pp_degree,
             )
-    
+
     def destory_distributed_env(self):
-        if model_parallel_is_initialized():
-            destroy_model_parallel()
-        destroy_distributed_environment()
+        if ps.model_parallel_is_initialized():
+            ps.destroy_model_parallel()
+        ps.destroy_distributed_environment()
 
 
 class DiTRuntimeState(RuntimeState):
@@ -82,7 +72,7 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_start_end_idx: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
-    # Storing the shape of a tensor that is not latent but requires pp communication 
+    # Storing the shape of a tensor that is not latent but requires pp communication
     #   torch.Size: size of tensor
     #   int: number of recv buffer it needs
     pipeline_comm_extra_tensors_info: List[Tuple[str, List[int], int]]
@@ -92,7 +82,7 @@ class DiTRuntimeState(RuntimeState):
         self.patch_mode = False
         self.pipeline_patch_idx = 0
         self._check_model_and_parallel_config(
-            pipeline=pipeline, 
+            pipeline=pipeline,
             parallel_config=config.parallel_config
         )
         self._set_model_parameters(
@@ -118,8 +108,8 @@ class DiTRuntimeState(RuntimeState):
             self.input_config.seed = seed
             set_random_seed(seed)
         if (
-            (height and self.input_config.height != height) or 
-            (width and self.input_config.width != width) or 
+            (height and self.input_config.height != height) or
+            (width and self.input_config.width != width) or
             (batch_size and self.input_config.batch_size != batch_size)
         ):
             self._input_size_change(height, width, batch_size)
@@ -153,8 +143,8 @@ class DiTRuntimeState(RuntimeState):
             )
 
     def _set_model_parameters(
-        self, 
-        vae_scale_factor: int, 
+        self,
+        vae_scale_factor: int,
         backbone_patch_size: int,
         backbone_inner_dim: int,
         backbone_in_channel: int
@@ -177,8 +167,8 @@ class DiTRuntimeState(RuntimeState):
         self._reset_recv_buffer()
 
     def _calc_patches_metadata(self):
-        num_sp_patches = get_sequence_parallel_world_size()
-        sp_patch_idx = get_sequence_parallel_rank()
+        num_sp_patches = ps.get_sequence_parallel_world_size()
+        sp_patch_idx = ps.get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size
         vae_scale_factor = self.vae_scale_factor
         latents_height = self.input_config.height // vae_scale_factor
@@ -269,7 +259,7 @@ class DiTRuntimeState(RuntimeState):
     def _reset_recv_buffer(self):
         # calc communicator buffer metadata
         batch_size = self.input_config.batch_size
-        if get_pipeline_parallel_rank() != 0:
+        if ps.get_pipeline_parallel_rank() != 0:
             batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
             hidden_dim = self.backbone_inner_dim
             num_patches_tokens = [
@@ -278,7 +268,7 @@ class DiTRuntimeState(RuntimeState):
             ]
             patches_shape = [
                 [batch_size, tokens, hidden_dim]
-                for tokens in num_patches_tokens 
+                for tokens in num_patches_tokens
             ]
             feature_map_shape = [
                 batch_size,
@@ -301,7 +291,7 @@ class DiTRuntimeState(RuntimeState):
             ]
 
         # reset pipeline communicator buffer
-        get_pp_group().set_recv_buffer(
+        ps.get_pp_group().set_recv_buffer(
             num_pipefusion_patches=self.num_pipeline_patch,
             patches_shape_list=patches_shape,
             feature_map_shape=feature_map_shape,

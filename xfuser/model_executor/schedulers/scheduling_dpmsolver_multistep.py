@@ -9,11 +9,7 @@ from diffusers.schedulers.scheduling_dpmsolver_multistep import (
     SchedulerOutput,
 )
 
-from xfuser.distributed import (
-    get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
-    get_runtime_state,
-)
+from xfuser.distributed import rs
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper
 
@@ -78,33 +74,33 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
 
 #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         if (
-            get_runtime_state().patch_mode
-            and get_runtime_state().pipeline_patch_idx == 0
+            rs.get_runtime_state().patch_mode
+            and rs.get_runtime_state().pipeline_patch_idx == 0
             and self.model_outputs[-1] is None
         ):
             self.model_outputs[-1] = torch.zeros(
                 [
                     model_output.shape[0],
                     model_output.shape[1],
-                    get_runtime_state().pp_patches_start_idx_local[-1],
+                    rs.get_runtime_state().pp_patches_start_idx_local[-1],
                     model_output.shape[3],
                 ],
                 device=model_output.device,
                 dtype=model_output.dtype,
             )
-        if get_runtime_state().pipeline_patch_idx == 0:
+        if rs.get_runtime_state().pipeline_patch_idx == 0:
             for i in range(self.config.solver_order - 1):
                 self.model_outputs[i] = self.model_outputs[i + 1]
 
-        if get_runtime_state().patch_mode and get_runtime_state().pipeline_patch_idx == 0:
+        if rs.get_runtime_state().patch_mode and rs.get_runtime_state().pipeline_patch_idx == 0:
             assert len(self.model_outputs) >= 2
             self.model_outputs[-1] = torch.zeros_like(self.model_outputs[-2])
-        if get_runtime_state().patch_mode:
+        if rs.get_runtime_state().patch_mode:
             self.model_outputs[-1][
                 :,
                 :,
-                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]: 
-                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
+                rs.get_runtime_state().pp_patches_start_idx_local[rs.get_runtime_state().pipeline_patch_idx]:
+                rs.get_runtime_state().pp_patches_start_idx_local[rs.get_runtime_state().pipeline_patch_idx + 1],
                 :,
             ] = model_output
         else:
@@ -128,15 +124,15 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
             noise = None
 
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_runtime_state().patch_mode:
+        if rs.get_runtime_state().patch_mode:
             model_outputs = []
             for output in self.model_outputs:
                 model_outputs.append(
                     output[
                         :,
                         :,
-                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]:
-                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
+                        rs.get_runtime_state().pp_patches_start_idx_local[rs.get_runtime_state().pipeline_patch_idx]:
+                        rs.get_runtime_state().pp_patches_start_idx_local[rs.get_runtime_state().pipeline_patch_idx + 1],
                         :,
                     ]
                 )
@@ -160,8 +156,8 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
         # upon completion increase step index by one
         #* increase step index only when the last pipeline patch is done (or not in patch mode)
         if (
-            not get_runtime_state().patch_mode
-            or get_runtime_state().pipeline_patch_idx == get_runtime_state().num_pipeline_patch - 1
+            not rs.get_runtime_state().patch_mode
+            or rs.get_runtime_state().pipeline_patch_idx == rs.get_runtime_state().num_pipeline_patch - 1
         ):
             self._step_index += 1
 

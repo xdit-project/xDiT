@@ -1,10 +1,7 @@
 from typing import Type, Union
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser.distributed import (
-    init_distributed_environment,
-    initialize_model_parallel,
-)
+from xfuser.distributed import ps
 from xfuser.config import EngineConfig
 from xfuser.logger import init_logger
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
@@ -16,8 +13,8 @@ logger = init_logger(__name__)
 
 class Parallel:
     def __init__(self, engine_config: EngineConfig):
-        init_distributed_environment(random_seed=engine_config.runtime_config.seed)
-        initialize_model_parallel(
+        ps.init_distributed_environment(random_seed=engine_config.runtime_config.seed)
+        ps.initialize_model_parallel(
             data_parallel_degree=engine_config.parallel_config.dp_degree,
             classifier_free_guidance_degree=
                 engine_config.parallel_config.cfg_degree,
@@ -31,7 +28,7 @@ class Parallel:
         self.engine_config = engine_config
 
     def __call__(
-        self, 
+        self,
         pipe: Union[DiffusionPipeline, Type[DiffusionPipeline]],
     ) -> Union[
         xFuserPipelineBaseWrapper,
@@ -45,7 +42,7 @@ class Parallel:
             xfuser_pipe_wrapper = \
                 xFuserPipelineWrapperRegister.get_class(pipe)
             return xfuser_pipe_wrapper(
-                pipeline=pipe, 
+                pipeline=pipe,
                 engine_config=self.engine_config
             )
         else:

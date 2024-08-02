@@ -3,7 +3,7 @@ import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
 import torch.distributed
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.distributed import rs
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
@@ -22,9 +22,9 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
         self.pos_embed = None
 
     def forward(self, latent):
-        height = get_runtime_state().input_config.height // get_runtime_state().vae_scale_factor
+        height = rs.get_runtime_state().input_config.height // rs.get_runtime_state().vae_scale_factor
         width = latent.shape[-1]
-        if not get_runtime_state().patch_mode:
+        if not rs.get_runtime_state().patch_mode:
             if getattr(self.module, "pos_embed_max_size", None) is not None:
                 pass
             else:
@@ -76,10 +76,10 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
                 pos_embed = self.module.pos_embed
         b, c, h = pos_embed.shape
 
-        if get_runtime_state().patch_mode:
-            start, end = get_runtime_state().pp_patches_token_start_end_idx[get_runtime_state().pipeline_patch_idx]
+        if rs.get_runtime_state().patch_mode:
+            start, end = rs.get_runtime_state().pp_patches_token_start_end_idx[rs.get_runtime_state().pipeline_patch_idx]
             pos_embed = pos_embed[
-                :, 
+                :,
                 start:end,
                 :,
             ]
@@ -87,11 +87,11 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
             pos_embed_list = [
                 pos_embed[
                     :,
-                    get_runtime_state().pp_patches_token_start_end_idx[i][0]:
-                    get_runtime_state().pp_patches_token_start_end_idx[i][1],
+                    rs.get_runtime_state().pp_patches_token_start_end_idx[i][0]:
+                    rs.get_runtime_state().pp_patches_token_start_end_idx[i][1],
                     :,
                 ]
-                for i in range(get_runtime_state().num_pipeline_patch)
+                for i in range(rs.get_runtime_state().num_pipeline_patch)
             ]
             pos_embed = torch.cat(pos_embed_list, dim=1)
 

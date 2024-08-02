@@ -14,12 +14,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
-from xfuser.distributed import (
-    get_data_parallel_world_size,
-    get_pipeline_parallel_world_size,
-    get_data_parallel_rank, 
-    get_runtime_state,
-)
+from xfuser.distributed import ps, rs
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 
@@ -196,7 +191,7 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
         do_classifier_free_guidance = guidance_scale > 1.0
 
         #* set runtime state input parameters
-        get_runtime_state().set_input_parameters(
+        rs.get_runtime_state().set_input_parameters(
             height=height,
             width=width,
             batch_size=batch_size,
@@ -229,7 +224,7 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
                 prompt_embeds,
                 prompt_attention_mask,
             ) = self._process_cfg_split_batch(
-                negative_prompt_embeds, 
+                negative_prompt_embeds,
                 prompt_embeds,
                 negative_prompt_attention_mask,
                 prompt_attention_mask
@@ -261,11 +256,11 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        num_pipeline_warmup_steps = rs.get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if (
-                get_pipeline_parallel_world_size() > 1
+                ps.get_pipeline_parallel_world_size() > 1
                 and len(timesteps) > num_pipeline_warmup_steps
             ):
                 # * warmup stage
@@ -313,7 +308,7 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
                 )
 
         #* 8. Decode latents (only the last rank in a dp group)
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+        if ps.get_data_parallel_rank() == ps.get_data_parallel_world_size() - 1:
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
                 if use_resolution_binning:

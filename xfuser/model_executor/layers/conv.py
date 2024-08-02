@@ -2,15 +2,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from xfuser.config import ParallelConfig, RuntimeConfig
-from xfuser.distributed.parallel_state import get_sequence_parallel_world_size
-from xfuser.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.logger import init_logger
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
-from xfuser.distributed import (
-    get_pipeline_parallel_world_size,
-)
+from xfuser.distributed import ps, rs
+
 
 logger = init_logger(__name__)
 
@@ -39,8 +35,8 @@ class xFuserConv2dWrapper(xFuserLayerBaseWrapper):
         stride = self.module.stride[0]
         padding = self.module.padding[0]
 
-        idx = get_runtime_state().pipeline_patch_idx
-        pp_patches_start_idx_local = get_runtime_state().pp_patches_start_idx_local
+        idx = rs.get_runtime_state().pipeline_patch_idx
+        pp_patches_start_idx_local = rs.get_runtime_state().pp_patches_start_idx_local
         h_begin = pp_patches_start_idx_local[idx] - padding
         h_end = pp_patches_start_idx_local[idx + 1] + padding
         final_padding = [padding, padding, 0, 0]
@@ -64,8 +60,8 @@ class xFuserConv2dWrapper(xFuserLayerBaseWrapper):
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         if (
             (
-                get_pipeline_parallel_world_size() == 1 
-                and get_sequence_parallel_world_size() == 1
+                ps.get_pipeline_parallel_world_size() == 1
+                and ps.get_sequence_parallel_world_size() == 1
             )
             or self.module.kernel_size == (1, 1)
             or self.module.kernel_size == 1
@@ -73,7 +69,7 @@ class xFuserConv2dWrapper(xFuserLayerBaseWrapper):
             output = self.naive_forward(x)
         else:
             if self.is_first_layer:
-                if not get_runtime_state().patch_mode or get_runtime_state().num_pipeline_patch == 1:
+                if not rs.get_runtime_state().patch_mode or rs.get_runtime_state().num_pipeline_patch == 1:
                     self.activation_cache = x
                     output = self.naive_forward(self.activation_cache)
                 else:
@@ -82,7 +78,7 @@ class xFuserConv2dWrapper(xFuserLayerBaseWrapper):
                             [
                                 x.shape[0],
                                 x.shape[1],
-                                get_runtime_state().pp_patches_start_idx_local[-1],
+                                rs.get_runtime_state().pp_patches_start_idx_local[-1],
                                 x.shape[3],
                             ],
                             dtype=x.dtype,
@@ -92,8 +88,8 @@ class xFuserConv2dWrapper(xFuserLayerBaseWrapper):
                     self.activation_cache[
                         :,
                         :,
-                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]: 
-                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx+1],
+                        rs.get_runtime_state().pp_patches_start_idx_local[rs.get_runtime_state().pipeline_patch_idx]:
+                        rs.get_runtime_state().pp_patches_start_idx_local[rs.get_runtime_state().pipeline_patch_idx+1],
                         :,
                     ] = x
                     output = self.sliced_forward(self.activation_cache)

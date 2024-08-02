@@ -10,10 +10,7 @@ from diffusers.utils import is_torch_version
 
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.distributed import (
-    get_pipeline_parallel_rank,
-    get_pipeline_parallel_world_size,
-)
+from xfuser.distributed import ps
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 
@@ -114,7 +111,7 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
         #* get height & width from runtime state
         height, width = self._get_patch_height_width()
         #* only pp rank 0 needs pos_embed (patchify)
-        if get_pipeline_parallel_rank() == 0:
+        if ps.is_pipeline_first_stage():
             hidden_states = self.pos_embed(hidden_states)
 
         #! ORIGIN
@@ -172,7 +169,7 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
         # 3. Output
         #* only the last pp rank needs unpatchify
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+        if ps.is_pipeline_last_stage():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             shift, scale = (
                 self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)

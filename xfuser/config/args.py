@@ -8,7 +8,7 @@ import torch
 import torch.distributed
 
 from xfuser.logger import init_logger
-from xfuser.distributed import init_distributed_environment
+from xfuser.distributed import ps
 from xfuser.config.config import (
     EngineConfig,
     ParallelConfig,
@@ -144,7 +144,7 @@ class xFuserArgs:
         if not torch.distributed.is_initialized():
             logger.warning("Distributed environment is not initialized. "
                            "Initializing...")
-            init_distributed_environment()
+            ps.init_distributed_environment()
 
         model_config = ModelConfig(
             model=self.model,
@@ -158,7 +158,7 @@ class xFuserArgs:
             use_parallel_vae=self.use_parallel_vae,
             # use_profiler=self.use_profiler,
         )
-        
+
         parallel_config = ParallelConfig(
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,

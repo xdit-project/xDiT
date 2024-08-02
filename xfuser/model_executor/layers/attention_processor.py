@@ -8,12 +8,7 @@ from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
 from diffusers.models.attention_processor import AttnProcessor2_0, JointAttnProcessor2_0
 
-from xfuser.distributed import (
-    get_sequence_parallel_world_size,
-    get_sequence_parallel_rank,
-    get_sp_group,
-)
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.distributed import ps, rs
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
@@ -139,7 +134,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
     def __init__(self):
         super().__init__()
         self.use_long_ctx_attn_kvcache = True
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if HAS_LONG_CTX_ATTN and ps.get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
 
@@ -201,8 +196,8 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 
 #! ---------------------------------------- KV CACHE ----------------------------------------
         if (
-            HAS_FLASH_ATTN 
-            and get_sequence_parallel_world_size() > 1
+            HAS_FLASH_ATTN
+            and ps.get_sequence_parallel_world_size() > 1
             and self.use_long_ctx_attn_kvcache
         ):
             key, value = torch.chunk(kv, 2, dim=-1)
@@ -210,15 +205,15 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             head_dim = inner_dim // attn.heads
         else:
             # the distributed sparse attention from xfuser
-            if get_runtime_state().num_pipeline_patch == 1:
+            if rs.get_runtime_state().num_pipeline_patch == 1:
                 local_kv = kv
             else:
-                if not get_runtime_state().patch_mode:
+                if not rs.get_runtime_state().patch_mode:
                     local_kv = kv
                 else:
                     local_kv = attn.activation_cache
-                    token_start_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
-                    token_end_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx+1])
+                    token_start_idx = sum(rs.get_runtime_state().pp_patches_token_num[:rs.get_runtime_state().pipeline_patch_idx])
+                    token_end_idx = sum(rs.get_runtime_state().pp_patches_token_num[:rs.get_runtime_state().pipeline_patch_idx+1])
                     local_kv[:, token_start_idx:token_end_idx, :] = kv
 
                 attn.activation_cache = local_kv
@@ -229,7 +224,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
 
 #! ---------------------------------------- ATTENTION ----------------------------------------
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if HAS_LONG_CTX_ATTN and ps.get_sequence_parallel_world_size() > 1:
             query = query.view(batch_size, -1, attn.heads, head_dim)
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
@@ -297,7 +292,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
     def __init__(self):
         super().__init__()
         self.use_long_ctx_attn_kvcache = True
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if HAS_LONG_CTX_ATTN and ps.get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
 
@@ -339,22 +334,22 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
         # if use sp, use the kvcache inside long_context_attention
         if (
-            HAS_FLASH_ATTN 
-            and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache 
+            HAS_FLASH_ATTN
+            and ps.get_sequence_parallel_world_size() > 1
+            and self.use_long_ctx_attn_kvcache
         ):
             pass
         else:
             kv = torch.cat([key, value], dim=-1)
-            if get_runtime_state().num_pipeline_patch == 1:
+            if rs.get_runtime_state().num_pipeline_patch == 1:
                 local_kv = kv
             else:
-                if not get_runtime_state().patch_mode:
+                if not rs.get_runtime_state().patch_mode:
                     local_kv = kv
                 else:
                     local_kv = attn.activation_cache
-                    token_start_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
-                    token_end_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx+1])
+                    token_start_idx = sum(rs.get_runtime_state().pp_patches_token_num[:rs.get_runtime_state().pipeline_patch_idx])
+                    token_end_idx = sum(rs.get_runtime_state().pp_patches_token_num[:rs.get_runtime_state().pipeline_patch_idx+1])
                     local_kv[:, token_start_idx:token_end_idx, :] = kv
 
                 attn.activation_cache = local_kv
@@ -363,7 +358,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
 
         # `context` projections.
-        if get_runtime_state().pipeline_patch_idx == 0:
+        if rs.get_runtime_state().pipeline_patch_idx == 0:
             encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
         encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
         encoder_hidden_states_value_proj = attn.add_v_proj(encoder_hidden_states)
@@ -372,18 +367,18 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         head_dim = inner_dim // attn.heads
 
 #! ---------------------------------------- ATTENTION ----------------------------------------
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if HAS_LONG_CTX_ATTN and ps.get_sequence_parallel_world_size() > 1:
             query = query.view(batch_size, -1, attn.heads, head_dim)
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
-            if get_runtime_state().pipeline_patch_idx == 0:
+            if rs.get_runtime_state().pipeline_patch_idx == 0:
                 encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(batch_size, -1, attn.heads, head_dim)
             encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(batch_size, -1, attn.heads, head_dim)
             encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(batch_size, -1, attn.heads, head_dim)
             hidden_states = self.hybrid_seq_parallel_attn(
                 query, key, value, dropout_p=0.0, causal=False,
                 joint_tensor_query=encoder_hidden_states_query_proj
-                if get_runtime_state().pipeline_patch_idx == 0
+                if rs.get_runtime_state().pipeline_patch_idx == 0
                 else None,
                 joint_tensor_key=encoder_hidden_states_key_proj,
                 joint_tensor_value=encoder_hidden_states_value_proj,
@@ -391,7 +386,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 
         else:
-            if get_runtime_state().pipeline_patch_idx == 0:
+            if rs.get_runtime_state().pipeline_patch_idx == 0:
                 query = torch.cat([query, encoder_hidden_states_query_proj], dim=1)
             key = torch.cat([key, encoder_hidden_states_key_proj], dim=1)
             value = torch.cat([value, encoder_hidden_states_value_proj], dim=1)
@@ -433,7 +428,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         hidden_states = hidden_states.to(query.dtype)
 
         # Split the attention outputs.
-        if get_runtime_state().pipeline_patch_idx == 0:
+        if rs.get_runtime_state().pipeline_patch_idx == 0:
             hidden_states, encoder_hidden_states = (
                 hidden_states[:, : residual.shape[1]],
                 hidden_states[:, residual.shape[1] :],

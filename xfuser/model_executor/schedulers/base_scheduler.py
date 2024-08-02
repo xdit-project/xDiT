@@ -1,11 +1,8 @@
 from abc import abstractmethod, ABCMeta
 from functools import wraps
-from typing import List
 
 from diffusers.schedulers import SchedulerMixin
-from xfuser.distributed import (
-    get_pipeline_parallel_world_size, get_sequence_parallel_world_size
-)
+from xfuser.distributed import ps
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
 class xFuserSchedulerBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
@@ -18,8 +15,8 @@ class xFuserSchedulerBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def __setattr__(self, name, value):
         if name == 'module':
             super().__setattr__(name, value)
-        elif (hasattr(self, 'module') and 
-              self.module is not None and 
+        elif (hasattr(self, 'module') and
+              self.module is not None and
               hasattr(self.module, name)):
             setattr(self.module, name, value)
         else:
@@ -34,8 +31,8 @@ class xFuserSchedulerBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         @wraps(func)
         def check_naive_step_fn(self, *args, **kwargs):
             if (
-                get_pipeline_parallel_world_size() == 1
-                and get_sequence_parallel_world_size() == 1
+                ps.get_pipeline_parallel_world_size() == 1
+                and ps.get_sequence_parallel_world_size() == 1
             ):
                 return self.module.step(*args, **kwargs)
             else:

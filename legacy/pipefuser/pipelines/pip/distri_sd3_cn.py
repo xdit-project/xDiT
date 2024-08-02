@@ -72,7 +72,7 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
         # print(self.controlnet)
         # exit()
         
-        control_block_samples = self.controlnet(
+        control_block_samples,encoder_hidden_states = self.controlnet(
                     hidden_states=latents,
                     timestep=timestep,
                     encoder_hidden_states=encoder_hidden_states,
@@ -87,7 +87,7 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
         # exit()
 
 
-        return control_block_samples
+        return control_block_samples,encoder_hidden_states
     def pip_forward(
         self,
         latents: torch.FloatTensor,
@@ -458,10 +458,10 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
 
         if distri_config.rank == 1:
             encoder_hidden_states = prompt_embeds
-            # control_block_samples = []
+            next_control_block_samples = [prompt_embeds,prompt_embeds,prompt_embeds]
         else:
             encoder_hidden_states = None
-            # control_block_samples = None
+            next_control_block_samples = [prompt_embeds,prompt_embeds,prompt_embeds]
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             if distri_config.mode != "full_sync":
@@ -469,7 +469,7 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                 pip_timesteps = timesteps[distri_config.warmup_steps + 1 :]
             else:
                 warmup_timesteps = timesteps
-                pip_timesteps = None
+                pip_timesteps = []
 
             for i, t in enumerate(warmup_timesteps):
                 if distri_config.rank == 0:
@@ -486,8 +486,15 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         encoder_hidden_states = self.comm_manager.recv_from_prev(
                             prompt_embeds.dtype, is_extra=True
                         )
-
-
+                        # print("collect?")
+                    if distri_config.rank != 1:
+                        print("collect?",distri_config.rank)
+                        for items in range(3):
+                            print(items)
+                            next_control_block_samples[items] = self.comm_manager.recv_from_prev(
+                                prompt_embeds.dtype, is_extra=True
+                            )
+                        print("collect successful")
 
                 assert self._interrupt == False
                 # TBD
@@ -502,16 +509,25 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         controlnet_cond_scale = controlnet_cond_scale[0]
                     cond_scale = controlnet_cond_scale * controlnet_keep[i]
                 # print(control_image.shape)
-                next_control_block_samples = self.pip_forward_cn(
-                    latents,
-                    encoder_hidden_states,
-                    t,
-                    pooled_prompt_embeds,
-                    timestep_expand_shape,
-                    cond_scale=cond_scale,
-                    control_image = control_image,
-                    controlnet_pooled_projections = controlnet_pooled_projections
-                )
+                # torch.cuda.synchronize()
+                if distri_config.rank != 1:
+                    pass
+
+                else:
+                    next_control_block_samples,_ = self.pip_forward_cn(
+                        latents,
+                        encoder_hidden_states,
+                        t,
+                        pooled_prompt_embeds,
+                        timestep_expand_shape,
+                        cond_scale=cond_scale,
+                        control_image = control_image,
+                        controlnet_pooled_projections = controlnet_pooled_projections
+                    )
+                    print("the length",len(next_control_block_samples))
+                # print(len(next_control_block_samples))
+                # exit()
+
                 latents, next_encoder_hidden_states = self.pip_forward(
                     latents,
                     encoder_hidden_states,
@@ -560,14 +576,17 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                 #     xm.mark_step()
                 self.comm_manager.isend_to_next(latents)
                 # self.comm_manager.isend_to_next(control_image) #controlnet
+                # torch.cuda.synchronize()
                 if distri_config.rank != 0:
                     self.comm_manager.send_to_next(
                         next_encoder_hidden_states, is_extra=True
                     )
-                    # for items in range(len(next_control_block_samples)):
-                    #     self.comm_manager.send_to_next(
-                    #         next_control_block_samples[items], is_extra=True
-                    #     )
+                if distri_config.rank !=0:
+                    for items in range(3):
+                        self.comm_manager.send_to_next(
+                            next_control_block_samples[items], is_extra=True
+                        )
+                        
 
 
             assert self.comm_manager.recv_queue == []
@@ -616,10 +635,11 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                     encoder_hidden_states = self.comm_manager.recv_from_prev(
                         prompt_embeds.dtype, is_extra=True
                     )
-                    # for items in range(len(next_control_block_samples)):
-                    #     next_control_block_samples[items] = self.comm_manager.recv_from_prev(
-                    #         prompt_embeds.dtype, is_extra=True
-                    #     )
+                    
+                    for items in range(3):
+                        next_control_block_samples[items] = self.comm_manager.recv_from_prev(
+                            prompt_embeds.dtype, is_extra=True
+                        )
 
 
 
@@ -633,22 +653,33 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                         pass
                     else:
                         latents[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
+                    
+                    # if distri_config.rank != 1:
+                    #     for items in range(3):
+                    #         next_control_block_samples[items] = self.comm_manager.recv_from_prev(
+                    # prompt_embeds.dtype, is_extra=True
+                # )
+                    if distri_config.rank != 1:
+                        pass
                         # control_image[batch_idx] = self.comm_manager.get_data(idx=batch_idx)
                     # print(len(latents))
 
                     # exit()
 
-                    next_control_block_samples = self.pip_forward_cn(
-                    latents[batch_idx],
-                    encoder_hidden_states,
-                    t,
-                    pooled_prompt_embeds,
-                    timestep_expand_shape,
-                    cond_scale=cond_scale,
-                    control_image = control_image[batch_idx],
-                    controlnet_pooled_projections = controlnet_pooled_projections
+                    else:
+                        next_control_block_samples,_ = self.pip_forward_cn(
+                        latents[batch_idx],
+                        encoder_hidden_states,
+                        t,
+                        pooled_prompt_embeds,
+                        timestep_expand_shape,
+                        cond_scale=cond_scale,
+                        control_image = control_image[batch_idx],
+                        controlnet_pooled_projections = controlnet_pooled_projections
 
-                )
+                        )
+                    
+                    
                     latents[batch_idx], next_encoder_hidden_states = self.pip_forward(
                     latents[batch_idx],
                     encoder_hidden_states,
@@ -688,15 +719,15 @@ class DistriSD3CNPiP(StableDiffusion3ControlNetPipeline):
                     else:
                         self.comm_manager.isend_to_next(latents[batch_idx])
                         # self.comm_manager.isend_to_next(control_image[batch_idx])
-
+                    # print("The length",len(next_control_block_samples))
                     if distri_config.rank != 0 and batch_idx == 0:
                         self.comm_manager.send_to_next(
                             next_encoder_hidden_states, is_extra=True
                         )
-                        # for items in range(len(next_control_block_samples)):
-                        #     self.comm_manager.send_to_next(
-                        #         next_control_block_samples[items], is_extra=True
-                        #     ) 
+                        for items in range(len(next_control_block_samples)):
+                            self.comm_manager.send_to_next(
+                                next_control_block_samples[items], is_extra=True
+                            ) 
 
                 i += len(warmup_timesteps)
                 if i == len(timesteps) - 1 or (

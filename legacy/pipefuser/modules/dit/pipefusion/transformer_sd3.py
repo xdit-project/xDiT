@@ -134,6 +134,7 @@ class DistriSD3Transformer2DModel(BaseModule):
                 encoder_hidden_states=encoder_hidden_states,
                 temb=temb,
             )
+            
             # controlnet residual
             if block_controlnet_hidden_states is not None and block.context_pre_only is False:
                 if (len(block_controlnet_hidden_states)):
@@ -390,8 +391,8 @@ class DistriSD3CNTransformer2DModel(BaseModule):
             #     unscale_lora_layers(module, lora_scale)
 
         # else:
-        #     output = hidden_states, encoder_hidden_states
-        output = controlnet_block_res_samples
+        output = controlnet_block_res_samples, hidden_states
+        # output = controlnet_block_res_samples, encoder_hidden_states
         if is_warmup:
             self.counter += 1
         else:

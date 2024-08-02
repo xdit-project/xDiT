@@ -58,7 +58,7 @@ def main():
         default=28,
     )
     parser.add_argument(
-        "--pp_num_patch", type=int, default=2, help="patch number in pipefusion."
+        "--pp_num_patch", type=int, default=4, help="patch number in pipefusion."
     )
     parser.add_argument(
         "--height",

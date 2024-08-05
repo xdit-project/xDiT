@@ -1,15 +1,14 @@
 import time
 import torch
 import torch.distributed
-from xfuser import xFuserPixArtAlphaPipeline, xFuserArgs
+from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.distributed import (
     get_world_group, 
     get_data_parallel_rank, 
     get_data_parallel_world_size,
-    get_runtime_state
+    get_runtime_state,
 )
-
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
@@ -17,7 +16,7 @@ def main():
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
-    pipe = xFuserPixArtAlphaPipeline.from_pretrained(
+    pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.float16,
@@ -32,7 +31,6 @@ def main():
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
-        use_resolution_binning=input_config.use_resolution_binning,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     )
     end_time = time.time()
@@ -53,7 +51,7 @@ def main():
         if get_data_parallel_rank() == dp_group_world_size - 1:
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
-                image.save(f"./results/pixart_alpha_result_{parallel_info}_{image_rank}.png")
+                image.save(f"./results/stable_diffusion_3_result_{parallel_info}_{image_rank}.png")
 
     if get_world_group().rank == get_world_group().world_size - 1:
         print(

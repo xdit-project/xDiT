@@ -20,8 +20,11 @@
 - [📈 Performance](#perf)
 - [🚀 QuickStart](#QuickStart)
 - [✨ the xDiT's secret weapons](#secrets)
-  - [PipeFusion](#PipeFusion)
-  - [Parallel VAE](#ParallelVAE)
+  - [1. PipeFusion](#PipeFusion)
+  - [2. USP](#USP)
+  - [3. Hybrid Parallel](#hybrid_parallel)
+  - [4. CFG Parallel](#cfg_parallel)
+  - [5. Parallel VAE](#parallel_vae)
 - [📚  Develop Guide](#dev-guide)
 - [🚧  History and Looking for Contributions](#history)
 - [📝 Cite Us](#cite-us)
@@ -231,56 +234,30 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-<h2 id="secrets">✨ the xDiT's secret weapons </h2>
 
-<h3 id="PipeFusion">1. PipeFusion </h3>
+<h2 id="secrets">✨ The xDiT's Secret Weapons</h2>
 
-PipeFusion is the innovative method first proposed by us. 
-It is a sequence-level pipeline parallel method, similar to [TeraPipe](https://proceedings.mlr.press/v139/li21y.html), demonstrates significant advantages in weakly interconnected network hardware such as PCIe/Ethernet. 
+The exceptional capabilities of xDiT stem from our innovative technologies.
 
-PipeFusion innovatively harnesses input temporal redundancy—the similarity between inputs and activations across diffusion steps, a diffusion-specific characteristics also employed in DistriFusion. PipeFusion not only reduces communication volume but also streamlines pipeline parallelism with TeraPipe, avoiding the load balancing issues inherent in LLM models with Causal Attention.
-It significantly surpasses other methods in communication efficiency, particularly in multi-node setups connected via Ethernet and multi-GPU configurations linked with PCIe.
+<h3 id="PipeFusion">1. PipeFusion</h3>
 
-<div align="center">
-    <img src="./assets/overview.png" alt="PipeFusion Image">
-</div>
+[PipeFusion: Displaced Patch Pipeline Parallelism for Diffusion Models](./docs/methods/pipefusion.md)
 
-The above picture compares DistriFusion and PipeFusion.
-(a) DistriFusion replicates DiT parameters on two devices. 
-It splits an image into 2 patches and employs asynchronous allgather for activations of every layer.
-(b) PipeFusion shards DiT parameters on two devices.
-It splits an image into 4 patches and employs asynchronous P2P for activations across two devices.
+<h3 id="USP">2. USP: Unified Sequence Parallelism</h3>
 
-We briefly explain the workflow of PipeFusion. It partitions an input image into $M$ non-overlapping patches.
-The DiT network is partitioned into $N$ stages ($N$ < $L$), which are sequentially assigned to $N$ computational devices. 
-Note that $M$ and $N$ can be unequal, which is different from the image-splitting approaches used in sequence parallelism and DistriFusion.
-Each device processes the computation task for one patch of its assigned stage in a pipelined manner. 
+[USP: A Unified Sequence Parallelism Approach for Long Context Generative AI](./docs/methods/usp.md)
 
-The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
+<h3 id="hybrid_parallel">3. Hybrid Parallel</h3>
 
-<div align="center">
-    <img src="./assets/workflow.png" alt="Pipeline Image">
-</div>
+[Hybrid Parallelism](./docs/methods/hybrid.md)
 
+<h3 id="cfg_parallel">4. CFG Parallel</h3>
 
-We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown bolow. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](assets/doc/FID).md .
+[CFG Parallel](./docs/methods/cfg_parallel.md)
 
-<div align="center">
-    <img src="./assets/image_quality.png" alt="image_quality">
-</div>
+<h3 id="parallel_vae">5. Parallel VAE</h3>
 
-<h3 id="ParallelVAE">2. Parallel VAE </h3>
-
-The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
-
-To address this limitation, we developed [dit-project/DistVAE](https://github.com/dit-project/DistVAE), an solution that enables efficient processing of high-resolution images in parallel. Our approach incorporates two key strategies:
-
-* Patch Parallel: We divide the feature maps in the latent space into multiple patches and perform sequence parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/N, where N is the number of devices utilized.
-
-* Chunked Input Processing: Similar to [MIT-patch-conv](https://hanlab.mit.edu/blog/patch-conv), we split the input feature map into chunks and feed them into convolution operator sequentially. This approach minimizes temporary memory consumption.
-
-By synergizing these two methods, we have dramatically expanded the capabilities of VAE decoding. Our implementation successfully handles image resolutions up to 10240px - an impressive 11-fold increase compared to the default VAE implmentation.
-
+[Patch Parallel VAE](./docs/methods/parallel_vae.md)
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 TBD

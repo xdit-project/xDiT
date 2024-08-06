@@ -27,7 +27,7 @@ pipelines文件目录位于`xfuser/model_executor/pipelines`，在该目录下�
 ```python
 **@xFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)**
 class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
-    
+
    @classmethod
     def from_pretrained(
         cls,
@@ -68,7 +68,7 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
 </aside>
 
 1. encode input prompt之前，计算出batch size之后。使用本次推理的长宽和batch size调用`set_input_parameters`来对本次forward的输入信息进行设置，从而计算出各种运行时原数据，为正式forward做准备
-    
+
     ```python
             ...
             # 2. Default height and width to transformer
@@ -79,7 +79,7 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
             else:
                 batch_size = prompt_embeds.shape[0]
             device = self._execution_device
-    
+
             # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
             # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
             # corresponds to doing no classifier free guidance.
@@ -114,9 +114,9 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
             )
             ...
     ```
-    
+
 2. 修改`do_classifier_free_guidance`的情况下的`prompt_embeds`&`prompt_attention_mask`划分，判定split batch的情况
-    
+
     ```python
             ...
             # 3. Encode input prompt
@@ -138,7 +138,7 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
                 clean_caption=clean_caption,
                 max_sequence_length=max_sequence_length,
             )
-    
+
     **#! ---------------------------------------- MODIFIED BELOW ----------------------------------------**
             # * dealing with cfg degree
             if do_classifier_free_guidance:
@@ -146,12 +146,12 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
                     prompt_embeds,
                     prompt_attention_mask,
                 ) = self._process_cfg_split_batch(
-                    prompt_embeds, 
-                    prompt_attention_mask, 
-                    negative_prompt_embeds, 
+                    prompt_embeds,
+                    prompt_attention_mask,
+                    negative_prompt_embeds,
                     negative_prompt_attention_mask
                 )
-    
+
             #! ORIGIN
             # if do_classifier_free_guidance:
             #     prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
@@ -159,13 +159,13 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
     **#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------**
     				...
     ```
-    
+
 3. 仍然是对classifier_free_guidance和split batch的特殊处理
-    
+
     ```python
             # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
             extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-    
+
             # 6.1 Prepare micro-conditions.
             added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
             if self.transformer.config.sample_size == 128:
@@ -177,7 +177,7 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
                 )
                 resolution = resolution.to(dtype=prompt_embeds.dtype, device=device)
                 aspect_ratio = aspect_ratio.to(dtype=prompt_embeds.dtype, device=device)
-    
+
     **#! ---------------------------------------- MODIFIED BELOW ----------------------------------------**
                 if (
                     do_classifier_free_guidance
@@ -185,23 +185,23 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
                 ):
                     resolution = torch.cat([resolution, resolution], dim=0)
                     aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
-    
+
                 #! ORIGIN
                 # if do_classifier_free_guidance:
                 #     resolution = torch.cat([resolution, resolution], dim=0)
                 #     aspect_ratio = torch.cat([aspect_ratio, aspect_ratio], dim=0)
     **#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------**
     ```
-    
+
 4. 模型forward过程需要在前几个diffusion step使用同步流水线做与人，后面都使用异步流水线。复杂的通信逻辑已封装进`xFuserPipelineBaseWrapper`，直接调用即可
     - 若在基类中实现的`_sync_pipeline`与`_async_pipeline`函数与模型不适配，则需要在当前类中重载该函数，并参考基类中的代码单独实现。通常这种情况会出现在存在多余的通信逻辑时
-    
+
     ```python
             # 7. Denoising loop
             num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
     **#! ---------------------------------------- MODIFIED BELOW ----------------------------------------**
             num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
-    
+
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 if (
                     get_pipeline_parallel_world_size() > 1
@@ -252,13 +252,13 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
                     )
     **#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------**
     ```
-    
+
 5. 输出处理，由于只有流水线最后一段持有生成的结果，设置为仅有每个dp group的最后一个rank返回数据，其他rank返回None
-    
+
     ```python
             # 8. Decode latents (only rank 0)
     **#! ---------------------------------------- ADD BELOW ----------------------------------------**
-            if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+            if is_dp_last_rank():
     **#! ---------------------------------------- ADD ABOVE ----------------------------------------**
                 if not output_type == "latent":
                     image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
@@ -266,23 +266,23 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
                         image = self.image_processor.resize_and_crop_tensor(image, orig_width, orig_height)
                 else:
                     image = latents
-    
+
                 if not output_type == "latent":
                     image = self.image_processor.postprocess(image, output_type=output_type)
-    
+
                 # Offload all models
                 self.maybe_free_model_hooks()
-    
+
                 if not return_dict:
                     return (image,)
-    
+
                 return ImagePipelineOutput(images=image)
     **#! ---------------------------------------- ADD BELOW ----------------------------------------
             else:**
                 return None
     **#! ---------------------------------------- ADD ABOVE ----------------------------------------**
     ```
-    
+
 
 至此，pipeline中的改动已完成，在pipeline的__call__层次主要处理了cfg的split batch情况。pipeline parallel相关的改动与通信被封装到了_sync_pipeline与_async_pipeline中，从而简化模型修改。但在基类中此函数无法满足模型需求是同样需要重载并手动更改以保证正确性。
 
@@ -325,7 +325,7 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
 1. 更改获取height / width的方式，因为patch情况下无法直接通过hidden_state获取到准确的height & width。
 2. 设置仅pp_rank为0时候进行pos_embed
-    
+
     ```python
             # 1. Input
             batch_size = hidden_states.shape[0]
@@ -333,9 +333,9 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
             #* get height & width from runtime state
             height, width = self._get_patch_height_width()
             #* only pp rank 0 needs pos_embed (patchify)
-            if get_pipeline_parallel_rank() == 0:
+            if is_pipeline_first_stage():
                 hidden_states = self.pos_embed(hidden_states)
-    
+
             #! ORIGIN
             # height, width = (
             #     hidden_states.shape[-2] // self.config.patch_size,
@@ -344,14 +344,14 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
             # hidden_states = self.pos_embed(hidden_states)
     **#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------**
     ```
-    
+
 3. 每个diffusion step结束需要进行unpatchify，将attention中使用的tokens形式的hidden state转化回到latent space下的图片，我们只让最后一个pp_rank做这个操作。
-    
+
     ```python
             # 3. Output
             #* only the last pp rank needs unpatchify
     **#! ---------------------------------------- ADD BELOW ----------------------------------------**
-            if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+            if is_pipeline_last_stage():
     **#! ---------------------------------------- ADD ABOVE ----------------------------------------**
                 shift, scale = (
                     self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
@@ -361,7 +361,7 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 hidden_states = hidden_states * (1 + scale.to(hidden_states.device)) + shift.to(hidden_states.device)
                 hidden_states = self.proj_out(hidden_states)
                 hidden_states = hidden_states.squeeze(1)
-    
+
                 # unpatchify
                 hidden_states = hidden_states.reshape(
                     shape=(-1, height, width, self.config.patch_size, self.config.patch_size, self.out_channels)
@@ -375,7 +375,7 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 output = hidden_states
     **#! ---------------------------------------- ADD ABOVE ----------------------------------------**
     ```
-    
+
 
 # 3.scheduler
 

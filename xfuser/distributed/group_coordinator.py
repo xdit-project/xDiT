@@ -177,7 +177,7 @@ class GroupCoordinator:
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
-        NOTE: This operation will be applied in-place or out-of-place. 
+        NOTE: This operation will be applied in-place or out-of-place.
         Always assume this function modifies its input, but use the return
         value as the output.
         """
@@ -189,9 +189,9 @@ class GroupCoordinator:
         return input_
 
     def all_gather(
-        self, 
-        input_: torch.Tensor, 
-        dim: int = -1, 
+        self,
+        input_: torch.Tensor,
+        dim: int = 0,
         separate_tensors: bool = False
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         world_size = self.world_size
@@ -200,35 +200,33 @@ class GroupCoordinator:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+        # Allocate output tensor.
         input_size = input_.size()
-        if not separate_tensors:
-            if dim < 0:
-                # Convert negative dim to positive.
-                dim += input_.dim()
-            # Allocate output tensor.
-            output_tensor = torch.empty((world_size, ) + input_size,
-                                        dtype=input_.dtype,
-                                        device=input_.device)
-            # All-gather.
-            torch.distributed.all_gather_into_tensor(output_tensor,
-                                                     input_,
-                                                     group=self.device_group)
-            # Reshape
+        output_tensor = torch.empty((world_size, ) + input_size,
+                                    dtype=input_.dtype,
+                                    device=input_.device)
+        # All-gather.
+        torch.distributed.all_gather_into_tensor(output_tensor,
+                                                 input_,
+                                                 group=self.device_group)
+        if dim != 0:
             output_tensor = output_tensor.movedim(0, dim)
-            output_tensor = output_tensor.reshape(input_size[:dim] +
-                                                  (world_size *
-                                                   input_size[dim], ) +
-                                                  input_size[dim + 1:])
-            return output_tensor
+
+        if separate_tensors:
+            tensor_list = [
+            output_tensor.view(-1).narrow(0,
+                input_.numel() * i, input_.numel()).view_as(input_) for i in range(world_size)
+            ]
+            return tensor_list
         else:
-            # Allocate output tensors.
-            output_tensors = [torch.empty_like(input_) 
-                              for _ in range(world_size)]
-            # All-gather.
-            torch.distributed.all_gather(output_tensors,
-                                        input_,
-                                        group=self.device_group)
-            return output_tensors
+            input_size = list(input_.size())
+            input_size[dim] = input_size[dim] * world_size
+            # Reshape
+            output_tensor = output_tensor.reshape(input_size)
+            return output_tensor
 
     def gather(self,
                input_: torch.Tensor,
@@ -504,8 +502,8 @@ class GroupCoordinator:
                 continue
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
-                torch.distributed.send(tensor, 
-                                       dst=self.ranks[dst], 
+                torch.distributed.send(tensor,
+                                       dst=self.ranks[dst],
                                        group=metadata_group)
             else:
                 # use group for GPU tensors
@@ -548,8 +546,8 @@ class GroupCoordinator:
                                            group=metadata_group)
                 else:
                     # use group for GPU tensors
-                    torch.distributed.recv(tensor, 
-                                           src=self.ranks[src], 
+                    torch.distributed.recv(tensor,
+                                           src=self.ranks[src],
                                            group=group)
                 _update_nested_dict(tensor_dict, key, tensor)
             else:
@@ -572,8 +570,8 @@ class GroupCoordinator:
             dst = self.group_next_rank
 
         torch.distributed.send(
-            tensor, 
-            self.ranks[dst], 
+            tensor,
+            self.ranks[dst],
             group=self.device_groups[self.rank_in_group % 2]
             if self.world_size == 2 else self.device_group
         )
@@ -589,9 +587,9 @@ class GroupCoordinator:
 
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         torch.distributed.recv(
-            tensor, 
-            self.ranks[src], 
-            self.device_groups[(self.rank_in_group + 1) % 2] 
+            tensor,
+            self.ranks[src],
+            self.device_groups[(self.rank_in_group + 1) % 2]
             if self.world_size == 2 else self.device_group
         )
         return tensor
@@ -623,7 +621,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
     """
-    
+
     def __init__(
         self,
         group_ranks: List[List[int]],
@@ -651,7 +649,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
                     self.cpu_group = cpu_group
         # when pipeline parallelism is 2, we need to create two groups to avoid
         #   communication stall.
-        # *_group_0_1 represents the group for communication from device 0 to 
+        # *_group_0_1 represents the group for communication from device 0 to
         #   device 1.
         # *_group_1_0 represents the group for communication from device 1 to
         #   device 0.
@@ -698,7 +696,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.recv_tasks_queue = []
         self.receiving_tasks = []
         self.recv_buffer = None
-        
+
     def set_recv_buffer(
         self,
         num_pipefusion_patches: int,
@@ -708,7 +706,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
     ):
         assert isinstance(dtype, torch.dtype), (
             "dtype must be a torch.dtype object")
-        assert (isinstance(num_pipefusion_patches, int) and 
+        assert (isinstance(num_pipefusion_patches, int) and
                 num_pipefusion_patches >= 1), (
                     "num_pipefusion_patches must be greater than or equal to 1")
         self.dtype = dtype
@@ -739,7 +737,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         assert self.recv_buffer_set, (
             "set_recv_buffer must be called before sending tensors")
         self._pipeline_isend(tensor).wait()
-    
+
     def pipeline_isend(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
         assert self.recv_buffer_set, (
@@ -806,10 +804,10 @@ class PipelineGroupCoordinator(GroupCoordinator):
         return torch.distributed.irecv(
             tensor,
             src=self.prev_rank,
-            group=self.device_groups[(self.rank_in_group + 1) % 2] 
+            group=self.device_groups[(self.rank_in_group + 1) % 2]
             if self.world_size == 2 else self.device_group
         )
-    
+
     def _pipeline_isend(self, tensor: torch.tensor):
         return torch.distributed.isend(
             tensor,

@@ -257,7 +257,7 @@ The code logic in `__call__` is inherited from the `__call__` function of the co
 ```python
         # 8. Decode latents (only rank 0)
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+        if is_dp_last_rank():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
@@ -334,7 +334,7 @@ In `__init__`, you need to specify which layers in the transformer model need to
         #* get height & width from runtime state
         height, width = self._get_patch_height_width()
         #* only pp rank 0 needs pos_embed (patchify)
-        if get_pipeline_parallel_rank() == 0:
+        if is_pipeline_first_stage():
             hidden_states = self.pos_embed(hidden_states)
 
         #! ORIGIN
@@ -353,7 +353,7 @@ In `__init__`, you need to specify which layers in the transformer model need to
         # 3. Output
         #* only the last pp rank needs unpatchify
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+        if is_pipeline_last_stage():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             shift, scale = (
                 self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)

@@ -260,7 +260,10 @@ The exceptional capabilities of xDiT stem from our innovative technologies.
 [Patch Parallel VAE](./docs/methods/parallel_vae.md)
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
-TBD
+
+[The implementdesign of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
+
+[Manual for adding new models](./docs/developer/Manual_for_Adding_New_Models.md)
 
 <h2 id="history">🚧  History and Looking for Contributions</h2>
 

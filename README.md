@@ -261,7 +261,7 @@ The exceptional capabilities of xDiT stem from our innovative technologies.
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 
-[The implementdesign of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
+[The implement and design of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
 
 [Manual for adding new models](./docs/developer/Manual_for_Adding_New_Models.md)
 

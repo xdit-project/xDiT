@@ -88,6 +88,7 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).
 * 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference scripts are [examples/sd3_example](examples/sd3_example.py).
 * 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
 * 🎉**July 17, 2024**: Rename the project to xDiT. The project has evolved from a collection of parallel methods into a unified inference framework and supported the hybrid parallel for DiTs.
@@ -98,6 +99,7 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
 
+-  [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
 -  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
 -  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
 -  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)

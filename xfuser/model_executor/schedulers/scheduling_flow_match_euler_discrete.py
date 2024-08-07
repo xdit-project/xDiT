@@ -10,9 +10,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
 )
 
 from xfuser.distributed import (
-    get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
-    get_runtime_state,
+    get_runtime_state
 )
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper

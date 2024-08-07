@@ -17,12 +17,13 @@ from xfuser.distributed import (
     get_pipeline_parallel_world_size,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
-    get_pipeline_parallel_rank,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
     get_pp_group,
     get_world_group,
     get_cfg_group,
     get_sp_group,
-    get_runtime_state, 
+    get_runtime_state,
     initialize_runtime_state
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
@@ -198,7 +199,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             get_pp_group().set_extra_tensors_recv_buffer(name, shape, cnt)
         get_runtime_state().pipeline_comm_extra_tensors_info = extra_tensors_shape_dict
 
-        
+
 
     def _init_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
@@ -219,7 +220,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         get_runtime_state().set_patched_mode(patch_mode=True)
 
-        if get_pipeline_parallel_rank() == 0:
+        if is_pipeline_first_stage():
             # get latents computed in warmup stage
             # ignore latents after the last timestep
             latents = (
@@ -228,20 +229,20 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 else latents
             )
             patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
-        elif get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+        elif is_pipeline_last_stage():
             patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
         else:
             patch_latents = [None for _ in range(get_runtime_state().num_pipeline_patch)]
 
         recv_timesteps = (
-            num_timesteps - 1 if get_pipeline_parallel_rank() == 0 else num_timesteps
+            num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
         )
         for _ in range(recv_timesteps):
             for patch_idx in range(get_runtime_state().num_pipeline_patch):
                 get_pp_group().add_pipeline_recv_task(patch_idx)
 
         return patch_latents
-    
+
     def _process_cfg_split_batch(
         self,
         concat_group_0_negative: torch.Tensor,
@@ -300,7 +301,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         latents = self._init_sync_pipeline(latents)
         for i, t in enumerate(timesteps):
-            if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+            if is_pipeline_last_stage():
                 last_timestep_latents = latents
 
             # when there is only one pp stage, no need to recv
@@ -309,7 +310,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             # all ranks should recv the latent from the previous rank except
             #   the first rank in the first pipeline forward which should use
             #   the input latent
-            elif get_pipeline_parallel_rank() == 0 and i == 0:
+            elif is_pipeline_first_stage() and i == 0:
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
@@ -323,7 +324,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 guidance_scale=guidance_scale,
             )
 
-            if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+            if is_pipeline_last_stage():
                 latents = self._scheduler_step(
                     latents, last_timestep_latents, t, extra_step_kwargs
                 )
@@ -337,17 +338,16 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
             if (
                 sync_only
-                and get_pipeline_parallel_rank()
-                == get_pipeline_parallel_world_size() - 1
+                and is_pipeline_last_stage()
                 and i == len(timesteps) - 1
             ):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
 
-        if (sync_only and 
+        if (sync_only and
             get_sequence_parallel_world_size() > 1 and
-            get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1
+            is_pipeline_last_stage()
         ):
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
@@ -356,7 +356,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 latents_list += [
                     sp_latents_list[sp_patch_idx][
                         :,
-                        :, 
+                        :,
                         get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
                         get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
                         :
@@ -393,20 +393,17 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         )
         last_patch_latents = (
             [None for _ in range(num_pipeline_patch)]
-            if (get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1)
+            if (is_pipeline_last_stage())
             else None
         )
 
         first_async_recv = True
         for i, t in enumerate(timesteps):
             for patch_idx in range(num_pipeline_patch):
-                if (
-                    get_pipeline_parallel_rank()
-                    == get_pipeline_parallel_world_size() - 1
-                ):
+                if is_pipeline_last_stage():
                     last_patch_latents[patch_idx] = patch_latents[patch_idx]
 
-                if get_pipeline_parallel_rank() == 0 and i == 0:
+                if is_pipeline_first_stage() and i == 0:
                     pass
                 else:
                     if first_async_recv:
@@ -427,10 +424,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                     t=t,
                     guidance_scale=guidance_scale,
                 )
-                if (
-                    get_pipeline_parallel_rank()
-                    == get_pipeline_parallel_world_size() - 1
-                ):
+                if is_pipeline_last_stage():
                     patch_latents[patch_idx] = self._scheduler_step(
                         patch_latents[patch_idx],
                         last_patch_latents[patch_idx],
@@ -441,7 +435,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
                 else:
                     get_pp_group().pipeline_isend(patch_latents[patch_idx])
-                
+
                 get_runtime_state().next_patch()
 
             if i == len(timesteps) - 1 or (
@@ -460,7 +454,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                     callback(step_idx, t, patch_latents[patch_idx])
 
         latents = None
-        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+        if is_pipeline_last_stage():
             latents = torch.cat(patch_latents, dim=2)
             if get_sequence_parallel_world_size() > 1:
                 sp_degree = get_sequence_parallel_world_size()
@@ -469,7 +463,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                     latents_list += [
                         sp_latents_list[sp_patch_idx][
-                            ..., 
+                            ...,
                             get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
                             get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
                             :
@@ -488,7 +482,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         t: Union[float, torch.Tensor],
         guidance_scale: float,
     ):
-        if get_pipeline_parallel_rank() == 0:
+        if is_pipeline_first_stage():
             latents = torch.cat(
                 [latents] * (2 // get_classifier_free_guidance_world_size())
             )
@@ -521,7 +515,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         )[0]
 
         # classifier free guidance
-        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+        if is_pipeline_last_stage():
             if get_classifier_free_guidance_world_size() == 1:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
             elif get_classifier_free_guidance_world_size() == 2:

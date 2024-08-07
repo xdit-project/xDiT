@@ -12,8 +12,8 @@ from xfuser.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.distributed import (
-    get_pipeline_parallel_rank,
-    get_pipeline_parallel_world_size,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage
 )
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
@@ -86,7 +86,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         height, width = self._get_patch_height_width()
 
         #* only pp rank 0 needs pos_embed (patchify)
-        if get_pipeline_parallel_rank() == 0:
+        if is_pipeline_first_stage():
             hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
 
         #! ORIGIN:
@@ -95,7 +95,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
         temb = self.time_text_embed(timestep, pooled_projections)
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_pipeline_parallel_rank() == 0:
+        if is_pipeline_first_stage():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
@@ -137,7 +137,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
         #* only the last pp rank needs unpatchify
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+        if is_pipeline_last_stage():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             hidden_states = self.norm_out(hidden_states, temb)
             hidden_states = self.proj_out(hidden_states)

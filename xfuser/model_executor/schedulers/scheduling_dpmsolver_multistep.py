@@ -10,9 +10,7 @@ from diffusers.schedulers.scheduling_dpmsolver_multistep import (
 )
 
 from xfuser.distributed import (
-    get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
-    get_runtime_state,
+    get_runtime_state
 )
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper
@@ -103,7 +101,7 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
             self.model_outputs[-1][
                 :,
                 :,
-                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]: 
+                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]:
                 get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
                 :,
             ] = model_output

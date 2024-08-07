@@ -15,10 +15,9 @@ from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
 from xfuser.distributed import (
-    get_data_parallel_world_size,
+    is_dp_last_rank,
     get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,
-    get_data_parallel_rank, 
     get_runtime_state,
 )
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
@@ -232,7 +231,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 prompt_embeds,
                 prompt_attention_mask,
             ) = self._process_cfg_split_batch(
-                negative_prompt_embeds, 
+                negative_prompt_embeds,
                 prompt_embeds,
                 negative_prompt_attention_mask,
                 prompt_attention_mask
@@ -350,7 +349,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
         # 8. Decode latents (only rank 0)
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+        if is_dp_last_rank():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

@@ -5,6 +5,8 @@ import torch.nn as nn
 
 from xfuser.distributed import (
     get_pipeline_parallel_rank,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
 )
@@ -72,7 +74,7 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
                 "Sum of attn_layer_num_for_pp should be equal to the "
                 "number of transformer blocks"
             )
-            if pp_rank == 0:
+            if is_pipeline_first_stage():
                 transformer.transformer_blocks = transformer.transformer_blocks[
                     : attn_layer_num_for_pp[0]
                 ]
@@ -95,8 +97,11 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
                 start_idx:end_idx
             ]
         # position embedding
-        if pp_rank != 0:
+        if not is_pipeline_first_stage():
             transformer.pos_embed = None
+        if not is_pipeline_last_stage():
+            transformer.norm_out = None
+            transformer.proj_out = None
         return transformer
 
     @abstractmethod
@@ -107,12 +112,12 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
         patch_size = get_runtime_state().backbone_patch_size
         vae_scale_factor = get_runtime_state().vae_scale_factor
         width = get_runtime_state().input_config.width // patch_size // vae_scale_factor
-        
+
         if get_runtime_state().patch_mode:
             height = (
                 get_runtime_state().pp_patches_height[get_runtime_state().pipeline_patch_idx]
                 // patch_size
             )
         else:
-            height = sum(get_runtime_state().pp_patches_height) // patch_size 
+            height = sum(get_runtime_state().pp_patches_height) // patch_size
         return height, width

@@ -31,14 +31,13 @@ from xfuser.config import EngineConfig, InputConfig
 from xfuser.distributed import (
     get_pipeline_parallel_world_size,
     get_runtime_state,
-    get_cfg_group, 
-    get_classifier_free_guidance_world_size,
-    get_pipeline_parallel_rank, 
     get_pp_group, 
     get_sequence_parallel_world_size, 
     get_sp_group,
     get_data_parallel_rank,
-    get_data_parallel_world_size
+    get_data_parallel_world_size,
+    is_pipeline_first_stage, 
+    is_pipeline_last_stage
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -369,7 +368,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         for i, t in enumerate(timesteps):
             if self.interrupt:
                 continue
-            if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+            if is_pipeline_last_stage():
                 last_timestep_latents = latents
 
             # when there is only one pp stage, no need to recv
@@ -378,11 +377,11 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             # all ranks should recv the latent from the previous rank except
             #   the first rank in the first pipeline forward which should use
             #   the input latent
-            elif get_pipeline_parallel_rank() == 0 and i == 0:
+            elif is_pipeline_first_stage() and i == 0:
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
-                if get_pipeline_parallel_rank() != 0:
+                if not is_pipeline_first_stage():
                     encoder_hidden_states = get_pp_group().pipeline_recv(0, "encoder_hidden_states")
 
                             # handle guidance
@@ -395,7 +394,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             latents, encoder_hidden_states = self._backbone_forward(
                 latents=latents,
                 encoder_hidden_states=prompt_embeds
-                if get_pipeline_parallel_rank() == 0 else encoder_hidden_states,
+                if is_pipeline_first_stage() else encoder_hidden_states,
                 pooled_prompt_embeds=pooled_prompt_embeds,
                 text_ids=text_ids,
                 latent_image_ids=latent_image_ids,
@@ -403,7 +402,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 t=t,
             )
 
-            if get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1:
+            if is_pipeline_last_stage():
                 latents_dtype = latents.dtype
                 latents = self._scheduler_step(latents, last_timestep_latents, t)
 
@@ -429,19 +428,18 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
             if (
                 sync_only
-                and get_pipeline_parallel_rank()
-                == get_pipeline_parallel_world_size() - 1
+                and is_pipeline_last_stage()
                 and i == len(timesteps) - 1
             ):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
-                if get_pipeline_parallel_rank() != get_pipeline_parallel_world_size() - 1:
+                if not is_pipeline_last_stage():
                     get_pp_group().pipeline_send(encoder_hidden_states)
 
         if (sync_only and 
             get_sequence_parallel_world_size() > 1 and
-            get_pipeline_parallel_rank() == get_pipeline_parallel_world_size() - 1
+            is_pipeline_last_stage()
         ):
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)

@@ -440,7 +440,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
-                if get_pipeline_parallel_rank() != 0:
+                if not is_pipeline_first_stage():
                     encoder_hidden_states = get_pp_group().pipeline_recv(0, "encoder_hidden_states")
 
 
@@ -590,12 +590,12 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                     pass
                 else:
                     if first_async_recv:
-                        if get_pipeline_parallel_rank() != 0 and patch_idx == 0:
+                        if not is_pipeline_first_stage() and patch_idx == 0:
                             get_pp_group().recv_next()
                         get_pp_group().recv_next()
                         first_async_recv = False
 
-                    if get_pipeline_parallel_rank() != 0 and patch_idx == 0:
+                    if not is_pipeline_first_stage() and patch_idx == 0:
                         last_encoder_hidden_states = get_pp_group().get_pipeline_recv_data(
                             idx=patch_idx, name="encoder_hidden_states"
                         )

@@ -7,8 +7,8 @@ from torch.nn import functional as F
 from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
 from diffusers.models.attention_processor import (
-    AttnProcessor2_0, 
-    JointAttnProcessor2_0, 
+    AttnProcessor2_0,
+    JointAttnProcessor2_0,
     FluxAttnProcessor2_0,
     FluxSingleAttnProcessor2_0,
     apply_rope,
@@ -207,7 +207,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 
 #! ---------------------------------------- KV CACHE ----------------------------------------
         if (
-            HAS_FLASH_ATTN 
+            HAS_FLASH_ATTN
             and get_sequence_parallel_world_size() > 1
             and self.use_long_ctx_attn_kvcache
         ):
@@ -345,9 +345,9 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
         # if use sp, use the kvcache inside long_context_attention
         if (
-            HAS_FLASH_ATTN 
+            HAS_FLASH_ATTN
             and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache 
+            and self.use_long_ctx_attn_kvcache
         ):
             pass
         else:
@@ -503,9 +503,9 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
         # if use sp, use the kvcache inside long_context_attention
         if (
-            HAS_FLASH_ATTN 
+            HAS_FLASH_ATTN
             and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache 
+            and self.use_long_ctx_attn_kvcache
         ):
             pass
         else:
@@ -687,9 +687,9 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
         # if use sp, use the kvcache inside long_context_attention
         if (
-            HAS_FLASH_ATTN 
+            HAS_FLASH_ATTN
             and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache 
+            and self.use_long_ctx_attn_kvcache
         ):
             pass
         else:
@@ -735,9 +735,9 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
         else:
             # the output of sdp = (batch, num_heads, seq_len, head_dim)
             # TODO: add support for attn.scale when we move to Torch 2.1
-            hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, causal=False)
+            hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
             hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        
+
 #! ---------------------------------------- ATTENTION ----------------------------------------
 
         hidden_states = hidden_states.to(query.dtype)

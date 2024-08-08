@@ -409,13 +409,11 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                     if first_async_recv:
                         get_pp_group().recv_next()
                         first_async_recv = False
+
                     patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
                         idx=patch_idx
                     )
-                    if i == len(timesteps) - 1 and patch_idx == num_pipeline_patch - 1:
-                        pass
-                    else:
-                        get_pp_group().recv_next()
+
                 patch_latents[patch_idx] = self._backbone_forward(
                     latents=patch_latents[patch_idx],
                     prompt_embeds=prompt_embeds,
@@ -424,6 +422,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                     t=t,
                     guidance_scale=guidance_scale,
                 )
+
                 if is_pipeline_last_stage():
                     patch_latents[patch_idx] = self._scheduler_step(
                         patch_latents[patch_idx],
@@ -435,6 +434,14 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                         get_pp_group().pipeline_isend(patch_latents[patch_idx])
                 else:
                     get_pp_group().pipeline_isend(patch_latents[patch_idx])
+
+                if is_pipeline_first_stage() and i == 0:
+                    pass
+                else:
+                    if i == len(timesteps) - 1 and patch_idx == num_pipeline_patch - 1:
+                        pass
+                    else:
+                        get_pp_group().recv_next()
 
                 get_runtime_state().next_patch()
 

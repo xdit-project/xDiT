@@ -17,7 +17,7 @@ set -x
 # The model is downloaded to a specified location on disk, 
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
-export MODEL_TYPE="Pixart-sigma"
+export MODEL_TYPE="Flux"
 
 CFG_ARGS="--use_cfg_parallel"
 
@@ -38,7 +38,7 @@ elif [ "$MODEL_TYPE" = "Flux" ]; then
     export MODEL_ID="/cfs/dit/FLUX.1-schnell"
     export INFERENCE_STEP=4
     # Flux does not apply cfg
-    export $CFG_ARGS=""
+    export CFG_ARGS=""
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
@@ -58,16 +58,24 @@ TASK_ARGS="--height $HEIGHT \
 --no_use_resolution_binning \
 "
 
+# On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
+PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
+
+# Flux only supports SP, do not set the pipefusion degree
+if [ "$MODEL_TYPE" = "Flux" ]; then
+PARALLEL_ARGS="--ulysses_degree $N_GPUS"
+fi
+
+
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
 # PIPEFUSION_ARGS="--num_pipeline_patch 8 "
 
 # For high-resolution images, we use the latent output type to avoid runing the vae module. Used for measuring speed.
 # OUTPUT_ARGS="--output_type latent"
 
-# On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
---pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 \
+$PARALLEL_ARGS \
 $TASK_ARGS \
 $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \

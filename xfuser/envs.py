@@ -1,5 +1,6 @@
 import os
 import torch
+import diffusers
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from packaging import version
 
@@ -55,7 +56,7 @@ variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
 
     # used in version checking
-    'CUDA_VERSION': 
+    'CUDA_VERSION':
     lambda: version.parse(torch.version.cuda),
 
     'TORCH_VERSION':
@@ -75,6 +76,7 @@ class PackagesEnvChecker:
         self.packages_info = {
             'has_flash_attn': self.check_flash_attn(),
             'has_long_ctx_attn': self.check_long_ctx_attn(),
+            'diffusers_version': self.check_diffusers_version(),
         } 
         
 
@@ -106,6 +108,12 @@ class PackagesEnvChecker:
             logger.warning(f'Ring Flash Attention library "yunchang" not found, '
                            f'using pytorch attention implementation')
             return False
+
+    def check_diffusers_version(self):
+        if version.parse(version.parse(diffusers.__version__).base_version) < version.parse("0.30.0"):
+            raise RuntimeError(f"Diffusers version: {version.parse(version.parse(diffusers.__version__).base_version)} is not supported,"
+                               f"please upgrade to version > 0.30.0")
+        return version.parse(version.parse(diffusers.__version__).base_version)
 
     def get_packages_info(self):
         return self.packages_info

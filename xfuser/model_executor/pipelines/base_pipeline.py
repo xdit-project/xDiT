@@ -27,6 +27,10 @@ from xfuser.distributed import (
     initialize_runtime_state
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
+
+from xfuser.envs import PACKAGES_CHECKER
+PACKAGES_CHECKER.check_diffusers_version()
+
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
 

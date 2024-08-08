@@ -1,5 +1,5 @@
 import os
-from typing import List, Tuple, Callable, Optional, Union
+from typing import Dict, List, Tuple, Callable, Optional, Union
 
 import torch
 import torch.distributed
@@ -16,8 +16,15 @@ from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 from xfuser.config import EngineConfig
 from xfuser.distributed import (
     is_dp_last_rank,
+    get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,
     get_runtime_state,
+    get_cfg_group,
+    get_pp_group,
+    get_sequence_parallel_world_size,
+    get_sp_group,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -332,3 +339,272 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
             return ImagePipelineOutput(images=image)
         else:
             return None
+
+    def _scheduler_step(
+        self,
+        noise_pred: torch.Tensor,
+        latents: torch.Tensor,
+        t: Union[float, torch.Tensor],
+        extra_step_kwargs: Dict,
+    ):
+        # compute previous image: x_t -> x_t-1
+        return self.scheduler.step(
+            noise_pred,
+            t,
+            latents,
+            **extra_step_kwargs,
+            return_dict=False,
+        )[0]
+
+    # synchronized compute the whole feature map in each pp stage
+    def _sync_pipeline(
+        self,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
+        guidance_scale: float,
+        timesteps: List[int],
+        num_warmup_steps: int,
+        extra_step_kwargs: List,
+        added_cond_kwargs: Dict,
+        progress_bar,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: int = 1,
+        sync_only: bool = False,
+    ):
+        latents = self._init_sync_pipeline(latents)
+        for i, t in enumerate(timesteps):
+            if is_pipeline_last_stage():
+                last_timestep_latents = latents
+
+            # when there is only one pp stage, no need to recv
+            if get_pipeline_parallel_world_size() == 1:
+                pass
+            # all ranks should recv the latent from the previous rank except
+            #   the first rank in the first pipeline forward which should use
+            #   the input latent
+            elif is_pipeline_first_stage() and i == 0:
+                pass
+            else:
+                latents = get_pp_group().pipeline_recv()
+
+            latents = self._backbone_forward(
+                latents=latents,
+                prompt_embeds=prompt_embeds,
+                prompt_attention_mask=prompt_attention_mask,
+                added_cond_kwargs=added_cond_kwargs,
+                t=t,
+                guidance_scale=guidance_scale,
+            )
+
+            if is_pipeline_last_stage():
+                latents = self._scheduler_step(
+                    latents, last_timestep_latents, t, extra_step_kwargs
+                )
+            if i == len(timesteps) - 1 or (
+                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+            ):
+                progress_bar.update()
+                if callback is not None and i % callback_steps == 0:
+                    step_idx = i // getattr(self.scheduler, "order", 1)
+                    callback(step_idx, t, latents)
+
+            if (
+                sync_only
+                and is_pipeline_last_stage()
+                and i == len(timesteps) - 1
+            ):
+                pass
+            elif get_pipeline_parallel_world_size() > 1:
+                get_pp_group().pipeline_send(latents)
+
+        if (sync_only and
+            get_sequence_parallel_world_size() > 1 and
+            is_pipeline_last_stage()
+        ):
+            sp_degree = get_sequence_parallel_world_size()
+            sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
+            latents_list = []
+            for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
+                latents_list += [
+                    sp_latents_list[sp_patch_idx][
+                        :,
+                        :,
+                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
+                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
+                        :
+                    ]
+                    for sp_patch_idx in range(sp_degree)
+                ]
+            latents = torch.cat(latents_list, dim=-2)
+
+        return latents
+
+    # * implement of pipefusion
+    def _async_pipeline(
+        self,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
+        guidance_scale: float,
+        timesteps: List[int],
+        num_warmup_steps: int,
+        extra_step_kwargs: List,
+        added_cond_kwargs: Dict,
+        progress_bar,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: int = 1,
+    ):
+        if len(timesteps) == 0:
+            return latents
+        num_pipeline_patch = get_runtime_state().num_pipeline_patch
+        num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        patch_latents = self._init_async_pipeline(
+            num_timesteps=len(timesteps),
+            latents=latents,
+            num_pipeline_warmup_steps=num_pipeline_warmup_steps,
+        )
+        last_patch_latents = (
+            [None for _ in range(num_pipeline_patch)]
+            if (is_pipeline_last_stage())
+            else None
+        )
+
+        first_async_recv = True
+        for i, t in enumerate(timesteps):
+            for patch_idx in range(num_pipeline_patch):
+                if is_pipeline_last_stage():
+                    last_patch_latents[patch_idx] = patch_latents[patch_idx]
+
+                if is_pipeline_first_stage() and i == 0:
+                    pass
+                else:
+                    if first_async_recv:
+                        get_pp_group().recv_next()
+                        first_async_recv = False
+                    patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
+                        idx=patch_idx
+                    )
+                    if i == len(timesteps) - 1 and patch_idx == num_pipeline_patch - 1:
+                        pass
+                    else:
+                        get_pp_group().recv_next()
+                patch_latents[patch_idx] = self._backbone_forward(
+                    latents=patch_latents[patch_idx],
+                    prompt_embeds=prompt_embeds,
+                    prompt_attention_mask=prompt_attention_mask,
+                    added_cond_kwargs=added_cond_kwargs,
+                    t=t,
+                    guidance_scale=guidance_scale,
+                )
+                if is_pipeline_last_stage():
+                    patch_latents[patch_idx] = self._scheduler_step(
+                        patch_latents[patch_idx],
+                        last_patch_latents[patch_idx],
+                        t,
+                        extra_step_kwargs,
+                    )
+                    if i != len(timesteps) - 1:
+                        get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                else:
+                    get_pp_group().pipeline_isend(patch_latents[patch_idx])
+
+                get_runtime_state().next_patch()
+
+            if i == len(timesteps) - 1 or (
+                (i + num_pipeline_warmup_steps + 1) > num_warmup_steps
+                and (i + num_pipeline_warmup_steps + 1) % self.scheduler.order == 0
+            ):
+                progress_bar.update()
+                assert callback is None, "callback not supported in async " "pipeline"
+                if (
+                    callback is not None
+                    and i + num_pipeline_warmup_steps % callback_steps == 0
+                ):
+                    step_idx = (i + num_pipeline_warmup_steps) // getattr(
+                        self.scheduler, "order", 1
+                    )
+                    callback(step_idx, t, patch_latents[patch_idx])
+
+        latents = None
+        if is_pipeline_last_stage():
+            latents = torch.cat(patch_latents, dim=2)
+            if get_sequence_parallel_world_size() > 1:
+                sp_degree = get_sequence_parallel_world_size()
+                sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
+                latents_list = []
+                for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
+                    latents_list += [
+                        sp_latents_list[sp_patch_idx][
+                            ...,
+                            get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
+                            get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
+                            :
+                        ]
+                        for sp_patch_idx in range(sp_degree)
+                    ]
+                latents = torch.cat(latents_list, dim=-2)
+        return latents
+
+    def _backbone_forward(
+        self,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
+        added_cond_kwargs: Dict,
+        t: Union[float, torch.Tensor],
+        guidance_scale: float,
+    ):
+        if is_pipeline_first_stage():
+            latents = torch.cat(
+                [latents] * (2 // get_classifier_free_guidance_world_size())
+            )
+            latents = self.scheduler.scale_model_input(latents, t)
+
+        current_timestep = t
+        if not torch.is_tensor(current_timestep):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            # This would be a good case for the `match` statement (Python 3.10+)
+            is_mps = latents.device.type == "mps"
+
+            if isinstance(current_timestep, float):
+                dtype = torch.float32 if is_mps else torch.float64
+            else:
+                dtype = torch.int32 if is_mps else torch.int64
+            current_timestep = torch.tensor(
+                [current_timestep], dtype=dtype, device=latents.device
+            )
+        elif len(current_timestep.shape) == 0:
+            current_timestep = current_timestep[None].to(latents.device)
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        current_timestep = current_timestep.expand(latents.shape[0])
+        noise_pred = self.transformer(
+            latents,
+            encoder_hidden_states=prompt_embeds,
+            encoder_attention_mask=prompt_attention_mask,
+            timestep=current_timestep,
+            added_cond_kwargs=added_cond_kwargs,
+            return_dict=False,
+        )[0]
+
+        # classifier free guidance
+        if is_pipeline_last_stage():
+            if get_classifier_free_guidance_world_size() == 1:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            elif get_classifier_free_guidance_world_size() == 2:
+                noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
+                    noise_pred, separate_tensors=True
+                )
+            latents = noise_pred_uncond + guidance_scale * (
+                noise_pred_text - noise_pred_uncond
+            )
+
+            if (
+                self.transformer.config.out_channels // 2
+                == self.transformer.config.in_channels
+            ):
+                latents = latents.chunk(2, dim=1)[0]
+        else:
+            latents = noise_pred
+
+        return latents

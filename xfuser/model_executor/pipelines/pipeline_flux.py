@@ -99,6 +99,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         return self._interrupt
 
     @torch.no_grad()
+    @xFuserPipelineBaseWrapper.check_model_parallel_state(cfg_parallel_available=False, pipefusion_parallel_available=False)
     @xFuserPipelineBaseWrapper.enable_data_parallel
     @xFuserPipelineBaseWrapper.check_to_use_naive_forward
     def __call__(

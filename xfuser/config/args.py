@@ -67,8 +67,7 @@ class xFuserArgs:
     # Parallel arguments
         # data parallel
     data_parallel_degree: int = 1
-    use_split_batch: bool = False
-    do_classifier_free_guidance: bool = True
+    use_cfg_parallel: bool = False
         # sequence parallel
     ulysses_degree: Optional[int] = None
     ring_degree: Optional[int] = None
@@ -108,8 +107,7 @@ class xFuserArgs:
 
         # Parallel arguments
         parallel_group = parser.add_argument_group('Parallel Processing Options')
-        parallel_group.add_argument("--do_classifier_free_guidance", action="store_true")
-        parallel_group.add_argument("--use_split_batch", action="store_true", help="Use split batch in classifier_free_guidance. cfg_degree will be 2 if set")
+        parallel_group.add_argument("--use_cfg_parallel", action="store_true", help="Use split batch in classifier_free_guidance. cfg_degree will be 2 if set")
         parallel_group.add_argument("--data_parallel_degree", type=int, default=1, help="Data parallel degree.")
         parallel_group.add_argument("--ulysses_degree", type=int, default=None, help="Ulysses sequence parallel degree. Used in attention layer.")
         parallel_group.add_argument("--ring_degree", type=int, default=None, help="Ring sequence parallel degree. Used in attention layer.")
@@ -162,8 +160,7 @@ class xFuserArgs:
         parallel_config = ParallelConfig(
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,
-                use_split_batch=self.use_split_batch,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                use_cfg_parallel=self.use_cfg_parallel,
             ),
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,

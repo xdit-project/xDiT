@@ -155,7 +155,7 @@ python setup.py install
 3. Usage
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
-You can easily modify the model type, model directory, and parallel options within the script to run certain DiT models.
+You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
 
 ```bash
 bash examples/run.sh

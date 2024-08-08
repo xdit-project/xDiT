@@ -10,11 +10,6 @@
 # export NCCL_P2P=0
 # export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-# docker exec -it 888c58e74578 bash
-# export CUDA_VISIBLE_DEVICES="0,1,2,3"
-
-# export CUDA_VISIBLE_DEVICES="4,5,6,7"
-
 
 export SCRIPT=pixartalpha_example.py
 export MODEL_ID="/mnt/models/SD/PixArt-XL-2-1024-MS"
@@ -31,7 +26,7 @@ ARSG="--height $HEIGHT \
 --num_pipeline_patch 8
 "
 
-# On 4 gpus, pp=2, ulysses=1, ring=1, cfg_parallel=2 (split batch)
+# On 8 gpus, pp=2, ulysses=12, ring=1, cfg_parallel=2 (split batch)
 torchrun --nproc_per_node=$N_GPUS ./examples/pixartalpha_example.py \
 --model $MODEL_ID --pipefusion_parallel_degree 2 --ulysses_degree 2 \
 --num_inference_steps 20 \

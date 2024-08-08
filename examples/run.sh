@@ -17,15 +17,17 @@ set -x
 # The model is downloaded to a specified location on disk, 
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
-export MODEL_TYPE="Flux"
+export MODEL_TYPE="Pixart-sigma"
+
+CFG_ARGS="--use_cfg_parallel"
 
 if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
     export SCRIPT=pixartalpha_example.py
     export MODEL_ID="/mnt/models/SD/PixArt-XL-2-1024-MS"
     export INFERENCE_STEP=20
 elif [ "$MODEL_TYPE" = "Pixart-sigma" ]; then
-    export SCRIPT=sd3_example.py
-    export MODEL_ID="/mnt/models/SD/PixArt-Sigma-XL-2-1024-MS"
+    export SCRIPT=pixartsigma_example.py
+    export MODEL_ID="/cfs/dit/PixArt-Sigma-XL-2-2K-MS"
     export INFERENCE_STEP=20
 elif [ "$MODEL_TYPE" = "Sd3" ]; then
     export SCRIPT=sd3_example.py
@@ -35,6 +37,8 @@ elif [ "$MODEL_TYPE" = "Flux" ]; then
     export SCRIPT=flux_example.py
     export MODEL_ID="/cfs/dit/FLUX.1-schnell"
     export INFERENCE_STEP=4
+    # Flux does not apply cfg
+    export $CFG_ARGS=""
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
@@ -46,7 +50,7 @@ mkdir -p ./results
 
 for HEIGHT in 1024
 do
-for N_GPUS in 1;
+for N_GPUS in 8;
 do 
 
 TASK_ARGS="--height $HEIGHT \
@@ -60,13 +64,10 @@ TASK_ARGS="--height $HEIGHT \
 # For high-resolution images, we use the latent output type to avoid runing the vae module. Used for measuring speed.
 # OUTPUT_ARGS="--output_type latent"
 
-# use cfg parallel if using Classifier Free Guidence.
-# CFG_ARGS="--use_split_batch"
-
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
---pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 1 \
+--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 \
 $TASK_ARGS \
 $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \

@@ -154,7 +154,14 @@ python setup.py install
 
 3. Usage
 
-We provide examples demonstrating how to run models with PipeFusion in the [./examples/](./examples/) directory. To inspect the available options for the PixArt-alpha example, use the following command:
+We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
+You can easily modify the model type, model directory, and parallel options within the script to run certain DiT models.
+
+```bash
+bash examples/run.sh
+```
+
+To inspect the available options for the PixArt-alpha example, use the following command:
 
 ```bash
 python ./examples/pixartalpha_example.py -h

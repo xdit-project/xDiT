@@ -35,7 +35,7 @@ elif [ "$MODEL_TYPE" = "Sd3" ]; then
     export INFERENCE_STEP=20
 elif [ "$MODEL_TYPE" = "Flux" ]; then
     export SCRIPT=flux_example.py
-    export MODEL_ID="/cfs/dit/FLUX.1-schnell"
+    export MODEL_ID="/mnt/models/SD/FLUX.1-schnell"
     export INFERENCE_STEP=4
     # Flux does not apply cfg
     export CFG_ARGS=""
@@ -44,7 +44,7 @@ else
     exit 1
 fi
 
-export PYTHONAPTH=$PWD:$PYTHONPATH
+# export PYTHONAPTH=$PWD:$PYTHONPATH
 
 mkdir -p ./results
 

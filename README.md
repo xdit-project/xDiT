@@ -88,6 +88,7 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example](examples/latte_example.py).
 * 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).
 * 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference scripts are [examples/sd3_example](examples/sd3_example.py).
 * 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
@@ -99,6 +100,7 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
 
+-  [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1)
 -  [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
 -  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
 -  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
@@ -234,7 +236,7 @@ examples/pixartalpha_example.py \
 --num_inference_steps 20 \
 --warmup_steps 0 \
 --prompt "A small dog" \
---use_split_batch
+--use_cfg_parallel
 ```
 
 

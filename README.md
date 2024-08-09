@@ -101,11 +101,13 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 -  [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
 -  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
--  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
 -  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
 -  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
--  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
+### Supported by legacy only:
+
+-  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
+-  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
 <h2 id="perf">📈 Performance</h2>
 

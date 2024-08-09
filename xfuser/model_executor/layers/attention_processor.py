@@ -91,9 +91,11 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
     def __init__(
         self,
         attention: Attention,
+        latte_temporal_attention: bool = False,
     ):
         super().__init__(attention=attention)
         self.processor = xFuserAttentionProcessorRegister.get_processor(attention.processor)()
+        self.latte_temporal_attention = latte_temporal_attention
 
     def forward(
         self,
@@ -137,6 +139,7 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
             hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             attention_mask=attention_mask,
+            latte_temporal_attention=self.latte_temporal_attention,
             **cross_attention_kwargs,
         )
 
@@ -166,6 +169,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         temb: Optional[torch.Tensor] = None,
+        latte_temporal_attention: Optional[bool] = False,
         *args,
         **kwargs,
     ):
@@ -235,12 +239,13 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 #! ---------------------------------------- KV CACHE ----------------------------------------
 
 #! ---------------------------------------- ATTENTION ----------------------------------------
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1 and not latte_temporal_attention:
+            
             query = query.view(batch_size, -1, attn.heads, head_dim)
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
             hidden_states = self.hybrid_seq_parallel_attn(
-                query, key, value, dropout_p=0.0, causal=False
+                query, key, value, dropout_p=0.0, causal=False,
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 

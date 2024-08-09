@@ -158,7 +158,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             height=input_config.height,
             width=input_config.width,
             prompt=prompt,
-            use_resolution_binning=input_config.use_resolution_binning,
+            # use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
             output_type="latent",
             generator=torch.Generator(device="cuda").manual_seed(42),
@@ -220,18 +220,15 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             get_pp_group().set_extra_tensors_recv_buffer(name, shape, cnt)
         get_runtime_state().pipeline_comm_extra_tensors_info = extra_tensors_shape_dict
 
-
-
     def _init_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
         latents_list = [
-            latents[:, :, start_idx: end_idx,:]
+            latents[:, :, :, start_idx: end_idx,:]
             for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global
         ]
         latents = torch.cat(latents_list, dim=-2)
         return latents
-
 
     def _init_async_pipeline(
         self,
@@ -287,3 +284,20 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         else:
             raise ValueError("Invalid classifier free guidance rank")
         return concat_group_0, concat_group_1
+
+    def _process_cfg_split_batch_latte(
+        self,
+        concat_group_0: torch.Tensor,
+        concat_group_0_negative: torch.Tensor,
+    ):
+        if get_classifier_free_guidance_world_size() == 1:
+            concat_group_0 = torch.cat(
+                [concat_group_0_negative, concat_group_0], dim=0
+            )
+        elif get_classifier_free_guidance_rank() == 0:
+            concat_group_0 = concat_group_0_negative
+        elif get_classifier_free_guidance_rank() == 1:
+            concat_group_0 = concat_group_0
+        else:
+            raise ValueError("Invalid classifier free guidance rank")
+        return concat_group_0

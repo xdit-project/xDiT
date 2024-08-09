@@ -18,7 +18,7 @@ if __name__ == "__main__":
             "diffusers>=0.30.0",
             "transformers",
             "sentencepiece",
-            "accelerate",
+            "accelerate==0.33.0",
             "beautifulsoup4",
             "distvae",
             "ftfy",

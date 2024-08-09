@@ -2,7 +2,7 @@ from packaging.version import Version
 import diffusers
 
 if Version("0.29.0") <= Version(diffusers.__version__):
-    from .transformer_sd3 import DistriSD3Transformer2DModel
+    from .transformer_sd3 import DistriSD3Transformer2DModel,DistriSD3CNTransformer2DModel
 
 from .transformer_2d import DistriTransformer2DModel
 from .attn import DistriCrossAttentionPiP, DistriSelfAttentionPiP, DistriJointAttnPiP

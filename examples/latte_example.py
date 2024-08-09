@@ -14,7 +14,6 @@ import imageio
 
 
 def main():
-    torch.manual_seed(0)
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
@@ -27,7 +26,7 @@ def main():
     ).to(f"cuda:{local_rank}")
     # pipe.latte_prepare_run(input_config)
     
-    vae = AutoencoderKLTemporalDecoder.from_pretrained("../../Latte-1", subfolder="vae_temporal_decoder", torch_dtype=torch.float16).to(f"cuda:{local_rank}")
+    vae = AutoencoderKLTemporalDecoder.from_pretrained(engine_config.model_config.model, subfolder="vae_temporal_decoder", torch_dtype=torch.float16).to(f"cuda:{local_rank}")
     pipe.vae = vae
 
     torch.cuda.reset_peak_memory_stats()

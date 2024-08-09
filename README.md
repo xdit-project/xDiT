@@ -141,18 +141,26 @@ Here are the benchmark results for Pixart-Alpha using the 20-step DPM solver as 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
-1. Install yunchang for sequence parallel.
+### 1. Install from pip
+
+```
+pip install xfuser
+```
+
+### 2. Install from source 
+
+#### 2.1 Install yunchang for sequence parallel.
 
 Install yunchang from [feifeibear/long-context-attention](https://github.com/feifeibear/long-context-attention).
 Please note that it has a dependency on flash attention and specific GPU model requirements. We recommend installing yunchang from the source code rather than using `pip install yunchang==0.2.0`.
 
-2. Install xDiT
+#### 2.2 Install xDiT
 
 ```
 python setup.py install
 ```
 
-3. Usage
+### 2. Usage
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.

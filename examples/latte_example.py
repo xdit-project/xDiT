@@ -25,6 +25,7 @@ def main():
         engine_config=engine_config,
         torch_dtype=torch.float16,
     ).to(f"cuda:{local_rank}")
+    # pipe.latte_prepare_run(input_config)
     
     vae = AutoencoderKLTemporalDecoder.from_pretrained("../../Latte-1", subfolder="vae_temporal_decoder", torch_dtype=torch.float16).to(f"cuda:{local_rank}")
     pipe.vae = vae

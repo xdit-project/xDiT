@@ -158,6 +158,25 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             height=input_config.height,
             width=input_config.width,
             prompt=prompt,
+            use_resolution_binning=input_config.use_resolution_binning,
+            num_inference_steps=steps,
+            output_type="latent",
+            generator=torch.Generator(device="cuda").manual_seed(42),
+        )
+        get_runtime_state().runtime_config.warmup_steps = warmup_steps
+        
+    def latte_prepare_run(self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1):
+        prompt = (
+            [""] * input_config.batch_size
+            if input_config.batch_size > 1
+            else ""
+        )
+        warmup_steps = get_runtime_state().runtime_config.warmup_steps
+        get_runtime_state().runtime_config.warmup_steps = sync_steps
+        self.__call__(
+            height=input_config.height,
+            width=input_config.width,
+            prompt=prompt,
             # use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
             output_type="latent",
@@ -219,8 +238,18 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         for name, shape, cnt in extra_tensors_shape_dict:
             get_pp_group().set_extra_tensors_recv_buffer(name, shape, cnt)
         get_runtime_state().pipeline_comm_extra_tensors_info = extra_tensors_shape_dict
-
+        
     def _init_sync_pipeline(self, latents: torch.Tensor):
+        get_runtime_state().set_patched_mode(patch_mode=False)
+
+        latents_list = [
+            latents[:, :, start_idx: end_idx,:]
+            for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global
+        ]
+        latents = torch.cat(latents_list, dim=-2)
+        return latents
+
+    def _init_video_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
         latents_list = [

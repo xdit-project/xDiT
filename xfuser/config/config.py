@@ -204,6 +204,7 @@ class EngineConfig:
 class InputConfig:
     height: int = 1024
     width: int = 1024
+    video_length: int = 16
     use_resolution_binning: bool = True,
     batch_size: Optional[int] = None
     prompt: Union[str, List[str]] = ""
@@ -218,5 +219,5 @@ class InputConfig:
                     len(self.negative_prompt) == 0), (
                 "prompts and negative_prompts must have the same quantities"
             )
-        assert self.output_type in ["pil", "latent"], (
+        assert self.output_type in ["pil", "latent", "pt"], (
             "output_pil must be either 'pil' or 'latent'")

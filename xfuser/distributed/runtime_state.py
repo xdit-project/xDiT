@@ -99,7 +99,7 @@ class DiTRuntimeState(RuntimeState):
             vae_scale_factor=pipeline.vae_scale_factor,
             backbone_patch_size=pipeline.transformer.config.patch_size,
             backbone_in_channel=pipeline.transformer.config.in_channels,
-            backbone_inner_dim=pipeline.transformer.inner_dim,
+            backbone_inner_dim=pipeline.transformer.config.num_attention_heads * pipeline.transformer.config.attention_head_dim,
         )
         self.pipeline_comm_extra_tensors_info = []
 
@@ -126,6 +126,31 @@ class DiTRuntimeState(RuntimeState):
 
         self.ready = True
 
+    def set_video_input_parameters(
+        self,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        video_length: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        num_inference_steps: Optional[int] = None,
+        seed: Optional[int] = None,
+    ):
+        self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
+        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
+            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
+        if (seed is not None and seed != self.input_config.seed):
+            self.input_config.seed = seed
+            set_random_seed(seed)
+        if (
+            (height and self.input_config.height != height) or 
+            (width and self.input_config.width != width) or 
+            (video_length and self.input_config.video_length != video_length) or
+            (batch_size and self.input_config.batch_size != batch_size)
+        ):
+            self._video_input_size_change(height, width, video_length, batch_size)
+
+        self.ready = True
+    
     def set_patched_mode(self, patch_mode: bool):
         self.patch_mode = patch_mode
         self.pipeline_patch_idx = 0
@@ -163,7 +188,7 @@ class DiTRuntimeState(RuntimeState):
         self.backbone_patch_size = backbone_patch_size
         self.backbone_inner_dim = backbone_inner_dim
         self.backbone_in_channel = backbone_in_channel
-
+    
     def _input_size_change(
         self,
         height: Optional[int] = None,
@@ -172,6 +197,20 @@ class DiTRuntimeState(RuntimeState):
     ):
         self.input_config.height = height or self.input_config.height
         self.input_config.width = width or self.input_config.width
+        self.input_config.batch_size = batch_size or self.input_config.batch_size
+        self._calc_patches_metadata()
+        self._reset_recv_buffer()
+        
+    def _video_input_size_change(
+        self,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        video_length: Optional[int] = None,
+        batch_size: Optional[int] = None
+    ):
+        self.input_config.height = height or self.input_config.height
+        self.input_config.width = width or self.input_config.width
+        self.input_config.video_length = video_length or self.input_config.video_length
         self.input_config.batch_size = batch_size or self.input_config.batch_size
         self._calc_patches_metadata()
         self._reset_recv_buffer()

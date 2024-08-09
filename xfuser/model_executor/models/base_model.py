@@ -84,14 +84,21 @@ class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
                         f"{wrapper.__name__}"
                     )
                     if additional_args is not {}:
-                        setattr(
-                            module,
-                            subname,
-                            wrapper(
-                                submodule,
-                                **additional_args,
-                            ),
-                        )
+                        if "temporal_transformer_blocks" in name and subname == "attn1":
+                            setattr(
+                                module,
+                                subname,
+                                wrapper(submodule, latte_temporal_attention=True),
+                            )
+                        else:
+                            setattr(
+                                module,
+                                subname,
+                                wrapper(
+                                    submodule,
+                                    **additional_args,
+                                ),
+                            )
                     else:
                         setattr(
                             module,
@@ -105,7 +112,3 @@ class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
             self.module = model
         else:
             return model
-
-    @abstractmethod
-    def forward(self, *args, **kwargs):
-        pass

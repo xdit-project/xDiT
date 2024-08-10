@@ -37,7 +37,7 @@ from xfuser.distributed import (
     get_pp_group,
     get_sequence_parallel_world_size,
     get_sp_group,
-    is_dp_last_rank,
+    is_dp_last_group,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -378,7 +378,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 )
 
         # * 8. Decode latents (only the last rank in a dp group)
-        if is_dp_last_rank():
+        if is_dp_last_group():
             if output_type == "latent":
                 image = latents
 

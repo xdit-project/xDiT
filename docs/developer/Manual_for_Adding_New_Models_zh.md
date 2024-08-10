@@ -25,7 +25,7 @@ pipelines文件目录位于`xfuser/model_executor/pipelines`，在该目录下�
 代码如下：
 
 ```python
-**@xFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)**
+@xFuserPipelineWrapperRegister.register(PixArtAlphaPipeline)
 class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
    @classmethod
@@ -48,7 +48,9 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
 pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将参数转发到原pipeline类(此处为diffuser中的`PixArtAlphaPipeline`)的`from_pretrained`，获取到一个原pipeline对象，并将其传进`cls.__init__`。随后逐层init的过程中会逐渐将其组分进行并行化，此种方式完全兼容diffusers接口。
 
-`__call__` 方法使用到`xFuserPipelineBaseWrapper`中的两个装饰器，这是是必须的且顺序不可变，其作用如下：
+将原始xFuserPixArtAlphaPipeline中的所有`@property`复制粘贴到`xFuserPixArtAlphaPipeline`中。
+
+最大的改动是`__call__` 方法，首先使用`xFuserPipelineBaseWrapper`中的两个装饰器包装它，这是是必须的且顺序不可变，其作用如下：
 
 - `enable_data_parallel`：启用数据并行(dp)，会在__call__之前自动读取dp相关配置与输入prompts，当promp多个时候，会分配到不同的dp rank上执行。如果输入prompt只有一个，则不发挥作用。
 - `check_to_use_naive_forward`：进行并行条件检测。若仅enable了data parallel，则直接使用该装饰器对输入prompts进行朴素forward推理
@@ -57,6 +59,8 @@ pipeline wrapper中，仅需要实现两个函数，`from_pretrained`用以将�
 💡 装饰器的顺序不可交换，否则在使用朴素forward时data parallel将无法使用。
 
 </aside>
+
+然后对`__call__`中代码做修改。
 
 ## 1.1.__call__改动
 

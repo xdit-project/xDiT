@@ -56,7 +56,7 @@ def main():
     visited = set()
     dp_degree = 1
     for size in SIZES:
-        for cfg_degree in [1, 2]:
+        for cfg_degree in [2]:
             model_parallel_degree = N_GPUS // cfg_degree
             for i in range(int(math.log2(model_parallel_degree)) + 1):
                 pp_degree = int(math.pow(2, i))
@@ -109,6 +109,7 @@ def main():
                                     f"{RESOLUTION_BINNING} --use_cfg_parallel --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
                                     f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches}"
                                 )
+                                run_command(cmd)
                             else:
                                 print(
                                     f"Running test for size {size}, no split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",

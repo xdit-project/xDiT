@@ -58,6 +58,9 @@ def main():
                 image.save(
                     f"./results/stable_diffusion_3_result_{parallel_info}_{image_rank}.png"
                 )
+                print(
+                    f"image {i} saved to ./results/stable_diffusion_3_result_{parallel_info}_{image_rank}.png"
+                )
 
     if get_world_group().rank == get_world_group().world_size - 1:
         print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")

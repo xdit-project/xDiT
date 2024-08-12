@@ -178,6 +178,20 @@ class GroupCoordinator:
         world_size = self.world_size
         return (rank_in_group - 1) % world_size
 
+    @property
+    def skip_rank(self):
+        """Return the global rank of the process that skip connects with the caller"""
+        rank_in_group = self.rank_in_group
+        world_size = self.world_size
+        return self.ranks[(world_size - rank_in_group - 1) % world_size]
+
+    @property
+    def group_skip_rank(self):
+        """Return the group rank of the process that skip connects with the caller"""
+        rank_in_group = self.rank_in_group
+        world_size = self.world_size
+        return (world_size - rank_in_group - 1) % world_size
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
         NOTE: This operation will be applied in-place or out-of-place.
@@ -686,12 +700,29 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.send_shape: Dict[str, Dict[int, torch.Size]] = {}
         self.recv_buffer: Dict[str, Dict[int, torch.Size]] = {}
 
+        self.skip_tensor_recv_buffer_set: bool = False
+        self.recv_skip_tasks_queue: List[Union[int, Tuple[str, int]]] = []
+        self.receiving_skip_tasks: List[Tuple[torch.distributed.Work, str, int]] = []
+        self.skip_tensor_recv_buffer: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
+        self.skip_device_group = None
+        for ranks in group_ranks:
+            skip_device_group = torch.distributed.new_group(
+                ranks, backend=torch_distributed_backend)
+            if self.rank in ranks:
+                self.skip_device_group = skip_device_group
+        assert self.skip_device_group is not None
+        
+
     def reset_buffer(self):
         self.recv_tasks_queue = []
         self.receiving_tasks = []
         self.recv_shape = {}
         self.send_shape = {}
         self.recv_buffer = {}
+
+        self.recv_skip_tasks_queue = []
+        self.receiving_skip_tasks = []
+        self.skip_tensor_recv_buffer = {}
 
     def set_config(self, dtype: torch.dtype):
         self.dtype = dtype
@@ -936,4 +967,68 @@ class PipelineGroupCoordinator(GroupCoordinator):
                 if self.world_size == 2
                 else self.device_group
             ),
+        )
+    
+    def set_skip_tensor_recv_buffer(
+        self,
+        patches_shape_list: List[List[int]],
+        feature_map_shape: List[int],
+    ):
+        self.skip_tensor_recv_buffer = [
+            torch.zeros(*shape, dtype=self.dtype, device=self.device)
+            for shape in patches_shape_list
+        ]
+        self.skip_tensor_recv_buffer.append(
+            torch.zeros(*feature_map_shape, dtype=self.dtype, device=self.device)
+        )
+        self.skip_tensor_recv_buffer_set = True
+    
+    def pipeline_send_skip(self, tensor: torch.Tensor) -> None:
+        tensor = tensor.contiguous()
+        self._pipeline_isend_skip(tensor).wait()
+
+    def pipeline_isend_skip(self, tensor: torch.Tensor) -> None:
+        tensor = tensor.contiguous()
+        self._pipeline_isend_skip(tensor)
+    
+    def pipeline_recv_skip(self, idx: int = -1) -> torch.Tensor:
+        self._pipeline_irecv_skip(self.skip_tensor_recv_buffer[idx]).wait()
+        return self.skip_tensor_recv_buffer[idx]
+    
+    def add_pipeline_recv_skip_task(self, idx: int = -1):
+        self.recv_skip_tasks_queue.append(idx)
+    
+    def get_pipeline_recv_skip_data(self, idx: int = -1) -> torch.Tensor:
+        assert (
+            len(self.receiving_skip_tasks) > 0
+        ), "No tasks to receive, call add_pipeline_recv_skip_task first"
+        receiving_skip_task = self.receiving_skip_tasks.pop(0)
+        receiving_skip_task[0].wait()
+        assert (
+            receiving_skip_task[2] == idx
+        ), "Received tensor does not match the requested"
+        return self.skip_tensor_recv_buffer[idx]
+    
+    def recv_skip_next(self):
+        if len(self.recv_skip_tasks_queue) == 0:
+            raise ValueError("No more tasks to receive")
+        elif len(self.recv_skip_tasks_queue) > 0:
+            task = self.recv_skip_tasks_queue.pop(0)
+            idx = task
+            self.receiving_skip_tasks.append(
+                (self._pipeline_irecv_skip(self.skip_tensor_recv_buffer[idx]), None, idx)
+            )
+    
+    def _pipeline_irecv_skip(self, tensor: torch.tensor):
+        return torch.distributed.irecv(
+            tensor,
+            src=self.skip_rank,
+            group=self.skip_device_group
+        )
+    
+    def _pipeline_isend_skip(self, tensor: torch.tensor):
+        return torch.distributed.isend(
+            tensor,
+            dst=self.skip_rank,
+            group=self.skip_device_group
         )

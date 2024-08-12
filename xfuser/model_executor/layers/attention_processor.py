@@ -12,6 +12,7 @@ from diffusers.models.attention_processor import (
     FluxAttnProcessor2_0,
     FluxSingleAttnProcessor2_0,
     apply_rope,
+    HunyuanAttnProcessor2_0,
 )
 
 from xfuser.distributed import (
@@ -749,5 +750,202 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 
         if input_ndim == 4:
             hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+        return hidden_states
+
+@xFuserAttentionProcessorRegister.register(HunyuanAttnProcessor2_0)
+class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
+    def __init__(self):
+        super().__init__()
+        self.use_long_ctx_attn_kvcache = True
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            from yunchang import UlyssesAttention
+            from xfuser.modules.long_context_attention import xFuserLongContextAttention
+
+            if HAS_FLASH_ATTN:
+                # self.hybrid_seq_parallel_attn = LongContextAttention()
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                )
+            else:
+                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+        else:
+            self.hybrid_seq_parallel_attn = None
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        temb: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        latte_temporal_attention: Optional[bool] = False,
+    ) -> torch.Tensor:
+        from diffusers.models.embeddings import apply_rotary_emb
+
+        residual = hidden_states
+        if attn.spatial_norm is not None:
+            hidden_states = attn.spatial_norm(hidden_states, temb)
+
+        input_ndim = hidden_states.ndim
+
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+            # scaled_dot_product_attention expects attention_mask shape to be
+            # (batch, heads, source_length, target_length)
+            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
+        if attn.group_norm is not None:
+            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        kv = attn.to_kv(encoder_hidden_states)
+
+#! ---------------------------------------- KV CACHE ----------------------------------------
+        if attn.is_cross_attention:
+            key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+        else:
+            if (
+                HAS_FLASH_ATTN 
+                and get_sequence_parallel_world_size() > 1
+                and self.use_long_ctx_attn_kvcache
+            ):
+                key, value = torch.chunk(kv, 2, dim=-1)
+                inner_dim = key.shape[-1]
+                head_dim = inner_dim // attn.heads
+            else:
+                # the distributed sparse attention from xfuser
+                if get_runtime_state().num_pipeline_patch == 1:
+                    local_kv = kv
+                else:
+                    if not get_runtime_state().patch_mode:
+                        local_kv = kv
+                    else:
+                        local_kv = attn.activation_cache
+                        token_start_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
+                        token_end_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx+1])
+                        local_kv[:, token_start_idx:token_end_idx, :] = kv
+
+                    attn.activation_cache = local_kv
+
+                key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
+                inner_dim = key.shape[-1]
+                head_dim = inner_dim // attn.heads
+#! ---------------------------------------- KV CACHE ----------------------------------------
+            
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # Apply RoPE if needed
+        if image_rotary_emb is not None:
+            # the distributed sparse attention from xfuser
+            if get_runtime_state().num_pipeline_patch == 1:
+                query = apply_rotary_emb(query, image_rotary_emb)
+            else:
+                if not get_runtime_state().patch_mode:
+                    query = apply_rotary_emb(query, image_rotary_emb)
+                else:
+                    cos, sin = image_rotary_emb
+                    token_start_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx])
+                    token_end_idx = sum(get_runtime_state().pp_patches_token_num[:get_runtime_state().pipeline_patch_idx+1])
+                    query = apply_rotary_emb(query, tuple((cos[token_start_idx : token_end_idx, :], sin[token_start_idx : token_end_idx, :])))
+            if not attn.is_cross_attention:
+                key = apply_rotary_emb(key, image_rotary_emb)
+
+#! ---------------------------------------- ATTENTION ----------------------------------------
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1 and not latte_temporal_attention:
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            
+            hidden_states = self.hybrid_seq_parallel_attn(
+                query, key, value, dropout_p=0.0, causal=False
+            )
+            hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
+
+        else:
+            if HAS_FLASH_ATTN:
+                from flash_attn import flash_attn_func
+
+                query = query.transpose(1, 2)
+                key = key.transpose(1, 2)
+                value = value.transpose(1, 2)
+                hidden_states = flash_attn_func(
+                    query, key, value, dropout_p=0.0, causal=False
+                )
+                hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
+
+            else:
+                # the output of sdp = (batch, num_heads, seq_len, head_dim)
+                # TODO: add support for attn.module.scale when we move to Torch 2.1
+                hidden_states = F.scaled_dot_product_attention(
+                    query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+                )
+
+                hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+
+        #! ORIGIN
+        # query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        # key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        # value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        # if attn.norm_q is not None:
+        #     query = attn.norm_q(query)
+        # if attn.norm_k is not None:
+        #     key = attn.norm_k(key)
+
+        # # Apply RoPE if needed
+        # if image_rotary_emb is not None:
+        #     query = apply_rotary_emb(query, image_rotary_emb)
+        #     if not attn.is_cross_attention:
+        #         key = apply_rotary_emb(key, image_rotary_emb)
+
+        # # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        # # TODO: add support for attn.scale when we move to Torch 2.1
+        # hidden_states = F.scaled_dot_product_attention(
+        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        # )
+
+        # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+#! ---------------------------------------- ATTENTION ----------------------------------------
+
+        hidden_states = hidden_states.to(query.dtype)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+
+        hidden_states = hidden_states / attn.rescale_output_factor
 
         return hidden_states

@@ -39,6 +39,10 @@ elif [ "$MODEL_TYPE" = "Flux" ]; then
     export INFERENCE_STEP=4
     # Flux does not apply cfg
     export CFG_ARGS=""
+elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
+    export SCRIPT=hunyuandit_example.py
+    export MODEL_ID="HunyuanDiT-v1.2-Diffusers"
+    export INFERENCE_STEP=20
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
@@ -64,6 +68,8 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 # Flux only supports SP, do not set the pipefusion degree
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
+elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
+PARALLEL_ARGS="--pipefusion_parallel_degree 4 --ulysses_degree 1 --ring_degree 1"
 fi
 
 

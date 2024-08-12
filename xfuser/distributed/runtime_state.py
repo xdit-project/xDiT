@@ -331,6 +331,30 @@ class DiTRuntimeState(RuntimeState):
         get_pp_group().reset_buffer()
         get_pp_group().set_config(dtype=self.runtime_config.dtype)
 
+    def _reset_recv_skip_buffer(self, num_blocks_per_stage):
+        batch_size = self.input_config.batch_size
+        batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
+        hidden_dim = self.backbone_inner_dim
+        num_patches_tokens = [
+            end - start
+            for start, end in self.pp_patches_token_start_end_idx
+        ]
+        patches_shape = [
+            [num_blocks_per_stage, batch_size, tokens, hidden_dim]
+            for tokens in num_patches_tokens 
+        ]
+        feature_map_shape = [
+            num_blocks_per_stage,
+            batch_size,
+            sum(num_patches_tokens),
+            hidden_dim,
+        ]
+        # reset pipeline communicator buffer
+        get_pp_group().set_skip_tensor_recv_buffer(
+            patches_shape_list=patches_shape,
+            feature_map_shape=feature_map_shape,
+        )
+
 
 # _RUNTIME: Optional[RuntimeState] = None
 # TODO: change to RuntimeState after implementing the unet

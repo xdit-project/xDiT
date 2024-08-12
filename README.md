@@ -21,7 +21,7 @@
 - [🚀 QuickStart](#QuickStart)
 - [✨ the xDiT's secret weapons](#secrets)
   - [1. PipeFusion](#PipeFusion)
-  - [2. USP](#USP)
+  - [2. Unified Sequence Parallel](#USP)
   - [3. Hybrid Parallel](#hybrid_parallel)
   - [4. CFG Parallel](#cfg_parallel)
   - [5. Parallel VAE](#parallel_vae)
@@ -99,16 +99,26 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
-
+<!-- 
 -  [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1)
+-  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
 -  [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
 -  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
 -  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
--  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
+-  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) -->
 
-### Supported by legacy only:
 
--  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
+| Model Name | CFG | SP | PipeFusion |
+| --- | --- | --- | --- |
+| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ |
+| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ❎ | ✔️ |
+| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ❎ |
+| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ |
+| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ |
+| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ |
+
+### Supported by legacy version only:
+
 -  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
 <h2 id="perf">📈 Performance</h2>
@@ -308,6 +318,13 @@ We also welcome developers to join and contribute more features and models to th
       eprint={2405.07719},
       archivePrefix={arXiv},
       primaryClass={cs.CV}
+}
+
+@article{fang2024unified,
+  title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
+  author={Fang, Jiarui and Zhao, Shangchun},
+  journal={arXiv preprint arXiv:2405.07719},
+  year={2024}
 }
 ```
 

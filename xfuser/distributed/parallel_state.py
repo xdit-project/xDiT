@@ -3,11 +3,8 @@
 # https://github.com/vllm-project/vllm/blob/main/vllm/distributed/parallel_state.py
 # Copyright 2023 The vLLM team.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-from contextlib import contextmanager
 from typing import List, Optional
 
-import random
-import numpy as np
 import torch
 import torch.distributed
 import xfuser.envs as envs
@@ -17,6 +14,7 @@ from .group_coordinator import (
     GroupCoordinator,
     PipelineGroupCoordinator,
 )
+from .utils import RankGenerator, generate_masked_orthogonal_rank_groups
 
 env_info = envs.PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
@@ -24,12 +22,124 @@ HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 logger = init_logger(__name__)
 
+
 _WORLD: Optional[GroupCoordinator] = None
+_TP: Optional[GroupCoordinator] = None
+_SP: Optional[GroupCoordinator] = None
+_PP: Optional[PipelineGroupCoordinator] = None
+_CFG: Optional[GroupCoordinator] = None
+_DP: Optional[GroupCoordinator] = None
 
 
+# * QUERY
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
     return _WORLD
+
+
+# TP
+def get_tp_group() -> GroupCoordinator:
+    assert _TP is not None, "tensor model parallel group is not initialized"
+    return _TP
+
+
+def get_tensor_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_tp_group().world_size
+
+
+def get_tensor_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    return get_tp_group().rank_in_group
+
+
+# SP
+def get_sp_group() -> GroupCoordinator:
+    assert _SP is not None, "pipeline model parallel group is not initialized"
+    return _SP
+
+
+def get_sequence_parallel_world_size():
+    """Return world size for the sequence parallel group."""
+    return get_sp_group().world_size
+
+
+def get_sequence_parallel_rank():
+    """Return my rank for the sequence parallel group."""
+    return get_sp_group().rank_in_group
+
+
+# PP
+def get_pp_group() -> PipelineGroupCoordinator:
+    assert _PP is not None, "pipeline model parallel group is not initialized"
+    return _PP
+
+
+def get_pipeline_parallel_world_size():
+    """Return world size for the pipeline model parallel group."""
+    return get_pp_group().world_size
+
+
+def get_pipeline_parallel_rank():
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
+def is_pipeline_first_stage():
+    """Return True if in the first pipeline model parallel stage, False otherwise."""
+    return get_pipeline_parallel_rank() == 0
+
+
+def is_pipeline_last_stage():
+    """Return True if in the last pipeline model parallel stage, False otherwise."""
+    return get_pipeline_parallel_rank() == (get_pipeline_parallel_world_size() - 1)
+
+
+# CFG
+def get_cfg_group() -> GroupCoordinator:
+    assert (
+        _CFG is not None
+    ), "classifier_free_guidance parallel group is not initialized"
+    return _CFG
+
+
+def get_classifier_free_guidance_world_size():
+    """Return world size for the classifier_free_guidance parallel group."""
+    return get_cfg_group().world_size
+
+
+def get_classifier_free_guidance_rank():
+    """Return my rank for the classifier_free_guidance parallel group."""
+    return get_cfg_group().rank_in_group
+
+
+# DP
+def get_dp_group() -> GroupCoordinator:
+    assert _DP is not None, "pipeline model parallel group is not initialized"
+    return _DP
+
+
+def get_data_parallel_world_size():
+    """Return world size for the data parallel group."""
+    return get_dp_group().world_size
+
+
+def get_data_parallel_rank():
+    """Return my rank for the data parallel group."""
+    return get_dp_group().rank_in_group
+
+
+def is_dp_last_group():
+    """Return True if in the last data parallel group, False otherwise."""
+    return (
+        get_sequence_parallel_rank() == (get_sequence_parallel_world_size() - 1)
+        and get_classifier_free_guidance_rank()
+        == (get_classifier_free_guidance_world_size() - 1)
+        and get_pipeline_parallel_rank() == (get_pipeline_parallel_world_size() - 1)
+    )
+
+
+# * SET
 
 
 def init_world_group(
@@ -42,95 +152,6 @@ def init_world_group(
     )
 
 
-def init_model_parallel_group(
-    group_ranks: List[List[int]], local_rank: int, backend: str, parallel_mode: str
-) -> GroupCoordinator:
-    assert parallel_mode in [
-        "data",
-        "pipeline",
-        "tensor",
-        "sequence",
-        "classifier_free_guidance",
-    ], f"parallel_mode {parallel_mode} is not supported"
-    if parallel_mode == "pipeline":
-        return PipelineGroupCoordinator(
-            group_ranks=group_ranks,
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-        )
-    else:
-        return GroupCoordinator(
-            group_ranks=group_ranks,
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-        )
-
-
-_TP: Optional[GroupCoordinator] = None
-
-
-def get_tp_group() -> GroupCoordinator:
-    assert _TP is not None, "tensor model parallel group is not initialized"
-    return _TP
-
-
-_PP: Optional[PipelineGroupCoordinator] = None
-
-
-def get_pp_group() -> PipelineGroupCoordinator:
-    assert _PP is not None, "pipeline model parallel group is not initialized"
-    return _PP
-
-
-_SP: Optional[GroupCoordinator] = None
-_ULYSSES_PG = None
-_RING_PG = None
-
-
-def get_sp_group() -> GroupCoordinator:
-    assert _SP is not None, "pipeline model parallel group is not initialized"
-    return _SP
-
-
-_DP: Optional[GroupCoordinator] = None
-
-
-def get_dp_group() -> GroupCoordinator:
-    assert _DP is not None, "pipeline model parallel group is not initialized"
-    return _DP
-
-
-_CFG: Optional[GroupCoordinator] = None
-
-
-def get_cfg_group() -> GroupCoordinator:
-    assert (
-        _CFG is not None
-    ), "classifier_free_guidance parallel group is not initialized"
-    return _CFG
-
-
-@contextmanager
-def graph_capture():
-    """
-    `graph_capture` is a context manager which should surround the code that
-    is capturing the CUDA graph. Its main purpose is to ensure that the
-    some operations will be run after the graph is captured, before the graph
-    is replayed. It returns a `GraphCaptureContext` object which contains the
-    necessary data for the graph capture. Currently, it only contains the
-    stream that the graph capture is running on. This stream is set to the
-    current CUDA stream when the context manager is entered and reset to the
-    default stream when the context manager is exited. This is to ensure that
-    the graph capture is running on a separate stream from the default stream,
-    in order to explicitly distinguish the kernels to capture
-    from other kernels possibly launched on background in the default stream.
-    """
-    with get_tp_group().graph_capture() as context, get_pp_group().graph_capture(
-        context
-    ):
-        yield context
-
-
 def init_distributed_environment(
     world_size: int = -1,
     rank: int = -1,
@@ -139,8 +160,7 @@ def init_distributed_environment(
     backend: str = "nccl",
 ):
     logger.debug(
-        "world_size=%d rank=%d local_rank=%d "
-        "distributed_init_method=%s backend=%s",
+        "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
         world_size,
         rank,
         local_rank,
@@ -177,6 +197,41 @@ def init_distributed_environment(
         assert (
             _WORLD.world_size == torch.distributed.get_world_size()
         ), "world group already initialized with a different world size"
+
+
+def model_parallel_is_initialized():
+    """Check if tensor and pipeline parallel groups are initialized."""
+    return (
+        _DP is not None
+        and _CFG is not None
+        and _SP is not None
+        and _PP is not None
+        and _TP is None
+    )
+
+
+def init_model_parallel_group(
+    group_ranks: List[List[int]], local_rank: int, backend: str, parallel_mode: str
+) -> GroupCoordinator:
+    assert parallel_mode in [
+        "data",
+        "pipeline",
+        "tensor",
+        "sequence",
+        "classifier_free_guidance",
+    ], f"parallel_mode {parallel_mode} is not supported"
+    if parallel_mode == "pipeline":
+        return PipelineGroupCoordinator(
+            group_ranks=group_ranks,
+            local_rank=local_rank,
+            torch_distributed_backend=backend,
+        )
+    else:
+        return GroupCoordinator(
+            group_ranks=group_ranks,
+            local_rank=local_rank,
+            torch_distributed_backend=backend,
+        )
 
 
 def initialize_model_parallel(
@@ -251,68 +306,53 @@ def initialize_model_parallel(
             f"data_parallel_degree ({data_parallel_degree})"
         )
 
-    # Build the data-parallel groups.
-    num_data_parallel_devices: int = world_size // data_parallel_degree
+    rank_generator: RankGenerator = RankGenerator(
+        tensor_parallel_degree,
+        sequence_parallel_degree,
+        pipeline_parallel_degree,
+        classifier_free_guidance_degree,
+        data_parallel_degree,
+        "tp-sp-pp-cfg-dp",
+    )
     global _DP
     assert _DP is None, "data parallel group is already initialized"
-    group_ranks = []
-    for i in range(data_parallel_degree):
-        ranks = list(
-            range(i * num_data_parallel_devices, (i + 1) * num_data_parallel_devices)
-        )
-        group_ranks.append(ranks)
+
     _DP = init_model_parallel_group(
-        group_ranks=group_ranks,
+        group_ranks=rank_generator.get_ranks("dp"),
         local_rank=get_world_group().local_rank,
         backend=backend,
         parallel_mode="data",
     )
 
-    # Build the classifier_free_guidance parallel groups. (split batch)
-    num_cfg_parallel_groups: int = world_size // classifier_free_guidance_degree
-    num_splited_batch_devices: int = (
-        num_data_parallel_devices // classifier_free_guidance_degree
-    )
     global _CFG
     assert _CFG is None, "classifier_free_guidance group is already initialized"
-    group_ranks = []
-    for i in range(num_cfg_parallel_groups):
-        start_rank = (
-            i // num_splited_batch_devices
-        ) * num_data_parallel_devices + i % num_splited_batch_devices
-        ranks = [
-            start_rank + j * num_splited_batch_devices
-            for j in range(classifier_free_guidance_degree)
-        ]
-        group_ranks.append(ranks)
     _CFG = init_model_parallel_group(
-        group_ranks=group_ranks,
+        group_ranks=rank_generator.get_ranks("cfg"),
         local_rank=get_world_group().local_rank,
         backend=backend,
         parallel_mode="classifier_free_guidance",
     )
 
-    # Build the sequence-parallel groups.
-    num_sequence_parallel_devices: int = sequence_parallel_degree
-    num_sequence_parallel_groups: int = world_size // num_sequence_parallel_devices
+    global _PP
+    assert _PP is None, "pipeline model parallel group is already initialized"
+    _PP = init_model_parallel_group(
+        group_ranks=rank_generator.get_ranks("pp"),
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="pipeline",
+    )
+
     global _SP
     assert _SP is None, "sequence parallel group is already initialized"
-    group_ranks = []
-    for i in range(num_sequence_parallel_groups):
-        ranks = list(
-            range(i * sequence_parallel_degree, (i + 1) * sequence_parallel_degree)
-        )
-        group_ranks.append(ranks)
+
     _SP = init_model_parallel_group(
-        group_ranks=group_ranks,
+        group_ranks=rank_generator.get_ranks("sp"),
         local_rank=get_world_group().local_rank,
         backend=backend,
         parallel_mode="sequence",
     )
 
     if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
-        global _ULYSSES_PG
-        global _RING_PG
         from yunchang import set_seq_parallel_pg
 
         set_seq_parallel_pg(
@@ -337,133 +377,6 @@ def initialize_model_parallel(
     #     group_ranks.append(ranks)
     # _TP = init_model_parallel_group(group_ranks,
     #                                 get_world_group().local_rank, backend)
-
-    # Build the pipeline model-parallel groups.
-    num_pipeline_per_stage_devices: int = (
-        sequence_parallel_degree * tensor_parallel_degree
-    )
-    num_pipeline_parallel_devices: int = pipeline_parallel_degree
-    num_pipeline_parallel_groups: int = (
-        data_parallel_degree
-        * classifier_free_guidance_degree
-        * num_pipeline_per_stage_devices
-    )
-    global _PP
-    assert _PP is None, "pipeline model parallel group is already initialized"
-    group_ranks = []
-    for i in range(num_pipeline_parallel_groups):
-        start_rank = (
-            i // num_pipeline_per_stage_devices * num_splited_batch_devices
-            + i % num_pipeline_per_stage_devices
-        )
-        ranks = [
-            start_rank + j * num_pipeline_per_stage_devices
-            for j in range(num_pipeline_parallel_devices)
-        ]
-        group_ranks.append(ranks)
-    _PP = init_model_parallel_group(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        backend=backend,
-        parallel_mode="pipeline",
-    )
-
-
-def model_parallel_is_initialized():
-    """Check if tensor and pipeline parallel groups are initialized."""
-    return _DP is not None and _CFG is not None and _SP is not None and _PP is not None
-
-
-_TP_STATE_PATCHED = False
-
-
-@contextmanager
-def patch_tensor_parallel_group(tp_group: GroupCoordinator):
-    """Patch the tp group temporarily until this function ends.
-
-    This method is for draft workers of speculative decoding to run draft model
-    with different tp degree from that of target model workers.
-
-    Args:
-        tp_group (GroupCoordinator): the tp group coordinator
-    """
-    global _TP_STATE_PATCHED
-    assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
-
-    _TP_STATE_PATCHED = True
-    old_tp_group = get_tp_group()
-    global _TP
-    _TP = tp_group
-    try:
-        yield
-    finally:
-        # restore the original state
-        _TP_STATE_PATCHED = False
-        _TP = old_tp_group
-
-
-def get_tensor_model_parallel_world_size():
-    """Return world size for the tensor model parallel group."""
-    return get_tp_group().world_size
-
-
-def get_tensor_model_parallel_rank():
-    """Return my rank for the tensor model parallel group."""
-    return get_tp_group().rank_in_group
-
-
-def get_pipeline_parallel_world_size():
-    """Return world size for the pipeline model parallel group."""
-    return get_pp_group().world_size
-
-
-def get_pipeline_parallel_rank():
-    """Return my rank for the pipeline model parallel group."""
-    return get_pp_group().rank_in_group
-
-def is_pipeline_first_stage():
-    """Return True if in the first pipeline model parallel stage, False otherwise."""
-    return get_pipeline_parallel_rank() == 0
-
-
-def is_pipeline_last_stage():
-    """Return True if in the last pipeline model parallel stage, False otherwise."""
-    return get_pipeline_parallel_rank() == (get_pipeline_parallel_world_size() - 1)
-
-
-def get_classifier_free_guidance_world_size():
-    """Return world size for the classifier_free_guidance parallel group."""
-    return get_cfg_group().world_size
-
-
-def get_classifier_free_guidance_rank():
-    """Return my rank for the classifier_free_guidance parallel group."""
-    return get_cfg_group().rank_in_group
-
-
-def get_sequence_parallel_world_size():
-    """Return world size for the sequence parallel group."""
-    return get_sp_group().world_size
-
-
-def get_sequence_parallel_rank():
-    """Return my rank for the sequence parallel group."""
-    return get_sp_group().rank_in_group
-
-
-def get_data_parallel_world_size():
-    """Return world size for the data parallel group."""
-    return get_dp_group().world_size
-
-
-def get_data_parallel_rank():
-    """Return my rank for the data parallel group."""
-    return get_dp_group().rank_in_group
-
-
-def is_dp_last_rank():
-    """Return True if in the last rank data parallel, False otherwise."""
-    return get_data_parallel_rank() == (get_data_parallel_world_size() - 1)
 
 
 def destroy_model_parallel():

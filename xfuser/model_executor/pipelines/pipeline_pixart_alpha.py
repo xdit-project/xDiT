@@ -15,7 +15,7 @@ from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
 from xfuser.distributed import (
-    is_dp_last_rank,
+    is_dp_last_group,
     get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,
     get_runtime_state,
@@ -359,7 +359,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
         # 8. Decode latents (only rank 0)
         #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if is_dp_last_rank():
+        if is_dp_last_group():
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image = self.vae.decode(
@@ -547,9 +547,13 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                         extra_step_kwargs,
                     )
                     if i != len(timesteps) - 1:
-                        get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                        get_pp_group().pipeline_isend(
+                            patch_latents[patch_idx], segment_idx=patch_idx
+                        )
                 else:
-                    get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                    get_pp_group().pipeline_isend(
+                        patch_latents[patch_idx], segment_idx=patch_idx
+                    )
 
                 if is_pipeline_first_stage() and i == 0:
                     pass

@@ -53,49 +53,75 @@ def main():
         "--no_use_resolution_binning" if args.no_use_resolution_binning else ""
     )
 
+    visited = set()
     dp_degree = 1
     for size in SIZES:
         for cfg_degree in [1, 2]:
             model_parallel_degree = N_GPUS // cfg_degree
-            for warmup_step in [0, 1, 2]:
-                for i in range(int(math.log2(model_parallel_degree)) + 1):
-                    pp_degree = int(math.pow(2, i))
-                    sp_degree = model_parallel_degree // pp_degree
-                    for i in range(int(math.log2(sp_degree)) + 1):
-                        ulysses_degree = int(math.pow(2, i))
-                        ring_degree = sp_degree // ulysses_degree
-                        last_num_patch = None
-                        for num_pipeline_patches in [
-                            max(1, pp_degree // 2),
-                            pp_degree,
-                            pp_degree * 2,
-                        ]:
-                            if num_pipeline_patches != last_num_patch:
-                                if cfg_degree == 2:
-                                    print(
-                                        f"Running test for size {size}, split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",
-                                        flush=True,
-                                    )
-                                    cmd = (
-                                        f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
-                                        f"--height {size} --width {size} --warmup_steps {warmup_step} "
-                                        f"{RESOLUTION_BINNING} --use_cfg_parallel --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
-                                        f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches}"
-                                    )
-                                else:
-                                    print(
-                                        f"Running test for size {size}, no split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",
-                                        flush=True,
-                                    )
-                                    cmd = (
-                                        f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
-                                        f"--height {size} --width {size} --warmup_steps {warmup_step} "
-                                        f"{RESOLUTION_BINNING} --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
-                                        f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} "
-                                    )
+            for i in range(int(math.log2(model_parallel_degree)) + 1):
+                pp_degree = int(math.pow(2, i))
+                sp_degree = model_parallel_degree // pp_degree
+                for i in range(int(math.log2(sp_degree)) + 1):
+                    ulysses_degree = int(math.pow(2, i))
+                    ring_degree = sp_degree // ulysses_degree
+                    last_num_patch = None
+                    for num_pipeline_patches in [
+                        max(1, pp_degree // 2),
+                        pp_degree,
+                        pp_degree * 2,
+                    ]:
+                        for warmup_step in [0, 1, 2]:
+                            # pp_degree = 1, no warmup and num_pipeline_patches
+                            if pp_degree == 1 and (
+                                warmup_step > 0 or num_pipeline_patches > 1
+                            ):
+                                continue
+
+                            if (
+                                size,
+                                pp_degree,
+                                ulysses_degree,
+                                ring_degree,
+                                num_pipeline_patches,
+                                warmup_step,
+                            ) in visited:
+                                continue
+
+                            visited.add(
+                                (
+                                    size,
+                                    pp_degree,
+                                    ulysses_degree,
+                                    ring_degree,
+                                    num_pipeline_patches,
+                                    warmup_step,
+                                )
+                            )
+                            # if num_pipeline_patches != last_num_patch:
+                            if cfg_degree == 2:
+                                print(
+                                    f"Running test for size {size}, split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",
+                                    flush=True,
+                                )
+                                cmd = (
+                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
+                                    f"--height {size} --width {size} --warmup_steps {warmup_step} "
+                                    f"{RESOLUTION_BINNING} --use_cfg_parallel --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
+                                    f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches}"
+                                )
+                            else:
+                                print(
+                                    f"Running test for size {size}, no split batch, warmup_step {warmup_step}, pp_degree {pp_degree}, ulysses_degree {ulysses_degree}, ring_degree {ring_degree}, num_pipeline_patches {num_pipeline_patches}",
+                                    flush=True,
+                                )
+                                cmd = (
+                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
+                                    f"--height {size} --width {size} --warmup_steps {warmup_step} "
+                                    f"{RESOLUTION_BINNING} --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
+                                    f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} "
+                                )
 
                                 run_command(cmd)
-                                last_num_patch = num_pipeline_patches
 
 
 if __name__ == "__main__":

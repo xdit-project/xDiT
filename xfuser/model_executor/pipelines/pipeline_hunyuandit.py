@@ -515,8 +515,6 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         latents = super()._init_sync_pipeline(latents)
         sin, cos = image_rotary_emb
 
-        print(f"before sin {sin.shape} cos {cos.shape}")
-
         def split_and_merge(t):
             t_list = [
                 t[start_idx:end_idx, :]
@@ -527,8 +525,6 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
         sin = split_and_merge(sin)
         cos = split_and_merge(cos)
-
-        print(f"after sin {sin.shape} cos {cos.shape}")
 
         image_rotary_emb = sin, cos
         return latents, image_rotary_emb

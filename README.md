@@ -99,14 +99,6 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
-<!-- 
--  [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1)
--  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
--  [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
--  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
--  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
--  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) -->
-
 
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |

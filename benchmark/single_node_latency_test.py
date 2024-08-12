@@ -56,7 +56,7 @@ def main():
     visited = set()
     dp_degree = 1
     for size in SIZES:
-        for cfg_degree in [2]:
+        for cfg_degree in [1, 2]:
             model_parallel_degree = N_GPUS // cfg_degree
             for i in range(int(math.log2(model_parallel_degree)) + 1):
                 pp_degree = int(math.pow(2, i))

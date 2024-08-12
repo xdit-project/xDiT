@@ -547,9 +547,13 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                         extra_step_kwargs,
                     )
                     if i != len(timesteps) - 1:
-                        get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                        get_pp_group().pipeline_isend(
+                            patch_latents[patch_idx], segment_idx=patch_idx
+                        )
                 else:
-                    get_pp_group().pipeline_isend(patch_latents[patch_idx])
+                    get_pp_group().pipeline_isend(
+                        patch_latents[patch_idx], segment_idx=patch_idx
+                    )
 
                 if is_pipeline_first_stage() and i == 0:
                     pass

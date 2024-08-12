@@ -201,7 +201,13 @@ def init_distributed_environment(
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return _DP is not None and _CFG is not None and _SP is not None and _PP is not None
+    return (
+        _DP is not None
+        and _CFG is not None
+        and _SP is not None
+        and _PP is not None
+        and _TP is None
+    )
 
 
 def init_model_parallel_group(

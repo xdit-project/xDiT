@@ -513,20 +513,30 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         self, latents: torch.Tensor, image_rotary_emb: torch.Tensor
     ):
         latents = super()._init_sync_pipeline(latents)
-        sin, cos = image_rotary_emb
+        cos, sin = image_rotary_emb
 
-        def split_and_merge(t):
-            t_list = [
-                t[start_idx:end_idx, :]
-                for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx
-            ]
-            t = torch.cat(t_list, dim=-2)
-            return t
+        # TODO() not correctly split
+        def split_and_merge(cos, sin):
+            token_start_idx = sum(
+                get_runtime_state().pp_patches_token_num[
+                    : get_runtime_state().pipeline_patch_idx
+                ]
+            )
+            token_end_idx = sum(
+                get_runtime_state().pp_patches_token_num[
+                    : get_runtime_state().pipeline_patch_idx + 1
+                ]
+            )
+            return (
+                cos[token_start_idx:token_end_idx, :],
+                sin[token_start_idx:token_end_idx, :],
+            )
 
-        sin = split_and_merge(sin)
-        cos = split_and_merge(cos)
+        cos, sin = split_and_merge(cos, sin)
 
-        image_rotary_emb = sin, cos
+        print(f"sin {sin.shape} cos {cos.shape}")
+
+        image_rotary_emb = cos, sin
         return latents, image_rotary_emb
 
     # synchronized compute the whole feature map in each pp stage

@@ -363,7 +363,6 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        self.set_flux_extra_comm_tensor(prompt_embeds)
         latents, latent_image_ids = self._init_sync_pipeline(latents, latent_image_ids)
         for i, t in enumerate(timesteps):
             if self.interrupt:

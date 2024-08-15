@@ -4,11 +4,12 @@ import torch.distributed
 from xfuser import xFuserFluxPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.distributed import (
-    get_world_group, 
-    get_data_parallel_rank, 
+    get_world_group,
+    get_data_parallel_rank,
     get_data_parallel_world_size,
     get_runtime_state,
 )
+
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
@@ -54,13 +55,14 @@ def main():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image.save(f"./results/flux_result_{parallel_info}_{image_rank}.png")
+                print(
+                    f"image {i} saved to ./results/flux_result_{parallel_info}_{image_rank}.png"
+                )
 
     if get_world_group().rank == get_world_group().world_size - 1:
-        print(
-            f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
-        )
+        print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
     get_runtime_state().destory_distributed_env()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

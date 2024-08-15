@@ -33,9 +33,9 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
         super().__init__(
             transformer=transformer,
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed, Attention],
-            submodule_name_to_wrap=[],
+            # submodule_name_to_wrap=["attn1"],
         )
-    
+
     def _split_transformer_blocks(
         self,
         transformer: nn.Module,
@@ -46,7 +46,9 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
             )
 
         # transformer layer split
-        attn_layer_num_for_pp = get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
+        attn_layer_num_for_pp = (
+            get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
+        )
         pp_rank = get_pipeline_parallel_rank()
         pp_world_size = get_pipeline_parallel_world_size()
         if attn_layer_num_for_pp is not None:
@@ -55,9 +57,7 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
                 "number of transformer blocks"
             )
             if is_pipeline_first_stage():
-                transformer.blocks = transformer.blocks[
-                    : attn_layer_num_for_pp[0]
-                ]
+                transformer.blocks = transformer.blocks[: attn_layer_num_for_pp[0]]
             else:
                 transformer.blocks = transformer.blocks[
                     sum(attn_layer_num_for_pp[: pp_rank - 1]) : sum(
@@ -73,9 +73,7 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
                 (pp_rank + 1) * num_blocks_per_stage,
                 len(transformer.blocks),
             )
-            transformer.blocks = transformer.blocks[
-                start_idx:end_idx
-            ]
+            transformer.blocks = transformer.blocks[start_idx:end_idx]
         # position embedding
         if not is_pipeline_first_stage():
             transformer.pos_embed = None
@@ -83,7 +81,7 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
             transformer.norm_out = None
             transformer.proj_out = None
         return transformer
-    
+
     @xFuserBaseWrapper.forward_check_condition
     def forward(
         self,
@@ -127,11 +125,11 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
         return_dict: bool
             Whether to return a dictionary.
         """
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         assert controlnet_block_samples is None
-        #* get height & width from runtime state
+        # * get height & width from runtime state
         height, width = self._get_patch_height_width()
-        #* only pp rank 0 needs pos_embed (patchify)
+        # * only pp rank 0 needs pos_embed (patchify)
         if is_pipeline_first_stage():
             hidden_states = self.pos_embed(hidden_states)
 
@@ -139,10 +137,14 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
         # height, width = hidden_states.shape[-2:]
 
         # hidden_states = self.pos_embed(hidden_states)
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         temb = self.time_extra_emb(
-            timestep, encoder_hidden_states_t5, image_meta_size, style, hidden_dtype=timestep.dtype
+            timestep,
+            encoder_hidden_states_t5,
+            image_meta_size,
+            style,
+            hidden_dtype=timestep.dtype,
         )  # [B, D]
 
         # text projection
@@ -150,15 +152,25 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
         encoder_hidden_states_t5 = self.text_embedder(
             encoder_hidden_states_t5.view(-1, encoder_hidden_states_t5.shape[-1])
         )
-        encoder_hidden_states_t5 = encoder_hidden_states_t5.view(batch_size, sequence_length, -1)
+        encoder_hidden_states_t5 = encoder_hidden_states_t5.view(
+            batch_size, sequence_length, -1
+        )
 
-        encoder_hidden_states = torch.cat([encoder_hidden_states, encoder_hidden_states_t5], dim=1)
-        text_embedding_mask = torch.cat([text_embedding_mask, text_embedding_mask_t5], dim=-1)
+        encoder_hidden_states = torch.cat(
+            [encoder_hidden_states, encoder_hidden_states_t5], dim=1
+        )
+        text_embedding_mask = torch.cat(
+            [text_embedding_mask, text_embedding_mask_t5], dim=-1
+        )
         text_embedding_mask = text_embedding_mask.unsqueeze(2).bool()
 
-        encoder_hidden_states = torch.where(text_embedding_mask, encoder_hidden_states, self.text_embedding_padding)
+        encoder_hidden_states = torch.where(
+            text_embedding_mask, encoder_hidden_states, self.text_embedding_padding
+        )
 
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        # from xfuser.distributed.parallel_state import get_sp_group
+        # print(f"{get_sp_group().rank=}, {hidden_states=}, {hidden_states.shape=}")
         if get_pipeline_parallel_world_size() == 1:
             skips = []
             num_layers = len(self.blocks)
@@ -181,7 +193,7 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
                     )  # (N, L, D)
                 if layer < (num_layers // 2 - 1):
                     skips.append(hidden_states)
-        
+
         else:
             if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
                 assert skips is not None
@@ -207,12 +219,12 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
                     )  # (N, L, D)
                     skips.append(hidden_states)
                 skips = torch.stack(skips, dim=0)
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
-        #* only the last pp rank needs unpatchify
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        # * only the last pp rank needs unpatchify
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         if is_pipeline_last_stage():
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+            #! ---------------------------------------- ADD ABOVE ----------------------------------------
             # final layer
             hidden_states = self.norm_out(hidden_states, temb.to(torch.float32))
             hidden_states = self.proj_out(hidden_states)
@@ -222,19 +234,31 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
             patch_size = get_runtime_state().backbone_patch_size
 
             hidden_states = hidden_states.reshape(
-                shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)
+                shape=(
+                    hidden_states.shape[0],
+                    height,
+                    width,
+                    patch_size,
+                    patch_size,
+                    self.out_channels,
+                )
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
-                shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
+                shape=(
+                    hidden_states.shape[0],
+                    self.out_channels,
+                    height * patch_size,
+                    width * patch_size,
+                )
             )
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         elif get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
             output = hidden_states
         else:
             output = hidden_states, skips
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
-            
+        #! ---------------------------------------- ADD ABOVE ----------------------------------------
+
         if not return_dict:
             return (output,)
         return Transformer2DModelOutput(sample=output)

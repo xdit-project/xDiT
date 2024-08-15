@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 from torch import nn
+import torch.distributed
 from torch.nn import functional as F
 from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
@@ -915,7 +916,7 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = False
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
@@ -1037,48 +1038,73 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         if attn.norm_k is not None:
             key = attn.norm_k(key)
 
+        def get_image_rotary_emb(image_rotary_emb, patch_idx: Optional[int] = None):
+            if patch_idx is None:
+                return (
+                    torch.cat(
+                        [
+                            image_rotary_emb[0][token_start_idx:token_end_idx, ...]
+                            for token_start_idx, token_end_idx in get_runtime_state().pp_patches_token_start_end_idx
+                        ],
+                        dim=0,
+                    ),
+                    torch.cat(
+                        [
+                            image_rotary_emb[1][token_start_idx:token_end_idx, ...]
+                            for token_start_idx, token_end_idx in get_runtime_state().pp_patches_token_start_end_idx
+                        ],
+                        dim=0,
+                    ),
+                )
+            else:
+                token_start_idx, token_end_idx = (
+                    get_runtime_state().pp_patches_token_start_end_idx[patch_idx]
+                )
+                return (
+                    image_rotary_emb[0][token_start_idx:token_end_idx, ...],
+                    image_rotary_emb[1][token_start_idx:token_end_idx, ...],
+                )
+
         # Apply RoPE if needed
         if image_rotary_emb is not None:
             # the distributed sparse attention from xfuser
+            local_image_rotary_emb = get_image_rotary_emb(image_rotary_emb)
             if get_runtime_state().num_pipeline_patch == 1:
-                query = apply_rotary_emb(query, image_rotary_emb)
+                query = apply_rotary_emb(query, local_image_rotary_emb)
             else:
                 if not get_runtime_state().patch_mode:
-                    query = apply_rotary_emb(query, image_rotary_emb)
+                    query = apply_rotary_emb(query, local_image_rotary_emb)
                 else:
-                    cos, sin = image_rotary_emb
-                    token_start_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx
-                        ]
+                    pp_patch_idx = get_runtime_state().pipeline_patch_idx
+                    patch_image_rotary_emb = get_image_rotary_emb(
+                        image_rotary_emb, pp_patch_idx
                     )
-                    token_end_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx + 1
-                        ]
-                    )
-                    query = apply_rotary_emb(
-                        query,
-                        tuple(
-                            (
-                                cos[token_start_idx:token_end_idx, :],
-                                sin[token_start_idx:token_end_idx, :],
-                            )
-                        ),
-                    )
+                    query = apply_rotary_emb(query, patch_image_rotary_emb)
+
             if not attn.is_cross_attention:
-                key = apply_rotary_emb(key, image_rotary_emb)
+                if (
+                    HAS_FLASH_ATTN
+                    and get_sequence_parallel_world_size() > 1
+                    and self.use_long_ctx_attn_kvcache
+                ):
+                    pp_patch_idx = get_runtime_state().pipeline_patch_idx
+                    patch_image_rotary_emb = get_image_rotary_emb(
+                        image_rotary_emb, pp_patch_idx
+                    )
+                    key = apply_rotary_emb(key, patch_image_rotary_emb)
+                else:
+                    key = apply_rotary_emb(key, local_image_rotary_emb)
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if (
             HAS_LONG_CTX_ATTN
             and get_sequence_parallel_world_size() > 1
+            and not attn.is_cross_attention
             and not latte_temporal_attention
         ):
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
-
             hidden_states = self.hybrid_seq_parallel_attn(
                 query, key, value, dropout_p=0.0, causal=False
             )

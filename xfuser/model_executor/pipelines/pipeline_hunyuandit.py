@@ -509,26 +509,6 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
         return patch_latents
 
-    def _init_sync_pipeline(
-        self, latents: torch.Tensor, image_rotary_emb: torch.Tensor
-    ):
-        latents = super()._init_sync_pipeline(latents)
-        sin, cos = image_rotary_emb
-
-        def split_and_merge(t):
-            t_list = [
-                t[start_idx:end_idx, :]
-                for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx
-            ]
-            t = torch.cat(t_list, dim=-2)
-            return t
-
-        sin = split_and_merge(sin)
-        cos = split_and_merge(cos)
-
-        image_rotary_emb = sin, cos
-        return latents, image_rotary_emb
-
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
         self,
@@ -557,7 +537,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents, image_rotary_emb = self._init_sync_pipeline(latents, image_rotary_emb)
+        latents = self._init_sync_pipeline(latents)
         skips = None
         for i, t in enumerate(timesteps):
             if is_pipeline_last_stage():

@@ -34,9 +34,10 @@ from .register import xFuserPipelineWrapperRegister
 
 logger = init_logger(__name__)
 
+
 @xFuserPipelineWrapperRegister.register(HunyuanDiTPipeline)
 class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
-    
+
     @classmethod
     def from_pretrained(
         cls,
@@ -73,9 +74,6 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         return self._interrupt
 
     @torch.no_grad()
-    @xFuserPipelineBaseWrapper.check_model_parallel_state(
-        sequence_parallel_available=False
-    )
     @xFuserPipelineBaseWrapper.enable_data_parallel
     @xFuserPipelineBaseWrapper.check_to_use_naive_forward
     def __call__(
@@ -101,7 +99,11 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         guidance_rescale: float = 0.0,
@@ -204,7 +206,9 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             width, height = map_to_standard_shapes(width, height)
             height = int(height)
             width = int(width)
-            logger.warning(f"Reshaped to (height, width)=({height}, {width}), Supported shapes are {SUPPORTED_SHAPE}")
+            logger.warning(
+                f"Reshaped to (height, width)=({height}, {width}), Supported shapes are {SUPPORTED_SHAPE}"
+            )
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -236,8 +240,8 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
         device = self._execution_device
 
-#! ---------------------------------------- ADDED BELOW ----------------------------------------
-        #* set runtime state input parameters
+        #! ---------------------------------------- ADDED BELOW ----------------------------------------
+        # * set runtime state input parameters
         get_runtime_state().set_input_parameters(
             height=height,
             width=width,
@@ -247,7 +251,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
             num_blocks_per_stage = len(self.transformer.blocks)
             get_runtime_state()._reset_recv_skip_buffer(num_blocks_per_stage)
-#! ---------------------------------------- ADDED ABOVE ----------------------------------------
+        #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
         # 3. Encode input prompt
         (
@@ -313,9 +317,13 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         grid_height = height // 8 // self.transformer.config.patch_size
         grid_width = width // 8 // self.transformer.config.patch_size
         base_size = 512 // 8 // self.transformer.config.patch_size
-        grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size)
+        grid_crops_coords = get_resize_crop_region_for_grid(
+            (grid_height, grid_width), base_size
+        )
         image_rotary_emb = get_2d_rotary_pos_embed(
-            self.transformer.inner_dim // self.transformer.num_heads, grid_crops_coords, (grid_height, grid_width)
+            self.transformer.inner_dim // self.transformer.num_heads,
+            grid_crops_coords,
+            (grid_height, grid_width),
         )
 
         style = torch.tensor([0], device=device)
@@ -324,26 +332,26 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         add_time_ids = list(original_size + target_size + crops_coords_top_left)
         add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype)
 
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         # * dealing with cfg degree
         if self.do_classifier_free_guidance:
             (
                 prompt_embeds,
                 prompt_attention_mask,
             ) = self._process_cfg_split_batch(
-                negative_prompt_embeds, 
+                negative_prompt_embeds,
                 prompt_embeds,
                 negative_prompt_attention_mask,
-                prompt_attention_mask
+                prompt_attention_mask,
             )
             (
                 prompt_embeds_2,
                 prompt_attention_mask_2,
             ) = self._process_cfg_split_batch(
-                negative_prompt_embeds_2, 
+                negative_prompt_embeds_2,
                 prompt_embeds_2,
                 negative_prompt_attention_mask_2,
-                prompt_attention_mask_2
+                prompt_attention_mask_2,
             )
             if get_classifier_free_guidance_world_size() == 1:
                 add_time_ids = torch.cat([add_time_ids] * 2, dim=0)
@@ -357,7 +365,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         #     prompt_attention_mask_2 = torch.cat([negative_prompt_attention_mask_2, prompt_attention_mask_2])
         #     add_time_ids = torch.cat([add_time_ids] * 2, dim=0)
         #     style = torch.cat([style] * 2, dim=0)
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         prompt_embeds = prompt_embeds.to(device=device)
         prompt_attention_mask = prompt_attention_mask.to(device=device)
@@ -372,7 +380,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -441,15 +449,19 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                     callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
                     sync_only=True,
                 )
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         # 8. Decode latents (only rank 0)
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         if is_dp_last_group():
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+            #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
-                image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
-                image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+                image = self.vae.decode(
+                    latents / self.vae.config.scaling_factor, return_dict=False
+                )[0]
+                image, has_nsfw_concept = self.run_safety_checker(
+                    image, device, prompt_embeds.dtype
+                )
             else:
                 image = latents
                 has_nsfw_concept = None
@@ -459,7 +471,9 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             else:
                 do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-            image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+            image = self.image_processor.postprocess(
+                image, output_type=output_type, do_denormalize=do_denormalize
+            )
 
             # Offload all models
             self.maybe_free_model_hooks()
@@ -467,11 +481,14 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             if not return_dict:
                 return (image, has_nsfw_concept)
 
-            return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+            return StableDiffusionPipelineOutput(
+                images=image, nsfw_content_detected=has_nsfw_concept
+            )
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         else:
             return None
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+
+    #! ---------------------------------------- ADD ABOVE ----------------------------------------
 
     def _init_async_pipeline(
         self,
@@ -480,11 +497,11 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         num_pipeline_warmup_steps: int,
     ):
         patch_latents = super()._init_async_pipeline(
-            num_timesteps, 
-            latents, 
+            num_timesteps,
+            latents,
             num_pipeline_warmup_steps,
         )
-                
+
         if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
             for _ in range(num_timesteps):
                 for patch_idx in range(get_runtime_state().num_pipeline_patch):
@@ -511,7 +528,11 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         extra_step_kwargs: List,
         progress_bar,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
@@ -532,7 +553,10 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
-                if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
+                if (
+                    get_pipeline_parallel_rank()
+                    >= get_pipeline_parallel_world_size() // 2
+                ):
                     skips = get_pp_group().pipeline_recv_skip()
 
             latents = self._backbone_forward(
@@ -552,12 +576,20 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             )
 
             if is_pipeline_last_stage():
-                latents = self.scheduler.step(latents, t, last_timestep_latents, **extra_step_kwargs, return_dict=False)[0]
-            elif get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
+                latents = self.scheduler.step(
+                    latents,
+                    t,
+                    last_timestep_latents,
+                    **extra_step_kwargs,
+                    return_dict=False,
+                )[0]
+            elif (
+                get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2
+            ):
                 pass
             else:
                 latents, skips = latents
-                
+
             if i == len(timesteps) - 1 or (
                 (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
             ):
@@ -570,8 +602,12 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
                 latents = callback_outputs.pop("latents", latents)
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-                prompt_embeds_2 = callback_outputs.pop("prompt_embeds_2", prompt_embeds_2)
+                negative_prompt_embeds = callback_outputs.pop(
+                    "negative_prompt_embeds", negative_prompt_embeds
+                )
+                prompt_embeds_2 = callback_outputs.pop(
+                    "prompt_embeds_2", prompt_embeds_2
+                )
                 negative_prompt_embeds_2 = callback_outputs.pop(
                     "negative_prompt_embeds_2", negative_prompt_embeds_2
                 )
@@ -580,7 +616,10 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
-                if get_pipeline_parallel_rank() < get_pipeline_parallel_world_size() // 2:
+                if (
+                    get_pipeline_parallel_rank()
+                    < get_pipeline_parallel_world_size() // 2
+                ):
                     get_pp_group().pipeline_send_skip(skips)
 
         if (
@@ -626,7 +665,11 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         extra_step_kwargs: List,
         progress_bar,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
     ):
@@ -634,6 +677,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             return latents
         num_pipeline_patch = get_runtime_state().num_pipeline_patch
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
+
         patch_latents = self._init_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
@@ -657,15 +701,23 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 else:
                     if first_async_recv:
                         get_pp_group().recv_next()
-                        if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
+                        if (
+                            get_pipeline_parallel_rank()
+                            >= get_pipeline_parallel_world_size() // 2
+                        ):
                             get_pp_group().recv_skip_next()
                         first_async_recv = False
                     patch_latents[patch_idx] = get_pp_group().get_pipeline_recv_data(
                         idx=patch_idx
                     )
-                    if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
-                        skips = get_pp_group().get_pipeline_recv_skip_data(idx=patch_idx)
-                        
+                    if (
+                        get_pipeline_parallel_rank()
+                        >= get_pipeline_parallel_world_size() // 2
+                    ):
+                        skips = get_pp_group().get_pipeline_recv_skip_data(
+                            idx=patch_idx
+                        )
+
                 patch_latents[patch_idx] = self._backbone_forward(
                     latents=patch_latents[patch_idx],
                     prompt_embeds=prompt_embeds,
@@ -683,16 +735,20 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 )
                 if is_pipeline_last_stage():
                     patch_latents[patch_idx] = self.scheduler.step(
-                        patch_latents[patch_idx], 
-                        t, 
-                        last_patch_latents[patch_idx], 
-                        **extra_step_kwargs, 
-                        return_dict=False)[0]
+                        patch_latents[patch_idx],
+                        t,
+                        last_patch_latents[patch_idx],
+                        **extra_step_kwargs,
+                        return_dict=False,
+                    )[0]
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(
                             patch_latents[patch_idx], segment_idx=patch_idx
                         )
-                elif get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
+                elif (
+                    get_pipeline_parallel_rank()
+                    >= get_pipeline_parallel_world_size() // 2
+                ):
                     get_pp_group().pipeline_isend(
                         patch_latents[patch_idx], segment_idx=patch_idx
                     )
@@ -702,7 +758,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                         patch_latents[patch_idx], segment_idx=patch_idx
                     )
                     get_pp_group().pipeline_isend_skip(skips)
-                
+
                 if is_pipeline_first_stage() and i == 0:
                     pass
                 else:
@@ -710,9 +766,12 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                         pass
                     else:
                         get_pp_group().recv_next()
-                        if get_pipeline_parallel_rank() >= get_pipeline_parallel_world_size() // 2:
+                        if (
+                            get_pipeline_parallel_rank()
+                            >= get_pipeline_parallel_world_size() // 2
+                        ):
                             get_pp_group().recv_skip_next()
-                
+
                 get_runtime_state().next_patch()
 
             if i == len(timesteps) - 1 or (
@@ -728,8 +787,12 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
                 latents = callback_outputs.pop("latents", latents)
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-                prompt_embeds_2 = callback_outputs.pop("prompt_embeds_2", prompt_embeds_2)
+                negative_prompt_embeds = callback_outputs.pop(
+                    "negative_prompt_embeds", negative_prompt_embeds
+                )
+                prompt_embeds_2 = callback_outputs.pop(
+                    "prompt_embeds_2", prompt_embeds_2
+                )
                 negative_prompt_embeds_2 = callback_outputs.pop(
                     "negative_prompt_embeds_2", negative_prompt_embeds_2
                 )
@@ -739,7 +802,9 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             latents = torch.cat(patch_latents, dim=2)
             if get_sequence_parallel_world_size() > 1:
                 sp_degree = get_sequence_parallel_world_size()
-                sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
+                sp_latents_list = get_sp_group().all_gather(
+                    latents, separate_tensors=True
+                )
                 latents_list = []
                 for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                     latents_list += [
@@ -802,7 +867,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
         if is_pipeline_last_stage():
             noise_pred, _ = noise_pred.chunk(2, dim=1)
-            
+
             # perform guidance
             if self.do_classifier_free_guidance:
                 if get_classifier_free_guidance_world_size() == 1:

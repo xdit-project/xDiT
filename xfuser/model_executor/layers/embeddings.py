@@ -17,12 +17,17 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
         self,
         patch_embedding: PatchEmbed,
     ):
-        super().__init__(module=patch_embedding,)
+        super().__init__(
+            module=patch_embedding,
+        )
         self.module: PatchEmbed
         self.pos_embed = None
 
     def forward(self, latent):
-        height = get_runtime_state().input_config.height // get_runtime_state().vae_scale_factor
+        height = (
+            get_runtime_state().input_config.height
+            // get_runtime_state().vae_scale_factor
+        )
         width = latent.shape[-1]
         if not get_runtime_state().patch_mode:
             if getattr(self.module, "pos_embed_max_size", None) is not None:
@@ -77,9 +82,11 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
         b, c, h = pos_embed.shape
 
         if get_runtime_state().patch_mode:
-            start, end = get_runtime_state().pp_patches_token_start_end_idx[get_runtime_state().pipeline_patch_idx]
+            start, end = get_runtime_state().pp_patches_token_start_end_idx_global[
+                get_runtime_state().pipeline_patch_idx
+            ]
             pos_embed = pos_embed[
-                :, 
+                :,
                 start:end,
                 :,
             ]
@@ -87,8 +94,9 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
             pos_embed_list = [
                 pos_embed[
                     :,
-                    get_runtime_state().pp_patches_token_start_end_idx[i][0]:
-                    get_runtime_state().pp_patches_token_start_end_idx[i][1],
+                    get_runtime_state()
+                    .pp_patches_token_start_end_idx_global[i][0] : get_runtime_state()
+                    .pp_patches_token_start_end_idx_global[i][1],
                     :,
                 ]
                 for i in range(get_runtime_state().num_pipeline_patch)

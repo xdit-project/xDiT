@@ -32,8 +32,8 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed, Attention],
-            # submodule_name_to_wrap=["attn1"],
+            submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
+            submodule_name_to_wrap=["attn1"],
         )
 
     def _split_transformer_blocks(
@@ -169,8 +169,6 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
         )
 
         #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
-        # from xfuser.distributed.parallel_state import get_sp_group
-        # print(f"{get_sp_group().rank=}, {hidden_states=}, {hidden_states.shape=}")
         if get_pipeline_parallel_world_size() == 1:
             skips = []
             num_layers = len(self.blocks)

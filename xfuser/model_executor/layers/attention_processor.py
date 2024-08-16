@@ -922,7 +922,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
 
             if HAS_FLASH_ATTN:
-                # self.hybrid_seq_parallel_attn = LongContextAttention()
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
@@ -985,51 +984,15 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 encoder_hidden_states
             )
 
-        kv = attn.to_kv(encoder_hidden_states)
+        # kv = attn.to_kv(encoder_hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
 
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-        if attn.is_cross_attention:
-            key, value = torch.split(kv, kv.shape[-1] // 2, dim=-1)
-            inner_dim = key.shape[-1]
-            head_dim = inner_dim // attn.heads
-        else:
-            if (
-                HAS_FLASH_ATTN
-                and get_sequence_parallel_world_size() > 1
-                and self.use_long_ctx_attn_kvcache
-            ):
-                key, value = torch.chunk(kv, 2, dim=-1)
-                inner_dim = key.shape[-1]
-                head_dim = inner_dim // attn.heads
-            else:
-                # the distributed sparse attention from xfuser
-                if get_runtime_state().num_pipeline_patch == 1:
-                    local_kv = kv
-                else:
-                    if not get_runtime_state().patch_mode:
-                        local_kv = kv
-                    else:
-                        local_kv = attn.activation_cache
-                        token_start_idx = sum(
-                            get_runtime_state().pp_patches_token_num[
-                                : get_runtime_state().pipeline_patch_idx
-                            ]
-                        )
-                        token_end_idx = sum(
-                            get_runtime_state().pp_patches_token_num[
-                                : get_runtime_state().pipeline_patch_idx + 1
-                            ]
-                        )
-                        local_kv[:, token_start_idx:token_end_idx, :] = kv
-
-                    attn.activation_cache = local_kv
-
-                key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
-                inner_dim = key.shape[-1]
-                head_dim = inner_dim // attn.heads
-        #! ---------------------------------------- KV CACHE ----------------------------------------
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
 
         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
@@ -1038,62 +1001,28 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         if attn.norm_k is not None:
             key = attn.norm_k(key)
 
-        def get_image_rotary_emb(image_rotary_emb, patch_idx: Optional[int] = None):
-            if patch_idx is None:
-                return (
-                    torch.cat(
-                        [
-                            image_rotary_emb[0][token_start_idx:token_end_idx, ...]
-                            for token_start_idx, token_end_idx in get_runtime_state().pp_patches_token_start_end_idx
-                        ],
-                        dim=0,
-                    ),
-                    torch.cat(
-                        [
-                            image_rotary_emb[1][token_start_idx:token_end_idx, ...]
-                            for token_start_idx, token_end_idx in get_runtime_state().pp_patches_token_start_end_idx
-                        ],
-                        dim=0,
-                    ),
-                )
-            else:
-                token_start_idx, token_end_idx = (
-                    get_runtime_state().pp_patches_token_start_end_idx[patch_idx]
-                )
-                return (
-                    image_rotary_emb[0][token_start_idx:token_end_idx, ...],
-                    image_rotary_emb[1][token_start_idx:token_end_idx, ...],
-                )
-
         # Apply RoPE if needed
+        # print(f"{query.shape=}, {key.shape=}, {image_rotary_emb[0].shape=}")
         if image_rotary_emb is not None:
-            # the distributed sparse attention from xfuser
-            local_image_rotary_emb = get_image_rotary_emb(image_rotary_emb)
-            if get_runtime_state().num_pipeline_patch == 1:
-                query = apply_rotary_emb(query, local_image_rotary_emb)
-            else:
-                if not get_runtime_state().patch_mode:
-                    query = apply_rotary_emb(query, local_image_rotary_emb)
-                else:
-                    pp_patch_idx = get_runtime_state().pipeline_patch_idx
-                    patch_image_rotary_emb = get_image_rotary_emb(
-                        image_rotary_emb, pp_patch_idx
-                    )
-                    query = apply_rotary_emb(query, patch_image_rotary_emb)
-
+            query = apply_rotary_emb(query, image_rotary_emb)
             if not attn.is_cross_attention:
-                if (
-                    HAS_FLASH_ATTN
-                    and get_sequence_parallel_world_size() > 1
-                    and self.use_long_ctx_attn_kvcache
-                ):
-                    pp_patch_idx = get_runtime_state().pipeline_patch_idx
-                    patch_image_rotary_emb = get_image_rotary_emb(
-                        image_rotary_emb, pp_patch_idx
-                    )
-                    key = apply_rotary_emb(key, patch_image_rotary_emb)
-                else:
-                    key = apply_rotary_emb(key, local_image_rotary_emb)
+                key = apply_rotary_emb(key, image_rotary_emb)
+
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+        if (
+            HAS_FLASH_ATTN
+            and get_sequence_parallel_world_size() > 1
+            and self.use_long_ctx_attn_kvcache
+        ):
+            pass
+        else:
+            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=2,
+                layer_type="attn",
+            )
+        #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if (
@@ -1141,22 +1070,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 )
 
         #! ORIGIN
-        # query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        # key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        # value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        # if attn.norm_q is not None:
-        #     query = attn.norm_q(query)
-        # if attn.norm_k is not None:
-        #     key = attn.norm_k(key)
-
-        # # Apply RoPE if needed
-        # if image_rotary_emb is not None:
-        #     query = apply_rotary_emb(query, image_rotary_emb)
-        #     if not attn.is_cross_attention:
-        #         key = apply_rotary_emb(key, image_rotary_emb)
-
         # # the output of sdp = (batch, num_heads, seq_len, head_dim)
         # # TODO: add support for attn.scale when we move to Torch 2.1
         # hidden_states = F.scaled_dot_product_attention(

@@ -4,6 +4,8 @@ from functools import wraps
 
 import torch.nn as nn
 from xfuser.config import InputConfig, ParallelConfig, RuntimeConfig
+from xfuser.distributed.parallel_state import get_sequence_parallel_world_size
+from xfuser.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.model_executor.layers import *
 from xfuser.distributed import get_world_group
@@ -18,7 +20,9 @@ class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
 
     def __init__(self, module: nn.Module):
         super().__init__()
-        super(nn.Module, self).__init__(module=module,)
+        super(nn.Module, self).__init__(
+            module=module,
+        )
 
     def __getattr__(self, name: str):
         if "_parameters" in self.__dict__:
@@ -112,3 +116,23 @@ class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
             self.module = model
         else:
             return model
+
+    def _register_cache(
+        self,
+    ):
+        for layer in self.wrapped_layers:
+            if isinstance(layer, xFuserAttentionWrapper):
+                # if getattr(layer.processor, 'use_long_ctx_attn_kvcache', False):
+                # TODO(Eigensystem): remove use_long_ctx_attn_kvcache flag
+                if get_sequence_parallel_world_size() == 1 or not getattr(
+                    layer.processor, "use_long_ctx_attn_kvcache", False
+                ):
+                    get_runtime_state().cache_manager.register_cache_entry(
+                        layer, layer_type="attn", cache_type="naive_cache"
+                    )
+                else:
+                    get_runtime_state().cache_manager.register_cache_entry(
+                        layer,
+                        layer_type="attn",
+                        cache_type="sequence_parallel_attn_cache",
+                    )

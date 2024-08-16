@@ -490,6 +490,26 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
     #! ---------------------------------------- ADD ABOVE ----------------------------------------
 
+    def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb):
+        latents = super()._init_sync_pipeline(latents)
+        image_rotary_emb = [
+            torch.cat(
+                [
+                    image_rotary_emb[0][start_token_idx:end_token_idx, ...]
+                    for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
+                ],
+                dim=0,
+            ),
+            torch.cat(
+                [
+                    image_rotary_emb[1][start_token_idx:end_token_idx, ...]
+                    for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
+                ],
+                dim=0,
+            ),
+        ]
+        return latents, image_rotary_emb
+
     def _init_async_pipeline(
         self,
         num_timesteps: int,
@@ -537,7 +557,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents = self._init_sync_pipeline(latents)
+        latents, image_rotary_emb = self._init_sync_pipeline(latents, image_rotary_emb)
         skips = None
         for i, t in enumerate(timesteps):
             if is_pipeline_last_stage():
@@ -683,6 +703,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,
         )
+        full_image_rotary_emb = image_rotary_emb
         last_patch_latents = (
             [None for _ in range(num_pipeline_patch)]
             if (is_pipeline_last_stage())
@@ -693,6 +714,14 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         skips = None
         for i, t in enumerate(timesteps):
             for patch_idx in range(num_pipeline_patch):
+                start_token_idx, end_token_idx = (
+                    get_runtime_state().pp_patches_token_start_end_idx_global[patch_idx]
+                )
+                image_rotary_emb = (
+                    full_image_rotary_emb[0][start_token_idx:end_token_idx, :],
+                    full_image_rotary_emb[1][start_token_idx:end_token_idx, :],
+                )
+
                 if is_pipeline_last_stage():
                     last_patch_latents[patch_idx] = patch_latents[patch_idx]
 
@@ -717,7 +746,6 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                         skips = get_pp_group().get_pipeline_recv_skip_data(
                             idx=patch_idx
                         )
-
                 patch_latents[patch_idx] = self._backbone_forward(
                     latents=patch_latents[patch_idx],
                     prompt_embeds=prompt_embeds,

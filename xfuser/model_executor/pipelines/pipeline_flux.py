@@ -337,12 +337,12 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
         latents_list = [
             latents[:, start_idx:end_idx, :]
-            for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx
+            for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
         ]
         latents = torch.cat(latents_list, dim=-2)
         latent_image_ids_list = [
             latent_image_ids[:, start_idx:end_idx, :]
-            for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx
+            for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
         ]
         latent_image_ids = torch.cat(latent_image_ids_list, dim=-2)
         return latents, latent_image_ids

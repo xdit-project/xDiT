@@ -14,6 +14,7 @@ from xfuser.config.config import (
     EngineConfig,
 )
 from xfuser.logger import init_logger
+from xfuser.modules.cache_manager import CacheManager
 from xfuser.distributed.parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -88,7 +89,8 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_height: Optional[List[int]]
     pp_patches_start_idx_local: Optional[List[int]]
     pp_patches_start_end_idx_global: Optional[List[List[int]]]
-    pp_patches_token_start_end_idx: Optional[List[List[int]]]
+    pp_patches_token_start_idx_local: Optional[List[int]]
+    pp_patches_token_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
     # Storing the shape of a tensor that is not latent but requires pp communication
     #   torch.Size: size of tensor
@@ -110,6 +112,7 @@ class DiTRuntimeState(RuntimeState):
             * pipeline.transformer.config.attention_head_dim,
         )
         self.pipeline_comm_extra_tensors_info = []
+        self.cache_manager = CacheManager()
 
     def set_input_parameters(
         self,
@@ -310,7 +313,7 @@ class DiTRuntimeState(RuntimeState):
             sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
             for sp_patches_start_idx in pp_sp_patches_start_idx
         ]
-        pp_patches_token_start_end_idx = [
+        pp_patches_token_start_end_idx_global = [
             [
                 (latents_width // patch_size) * (start_idx // patch_size),
                 (latents_width // patch_size) * (end_idx // patch_size),
@@ -318,13 +321,19 @@ class DiTRuntimeState(RuntimeState):
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]
         pp_patches_token_num = [
-            end - start for start, end in pp_patches_token_start_end_idx
+            end - start for start, end in pp_patches_token_start_end_idx_global
+        ]
+        pp_patches_token_start_idx_local = [
+            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
         ]
         self.num_pipeline_patch = num_pipeline_patch
         self.pp_patches_height = pp_patches_height
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
-        self.pp_patches_token_start_end_idx = pp_patches_token_start_end_idx
+        self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
+        self.pp_patches_token_start_end_idx_global = (
+            pp_patches_token_start_end_idx_global
+        )
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):
@@ -336,12 +345,11 @@ class DiTRuntimeState(RuntimeState):
         batch_size = batch_size * (2 // self.parallel_config.cfg_degree)
         hidden_dim = self.backbone_inner_dim
         num_patches_tokens = [
-            end - start
-            for start, end in self.pp_patches_token_start_end_idx
+            end - start for start, end in self.pp_patches_token_start_end_idx_global
         ]
         patches_shape = [
             [num_blocks_per_stage, batch_size, tokens, hidden_dim]
-            for tokens in num_patches_tokens 
+            for tokens in num_patches_tokens
         ]
         feature_map_shape = [
             num_blocks_per_stage,

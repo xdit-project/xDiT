@@ -167,7 +167,12 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
 class xFuserAttnProcessor2_0(AttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
@@ -239,43 +244,30 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
                 encoder_hidden_states
             )
 
-        kv = attn.to_kv(encoder_hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
-        if (
-            HAS_FLASH_ATTN
-            and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache
-        ):
-            key, value = torch.chunk(kv, 2, dim=-1)
-            inner_dim = key.shape[-1]
-            head_dim = inner_dim // attn.heads
-        else:
-            # the distributed sparse attention from xfuser
-            if get_runtime_state().num_pipeline_patch == 1:
-                local_kv = kv
-            else:
-                if not get_runtime_state().patch_mode:
-                    local_kv = kv
-                else:
-                    local_kv = attn.activation_cache
-                    token_start_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx
-                        ]
-                    )
-                    token_end_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx + 1
-                        ]
-                    )
-                    local_kv[:, token_start_idx:token_end_idx, :] = kv
-
-                attn.activation_cache = local_kv
-
-            key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
-            inner_dim = key.shape[-1]
-            head_dim = inner_dim // attn.heads
+        if not self.use_long_ctx_attn_kvcache:
+            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=2,
+                layer_type="attn",
+            )
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
@@ -284,10 +276,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
             and not latte_temporal_attention
         ):
-
-            query = query.view(batch_size, -1, attn.heads, head_dim)
-            key = key.view(batch_size, -1, attn.heads, head_dim)
-            value = value.view(batch_size, -1, attn.heads, head_dim)
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
             hidden_states = self.hybrid_seq_parallel_attn(
                 query,
                 key,
@@ -301,9 +292,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             if HAS_FLASH_ATTN:
                 from flash_attn import flash_attn_func
 
-                query = query.view(batch_size, -1, attn.heads, head_dim)
-                key = key.view(batch_size, -1, attn.heads, head_dim)
-                value = value.view(batch_size, -1, attn.heads, head_dim)
+                query = query.transpose(1, 2)
+                key = key.transpose(1, 2)
+                value = value.transpose(1, 2)
                 hidden_states = flash_attn_func(
                     query, key, value, dropout_p=0.0, causal=False
                 )
@@ -312,10 +303,6 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
                 )
 
             else:
-                query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-                key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-                value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
                 # the output of sdp = (batch, num_heads, seq_len, head_dim)
                 # TODO: add support for attn.module.scale when we move to Torch 2.1
                 hidden_states = F.scaled_dot_product_attention(
@@ -365,7 +352,12 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
@@ -408,40 +400,6 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
 
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-        # if use sp, use the kvcache inside long_context_attention
-        if (
-            HAS_FLASH_ATTN
-            and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache
-        ):
-            pass
-        else:
-            kv = torch.cat([key, value], dim=-1)
-            if get_runtime_state().num_pipeline_patch == 1:
-                local_kv = kv
-            else:
-                if not get_runtime_state().patch_mode:
-                    local_kv = kv
-                else:
-                    local_kv = attn.activation_cache
-                    token_start_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx
-                        ]
-                    )
-                    token_end_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx + 1
-                        ]
-                    )
-                    local_kv[:, token_start_idx:token_end_idx, :] = kv
-
-                attn.activation_cache = local_kv
-
-            key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-
         # `context` projections.
         if get_runtime_state().pipeline_patch_idx == 0:
             encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
@@ -450,6 +408,16 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
+
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+        if not self.use_long_ctx_attn_kvcache:
+            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=1,
+                layer_type="attn",
+            )
+        #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
@@ -567,7 +535,12 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
 
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = False
+        use_long_ctx_attn_kvcache = False
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import (
@@ -610,40 +583,6 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         query = attn.to_q(hidden_states)
         key = attn.to_k(hidden_states)
         value = attn.to_v(hidden_states)
-
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-        # if use sp, use the kvcache inside long_context_attention
-        if (
-            HAS_FLASH_ATTN
-            and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache
-        ):
-            pass
-        else:
-            kv = torch.cat([key, value], dim=-1)
-            if get_runtime_state().num_pipeline_patch == 1:
-                local_kv = kv
-            else:
-                if not get_runtime_state().patch_mode:
-                    local_kv = kv
-                else:
-                    local_kv = attn.activation_cache
-                    token_start_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx
-                        ]
-                    )
-                    token_end_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx + 1
-                        ]
-                    )
-                    local_kv[:, token_start_idx:token_end_idx, :] = kv
-
-                attn.activation_cache = local_kv
-
-            key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
-        #! ---------------------------------------- KV CACHE ----------------------------------------
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
@@ -694,6 +633,24 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             # query = apply_rotary_emb(query, image_rotary_emb)
             # key = apply_rotary_emb(key, image_rotary_emb)
             query, key = apply_rope(query, key, image_rotary_emb)
+
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+        if not self.use_long_ctx_attn_kvcache:
+            encoder_hidden_states_key_proj, key = key.split(
+                [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
+            )
+            encoder_hidden_states_value_proj, value = value.split(
+                [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
+            )
+            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=2,
+                layer_type="attn",
+            )
+            key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
+            value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
+        #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
@@ -781,7 +738,12 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = False
+        use_long_ctx_attn_kvcache = False
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import (
@@ -834,40 +796,6 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-        # if use sp, use the kvcache inside long_context_attention
-        if (
-            HAS_FLASH_ATTN
-            and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache
-        ):
-            pass
-        else:
-            kv = torch.cat([key, value], dim=-1)
-            if get_runtime_state().num_pipeline_patch == 1:
-                local_kv = kv
-            else:
-                if not get_runtime_state().patch_mode:
-                    local_kv = kv
-                else:
-                    local_kv = attn.activation_cache
-                    token_start_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx
-                        ]
-                    )
-                    token_end_idx = sum(
-                        get_runtime_state().pp_patches_token_num[
-                            : get_runtime_state().pipeline_patch_idx + 1
-                        ]
-                    )
-                    local_kv[:, token_start_idx:token_end_idx, :] = kv
-
-                attn.activation_cache = local_kv
-
-            key, value = torch.split(local_kv, local_kv.shape[-1] // 2, dim=-1)
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-
         if attn.norm_q is not None:
             query = attn.norm_q(query)
         if attn.norm_k is not None:
@@ -881,7 +809,18 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
             # key = apply_rotary_emb(key, image_rotary_emb)
             query, key = apply_rope(query, key, image_rotary_emb)
 
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+        if not self.use_long_ctx_attn_kvcache:
+            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=2,
+                layer_type="attn",
+            )
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+
         #! ---------------------------------------- ATTENTION ----------------------------------------
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
@@ -891,14 +830,28 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
         else:
-            # the output of sdp = (batch, num_heads, seq_len, head_dim)
-            # TODO: add support for attn.scale when we move to Torch 2.1
-            hidden_states = F.scaled_dot_product_attention(
-                query, key, value, dropout_p=0.0, is_causal=False
-            )
-            hidden_states = hidden_states.transpose(1, 2).reshape(
-                batch_size, -1, attn.heads * head_dim
-            )
+            if HAS_FLASH_ATTN:
+                from flash_attn import flash_attn_func
+
+                query = query.transpose(1, 2)
+                key = key.transpose(1, 2)
+                value = value.transpose(1, 2)
+                hidden_states = flash_attn_func(
+                    query, key, value, dropout_p=0.0, causal=False
+                )
+                hidden_states = hidden_states.reshape(
+                    batch_size, -1, attn.heads * head_dim
+                )
+
+            else:
+                # the output of sdp = (batch, num_heads, seq_len, head_dim)
+                # TODO: add support for attn.scale when we move to Torch 2.1
+                hidden_states = F.scaled_dot_product_attention(
+                    query, key, value, dropout_p=0.0, is_causal=False
+                )
+                hidden_states = hidden_states.transpose(1, 2).reshape(
+                    batch_size, -1, attn.heads * head_dim
+                )
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
 
@@ -916,7 +869,12 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        self.use_long_ctx_attn_kvcache = False
+        use_long_ctx_attn_kvcache = False
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
             from xfuser.modules.long_context_attention import xFuserLongContextAttention
@@ -1009,13 +967,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 key = apply_rotary_emb(key, image_rotary_emb)
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
-        if (
-            HAS_FLASH_ATTN
-            and get_sequence_parallel_world_size() > 1
-            and self.use_long_ctx_attn_kvcache
-        ):
-            pass
-        else:
+        if not self.use_long_ctx_attn_kvcache:
             key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,

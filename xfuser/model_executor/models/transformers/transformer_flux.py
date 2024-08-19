@@ -13,10 +13,10 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_rank,
     get_pipeline_parallel_world_size,
 )

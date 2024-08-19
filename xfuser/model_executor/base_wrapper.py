@@ -2,12 +2,20 @@ from abc import abstractmethod, ABCMeta
 from functools import wraps
 from typing import Any, List, Optional
 
-from xfuser.distributed.parallel_state import get_classifier_free_guidance_world_size, get_pipeline_parallel_world_size, get_sequence_parallel_world_size
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.parallel_state import (
+    get_classifier_free_guidance_world_size,
+    get_pipeline_parallel_world_size,
+    get_sequence_parallel_world_size,
+)
+from xfuser.core.distributed.runtime_state import get_runtime_state
+
 
 class xFuserBaseWrapper(metaclass=ABCMeta):
 
-    def __init__(self, module: Any,):
+    def __init__(
+        self,
+        module: Any,
+    ):
         self.module = module
         self.module_type = type(module)
 
@@ -15,8 +23,9 @@ class xFuserBaseWrapper(metaclass=ABCMeta):
         try:
             return getattr(self.module, name)
         except RecursionError:
-            raise AttributeError(f"module {type(self.module).__name__} has no "
-                                 f"attribute {name}")
+            raise AttributeError(
+                f"module {type(self.module).__name__} has no " f"attribute {name}"
+            )
 
     def __str__(self):
         return str(self.module)
@@ -37,4 +46,5 @@ class xFuserBaseWrapper(metaclass=ABCMeta):
                     "before calling forward"
                 )
             return func(self, *args, **kwargs)
+
         return check_condition_fn

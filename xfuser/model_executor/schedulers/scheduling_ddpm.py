@@ -9,7 +9,7 @@ from diffusers.schedulers.scheduling_ddpm import (
     DDPMSchedulerOutput,
 )
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
     get_runtime_state,
@@ -20,7 +20,7 @@ from .base_scheduler import xFuserSchedulerBaseWrapper
 
 @xFuserSchedulerWrappersRegister.register(DDPMScheduler)
 class xFuserDDPMSchedulerWrapper(xFuserSchedulerBaseWrapper):
-    
+
     @xFuserSchedulerBaseWrapper.check_to_use_naive_step
     def step(
         self,

@@ -3,7 +3,7 @@ import torch
 import torch.distributed
 from xfuser import xFuserFluxPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_world_group,
     get_data_parallel_rank,
     get_data_parallel_world_size,

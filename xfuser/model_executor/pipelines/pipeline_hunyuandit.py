@@ -16,7 +16,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 
 from xfuser.config import EngineConfig
 from xfuser.logger import init_logger
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,
     get_runtime_state,

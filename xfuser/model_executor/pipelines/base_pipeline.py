@@ -11,7 +11,7 @@ from xfuser.config.config import (
     InputConfig,
 )
 from xfuser.logger import init_logger
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,

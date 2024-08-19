@@ -23,7 +23,7 @@ from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput
 from diffusers.pipelines.flux.pipeline_flux import retrieve_timesteps, calculate_shift
 
 from xfuser.config import EngineConfig, InputConfig
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     get_runtime_state,
     get_pp_group,

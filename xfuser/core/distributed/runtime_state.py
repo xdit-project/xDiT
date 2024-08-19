@@ -1,6 +1,6 @@
 from abc import ABCMeta
 import random
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -14,11 +14,10 @@ from xfuser.config.config import (
     EngineConfig,
 )
 from xfuser.logger import init_logger
-from xfuser.modules.cache_manager import CacheManager
-from xfuser.distributed.parallel_state import (
+from ..cache_manager.cache_manager import CacheManager
+from .parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
-    get_pipeline_parallel_rank,
     get_pp_group,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,

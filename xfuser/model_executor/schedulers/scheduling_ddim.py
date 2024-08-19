@@ -9,7 +9,7 @@ from diffusers.schedulers.scheduling_ddim import (
     DDIMSchedulerOutput,
 )
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
     get_runtime_state,

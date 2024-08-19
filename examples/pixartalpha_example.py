@@ -4,7 +4,7 @@ import torch
 import torch.distributed
 from xfuser import xFuserPixArtAlphaPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_world_group,
     is_dp_last_group,
     get_data_parallel_world_size,

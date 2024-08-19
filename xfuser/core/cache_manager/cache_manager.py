@@ -1,7 +1,6 @@
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 
-from xfuser.distributed import get_ulysses_parallel_world_size
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -107,7 +106,7 @@ class CacheManager:
         slice_dim: int = 1,
         layer_type: str = "attn",
     ):
-        from xfuser.distributed.runtime_state import get_runtime_state
+        from xfuser.core.distributed.runtime_state import get_runtime_state
 
         if (
             get_runtime_state().num_pipeline_patch == 1
@@ -141,7 +140,10 @@ class CacheManager:
         slice_dim: int = 1,
         layer_type: str = "attn",
     ):
-        from xfuser.distributed.runtime_state import get_runtime_state
+        from xfuser.core.distributed import (
+            get_ulysses_parallel_world_size,
+            get_runtime_state,
+        )
 
         ulysses_world_size = get_ulysses_parallel_world_size()
         if get_runtime_state().num_pipeline_patch == 1:

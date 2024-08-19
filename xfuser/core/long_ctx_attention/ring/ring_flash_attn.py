@@ -3,7 +3,7 @@ from flash_attn.flash_attn_interface import _flash_attn_forward
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
 def ring_flash_attn_forward(

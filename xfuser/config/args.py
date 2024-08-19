@@ -8,7 +8,7 @@ import torch
 import torch.distributed
 
 from xfuser.logger import init_logger
-from xfuser.distributed import init_distributed_environment
+from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.config import (
     EngineConfig,
     ParallelConfig,

@@ -1,7 +1,7 @@
 import torch
 import unittest
 from diffusers.models.attention import FeedForward
-from xfuser.modules.feedforward import FeedForward_TP
+from xfuser.model_executor.layers.feedforward import xFuserFeedForwardWrapper
 from xfuser.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -24,7 +24,7 @@ class TestFeedForward(unittest.TestCase):
         dist.broadcast(self.input_data, src=0)
 
         torch.manual_seed(0)
-        self.model1 = FeedForward(20, 5, bias=False, activation_fn="geglu").cuda(
+        self.model1 = FeedForward(20, 5, bias=True, activation_fn="geglu").cuda(
             self.local_rank
         )
 
@@ -34,7 +34,7 @@ class TestFeedForward(unittest.TestCase):
 
         output1 = self.model1(self.input_data)
 
-        self.model2 = FeedForward_TP(self.model1)
+        self.model2 = xFuserFeedForwardWrapper(self.model1)
         output2 = self.model2(self.input_data)
 
         print(output1 - output2)

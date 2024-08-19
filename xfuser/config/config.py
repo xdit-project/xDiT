@@ -158,8 +158,6 @@ class ParallelConfig:
     tp_config: TensorParallelConfig
 
     def __post_init__(self):
-        if self.tp_config.tp_degree > 1:
-            raise NotImplementedError("Tensor parallel is not supported yet")
         assert self.dp_config is not None, "dp_config must be set"
         assert self.sp_config is not None, "sp_config must be set"
         assert self.pp_config is not None, "pp_config must be set"

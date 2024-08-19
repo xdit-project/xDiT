@@ -14,7 +14,7 @@ if __name__ == "__main__":
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
-            "torch>=2.2",
+            "torch>=2.3.0",
             "diffusers>=0.30.0",
             "transformers>=4.39.1",
             "sentencepiece>=0.1.99",

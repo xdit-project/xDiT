@@ -13,6 +13,7 @@ from xfuser.logger import init_logger
 from .group_coordinator import (
     GroupCoordinator,
     PipelineGroupCoordinator,
+    SequenceParallelGroupCoordinator,
 )
 from .utils import RankGenerator, generate_masked_orthogonal_rank_groups
 
@@ -25,7 +26,7 @@ logger = init_logger(__name__)
 
 _WORLD: Optional[GroupCoordinator] = None
 _TP: Optional[GroupCoordinator] = None
-_SP: Optional[GroupCoordinator] = None
+_SP: Optional[SequenceParallelGroupCoordinator] = None
 _PP: Optional[PipelineGroupCoordinator] = None
 _CFG: Optional[GroupCoordinator] = None
 _DP: Optional[GroupCoordinator] = None
@@ -54,7 +55,7 @@ def get_tensor_model_parallel_rank():
 
 
 # SP
-def get_sp_group() -> GroupCoordinator:
+def get_sp_group() -> SequenceParallelGroupCoordinator:
     assert _SP is not None, "pipeline model parallel group is not initialized"
     return _SP
 
@@ -67,6 +68,22 @@ def get_sequence_parallel_world_size():
 def get_sequence_parallel_rank():
     """Return my rank for the sequence parallel group."""
     return get_sp_group().rank_in_group
+
+
+def get_ulysses_parallel_world_size():
+    return get_sp_group().ulysses_world_size
+
+
+def get_ulysses_parallel_rank():
+    return get_sp_group().ulysses_rank
+
+
+def get_ring_parallel_world_size():
+    return get_sp_group().ring_world_size
+
+
+def get_ring_parallel_rank():
+    return get_sp_group().ring_rank
 
 
 # PP
@@ -211,7 +228,11 @@ def model_parallel_is_initialized():
 
 
 def init_model_parallel_group(
-    group_ranks: List[List[int]], local_rank: int, backend: str, parallel_mode: str
+    group_ranks: List[List[int]],
+    local_rank: int,
+    backend: str,
+    parallel_mode: str,
+    **kwargs,
 ) -> GroupCoordinator:
     assert parallel_mode in [
         "data",
@@ -225,6 +246,13 @@ def init_model_parallel_group(
             group_ranks=group_ranks,
             local_rank=local_rank,
             torch_distributed_backend=backend,
+        )
+    elif parallel_mode == "sequence":
+        return SequenceParallelGroupCoordinator(
+            group_ranks=group_ranks,
+            local_rank=local_rank,
+            torch_distributed_backend=backend,
+            **kwargs,
         )
     else:
         return GroupCoordinator(
@@ -345,21 +373,31 @@ def initialize_model_parallel(
     global _SP
     assert _SP is None, "sequence parallel group is already initialized"
 
-    _SP = init_model_parallel_group(
-        group_ranks=rank_generator.get_ranks("sp"),
-        local_rank=get_world_group().local_rank,
-        backend=backend,
-        parallel_mode="sequence",
-    )
-
-    if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
+    # if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
+    if HAS_LONG_CTX_ATTN:
         from yunchang import set_seq_parallel_pg
+        from yunchang.globals import PROCESS_GROUP
 
         set_seq_parallel_pg(
             sp_ulysses_degree=ulysses_degree,
             sp_ring_degree=ring_degree,
             rank=get_world_group().rank_in_group,
             world_size=get_world_group().world_size,
+        )
+        _SP = init_model_parallel_group(
+            group_ranks=rank_generator.get_ranks("sp"),
+            local_rank=get_world_group().local_rank,
+            backend=backend,
+            parallel_mode="sequence",
+            ulysses_group=PROCESS_GROUP.ULYSSES_PG,
+            ring_group=PROCESS_GROUP.RING_PG,
+        )
+    else:
+        _SP = init_model_parallel_group(
+            group_ranks=rank_generator.get_ranks("sp"),
+            local_rank=get_world_group().local_rank,
+            backend=backend,
+            parallel_mode="sequence",
         )
 
     global _TP

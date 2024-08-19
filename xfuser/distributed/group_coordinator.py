@@ -8,14 +8,18 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pickle
 
 import torch
-from torch.distributed import Backend, ProcessGroup
 import torch.distributed
+from torch.distributed import Backend, ProcessGroup
 
+import xfuser.envs as envs
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
+
+env_info = envs.PACKAGES_CHECKER.get_packages_info()
+HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
 
 def _split_tensor_dict(
@@ -703,15 +707,17 @@ class PipelineGroupCoordinator(GroupCoordinator):
         self.skip_tensor_recv_buffer_set: bool = False
         self.recv_skip_tasks_queue: List[Union[int, Tuple[str, int]]] = []
         self.receiving_skip_tasks: List[Tuple[torch.distributed.Work, str, int]] = []
-        self.skip_tensor_recv_buffer: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
+        self.skip_tensor_recv_buffer: Optional[
+            Union[List[torch.Tensor], torch.Tensor]
+        ] = None
         self.skip_device_group = None
         for ranks in group_ranks:
             skip_device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend)
+                ranks, backend=torch_distributed_backend
+            )
             if self.rank in ranks:
                 self.skip_device_group = skip_device_group
         assert self.skip_device_group is not None
-        
 
     def reset_buffer(self):
         self.recv_tasks_queue = []
@@ -968,7 +974,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
                 else self.device_group
             ),
         )
-    
+
     def set_skip_tensor_recv_buffer(
         self,
         patches_shape_list: List[List[int]],
@@ -982,7 +988,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
             torch.zeros(*feature_map_shape, dtype=self.dtype, device=self.device)
         )
         self.skip_tensor_recv_buffer_set = True
-    
+
     def pipeline_send_skip(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
         self._pipeline_isend_skip(tensor).wait()
@@ -990,14 +996,14 @@ class PipelineGroupCoordinator(GroupCoordinator):
     def pipeline_isend_skip(self, tensor: torch.Tensor) -> None:
         tensor = tensor.contiguous()
         self._pipeline_isend_skip(tensor)
-    
+
     def pipeline_recv_skip(self, idx: int = -1) -> torch.Tensor:
         self._pipeline_irecv_skip(self.skip_tensor_recv_buffer[idx]).wait()
         return self.skip_tensor_recv_buffer[idx]
-    
+
     def add_pipeline_recv_skip_task(self, idx: int = -1):
         self.recv_skip_tasks_queue.append(idx)
-    
+
     def get_pipeline_recv_skip_data(self, idx: int = -1) -> torch.Tensor:
         assert (
             len(self.receiving_skip_tasks) > 0
@@ -1008,7 +1014,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
             receiving_skip_task[2] == idx
         ), "Received tensor does not match the requested"
         return self.skip_tensor_recv_buffer[idx]
-    
+
     def recv_skip_next(self):
         if len(self.recv_skip_tasks_queue) == 0:
             raise ValueError("No more tasks to receive")
@@ -1016,19 +1022,57 @@ class PipelineGroupCoordinator(GroupCoordinator):
             task = self.recv_skip_tasks_queue.pop(0)
             idx = task
             self.receiving_skip_tasks.append(
-                (self._pipeline_irecv_skip(self.skip_tensor_recv_buffer[idx]), None, idx)
+                (
+                    self._pipeline_irecv_skip(self.skip_tensor_recv_buffer[idx]),
+                    None,
+                    idx,
+                )
             )
-    
+
     def _pipeline_irecv_skip(self, tensor: torch.tensor):
         return torch.distributed.irecv(
-            tensor,
-            src=self.skip_rank,
-            group=self.skip_device_group
+            tensor, src=self.skip_rank, group=self.skip_device_group
         )
-    
+
     def _pipeline_isend_skip(self, tensor: torch.tensor):
         return torch.distributed.isend(
-            tensor,
-            dst=self.skip_rank,
-            group=self.skip_device_group
+            tensor, dst=self.skip_rank, group=self.skip_device_group
         )
+
+
+class SequenceParallelGroupCoordinator(GroupCoordinator):
+    def __init__(
+        self,
+        group_ranks: List[List[int]],
+        local_rank: int,
+        torch_distributed_backend: Union[str, Backend],
+        **kwargs,
+    ):
+        super().__init__(
+            group_ranks=group_ranks,
+            local_rank=local_rank,
+            torch_distributed_backend=torch_distributed_backend,
+        )
+        if HAS_LONG_CTX_ATTN:
+            ulysses_group = kwargs.get("ulysses_group", None)
+            ring_group = kwargs.get("ring_group", None)
+            if ulysses_group is None:
+                raise RuntimeError(
+                    f"Please pass argument 'ulysses_group' when calling init func of SequenceParallelGroupCoordinator"
+                )
+            if ring_group is None:
+                raise RuntimeError(
+                    f"Please pass argument 'ring_group' when calling init func of SequenceParallelGroupCoordinator"
+                )
+            self.ulysses_group = ulysses_group
+            self.ring_group = ring_group
+
+            self.ulysses_world_size = torch.distributed.get_world_size(
+                self.ulysses_group
+            )
+            self.ulysses_rank = torch.distributed.get_rank(self.ulysses_group)
+            self.ring_world_size = torch.distributed.get_world_size(self.ring_group)
+            self.ring_rank = torch.distributed.get_rank(self.ring_group)
+        else:
+            self.ulysses_world_size = self.ring_world_size = 1
+            self.ulysses_rank = self.ring_rank = 0

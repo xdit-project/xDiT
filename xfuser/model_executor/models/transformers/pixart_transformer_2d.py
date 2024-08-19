@@ -10,10 +10,7 @@ from diffusers.utils import is_torch_version
 
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.distributed import (
-    is_pipeline_first_stage,
-    is_pipeline_last_stage
-)
+from xfuser.core.distributed import is_pipeline_first_stage, is_pipeline_last_stage
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 
@@ -105,15 +102,17 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
         if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
+            encoder_attention_mask = (
+                1 - encoder_attention_mask.to(hidden_states.dtype)
+            ) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
         batch_size = hidden_states.shape[0]
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
-        #* get height & width from runtime state
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        # * get height & width from runtime state
         height, width = self._get_patch_height_width()
-        #* only pp rank 0 needs pos_embed (patchify)
+        # * only pp rank 0 needs pos_embed (patchify)
         if is_pipeline_first_stage():
             hidden_states = self.pos_embed(hidden_states)
 
@@ -123,15 +122,20 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
         #     hidden_states.shape[-1] // self.config.patch_size,
         # )
         # hidden_states = self.pos_embed(hidden_states)
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         timestep, embedded_timestep = self.adaln_single(
-            timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype,
+            timestep,
+            added_cond_kwargs,
+            batch_size=batch_size,
+            hidden_dtype=hidden_states.dtype,
         )
 
         if self.caption_projection is not None:
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
-            encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
+            encoder_hidden_states = encoder_hidden_states.view(
+                batch_size, -1, hidden_states.shape[-1]
+            )
 
         # 2. Blocks
         for i, block in enumerate(self.transformer_blocks):
@@ -146,7 +150,9 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -170,31 +176,46 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 )
 
         # 3. Output
-        #* only the last pp rank needs unpatchify
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        # * only the last pp rank needs unpatchify
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         if is_pipeline_last_stage():
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+            #! ---------------------------------------- ADD ABOVE ----------------------------------------
             shift, scale = (
-                self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
+                self.scale_shift_table[None]
+                + embedded_timestep[:, None].to(self.scale_shift_table.device)
             ).chunk(2, dim=1)
             hidden_states = self.norm_out(hidden_states)
             # Modulation
-            hidden_states = hidden_states * (1 + scale.to(hidden_states.device)) + shift.to(hidden_states.device)
+            hidden_states = hidden_states * (
+                1 + scale.to(hidden_states.device)
+            ) + shift.to(hidden_states.device)
             hidden_states = self.proj_out(hidden_states)
             hidden_states = hidden_states.squeeze(1)
 
             # unpatchify
             hidden_states = hidden_states.reshape(
-                shape=(-1, height, width, self.config.patch_size, self.config.patch_size, self.out_channels)
+                shape=(
+                    -1,
+                    height,
+                    width,
+                    self.config.patch_size,
+                    self.config.patch_size,
+                    self.out_channels,
+                )
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
             output = hidden_states.reshape(
-                shape=(-1, self.out_channels, height * self.config.patch_size, width * self.config.patch_size)
+                shape=(
+                    -1,
+                    self.out_channels,
+                    height * self.config.patch_size,
+                    width * self.config.patch_size,
+                )
             )
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         else:
             output = hidden_states
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+        #! ---------------------------------------- ADD ABOVE ----------------------------------------
 
         if not return_dict:
             return (output,)

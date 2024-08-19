@@ -3,7 +3,7 @@ import torch
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
 import torch.distributed
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger

@@ -4,9 +4,9 @@ import torch.distributed
 from diffusers import AutoencoderKLTemporalDecoder
 from xfuser import xFuserLattePipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
-from xfuser.distributed import (
-    get_world_group, 
-    get_data_parallel_rank, 
+from xfuser.core.distributed import (
+    get_world_group,
+    get_data_parallel_rank,
     get_data_parallel_world_size,
     get_runtime_state,
 )
@@ -25,8 +25,12 @@ def main():
         torch_dtype=torch.float16,
     ).to(f"cuda:{local_rank}")
     # pipe.latte_prepare_run(input_config)
-    
-    vae = AutoencoderKLTemporalDecoder.from_pretrained(engine_config.model_config.model, subfolder="vae_temporal_decoder", torch_dtype=torch.float16).to(f"cuda:{local_rank}")
+
+    vae = AutoencoderKLTemporalDecoder.from_pretrained(
+        engine_config.model_config.model,
+        subfolder="vae_temporal_decoder",
+        torch_dtype=torch.float16,
+    ).to(f"cuda:{local_rank}")
     pipe.vae = vae
 
     torch.cuda.reset_peak_memory_stats()
@@ -37,7 +41,7 @@ def main():
         video_length=16,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
-        output_type='pt',
+        output_type="pt",
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     )
     end_time = time.time()
@@ -57,15 +61,17 @@ def main():
         num_dp_groups = engine_config.parallel_config.dp_degree
         dp_batch_size = (input_config.batch_size + num_dp_groups - 1) // num_dp_groups
         if input_config.video_length > 1:
-            videos = (videos.clamp(0, 1) * 255).to(dtype=torch.uint8) # convert to uint8
-            imageio.mimwrite('./latte_output.mp4', videos[0].permute(0, 2, 3, 1), fps=8, quality=5) # highest quality is 10, lowest is 0
+            videos = (videos.clamp(0, 1) * 255).to(
+                dtype=torch.uint8
+            )  # convert to uint8
+            imageio.mimwrite(
+                "./latte_output.mp4", videos[0].permute(0, 2, 3, 1), fps=8, quality=5
+            )  # highest quality is 10, lowest is 0
 
     if get_world_group().rank == get_world_group().world_size - 1:
-        print(
-            f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB"
-        )
+        print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
     get_runtime_state().destory_distributed_env()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

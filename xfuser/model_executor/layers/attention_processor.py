@@ -16,12 +16,12 @@ from diffusers.models.attention_processor import (
     HunyuanAttnProcessor2_0,
 )
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
 )
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
@@ -175,7 +175,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
-            from xfuser.modules.long_ctx_attention import (
+            from xfuser.core.long_ctx_attention import (
                 xFuserLongContextAttention,
             )
 
@@ -358,7 +358,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
-            from xfuser.modules.long_ctx_attention import (
+            from xfuser.core.long_ctx_attention import (
                 xFuserJointLongContextAttention,
             )
 
@@ -535,7 +535,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
-            from xfuser.modules.long_ctx_attention import (
+            from xfuser.core.long_ctx_attention import (
                 xFuserFluxLongContextAttention,
             )
 
@@ -735,7 +735,7 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
-            from xfuser.modules.long_ctx_attention import (
+            from xfuser.core.long_ctx_attention import (
                 # xFuserFluxLongContextAttention,
                 xFuserLongContextAttention,
             )
@@ -867,7 +867,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from yunchang import UlyssesAttention
-            from xfuser.modules.long_ctx_attention import (
+            from xfuser.core.long_ctx_attention import (
                 xFuserLongContextAttention,
             )
 

@@ -14,7 +14,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import (
 from diffusers.pipelines.pipeline_utils import ImagePipelineOutput
 
 from xfuser.config import EngineConfig
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     is_dp_last_group,
     get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,

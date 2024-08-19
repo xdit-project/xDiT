@@ -26,7 +26,7 @@ from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
 )
 
 from xfuser.config import EngineConfig, InputConfig
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     is_pipeline_first_stage,
     is_pipeline_last_stage,

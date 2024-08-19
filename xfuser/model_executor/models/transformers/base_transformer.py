@@ -3,14 +3,14 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch
 import torch.nn as nn
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_rank,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
 )
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.models import xFuserModelBaseWrapper
 

@@ -8,6 +8,7 @@ from xfuser.distributed import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_runtime_state,
+    is_dp_last_group,
 )
 
 
@@ -51,7 +52,7 @@ def main():
         dp_group_index = global_rank // dp_group_world_size
         num_dp_groups = engine_config.parallel_config.dp_degree
         dp_batch_size = (input_config.batch_size + num_dp_groups - 1) // num_dp_groups
-        if get_data_parallel_rank() == dp_group_world_size - 1:
+        if is_dp_last_group():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image.save(f"./results/flux_result_{parallel_info}_{image_rank}.png")

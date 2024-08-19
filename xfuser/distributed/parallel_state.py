@@ -206,7 +206,7 @@ def model_parallel_is_initialized():
         and _CFG is not None
         and _SP is not None
         and _PP is not None
-        and _TP is None
+        and _TP is not None
     )
 
 
@@ -362,21 +362,14 @@ def initialize_model_parallel(
             world_size=get_world_group().world_size,
         )
 
-    # TODO: implement tensor parallel groups
-    assert tensor_parallel_degree == 1, "Tensor parallelism is not implemented"
-    # # Build the tensor model-parallel groups.
-    # num_tensor_model_parallel_groups: int = (world_size //
-    #                                          tensor_parallel_degree)
-    # global _TP
-    # assert _TP is None, ("tensor model parallel group is already initialized")
-    # group_ranks = []
-    # for i in range(num_tensor_model_parallel_groups):
-    #     ranks = list(
-    #         range(i * tensor_parallel_degree,
-    #               (i + 1) * tensor_parallel_degree))
-    #     group_ranks.append(ranks)
-    # _TP = init_model_parallel_group(group_ranks,
-    #                                 get_world_group().local_rank, backend)
+    global _TP
+    assert _TP is None, "Tensor parallel group is already initialized"
+    _TP = init_model_parallel_group(
+        group_ranks=rank_generator.get_ranks("tp"),
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="tensor",
+    )
 
 
 def destroy_model_parallel():

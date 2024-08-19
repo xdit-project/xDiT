@@ -158,6 +158,7 @@ class ParallelConfig:
     tp_config: TensorParallelConfig
 
     def __post_init__(self):
+        assert self.tp_config is not None, "tp_config must be set"
         assert self.dp_config is not None, "dp_config must be set"
         assert self.sp_config is not None, "sp_config must be set"
         assert self.pp_config is not None, "pp_config must be set"

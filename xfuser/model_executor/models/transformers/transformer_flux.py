@@ -6,7 +6,12 @@ import torch.nn as nn
 from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_flux import FluxTransformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
-from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
+from diffusers.utils import (
+    is_torch_version,
+    scale_lora_layers,
+    USE_PEFT_BACKEND,
+    unscale_lora_layers,
+)
 
 from xfuser.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
@@ -20,6 +25,7 @@ from .base_transformer import xFuserTransformerBaseWrapper
 
 logger = init_logger(__name__)
 
+
 @xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
 class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
@@ -31,8 +37,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             # submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn"],
         )
-        self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
-        
+        self.encoder_hidden_states_cache = [
+            None for _ in range(len(self.transformer_blocks))
+        ]
 
     def forward(
         self,
@@ -82,7 +89,10 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
         else:
-            if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
+            if (
+                joint_attention_kwargs is not None
+                and joint_attention_kwargs.get("scale", None) is not None
+            ):
                 logger.warning(
                     "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
                 )
@@ -100,7 +110,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
         )
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-        print(f"{txt_ids.shape=}, {img_ids.shape=}")
+        # print(f"{txt_ids.shape=}, {img_ids.shape=}")
         ids = torch.cat((txt_ids, img_ids), dim=1)
         image_rotary_emb = self.pos_embed(ids)
 
@@ -116,14 +126,18 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    encoder_hidden_states,
-                    temb,
-                    image_rotary_emb,
-                    **ckpt_kwargs,
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
+                encoder_hidden_states, hidden_states = (
+                    torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
+                        hidden_states,
+                        encoder_hidden_states,
+                        temb,
+                        image_rotary_emb,
+                        **ckpt_kwargs,
+                    )
                 )
 
             else:
@@ -148,7 +162,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,

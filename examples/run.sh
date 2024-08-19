@@ -17,9 +17,12 @@ set -x
 # The model is downloaded to a specified location on disk, 
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
-export MODEL_TYPE="Flux"
 
-CFG_ARGS="--use_cfg_parallel"
+export PYTHONPATH=$PWD:$PYTHONPATH
+
+export MODEL_TYPE="HunyuanDiT"
+
+# CFG_ARGS="--use_cfg_parallel"
 
 if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
     export SCRIPT=pixartalpha_example.py
@@ -41,20 +44,20 @@ elif [ "$MODEL_TYPE" = "Flux" ]; then
     export CFG_ARGS=""
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
     export SCRIPT=hunyuandit_example.py
-    export MODEL_ID="HunyuanDiT-v1.2-Diffusers"
+    export MODEL_ID="/mnt/models/SD/HunyuanDiT-v1.2-Diffusers"
     export INFERENCE_STEP=20
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
 fi
 
-# export PYTHONAPTH=$PWD:$PYTHONPATH
+
 
 mkdir -p ./results
 
 for HEIGHT in 1024
 do
-for N_GPUS in 8;
+for N_GPUS in 1;
 do 
 
 TASK_ARGS="--height $HEIGHT \
@@ -69,7 +72,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 4 --ulysses_degree 1 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 1"
 fi
 
 

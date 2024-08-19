@@ -20,9 +20,9 @@ set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 
-export MODEL_TYPE="HunyuanDiT"
+export MODEL_TYPE="Pixart-alpha"
 
-# CFG_ARGS="--use_cfg_parallel"
+CFG_ARGS="--use_cfg_parallel"
 
 if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
     export SCRIPT=pixartalpha_example.py
@@ -57,7 +57,7 @@ mkdir -p ./results
 
 for HEIGHT in 1024
 do
-for N_GPUS in 1;
+for N_GPUS in 8;
 do 
 
 TASK_ARGS="--height $HEIGHT \
@@ -72,7 +72,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 8 --ring_degree 1"
 fi
 
 

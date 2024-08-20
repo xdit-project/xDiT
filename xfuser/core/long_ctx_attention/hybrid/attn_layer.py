@@ -30,7 +30,6 @@ class xFuserLongContextAttention(LongContextAttention):
             use_pack_qkv=use_pack_qkv,
         )
         self.use_kv_cache = use_kv_cache
-        self.kv_cache = None
         if (
             use_kv_cache
             and ring_impl_type not in self.ring_impl_type_supported_kv_cache
@@ -46,6 +45,10 @@ class xFuserLongContextAttention(LongContextAttention):
         query: Tensor,
         key: Tensor,
         value: Tensor,
+        *,
+        joint_tensor_query=None,
+        joint_tensor_key=None,
+        joint_tensor_value=None,
         dropout_p=0.0,
         softmax_scale=None,
         causal=False,
@@ -53,7 +56,7 @@ class xFuserLongContextAttention(LongContextAttention):
         alibi_slopes=None,
         deterministic=False,
         return_attn_probs=False,
-        *args: Any,
+        joint_strategy="none",
     ) -> Tensor:
         """forward
 
@@ -127,6 +130,7 @@ class xFuserJointLongContextAttention(xFuserLongContextAttention):
         query: Tensor,
         key: Tensor,
         value: Tensor,
+        *,
         joint_tensor_query,
         joint_tensor_key,
         joint_tensor_value,
@@ -137,7 +141,7 @@ class xFuserJointLongContextAttention(xFuserLongContextAttention):
         alibi_slopes=None,
         deterministic=False,
         return_attn_probs=False,
-        *args: Any,
+        joint_strategy="rear",
     ):
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
@@ -196,7 +200,7 @@ class xFuserJointLongContextAttention(xFuserLongContextAttention):
             attn_layer=attn if self.use_kv_cache else None,
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,
-            joint_strategy="rear",
+            joint_strategy=joint_strategy,
         )
 
         if type(out) == tuple:
@@ -221,6 +225,7 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
         query: Tensor,
         key: Tensor,
         value: Tensor,
+        *,
         dropout_p=0.0,
         softmax_scale=None,
         causal=False,
@@ -231,7 +236,7 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
         joint_tensor_query=None,
         joint_tensor_key=None,
         joint_tensor_value=None,
-        *args: Any,
+        joint_strategy="front",
     ) -> Tensor:
         """forward
 
@@ -302,7 +307,7 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
             attn_layer=attn if self.use_kv_cache else None,
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,
-            joint_strategy="front",
+            joint_strategy=joint_strategy,
         )
 
         if type(out) == tuple:

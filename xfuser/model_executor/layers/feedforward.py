@@ -15,7 +15,6 @@ from xfuser.model_executor.layers.register import xFuserLayerWrappersRegister
 @xFuserLayerWrappersRegister.register(FeedForward)
 class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
     def __init__(self, feedforward: FeedForward):
-        print(f"====================== initialize TP =======================\n\n\n")
         super(xFuserFeedForwardWrapper, self).__init__(module=feedforward)
 
         self.module = feedforward
@@ -56,19 +55,16 @@ class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
         self.has_output_bias = False
         if self.module.net[2].bias is not None:
             self.register_parameter(
-                "output_bias", nn.Parameter(module.net[2].bias.data.clone())
+                "output_bias", nn.Parameter(self.module.net[2].bias.data.clone())
             )
             self.module.net[2].bias = None
             self.has_output_bias = True
 
         torch.cuda.empty_cache()
-        print(f"====================== initialize TP =======================\n\n\n")
 
     def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         hidden_states = self.module(hidden_states, *args, **kwargs)
         get_tp_group().all_reduce(hidden_states)
-
-        print(f"====================== running in TP =======================\n\n\n")
         if self.has_output_bias:
             hidden_states += self.output_bias
         return hidden_states

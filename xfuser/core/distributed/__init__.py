@@ -22,6 +22,7 @@ from .parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
     model_parallel_is_initialized,
+    get_tensor_model_parallel_world_size,
 )
 from .runtime_state import (
     get_runtime_state,

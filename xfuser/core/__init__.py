@@ -4,10 +4,12 @@ from .long_ctx_attention import (
     xFuserJointLongContextAttention,
     xFuserFluxLongContextAttention,
 )
+from .utils import gpu_timer_decorator
 
 __all__ = [
     "CacheManager",
     "xFuserLongContextAttention",
     "xFuserJointLongContextAttention",
     "xFuserFluxLongContextAttention",
+    "gpu_timer_decorator",
 ]

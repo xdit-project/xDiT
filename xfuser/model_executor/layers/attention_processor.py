@@ -174,9 +174,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import UlyssesAttention
             from xfuser.core.long_ctx_attention import (
                 xFuserLongContextAttention,
+                xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
@@ -185,7 +185,10 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
         else:
             self.hybrid_seq_parallel_attn = None
 
@@ -283,6 +286,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
                 value,
                 dropout_p=0.0,
                 causal=False,
+                joint_strategy="none",
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 
@@ -357,9 +361,9 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import UlyssesAttention
             from xfuser.core.long_ctx_attention import (
                 xFuserJointLongContextAttention,
+                xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
@@ -367,7 +371,10 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
 
     def __call__(
         self,
@@ -443,6 +450,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                 joint_tensor_query=encoder_hidden_states_query_proj,
                 joint_tensor_key=encoder_hidden_states_key_proj,
                 joint_tensor_value=encoder_hidden_states_value_proj,
+                joint_strategy="rear",
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 
@@ -534,9 +542,9 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import UlyssesAttention
             from xfuser.core.long_ctx_attention import (
                 xFuserFluxLongContextAttention,
+                xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
@@ -544,7 +552,10 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
 
     def __call__(
         self,
@@ -668,6 +679,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
                 joint_tensor_query=encoder_hidden_states_query_proj,
                 joint_tensor_key=encoder_hidden_states_key_proj,
                 joint_tensor_value=encoder_hidden_states_value_proj,
+                joint_strategy="front",
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 
@@ -734,10 +746,9 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import UlyssesAttention
             from xfuser.core.long_ctx_attention import (
-                # xFuserFluxLongContextAttention,
                 xFuserLongContextAttention,
+                xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
@@ -745,7 +756,10 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
 
     def __call__(
         self,
@@ -816,7 +830,13 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
             hidden_states = self.hybrid_seq_parallel_attn(
-                attn, query, key, value, dropout_p=0.0, causal=False
+                attn,
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                causal=False,
+                joint_strategy="none",
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
         else:
@@ -866,9 +886,9 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from yunchang import UlyssesAttention
             from xfuser.core.long_ctx_attention import (
                 xFuserLongContextAttention,
+                xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
@@ -876,7 +896,10 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                self.hybrid_seq_parallel_attn = UlyssesAttention(use_fa=False)
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
         else:
             self.hybrid_seq_parallel_attn = None
 
@@ -979,7 +1002,13 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
             hidden_states = self.hybrid_seq_parallel_attn(
-                attn, query, key, value, dropout_p=0.0, causal=False
+                attn,
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                causal=False,
+                joint_strategy="none",
             )
             hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
 

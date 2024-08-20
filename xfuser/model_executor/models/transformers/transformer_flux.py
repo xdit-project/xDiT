@@ -13,17 +13,18 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
+from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_world_size
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
-from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.core.distributed import (
-    get_pipeline_parallel_rank,
-    get_pipeline_parallel_world_size,
+from xfuser.model_executor.models.transformers.register import (
+    xFuserTransformerWrappersRegister,
 )
-from .register import xFuserTransformerWrappersRegister
-from .base_transformer import xFuserTransformerBaseWrapper
+from xfuser.model_executor.models.transformers.base_transformer import (
+    xFuserTransformerBaseWrapper,
+)
 
 logger = init_logger(__name__)
+from diffusers.models.attention import FeedForward
 
 
 @xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
@@ -34,7 +35,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            # submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
+            submodule_classes_to_wrap=(
+                [FeedForward] if get_tensor_model_parallel_world_size() > 1 else []
+            ),
             submodule_name_to_wrap=["attn"],
         )
         self.encoder_hidden_states_cache = [
@@ -194,3 +197,8 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             return (output,)
 
         return Transformer2DModelOutput(sample=output)
+
+
+if __name__ == "__main__":
+    # print module in FluxTransformer2DModel
+    model = FluxTransformer2DModel()

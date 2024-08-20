@@ -10,6 +10,7 @@ from xfuser.config.config import (
     EngineConfig,
     InputConfig,
 )
+from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_world_size
 from xfuser.logger import init_logger
 from xfuser.core.distributed import (
     get_data_parallel_world_size,
@@ -123,6 +124,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 get_pipeline_parallel_world_size() == 1
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
+                and get_tensor_model_parallel_world_size() == 1
             ):
                 return self.module(*args, **kwargs)
             else:
@@ -215,6 +217,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             get_pipeline_parallel_world_size() == 1
             and get_sequence_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
+            and get_tensor_model_parallel_world_size() == 1
         ):
             logger.info(
                 "Transformer backbone found, but model parallelism is not enabled, "

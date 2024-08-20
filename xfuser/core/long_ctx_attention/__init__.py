@@ -3,9 +3,11 @@ from .hybrid import (
     xFuserFluxLongContextAttention,
     xFuserJointLongContextAttention,
 )
+from .ulysses import xFuserUlyssesAttention
 
 __all__ = [
     "xFuserLongContextAttention",
     "xFuserFluxLongContextAttention",
     "xFuserJointLongContextAttention",
+    "xFuserUlyssesAttention",
 ]

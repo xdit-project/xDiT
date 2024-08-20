@@ -50,9 +50,12 @@ xDiT provides a suite of efficient parallel inference approaches for Diffusion M
 
 The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
 
-xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
+As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
 If the model you require is not available in the model zoo, developing it yourself is straightforward; please refer to our [Dev Guide](#dev-guide).
 
+<div align="center">
+    <img src="assets/methods/xdit_method.png" alt="xdit methods">
+</div>
 
 We also have implemented the following parallel stategies for reference:
 

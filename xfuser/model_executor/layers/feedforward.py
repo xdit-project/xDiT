@@ -17,7 +17,6 @@ class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
     def __init__(self, feedforward: FeedForward):
         super(xFuserFeedForwardWrapper, self).__init__(module=feedforward)
 
-        self.module = feedforward
         tp_degree = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 

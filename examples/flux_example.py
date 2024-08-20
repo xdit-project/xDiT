@@ -44,6 +44,7 @@ def main():
     parallel_info = (
         f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"
         f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"
+        f"tp{engine_args.tensor_parallel_degree}_"
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
     if input_config.output_type == "pil":

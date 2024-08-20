@@ -6,6 +6,7 @@ from xfuser.core.distributed.parallel_state import (
     get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
+    get_tensor_model_parallel_world_size,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
 
@@ -38,6 +39,7 @@ class xFuserBaseWrapper(metaclass=ABCMeta):
                 get_pipeline_parallel_world_size() == 1
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
+                and get_tensor_model_parallel_world_size() == 1
             ):
                 return func(self, *args, **kwargs)
             if not get_runtime_state().is_ready():

@@ -9,6 +9,7 @@ from xfuser.core.distributed import (
     is_pipeline_last_stage,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
+    get_tensor_model_parallel_world_size,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
@@ -44,6 +45,7 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
         if (
             get_pipeline_parallel_world_size() == 1
             and get_sequence_parallel_world_size() == 1
+            and get_tensor_model_parallel_world_size() == 1
         ):
             return transformer
         else:

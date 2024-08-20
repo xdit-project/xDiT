@@ -1,25 +1,22 @@
 # https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention.py
 
 from diffusers.models.attention import FeedForward, GELU, GEGLU
-from xfuser.distributed.runtime_state import get_runtime_state
 from torch import nn
-from xfuser.distributed.parallel_state import (
+from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
 import torch
-import torch.distributed as dist
 from xfuser.model_executor.layers.base_layer import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers.register import xFuserLayerWrappersRegister
 
 
 @xFuserLayerWrappersRegister.register(FeedForward)
 class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
-    def __init__(self, module: FeedForward):
-        super(xFuserFeedForwardWrapper, self).__init__(module=module)
+    def __init__(self, feedforward: FeedForward):
+        super(xFuserFeedForwardWrapper, self).__init__(module=feedforward)
 
-        self.module = module
         tp_degree = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
@@ -44,9 +41,10 @@ class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
             b = bias_buff[1].chunk(tp_degree, dim=0)[tp_rank]
             c = torch.cat([a, b], dim=0)
             self.module.net[0].proj.bias.data = c
+
         else:
             raise TypeError(
-                f"activation_fn {type(isinstance(self.module.net[0][0]))} not supported"
+                f"activation_fn {type(isinstance(self.module.net[0]))} not supported"
             )
 
         self.module.net[2].weight.data = self.module.net[2].weight.chunk(
@@ -56,16 +54,16 @@ class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
         self.has_output_bias = False
         if self.module.net[2].bias is not None:
             self.register_parameter(
-                "output_bias", nn.Parameter(module.net[2].bias.data.clone())
+                "output_bias", nn.Parameter(self.module.net[2].bias.data.clone())
             )
-            print(f"module.net[2].bias {module.net[2].bias.shape}")
             self.module.net[2].bias = None
             self.has_output_bias = True
+
+        torch.cuda.empty_cache()
 
     def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         hidden_states = self.module(hidden_states, *args, **kwargs)
         get_tp_group().all_reduce(hidden_states)
-
         if self.has_output_bias:
             hidden_states += self.output_bias
         return hidden_states

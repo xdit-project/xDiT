@@ -2,7 +2,7 @@ import torch
 import unittest
 from diffusers.models.attention import FeedForward
 from xfuser.model_executor.layers.feedforward import xFuserFeedForwardWrapper
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -41,6 +41,6 @@ class TestFeedForward(unittest.TestCase):
         self.assertTrue(torch.allclose(output1, output2, atol=1e-2))
 
 
-# torchrun --nproc_per_node=2 ./tests/layers/ffn_test.py
+# torchrun --nproc_per_node=2 ./tests/layers/feedforward_test.py
 if __name__ == "__main__":
     unittest.main()

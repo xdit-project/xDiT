@@ -23,7 +23,7 @@ def main():
         engine_config=engine_config,
         torch_dtype=torch.bfloat16,
     ).to(f"cuda:{local_rank}")
-    # pipe.prepare_run(input_config)
+    pipe.prepare_run(input_config)
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

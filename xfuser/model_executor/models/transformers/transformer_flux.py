@@ -13,17 +13,113 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
+from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_world_size
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
-from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.core.distributed import (
-    get_pipeline_parallel_rank,
-    get_pipeline_parallel_world_size,
+from xfuser.model_executor.models.transformers.register import (
+    xFuserTransformerWrappersRegister,
 )
-from .register import xFuserTransformerWrappersRegister
-from .base_transformer import xFuserTransformerBaseWrapper
+from xfuser.model_executor.models.transformers.base_transformer import (
+    xFuserTransformerBaseWrapper,
+)
 
 logger = init_logger(__name__)
+from diffusers.models.attention import FeedForward
+
+# FluxTransformer2DModel(
+#   (pos_embed): EmbedND()
+#   (time_text_embed): CombinedTimestepTextProjEmbeddings(
+#     (time_proj): Timesteps()
+#     (timestep_embedder): TimestepEmbedding(
+#       (linear_1): Linear(in_features=256, out_features=3072, bias=True)
+#       (act): SiLU()
+#       (linear_2): Linear(in_features=3072, out_features=3072, bias=True)
+#     )
+#     (text_embedder): PixArtAlphaTextProjection(
+#       (linear_1): Linear(in_features=768, out_features=3072, bias=True)
+#       (act_1): SiLU()
+#       (linear_2): Linear(in_features=3072, out_features=3072, bias=True)
+#     )
+#   )
+#   (context_embedder): Linear(in_features=4096, out_features=3072, bias=True)
+#   (x_embedder): Linear(in_features=64, out_features=3072, bias=True)
+#   (transformer_blocks): ModuleList(
+#     (0-18): 19 x FluxTransformerBlock(
+#       (norm1): AdaLayerNormZero(
+#         (silu): SiLU()
+#         (linear): Linear(in_features=3072, out_features=18432, bias=True)
+#         (norm): LayerNorm((3072,), eps=1e-06, elementwise_affine=False)
+#       )
+#       (norm1_context): AdaLayerNormZero(
+#         (silu): SiLU()
+#         (linear): Linear(in_features=3072, out_features=18432, bias=True)
+#         (norm): LayerNorm((3072,), eps=1e-06, elementwise_affine=False)
+#       )
+#       (attn): Attention(
+#         (norm_q): RMSNorm()
+#         (norm_k): RMSNorm()
+#         (to_q): Linear(in_features=3072, out_features=3072, bias=True)
+#         (to_k): Linear(in_features=3072, out_features=3072, bias=True)
+#         (to_v): Linear(in_features=3072, out_features=3072, bias=True)
+#         (add_k_proj): Linear(in_features=3072, out_features=3072, bias=True)
+#         (add_v_proj): Linear(in_features=3072, out_features=3072, bias=True)
+#         (add_q_proj): Linear(in_features=3072, out_features=3072, bias=True)
+#         (to_out): ModuleList(
+#           (0): Linear(in_features=3072, out_features=3072, bias=True)
+#           (1): Dropout(p=0.0, inplace=False)
+#         )
+#         (to_add_out): Linear(in_features=3072, out_features=3072, bias=True)
+#         (norm_added_q): RMSNorm()
+#         (norm_added_k): RMSNorm()
+#       )
+#       (norm2): LayerNorm((3072,), eps=1e-06, elementwise_affine=False)
+#       (ff): FeedForward(
+#         (net): ModuleList(
+#           (0): GELU(
+#             (proj): Linear(in_features=3072, out_features=12288, bias=True)
+#           )
+#           (1): Dropout(p=0.0, inplace=False)
+#           (2): Linear(in_features=12288, out_features=3072, bias=True)
+#         )
+#       )
+#       (norm2_context): LayerNorm((3072,), eps=1e-06, elementwise_affine=False)
+#       (ff_context): FeedForward(
+#         (net): ModuleList(
+#           (0): GELU(
+#             (proj): Linear(in_features=3072, out_features=12288, bias=True)
+#           )
+#           (1): Dropout(p=0.0, inplace=False)
+#           (2): Linear(in_features=12288, out_features=3072, bias=True)
+#         )
+#       )
+#     )
+#   )
+#   (single_transformer_blocks): ModuleList(
+#     (0-37): 38 x FluxSingleTransformerBlock(
+#       (norm): AdaLayerNormZeroSingle(
+#         (silu): SiLU()
+#         (linear): Linear(in_features=3072, out_features=9216, bias=True)
+#         (norm): LayerNorm((3072,), eps=1e-06, elementwise_affine=False)
+#       )
+#       (proj_mlp): Linear(in_features=3072, out_features=12288, bias=True)
+#       (act_mlp): GELU(approximate='tanh')
+#       (proj_out): Linear(in_features=15360, out_features=3072, bias=True)
+#       (attn): Attention(
+#         (norm_q): RMSNorm()
+#         (norm_k): RMSNorm()
+#         (to_q): Linear(in_features=3072, out_features=3072, bias=True)
+#         (to_k): Linear(in_features=3072, out_features=3072, bias=True)
+#         (to_v): Linear(in_features=3072, out_features=3072, bias=True)
+#       )
+#     )
+#   )
+#   (norm_out): AdaLayerNormContinuous(
+#     (silu): SiLU()
+#     (linear): Linear(in_features=3072, out_features=6144, bias=True)
+#     (norm): LayerNorm((3072,), eps=1e-06, elementwise_affine=False)
+#   )
+#   (proj_out): Linear(in_features=3072, out_features=64, bias=True)
+# )
 
 
 @xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
@@ -34,8 +130,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            # submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
-            submodule_name_to_wrap=["attn"],
+            submodule_classes_to_wrap=[FeedForward],
+            # submodule_classes_to_wrap=[FeedForward] if get_tensor_model_parallel_world_size() > 1 else [],
+            submodule_name_to_wrap=["attn", "ff_context"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
@@ -194,3 +291,8 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             return (output,)
 
         return Transformer2DModelOutput(sample=output)
+
+
+if __name__ == "__main__":
+    # print module in FluxTransformer2DModel
+    model = FluxTransformer2DModel()

@@ -24,7 +24,8 @@ from xfuser.core.distributed import (
     get_cfg_group,
     get_sp_group,
     get_runtime_state, 
-    initialize_runtime_state
+    initialize_runtime_state,
+    get_data_parallel_rank,
 )
 
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper

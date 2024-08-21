@@ -4,6 +4,7 @@ from .pipeline_pixart_sigma import xFuserPixArtSigmaPipeline
 from .pipeline_stable_diffusion_3 import xFuserStableDiffusion3Pipeline
 from .pipeline_flux import xFuserFluxPipeline
 from .pipeline_latte import xFuserLattePipeline
+from .pipeline_cogvideox import xFuserCogVideoXPipeline
 
 __all__ = [
     "xFuserPipelineBaseWrapper",
@@ -12,4 +13,5 @@ __all__ = [
     "xFuserStableDiffusion3Pipeline",
     "xFuserFluxPipeline",
     "xFuserLattePipeline",
+    "xFuserCogVideoXPipeline",
 ]

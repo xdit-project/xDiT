@@ -95,8 +95,9 @@ class DiTRuntimeState(RuntimeState):
             pipeline=pipeline, 
             parallel_config=config.parallel_config
         )
+        # TODO vae_scale_factor is spatial and temporal in cogvideox
         self._set_model_parameters(
-            vae_scale_factor=pipeline.vae_scale_factor,
+            vae_scale_factor=1,
             backbone_patch_size=pipeline.transformer.config.patch_size,
             backbone_in_channel=pipeline.transformer.config.in_channels,
             backbone_inner_dim=pipeline.transformer.config.num_attention_heads * pipeline.transformer.config.attention_head_dim,
@@ -148,6 +149,31 @@ class DiTRuntimeState(RuntimeState):
             (batch_size and self.input_config.batch_size != batch_size)
         ):
             self._video_input_size_change(height, width, video_length, batch_size)
+
+        self.ready = True
+    
+    def set_cogvideox_input_parameters(
+        self,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_frames: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        num_inference_steps: Optional[int] = None,
+        seed: Optional[int] = None,
+    ):
+        self.input_config.num_inference_steps = num_inference_steps or self.input_config.num_inference_steps
+        if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
+            self.runtime_config.warmup_steps = self.input_config.num_inference_steps
+        if (seed is not None and seed != self.input_config.seed):
+            self.input_config.seed = seed
+            set_random_seed(seed)
+        if (
+            (height and self.input_config.height != height) or 
+            (width and self.input_config.width != width) or 
+            (num_frames and self.input_config.num_frames != num_frames) or
+            (batch_size and self.input_config.batch_size != batch_size)
+        ):
+            self._video_input_size_change(height, width, num_frames, batch_size)
 
         self.ready = True
     

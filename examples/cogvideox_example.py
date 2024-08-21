@@ -4,7 +4,7 @@ import torch.distributed
 from diffusers import AutoencoderKLTemporalDecoder
 from xfuser import xFuserCogVideoXPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_world_group, 
     get_data_parallel_rank, 
     get_data_parallel_world_size,

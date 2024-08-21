@@ -104,7 +104,7 @@ class DiTRuntimeState(RuntimeState):
             pipeline=pipeline, parallel_config=config.parallel_config
         )
         self._set_model_parameters(
-            vae_scale_factor=pipeline.vae_scale_factor,
+            vae_scale_factor=pipeline.vae_scale_factor_spatial,
             backbone_patch_size=pipeline.transformer.config.patch_size,
             backbone_in_channel=pipeline.transformer.config.in_channels,
             backbone_inner_dim=pipeline.transformer.config.num_attention_heads

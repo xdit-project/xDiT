@@ -9,11 +9,6 @@ from diffusers.schedulers.scheduling_ddim_cogvideox import (
     DDIMSchedulerOutput,
 )
 
-from xfuser.distributed import (
-    get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
-    get_runtime_state,
-)
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper
 

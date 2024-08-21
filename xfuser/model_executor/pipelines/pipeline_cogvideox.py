@@ -11,16 +11,8 @@ from diffusers.utils import deprecate
 import math
 
 from xfuser.config import EngineConfig
-from xfuser.distributed import (
-    get_data_parallel_world_size,
-    get_classifier_free_guidance_world_size,
-    get_pipeline_parallel_world_size,
-    get_data_parallel_rank, 
-    get_runtime_state,
-    is_pipeline_first_stage,
-)
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
@@ -197,10 +189,10 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
         
-        get_runtime_state().set_cogvideox_input_parameters(
+        get_runtime_state().set_video_input_parameters(
             height=height,
             width=width,
-            num_frames=num_frames,
+            video_length=num_frames,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )

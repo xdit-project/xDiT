@@ -1,4 +1,4 @@
-HF_ENDPOINT=https://hf-mirror.com CUDA_VISIABLE_DEVICES=0,1,2,3,4,5,6,7 \
+HF_ENDPOINT=https://hf-mirror.com CUDA_VISIBLE_DEVICES=6,7 \
     torchrun --nproc_per_node=2 examples/cogvideox_example.py \
     --model ../../CogVideoX-2b \
     --height 480 \

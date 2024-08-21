@@ -10,10 +10,9 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
 
 from xfuser.model_executor.models import xFuserModelBaseWrapper
-from xfuser.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,

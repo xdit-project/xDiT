@@ -2,7 +2,7 @@
 
 The [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse) adopted by diffusers bring OOM to high-resolution images (8192px on A100). A critical issue is the CUDA memory spike, as documented in [diffusers/issues/5924](https://github.com/huggingface/diffusers/issues/5924).
 
-To address this limitation, we developed [DistVAE](https://github.com/dit-project/DistVAE), an solution that enables efficient processing of high-resolution images in parallel. Our approach incorporates two key strategies:
+To address this limitation, we developed [DistVAE](https://github.com/xdit-project/DistVAE), an solution that enables efficient processing of high-resolution images in parallel. Our approach incorporates two key strategies:
 
 * Patch Parallel: We divide the feature maps in the latent space into multiple patches and perform sequence parallel VAE decoding across different devices. This technique reduces the peak memory required for intermediate activations to 1/$N$, where N is the number of devices utilized.
 For the convolutional operator in VAE, we require the communication of the halo region data of the image as shown in the following figures.

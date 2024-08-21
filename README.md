@@ -150,7 +150,7 @@ Here are the benchmark results for Pixart-Alpha using the 20-step DPM solver as 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
-### 1. Install from pip
+### 1. Install from pip (current [version](./xfuser/__version__.py))
 
 ```
 pip install xfuser

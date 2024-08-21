@@ -6,12 +6,16 @@ import torch.distributed
 import torch.nn as nn
 
 from diffusers import DiffusionPipeline
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+
+from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
 from xfuser.config.config import (
     EngineConfig,
     InputConfig,
 )
+from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_world_size
 from xfuser.logger import init_logger
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
@@ -22,11 +26,12 @@ from xfuser.distributed import (
     get_pp_group,
     get_world_group,
     get_runtime_state,
-    initialize_runtime_state
+    initialize_runtime_state,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
+
 PACKAGES_CHECKER.check_diffusers_version()
 
 from xfuser.model_executor.schedulers import *
@@ -55,12 +60,18 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         scheduler = getattr(pipeline, "scheduler", None)
 
         if transformer is not None:
-            pipeline.transformer = self._convert_transformer_backbone(transformer)
+            pipeline.transformer = self._convert_transformer_backbone(
+                transformer,
+                enable_torch_compile=engine_config.runtime_config.use_torch_compile,
+            )
         elif unet is not None:
             pipeline.unet = self._convert_unet_backbone(unet)
 
         if scheduler is not None:
             pipeline.scheduler = self._convert_scheduler(scheduler)
+
+        if vae is not None and engine_config.runtime_config.use_parallel_vae:
+            pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
 
@@ -86,8 +97,6 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         self.module = self.module.to(*args, **kwargs)
         return self
 
-
-
     @staticmethod
     def enable_data_parallel(func):
         @wraps(func)
@@ -101,13 +110,16 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 dp_group_rank = get_world_group().rank // get_data_parallel_world_size()
                 dp_group_batch_size = (batch_size + dp_degree - 1) // dp_degree
                 start_batch_idx = dp_group_rank * dp_group_batch_size
-                end_batch_idx = min((dp_group_rank + 1) * dp_group_batch_size, batch_size)
+                end_batch_idx = min(
+                    (dp_group_rank + 1) * dp_group_batch_size, batch_size
+                )
                 prompt = prompt[start_batch_idx:end_batch_idx]
                 if isinstance(negative_prompt, List):
                     negative_prompt = negative_prompt[start_batch_idx:end_batch_idx]
                 kwargs["prompt"] = prompt
                 kwargs["negative_prompt"] = negative_prompt
             return func(self, *args, **kwargs)
+
         return data_parallel_fn
 
     @staticmethod
@@ -118,10 +130,12 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 get_pipeline_parallel_world_size() == 1
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
+                and get_tensor_model_parallel_world_size() == 1
             ):
                 return self.module(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
+
         return check_naive_forward_fn
 
     @staticmethod
@@ -133,25 +147,38 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         def decorator(func):
             @wraps(func)
             def wrapper(*args, **kwargs):
-                if not cfg_parallel_available and get_runtime_state().parallel_config.cfg_degree > 1:
+                if (
+                    not cfg_parallel_available
+                    and get_runtime_state().parallel_config.cfg_degree > 1
+                ):
                     raise RuntimeError("CFG parallelism is not supported by the model")
-                if not sequence_parallel_available and get_runtime_state().parallel_config.sp_degree > 1:
-                    raise RuntimeError("Sequence parallelism is not supported by the model")
-                if not pipefusion_parallel_available and get_runtime_state().parallel_config.pp_degree > 1:
-                    raise RuntimeError("Pipefusion parallelism is not supported by the model")
+                if (
+                    not sequence_parallel_available
+                    and get_runtime_state().parallel_config.sp_degree > 1
+                ):
+                    raise RuntimeError(
+                        "Sequence parallelism is not supported by the model"
+                    )
+                if (
+                    not pipefusion_parallel_available
+                    and get_runtime_state().parallel_config.pp_degree > 1
+                ):
+                    raise RuntimeError(
+                        "Pipefusion parallelism is not supported by the model"
+                    )
                 return func(*args, **kwargs)
+
             return wrapper
+
         return decorator
 
     def forward(self):
         pass
 
-    def prepare_run(self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1):
-        prompt = (
-            [""] * input_config.batch_size
-            if input_config.batch_size > 1
-            else ""
-        )
+    def prepare_run(
+        self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
+    ):
+        prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
         self.__call__(
@@ -164,13 +191,11 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             generator=torch.Generator(device="cuda").manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
-        
-    def latte_prepare_run(self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1):
-        prompt = (
-            [""] * input_config.batch_size
-            if input_config.batch_size > 1
-            else ""
-        )
+
+    def latte_prepare_run(
+        self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
+    ):
+        prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
         self.__call__(
@@ -184,17 +209,21 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 
-    def _init_runtime_state(self, pipeline: DiffusionPipeline, engine_config: EngineConfig):
+    def _init_runtime_state(
+        self, pipeline: DiffusionPipeline, engine_config: EngineConfig
+    ):
         initialize_runtime_state(pipeline=pipeline, engine_config=engine_config)
 
     def _convert_transformer_backbone(
         self,
         transformer: nn.Module,
+        enable_torch_compile: bool,
     ):
         if (
             get_pipeline_parallel_world_size() == 1
             and get_sequence_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
+            and get_tensor_model_parallel_world_size() == 1
         ):
             logger.info(
                 "Transformer backbone found, but model parallelism is not enabled, "
@@ -204,6 +233,17 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             logger.info("Transformer backbone found, paralleling transformer...")
             wrapper = xFuserTransformerWrappersRegister.get_wrapper(transformer)
             transformer = wrapper(transformer)
+
+        if enable_torch_compile:
+            if getattr(transformer, "forward") is not None:
+                optimized_transformer_forward = torch.compile(
+                    getattr(transformer, "forward")
+                )
+                setattr(transformer, "forward", optimized_transformer_forward)
+            else:
+                raise AttributeError(
+                    f"Transformer backbone type: {transformer.__class__.__name__} has no attribute 'forward'"
+                )
         return transformer
 
     def _convert_unet_backbone(
@@ -222,28 +262,35 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         scheduler = wrapper(scheduler)
         return scheduler
 
+    def _convert_vae(
+        self,
+        vae: AutoencoderKL,
+    ):
+        logger.info("VAE found, paralleling vae...")
+        vae.decoder = DecoderAdapter(vae.decoder)
+        return vae
+
     @abstractmethod
     def __call__(self):
         pass
 
     def _set_extra_comm_tensor_for_pipeline(
-        self,
-        extra_tensors_shape_dict: List[Tuple[str, List[int], int]] = []
+        self, extra_tensors_shape_dict: List[Tuple[str, List[int], int]] = []
     ):
         if (
-            get_runtime_state().pipeline_comm_extra_tensors_info == \
-                extra_tensors_shape_dict
+            get_runtime_state().pipeline_comm_extra_tensors_info
+            == extra_tensors_shape_dict
         ):
             return
         for name, shape, cnt in extra_tensors_shape_dict:
             get_pp_group().set_extra_tensors_recv_buffer(name, shape, cnt)
         get_runtime_state().pipeline_comm_extra_tensors_info = extra_tensors_shape_dict
-        
+
     def _init_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
         latents_list = [
-            latents[:, :, start_idx: end_idx,:]
+            latents[:, :, start_idx:end_idx, :]
             for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global
         ]
         latents = torch.cat(latents_list, dim=-2)
@@ -253,7 +300,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
         latents_list = [
-            latents[:, :, :, start_idx: end_idx,:]
+            latents[:, :, :, start_idx:end_idx, :]
             for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global
         ]
         latents = torch.cat(latents_list, dim=-2)
@@ -275,11 +322,17 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 if num_pipeline_warmup_steps > 0
                 else latents
             )
-            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
+            patch_latents = list(
+                latents.split(get_runtime_state().pp_patches_height, dim=2)
+            )
         elif is_pipeline_last_stage():
-            patch_latents = list(latents.split(get_runtime_state().pp_patches_height, dim=2))
+            patch_latents = list(
+                latents.split(get_runtime_state().pp_patches_height, dim=2)
+            )
         else:
-            patch_latents = [None for _ in range(get_runtime_state().num_pipeline_patch)]
+            patch_latents = [
+                None for _ in range(get_runtime_state().num_pipeline_patch)
+            ]
 
         recv_timesteps = (
             num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
@@ -298,12 +351,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         concat_group_1: torch.Tensor,
     ):
         if get_classifier_free_guidance_world_size() == 1:
-            concat_group_0 = torch.cat(
-                [concat_group_0_negative, concat_group_0], dim=0
-            )
-            concat_group_1 = torch.cat(
-                [concat_group_1_negative, concat_group_1], dim=0
-            )
+            concat_group_0 = torch.cat([concat_group_0_negative, concat_group_0], dim=0)
+            concat_group_1 = torch.cat([concat_group_1_negative, concat_group_1], dim=0)
         elif get_classifier_free_guidance_rank() == 0:
             concat_group_0 = concat_group_0_negative
             concat_group_1 = concat_group_1_negative
@@ -320,9 +369,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         concat_group_0_negative: torch.Tensor,
     ):
         if get_classifier_free_guidance_world_size() == 1:
-            concat_group_0 = torch.cat(
-                [concat_group_0_negative, concat_group_0], dim=0
-            )
+            concat_group_0 = torch.cat([concat_group_0_negative, concat_group_0], dim=0)
         elif get_classifier_free_guidance_rank() == 0:
             concat_group_0 = concat_group_0_negative
         elif get_classifier_free_guidance_rank() == 1:

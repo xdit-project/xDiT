@@ -21,7 +21,7 @@
 - [🚀 QuickStart](#QuickStart)
 - [✨ the xDiT's secret weapons](#secrets)
   - [1. PipeFusion](#PipeFusion)
-  - [2. USP](#USP)
+  - [2. Unified Sequence Parallel](#USP)
   - [3. Hybrid Parallel](#hybrid_parallel)
   - [4. CFG Parallel](#cfg_parallel)
   - [5. Parallel VAE](#parallel_vae)
@@ -50,9 +50,12 @@ xDiT provides a suite of efficient parallel inference approaches for Diffusion M
 
 The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
 
-xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
+As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
 If the model you require is not available in the model zoo, developing it yourself is straightforward; please refer to our [Dev Guide](#dev-guide).
 
+<div align="center">
+    <img src="assets/methods/xdit_method.png" alt="xdit methods">
+</div>
 
 We also have implemented the following parallel stategies for reference:
 
@@ -100,14 +103,18 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
 
--  [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1)
--  [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
--  [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)
--  [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers)
--  [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha)
--  [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)
--  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
+| Model Name | CFG | SP | PipeFusion |
+| --- | --- | --- | --- |
+| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
+| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
+| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ❎ |
+| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ |
+| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ |
+| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ |
 
+### Supported by legacy version only:
+
+-  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 
 <h2 id="perf">📈 Performance</h2>
 
@@ -143,18 +150,26 @@ Here are the benchmark results for Pixart-Alpha using the 20-step DPM solver as 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
-1. Install yunchang for sequence parallel.
+### 1. Install from pip (current [version](./xfuser/__version__.py))
+
+```
+pip install xfuser
+```
+
+### 2. Install from source 
+
+#### 2.1 Install yunchang for sequence parallel.
 
 Install yunchang from [feifeibear/long-context-attention](https://github.com/feifeibear/long-context-attention).
 Please note that it has a dependency on flash attention and specific GPU model requirements. We recommend installing yunchang from the source code rather than using `pip install yunchang==0.2.0`.
 
-2. Install xDiT
+#### 2.2 Install xDiT
 
 ```
 python setup.py install
 ```
 
-3. Usage
+### 2. Usage
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
@@ -298,6 +313,13 @@ We also welcome developers to join and contribute more features and models to th
       eprint={2405.07719},
       archivePrefix={arXiv},
       primaryClass={cs.CV}
+}
+
+@article{fang2024unified,
+  title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
+  author={Fang, Jiarui and Zhao, Shangchun},
+  journal={arXiv preprint arXiv:2405.07719},
+  year={2024}
 }
 ```
 

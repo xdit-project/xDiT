@@ -17,7 +17,10 @@ set -x
 # The model is downloaded to a specified location on disk, 
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
-export MODEL_TYPE="Flux"
+
+export PYTHONPATH=$PWD:$PYTHONPATH
+
+export MODEL_TYPE="Pixart-alpha"
 
 CFG_ARGS="--use_cfg_parallel"
 
@@ -35,16 +38,20 @@ elif [ "$MODEL_TYPE" = "Sd3" ]; then
     export INFERENCE_STEP=20
 elif [ "$MODEL_TYPE" = "Flux" ]; then
     export SCRIPT=flux_example.py
-    export MODEL_ID="/cfs/dit/FLUX.1-schnell"
+    export MODEL_ID="/mnt/models/SD/FLUX.1-schnell"
     export INFERENCE_STEP=4
     # Flux does not apply cfg
     export CFG_ARGS=""
+elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
+    export SCRIPT=hunyuandit_example.py
+    export MODEL_ID="/mnt/models/SD/HunyuanDiT-v1.2-Diffusers"
+    export INFERENCE_STEP=20
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
 fi
 
-export PYTHONAPTH=$PWD:$PYTHONPATH
+
 
 mkdir -p ./results
 
@@ -64,6 +71,8 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 # Flux only supports SP, do not set the pipefusion degree
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
+elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 8 --ring_degree 1"
 fi
 
 

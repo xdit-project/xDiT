@@ -257,7 +257,7 @@ The code logic in `__call__` is inherited from the `__call__` function of the co
 ```python
         # 8. Decode latents (only rank 0)
 #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if is_dp_last_rank():
+        if is_dp_last_group():
 #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]

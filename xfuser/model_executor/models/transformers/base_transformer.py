@@ -3,14 +3,15 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch
 import torch.nn as nn
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_pipeline_parallel_rank,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     get_pipeline_parallel_world_size,
     get_sequence_parallel_world_size,
+    get_tensor_model_parallel_world_size,
 )
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.models import xFuserModelBaseWrapper
 
@@ -41,17 +42,22 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
         submodule_name_to_wrap: List = [],
         submodule_addition_args: Dict = {},
     ) -> nn.Module:
-        if get_pipeline_parallel_world_size() == 1 \
-            and get_sequence_parallel_world_size() == 1:
+        if (
+            get_pipeline_parallel_world_size() == 1
+            and get_sequence_parallel_world_size() == 1
+            and get_tensor_model_parallel_world_size() == 1
+        ):
             return transformer
         else:
             transformer = self._split_transformer_blocks(transformer)
-            return self._wrap_layers(
+            transformer = self._wrap_layers(
                 model=transformer,
                 submodule_classes_to_wrap=submodule_classes_to_wrap,
                 submodule_name_to_wrap=submodule_name_to_wrap,
                 submodule_addition_args=submodule_addition_args,
             )
+            self._register_cache()
+            return transformer
 
     def _split_transformer_blocks(
         self,
@@ -66,7 +72,9 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
             )
 
         # transformer layer split
-        attn_layer_num_for_pp = get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
+        attn_layer_num_for_pp = (
+            get_runtime_state().parallel_config.pp_config.attn_layer_num_for_pp
+        )
         pp_rank = get_pipeline_parallel_rank()
         pp_world_size = get_pipeline_parallel_world_size()
         if attn_layer_num_for_pp is not None:
@@ -115,7 +123,9 @@ class xFuserTransformerBaseWrapper(xFuserModelBaseWrapper, metaclass=ABCMeta):
 
         if get_runtime_state().patch_mode:
             height = (
-                get_runtime_state().pp_patches_height[get_runtime_state().pipeline_patch_idx]
+                get_runtime_state().pp_patches_height[
+                    get_runtime_state().pipeline_patch_idx
+                ]
                 // patch_size
             )
         else:

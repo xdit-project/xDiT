@@ -9,9 +9,7 @@ from diffusers.schedulers.scheduling_dpmsolver_multistep import (
     SchedulerOutput,
 )
 
-from xfuser.distributed import (
-    get_runtime_state
-)
+from xfuser.core.distributed import get_runtime_state
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper
 
@@ -69,12 +67,14 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
             or self.config.final_sigmas_type == "zero"
         )
         lower_order_second = (
-            (self.step_index == len(self.timesteps) - 2) and self.config.lower_order_final and len(self.timesteps) < 15
+            (self.step_index == len(self.timesteps) - 2)
+            and self.config.lower_order_final
+            and len(self.timesteps) < 15
         )
 
         model_output = self.convert_model_output(model_output, sample=sample)
 
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
         if (
             get_runtime_state().patch_mode
             and get_runtime_state().pipeline_patch_idx == 0
@@ -94,15 +94,21 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
             for i in range(self.config.solver_order - 1):
                 self.model_outputs[i] = self.model_outputs[i + 1]
 
-        if get_runtime_state().patch_mode and get_runtime_state().pipeline_patch_idx == 0:
+        if (
+            get_runtime_state().patch_mode
+            and get_runtime_state().pipeline_patch_idx == 0
+        ):
             assert len(self.model_outputs) >= 2
             self.model_outputs[-1] = torch.zeros_like(self.model_outputs[-2])
         if get_runtime_state().patch_mode:
             self.model_outputs[-1][
                 :,
                 :,
-                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]:
-                get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
+                get_runtime_state()
+                .pp_patches_start_idx_local[
+                    get_runtime_state().pipeline_patch_idx
+                ] : get_runtime_state()
+                .pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
                 :,
             ] = model_output
         else:
@@ -112,20 +118,26 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
         # for i in range(self.config.solver_order - 1):
         #     self.model_outputs[i] = self.model_outputs[i + 1]
         # self.model_outputs[-1] = model_output
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
 
         # Upcast to avoid precision issues when computing prev_sample
         sample = sample.to(torch.float32)
-        if self.config.algorithm_type in ["sde-dpmsolver", "sde-dpmsolver++"] and variance_noise is None:
+        if (
+            self.config.algorithm_type in ["sde-dpmsolver", "sde-dpmsolver++"]
+            and variance_noise is None
+        ):
             noise = randn_tensor(
-                model_output.shape, generator=generator, device=model_output.device, dtype=torch.float32,
+                model_output.shape,
+                generator=generator,
+                device=model_output.device,
+                dtype=torch.float32,
             )
         elif self.config.algorithm_type in ["sde-dpmsolver", "sde-dpmsolver++"]:
             noise = variance_noise.to(device=model_output.device, dtype=torch.float32)
         else:
             noise = None
 
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         if get_runtime_state().patch_mode:
             model_outputs = []
             for output in self.model_outputs:
@@ -133,21 +145,40 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
                     output[
                         :,
                         :,
-                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx]:
-                        get_runtime_state().pp_patches_start_idx_local[get_runtime_state().pipeline_patch_idx + 1],
+                        get_runtime_state()
+                        .pp_patches_start_idx_local[
+                            get_runtime_state().pipeline_patch_idx
+                        ] : get_runtime_state()
+                        .pp_patches_start_idx_local[
+                            get_runtime_state().pipeline_patch_idx + 1
+                        ],
                         :,
                     ]
                 )
         else:
             model_outputs = self.model_outputs
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+        #! ---------------------------------------- ADD ABOVE ----------------------------------------
 
-        if self.config.solver_order == 1 or self.lower_order_nums < 1 or lower_order_final:
-            prev_sample = self.dpm_solver_first_order_update(model_output, sample=sample, noise=noise)
-        elif self.config.solver_order == 2 or self.lower_order_nums < 2 or lower_order_second:
-            prev_sample = self.multistep_dpm_solver_second_order_update(model_outputs, sample=sample, noise=noise)
+        if (
+            self.config.solver_order == 1
+            or self.lower_order_nums < 1
+            or lower_order_final
+        ):
+            prev_sample = self.dpm_solver_first_order_update(
+                model_output, sample=sample, noise=noise
+            )
+        elif (
+            self.config.solver_order == 2
+            or self.lower_order_nums < 2
+            or lower_order_second
+        ):
+            prev_sample = self.multistep_dpm_solver_second_order_update(
+                model_outputs, sample=sample, noise=noise
+            )
         else:
-            prev_sample = self.multistep_dpm_solver_third_order_update(model_outputs, sample=sample)
+            prev_sample = self.multistep_dpm_solver_third_order_update(
+                model_outputs, sample=sample
+            )
 
         if self.lower_order_nums < self.config.solver_order:
             self.lower_order_nums += 1
@@ -156,10 +187,11 @@ class xFuserDPMSolverMultistepSchedulerWrapper(xFuserSchedulerBaseWrapper):
         prev_sample = prev_sample.to(model_output.dtype)
 
         # upon completion increase step index by one
-        #* increase step index only when the last pipeline patch is done (or not in patch mode)
+        # * increase step index only when the last pipeline patch is done (or not in patch mode)
         if (
             not get_runtime_state().patch_mode
-            or get_runtime_state().pipeline_patch_idx == get_runtime_state().num_pipeline_patch - 1
+            or get_runtime_state().pipeline_patch_idx
+            == get_runtime_state().num_pipeline_patch - 1
         ):
             self._step_index += 1
 

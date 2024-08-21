@@ -6,12 +6,10 @@ import torch.distributed
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
-    FlowMatchEulerDiscreteSchedulerOutput
+    FlowMatchEulerDiscreteSchedulerOutput,
 )
 
-from xfuser.distributed import (
-    get_runtime_state
-)
+from xfuser.core.distributed import get_runtime_state
 from .register import xFuserSchedulerWrappersRegister
 from .base_scheduler import xFuserSchedulerBaseWrapper
 
@@ -80,10 +78,17 @@ class xFuserFlowMatchEulerDiscreteSchedulerWrapper(xFuserSchedulerBaseWrapper):
 
         sigma = self.sigmas[self.step_index]
 
-        gamma = min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.0
+        gamma = (
+            min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1)
+            if s_tmin <= sigma <= s_tmax
+            else 0.0
+        )
 
         noise = randn_tensor(
-            model_output.shape, dtype=model_output.dtype, device=model_output.device, generator=generator
+            model_output.shape,
+            dtype=model_output.dtype,
+            device=model_output.device,
+            generator=generator,
         )
 
         eps = noise * s_noise
@@ -111,7 +116,8 @@ class xFuserFlowMatchEulerDiscreteSchedulerWrapper(xFuserSchedulerBaseWrapper):
         # upon completion increase step index by one
         if (
             not get_runtime_state().patch_mode
-            or get_runtime_state().pipeline_patch_idx == get_runtime_state().num_pipeline_patch - 1
+            or get_runtime_state().pipeline_patch_idx
+            == get_runtime_state().num_pipeline_patch - 1
         ):
             self._step_index += 1
 

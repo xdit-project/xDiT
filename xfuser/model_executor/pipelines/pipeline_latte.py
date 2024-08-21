@@ -4,22 +4,25 @@ from typing import List, Tuple, Callable, Optional, Union, Dict
 import torch
 import torch.distributed
 from diffusers import LattePipeline
-from diffusers.pipelines.latte.pipeline_latte import LattePipelineOutput, retrieve_timesteps
+from diffusers.pipelines.latte.pipeline_latte import (
+    LattePipelineOutput,
+    retrieve_timesteps,
+)
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.utils import deprecate
 
 
 from xfuser.config import EngineConfig
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_classifier_free_guidance_world_size,
     get_pipeline_parallel_world_size,
-    get_data_parallel_rank, 
+    get_data_parallel_rank,
     get_runtime_state,
     is_pipeline_first_stage,
 )
 
-from xfuser.distributed import (
+from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
@@ -30,8 +33,8 @@ from xfuser.distributed import (
     get_world_group,
     get_cfg_group,
     get_sp_group,
-    get_runtime_state, 
-    initialize_runtime_state
+    get_runtime_state,
+    initialize_runtime_state,
 )
 
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
@@ -75,7 +78,11 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         output_type: str = "pil",
         return_dict: bool = True,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         clean_caption: bool = True,
@@ -163,7 +170,9 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
         # 0. Default
-        decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else video_length
+        decode_chunk_size = (
+            decode_chunk_size if decode_chunk_size is not None else video_length
+        )
 
         # 1. Check inputs. Raise error if not correct
         height = height or self.transformer.config.sample_size * self.vae_scale_factor
@@ -195,7 +204,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        #* set runtime state input parameters
+        # * set runtime state input parameters
         get_runtime_state().set_video_input_parameters(
             height=height,
             width=width,
@@ -203,7 +212,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )
-        
+
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
@@ -216,12 +225,14 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
             clean_caption=clean_caption,
             mask_feature=mask_feature,
         )
-        
+
         if do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device, timesteps
+        )
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents.
@@ -242,17 +253,23 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        
+        num_warmup_steps = max(
+            len(timesteps) - num_inference_steps * self.scheduler.order, 0
+        )
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             latents = self._init_video_sync_pipeline(latents)
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                
+
+                latent_model_input = (
+                    torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                )
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
+
                 current_timestep = t
                 if not torch.is_tensor(current_timestep):
                     # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
@@ -262,12 +279,18 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                         dtype = torch.float32 if is_mps else torch.float64
                     else:
                         dtype = torch.int32 if is_mps else torch.int64
-                    current_timestep = torch.tensor([current_timestep], dtype=dtype, device=latent_model_input.device)
+                    current_timestep = torch.tensor(
+                        [current_timestep],
+                        dtype=dtype,
+                        device=latent_model_input.device,
+                    )
                 elif len(current_timestep.shape) == 0:
-                    current_timestep = current_timestep[None].to(latent_model_input.device)
+                    current_timestep = current_timestep[None].to(
+                        latent_model_input.device
+                    )
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 current_timestep = current_timestep.expand(latent_model_input.shape[0])
-                
+
                 noise_pred = self.transformer(
                     latent_model_input,
                     encoder_hidden_states=prompt_embeds,
@@ -275,21 +298,26 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                     enable_temporal_attentions=enable_temporal_attentions,
                     return_dict=False,
                 )[0]
-                
+
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
 
                 # use learned sigma?
                 if not (
                     hasattr(self.scheduler.config, "variance_type")
-                    and self.scheduler.config.variance_type in ["learned", "learned_range"]
+                    and self.scheduler.config.variance_type
+                    in ["learned", "learned_range"]
                 ):
                     noise_pred = noise_pred.chunk(2, dim=1)[0]
-                    
+
                 # compute previous video: x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
+
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
@@ -298,9 +326,13 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop(
+                        "negative_prompt_embeds", negative_prompt_embeds
+                    )
 
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:
@@ -311,19 +343,22 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                 latents_list += [
                     sp_latents_list[sp_patch_idx][
                         :,
-                        :, 
-                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
-                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
-                        :
+                        :,
+                        get_runtime_state()
+                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
+                        .pp_patches_start_idx_local[pp_patch_idx + 1],
+                        :,
                     ]
                     for sp_patch_idx in range(sp_degree)
                 ]
             latents = torch.cat(latents_list, dim=-2)
-        
+
         if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
             if not (output_type == "latents" or output_type == "latent"):
                 video = self.decode_latents(latents, video_length, decode_chunk_size=14)
-                video = self.video_processor.postprocess_video(video=video, output_type=output_type)
+                video = self.video_processor.postprocess_video(
+                    video=video, output_type=output_type
+                )
             else:
                 video = latents
 
@@ -334,7 +369,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                 return (video,)
 
             return LattePipelineOutput(frames=video)
-                
+
     @property
     def interrupt(self):
         return self._interrupt

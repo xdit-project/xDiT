@@ -6,15 +6,17 @@ import torch.nn as nn
 from diffusers.models.embeddings import PatchEmbed
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
-from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
+from diffusers.utils import (
+    is_torch_version,
+    scale_lora_layers,
+    USE_PEFT_BACKEND,
+    unscale_lora_layers,
+)
 
-from xfuser.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
-from xfuser.distributed import (
-    is_pipeline_first_stage,
-    is_pipeline_last_stage
-)
+from xfuser.core.distributed import is_pipeline_first_stage, is_pipeline_last_stage
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 
@@ -32,7 +34,9 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
             submodule_name_to_wrap=["attn"],
         )
-        self.encoder_hidden_states_cache = [None for _ in range(len(self.transformer_blocks))]
+        self.encoder_hidden_states_cache = [
+            None for _ in range(len(self.transformer_blocks))
+        ]
 
     def forward(
         self,
@@ -81,22 +85,24 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
                 "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
             )
 
-#! ---------------------------------------- MODIFIED BELOW ----------------------------------------
-        #* get height & width from runtime state
+        #! ---------------------------------------- MODIFIED BELOW ----------------------------------------
+        # * get height & width from runtime state
         height, width = self._get_patch_height_width()
 
-        #* only pp rank 0 needs pos_embed (patchify)
+        # * only pp rank 0 needs pos_embed (patchify)
         if is_pipeline_first_stage():
-            hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
+            hidden_states = self.pos_embed(
+                hidden_states
+            )  # takes care of adding positional embeddings too.
 
         #! ORIGIN:
         # height, width = hidden_states.shape[-2:]
         # hidden_states = self.pos_embed(hidden_states)  # takes care of adding positional embeddings too.
-#! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
+        #! ---------------------------------------- MODIFIED ABOVE ----------------------------------------
         temb = self.time_text_embed(timestep, pooled_projections)
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         if is_pipeline_first_stage():
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+            #! ---------------------------------------- ADD ABOVE ----------------------------------------
             encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
         for i, block in enumerate(self.transformer_blocks):
@@ -111,7 +117,9 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -121,24 +129,33 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
                 )
 
             else:
-                if get_runtime_state().patch_mode and get_runtime_state().pipeline_patch_idx == 0:
+                if (
+                    get_runtime_state().patch_mode
+                    and get_runtime_state().pipeline_patch_idx == 0
+                ):
                     self.encoder_hidden_states_cache[i] = encoder_hidden_states
                     encoder_hidden_states, hidden_states = block(
-                        hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        temb=temb,
                     )
                 elif get_runtime_state().patch_mode:
                     _, hidden_states = block(
-                        hidden_states=hidden_states, encoder_hidden_states=self.encoder_hidden_states_cache[i], temb=temb
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=self.encoder_hidden_states_cache[i],
+                        temb=temb,
                     )
                 else:
                     encoder_hidden_states, hidden_states = block(
-                        hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        temb=temb,
                     )
 
-        #* only the last pp rank needs unpatchify
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        # * only the last pp rank needs unpatchify
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         if is_pipeline_last_stage():
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+            #! ---------------------------------------- ADD ABOVE ----------------------------------------
             hidden_states = self.norm_out(hidden_states, temb)
             hidden_states = self.proj_out(hidden_states)
 
@@ -146,20 +163,35 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
             patch_size = self.config.patch_size
 
             hidden_states = hidden_states.reshape(
-                shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)
+                shape=(
+                    hidden_states.shape[0],
+                    height,
+                    width,
+                    patch_size,
+                    patch_size,
+                    self.out_channels,
+                )
             )
             hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
-            output = hidden_states.reshape(
-                shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
-            ), None
+            output = (
+                hidden_states.reshape(
+                    shape=(
+                        hidden_states.shape[0],
+                        self.out_channels,
+                        height * patch_size,
+                        width * patch_size,
+                    )
+                ),
+                None,
+            )
 
             if USE_PEFT_BACKEND:
                 # remove `lora_scale` from each PEFT layer
                 unscale_lora_layers(self, lora_scale)
-#! ---------------------------------------- ADD BELOW ----------------------------------------
+        #! ---------------------------------------- ADD BELOW ----------------------------------------
         else:
             output = hidden_states, encoder_hidden_states
-#! ---------------------------------------- ADD ABOVE ----------------------------------------
+        #! ---------------------------------------- ADD ABOVE ----------------------------------------
 
         if not return_dict:
             return (output,)

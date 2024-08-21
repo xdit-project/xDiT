@@ -4,6 +4,7 @@ from xfuser.model_executor.pipelines import (
     xFuserStableDiffusion3Pipeline,
     xFuserFluxPipeline,
     xFuserLattePipeline,
+    xFuserHunyuanDiTPipeline,
     xFuserCogVideoXPipeline,
 )
 from xfuser.config import xFuserArgs, EngineConfig
@@ -14,6 +15,7 @@ __all__ = [
     "xFuserStableDiffusion3Pipeline",
     "xFuserFluxPipeline",
     "xFuserLattePipeline",
+    "xFuserHunyuanDiTPipeline",
     "xFuserCogVideoXPipeline",
     "xFuserArgs",
     "EngineConfig",

@@ -29,7 +29,7 @@ The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following pic
 </div>
 
 
-We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown bolow. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](assets/doc/FID.md).
+We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown bolow. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](../../docs/fid/FID.md).
 
 <div align="center">
     <img src="../../assets/image_quality.png" alt="image_quality">

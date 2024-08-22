@@ -162,6 +162,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         width = width or self.transformer.config.sample_size * self.vae_scale_factor_spatial
         num_videos_per_prompt = 1
 
+        print(f"CHECK pipeline start")
+        
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
@@ -190,10 +192,12 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
         
+        print(f"CHECK pipeline 2")
+        
         get_runtime_state().set_video_input_parameters(
             height=height,
             width=width,
-            video_length=num_frames,
+            num_frames=num_frames,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )
@@ -237,6 +241,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            print(f"CHECK get_runtime_state().patch_mode: {get_runtime_state().patch_mode}")
             # for DPM-solver++
             old_pred_original_sample = None
             for i, t in enumerate(timesteps):
@@ -249,6 +254,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
 
+                print(f"CHECK pipeline input latent_model_input: {latent_model_input.shape}")
+                
                 # predict noise model_output
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
@@ -267,6 +274,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
+                print(f"CHECK pipeline 3")
+                
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler, CogVideoXDPMScheduler):
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]

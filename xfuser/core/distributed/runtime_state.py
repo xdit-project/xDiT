@@ -83,7 +83,8 @@ class RuntimeState(metaclass=ABCMeta):
 class DiTRuntimeState(RuntimeState):
     patch_mode: bool
     pipeline_patch_idx: int
-    vae_scale_factor: int
+    vae_scale_factor_spatial: int
+    vae_scale_factor_temporal: int
     backbone_patch_size: int
     pp_patches_height: Optional[List[int]]
     pp_patches_start_idx_local: Optional[List[int]]
@@ -103,8 +104,9 @@ class DiTRuntimeState(RuntimeState):
         self._check_model_and_parallel_config(
             pipeline=pipeline, parallel_config=config.parallel_config
         )
-        self._set_model_parameters(
-            vae_scale_factor=pipeline.vae_scale_factor_spatial,
+        self._set_cogvideox_parameters(
+            vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
+            vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
             backbone_patch_size=pipeline.transformer.config.patch_size,
             backbone_in_channel=pipeline.transformer.config.in_channels,
             backbone_inner_dim=pipeline.transformer.config.num_attention_heads
@@ -142,7 +144,7 @@ class DiTRuntimeState(RuntimeState):
         self,
         height: Optional[int] = None,
         width: Optional[int] = None,
-        video_length: Optional[int] = None,
+        num_frames: Optional[int] = None,
         batch_size: Optional[int] = None,
         num_inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
@@ -158,10 +160,10 @@ class DiTRuntimeState(RuntimeState):
         if (
             (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
-            or (video_length and self.input_config.video_length != video_length)
+            or (num_frames and self.input_config.num_frames != num_frames)
             or (batch_size and self.input_config.batch_size != batch_size)
         ):
-            self._video_input_size_change(height, width, video_length, batch_size)
+            self._video_input_size_change(height, width, num_frames, batch_size)
 
         self.ready = True
 
@@ -202,6 +204,20 @@ class DiTRuntimeState(RuntimeState):
         self.backbone_patch_size = backbone_patch_size
         self.backbone_inner_dim = backbone_inner_dim
         self.backbone_in_channel = backbone_in_channel
+    
+    def _set_cogvideox_parameters(
+        self,
+        vae_scale_factor_spatial: int,
+        vae_scale_factor_temporal: int,
+        backbone_patch_size: int,
+        backbone_inner_dim: int,
+        backbone_in_channel: int,
+    ):
+        self.vae_scale_factor_spatial = vae_scale_factor_spatial
+        self.vae_scale_factor_temporal = vae_scale_factor_temporal
+        self.backbone_patch_size = backbone_patch_size
+        self.backbone_inner_dim = backbone_inner_dim
+        self.backbone_in_channel = backbone_in_channel
 
     def _input_size_change(
         self,
@@ -219,12 +235,12 @@ class DiTRuntimeState(RuntimeState):
         self,
         height: Optional[int] = None,
         width: Optional[int] = None,
-        video_length: Optional[int] = None,
+        num_frames: Optional[int] = None,
         batch_size: Optional[int] = None,
     ):
         self.input_config.height = height or self.input_config.height
         self.input_config.width = width or self.input_config.width
-        self.input_config.video_length = video_length or self.input_config.video_length
+        self.input_config.num_frames = num_frames or self.input_config.num_frames
         self.input_config.batch_size = batch_size or self.input_config.batch_size
         self._calc_patches_metadata()
         self._reset_recv_buffer()
@@ -233,9 +249,9 @@ class DiTRuntimeState(RuntimeState):
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size
-        vae_scale_factor = self.vae_scale_factor
-        latents_height = self.input_config.height // vae_scale_factor
-        latents_width = self.input_config.width // vae_scale_factor
+        vae_scale_factor_spatial = self.vae_scale_factor_spatial
+        latents_height = self.input_config.height // vae_scale_factor_spatial
+        latents_width = self.input_config.width // vae_scale_factor_spatial
 
         if latents_height % num_sp_patches != 0:
             raise ValueError(

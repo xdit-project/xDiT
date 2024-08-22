@@ -43,6 +43,7 @@ def main():
         height=input_config.height,
         width=input_config.width,
         num_frames=49,
+        # prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         guidance_scale=6,
@@ -52,7 +53,7 @@ def main():
     end_time = time.time()
     elapsed_time = end_time - start_time
     peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
-
+    
     if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
         export_to_video(output, "results/output.mp4", fps=8)
         

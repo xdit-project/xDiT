@@ -3,10 +3,10 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from diffusers.models.embeddings import PatchEmbed
+from diffusers.models.embeddings import PatchEmbed, CogVideoXPatchEmbed
 
 from diffusers.models import CogVideoXTransformer3DModel
-from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
 
 from xfuser.model_executor.models import xFuserModelBaseWrapper
@@ -41,10 +41,11 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
+            submodule_classes_to_wrap=[nn.Conv2d, CogVideoXPatchEmbed],
             submodule_name_to_wrap=["attn1"]
         )
-        
+    
+    @xFuserBaseWrapper.forward_check_condition
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -67,7 +68,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
-
+        print(f"after patch_embed hidden_states.shape: {hidden_states.shape}")
         # 3. Position embedding
         seq_length = height * width * num_frames // (self.config.patch_size**2)
 

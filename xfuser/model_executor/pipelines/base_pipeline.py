@@ -6,6 +6,9 @@ import torch.distributed
 import torch.nn as nn
 
 from diffusers import DiffusionPipeline
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+
+from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
 from xfuser.config.config import (
     EngineConfig,
     InputConfig,
@@ -66,6 +69,9 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         if scheduler is not None:
             pipeline.scheduler = self._convert_scheduler(scheduler)
+
+        if vae is not None and engine_config.runtime_config.use_parallel_vae:
+            pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
 
@@ -255,6 +261,14 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         wrapper = xFuserSchedulerWrappersRegister.get_wrapper(scheduler)
         scheduler = wrapper(scheduler)
         return scheduler
+
+    def _convert_vae(
+        self,
+        vae: AutoencoderKL,
+    ):
+        logger.info("VAE found, paralleling vae...")
+        vae.decoder = DecoderAdapter(vae.decoder)
+        return vae
 
     @abstractmethod
     def __call__(self):

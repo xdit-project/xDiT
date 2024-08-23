@@ -68,7 +68,6 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
-        print(f"after patch_embed hidden_states.shape: {hidden_states.shape}")
         # 3. Position embedding
         seq_length = height * width * num_frames // (self.config.patch_size**2)
 

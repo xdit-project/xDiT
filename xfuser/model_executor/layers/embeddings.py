@@ -138,7 +138,6 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
         image_embeds = image_embeds.view(batch, num_frames, *image_embeds.shape[1:])
         image_embeds = image_embeds.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
         image_embeds = image_embeds.flatten(1, 2)  # [batch, num_frames x height x width, channels]
-        image_embeds = image_embeds.to(text_embeds.device)
 
         # if get_runtime_state().patch_mode:
         #     start, end = get_runtime_state().pp_patches_token_start_end_idx_global[

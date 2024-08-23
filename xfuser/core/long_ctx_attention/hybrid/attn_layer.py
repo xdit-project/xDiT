@@ -83,7 +83,6 @@ class xFuserLongContextAttention(LongContextAttention):
             query_layer, key_layer, value_layer = qkv
 
         else:
-            print(f"CHECK rank: {torch.distributed.get_rank()} query device: {query.device}")
             query_layer = SeqAllToAll4D.apply(
                 self.ulysses_pg, query, self.scatter_idx, self.gather_idx
             )

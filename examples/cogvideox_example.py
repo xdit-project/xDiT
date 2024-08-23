@@ -26,20 +26,29 @@ def main():
     ).to(f"cuda:{local_rank}")
 
     # NOTE DO NOT CALL THIS FUNCTION
-    # pipe.enable_model_cpu_offload()
+    pipe.enable_model_cpu_offload()
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
+    
+    prompt_embeds, _ = pipe.encode_prompt(
+        prompt=input_config.prompt,
+        do_classifier_free_guidance=True,
+        num_videos_per_prompt=1,
+        max_sequence_length=226,
+        device=f"cuda:{local_rank}",
+        dtype=torch.float16,
+    )
     
     output = pipe(
         height=input_config.height,
         width=input_config.width,
         num_frames=49,
-        prompt=input_config.prompt,
+        # prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         guidance_scale=6,
-        # prompt_embeds=prompt_embeds,
+        prompt_embeds=prompt_embeds,
     ).frames[0]
     
     end_time = time.time()

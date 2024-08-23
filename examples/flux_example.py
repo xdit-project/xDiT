@@ -31,9 +31,6 @@ def main():
             raise ValueError(
                 "Sequential CPU offload is not supported in parallel mode."
             )
-            raise ValueError(
-                "Sequential CPU offload is not supported in parallel mode."
-            )
     pipe.prepare_run(input_config)
 
     torch.cuda.reset_peak_memory_stats()

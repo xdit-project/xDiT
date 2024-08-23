@@ -30,6 +30,7 @@ def main():
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
 
+
     pipe.prepare_run(input_config)
 
     torch.cuda.reset_peak_memory_stats()

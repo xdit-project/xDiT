@@ -20,9 +20,9 @@ set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 
-export MODEL_TYPE="Pixart-alpha"
+export MODEL_TYPE="HunyuanDiT"
 
-CFG_ARGS="--use_cfg_parallel"
+# CFG_ARGS="--use_cfg_parallel"
 
 if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
     export SCRIPT=pixartalpha_example.py
@@ -57,7 +57,7 @@ mkdir -p ./results
 
 for HEIGHT in 1024
 do
-for N_GPUS in 8;
+for N_GPUS in 4;
 do 
 
 TASK_ARGS="--height $HEIGHT \
@@ -72,7 +72,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 8 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 4 --ulysses_degree 1 --ring_degree 1"
 fi
 
 
@@ -81,6 +81,8 @@ fi
 
 # For high-resolution images, we use the latent output type to avoid runing the vae module. Used for measuring speed.
 # OUTPUT_ARGS="--output_type latent"
+
+# PARALLLEL_VAE="--use_parallel_vae"
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
@@ -91,7 +93,8 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
 --prompt "A small dog" \
-$CFG_ARGS
+$CFG_ARGS \
+$PARALLLEL_VAE
 
 done
 done

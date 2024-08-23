@@ -1,7 +1,7 @@
 # Pixart-Alpha Legacy Version Performance
 
 Here are the benchmark results for Pixart-Alpha using the 20-step DPM solver as the scheduler across various image resolutions. 
-To replicate these findings, please refer to the script at [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh).
+To replicate these findings, please refer to the script at [legacy/scripts/benchmark.sh](../../legacy/scripts/benchmark.sh).
 
 1. The Latency on 4xA100-80GB (PCIe)
 

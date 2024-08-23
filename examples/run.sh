@@ -20,9 +20,9 @@ set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 
-export MODEL_TYPE="HunyuanDiT"
+export MODEL_TYPE="Flux"
 
-# CFG_ARGS="--use_cfg_parallel"
+CFG_ARGS="--use_cfg_parallel"
 
 if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
     export SCRIPT=pixartalpha_example.py
@@ -72,7 +72,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 4 --ulysses_degree 1 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 4 --ring_degree 1"
 fi
 
 

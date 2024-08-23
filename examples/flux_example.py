@@ -22,15 +22,15 @@ def main():
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.bfloat16,
-    ).to(f"cuda:{local_rank}")
+    )
 
     if args.enable_sequential_cpu_offload:
-        if get_world_group().world_size == 1:
-            pipe.enable_sequential_cpu_offload()
-        else:
-            raise ValueError(
-                "Sequential CPU offload is not supported in parallel mode."
-            )
+        pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
+        print(f"rank {local_rank} Sequential CPU offload enabled")
+    else:
+        pipe = pipe.to(f"cuda:{local_rank}")
+
+
     pipe.prepare_run(input_config)
 
     torch.cuda.reset_peak_memory_stats()

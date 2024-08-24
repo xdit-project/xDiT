@@ -33,9 +33,9 @@ def main():
 
     if get_world_group().world_size > 1:
         logging.warning(
-            f"world size: {get_world_group().world_size} > 1, can not use torch compile"
+            f"world size: {get_world_group().world_size} > 1, can not use torch compile, set use_torch_compile = False"
         )
-        args.use_torch_compile = False
+        engine_args.use_torch_compile = False
 
     pipe.prepare_run(input_config, max_sequence_length=256)
 

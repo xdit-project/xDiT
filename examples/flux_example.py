@@ -1,3 +1,4 @@
+import logging
 import time
 import torch
 import torch.distributed
@@ -30,7 +31,13 @@ def main():
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
 
-    pipe.prepare_run(input_config)
+    if get_world_group().world_size > 1:
+        logging.warning(
+            f"world size: {get_world_group().world_size} > 1, can not use torch compile"
+        )
+        args.use_torch_compile = False
+
+    pipe.prepare_run(input_config, max_sequence_length=256)
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

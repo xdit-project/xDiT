@@ -27,7 +27,7 @@ def main():
 
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
-        print(f"rank {local_rank} Sequential CPU offload enabled")
+        logging.info(f"rank {local_rank} sequential CPU offload enabled")
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
 

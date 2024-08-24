@@ -39,6 +39,7 @@ class xFuserLongContextAttention(LongContextAttention):
             )
         self.ring_attn_fn = RING_IMPL_DICT[ring_impl_type]
 
+    @torch.compiler.disable
     def forward(
         self,
         attn,
@@ -124,6 +125,7 @@ class xFuserLongContextAttention(LongContextAttention):
 
 
 class xFuserJointLongContextAttention(xFuserLongContextAttention):
+    @torch.compiler.disable
     def forward(
         self,
         attn,
@@ -219,6 +221,7 @@ class xFuserJointLongContextAttention(xFuserLongContextAttention):
 
 
 class xFuserFluxLongContextAttention(xFuserLongContextAttention):
+    @torch.compiler.disable
     def forward(
         self,
         attn,

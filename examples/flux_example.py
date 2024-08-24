@@ -1,3 +1,4 @@
+import logging
 import time
 import torch
 import torch.distributed
@@ -18,6 +19,12 @@ def main():
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
+
+    if get_world_group().world_size > 1 and args.use_torch_compile:
+        raise RuntimeError(
+            "torch.distributed.launch does not support when world size > 1, do not use --use_torch_compile"
+        )
+
     pipe = xFuserFluxPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
@@ -26,12 +33,11 @@ def main():
 
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
-        print(f"rank {local_rank} Sequential CPU offload enabled")
+        logging.info(f"rank {local_rank} sequential CPU offload enabled")
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
 
-
-    pipe.prepare_run(input_config)
+    pipe.prepare_run(input_config, max_sequence_length=256)
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

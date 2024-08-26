@@ -76,6 +76,8 @@ The overview of xDiT is shown as follows.
 
 
 <h2 id="updates">📢 Updates</h2>
+
+
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
 * 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example](examples/latte_example.py).
 * 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).
@@ -239,6 +241,7 @@ The (<span style="color: red;">xDiT</span>) highlights the methods first propose
     <img src="assets/methods/xdit_method.png" alt="xdit methods">
 </div>
 
+
 The communication and memory costs associated with the aforementioned intra-image parallelism, except for the CFG and DP (they are inter-image parallel), in DiTs are detailed in the table below. (* denotes that communication can be overlapped with computation.)
 
 As we can see, PipeFusion and Sequence Parallel achieve lowest communication cost on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
@@ -286,6 +289,7 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 [Patch Parallel VAE](./docs/methods/parallel_vae.md)
 
 <h3 id="compilation">Compilation Acceleration</h3>
+
 We utilize two compilation acceleration techniques, [torch.compile](https://pytorch.org/tutorials/intermediate/torch_compile_tutorial.html) and [onediff](https://github.com/siliconflow/onediff), to enhance runtime speed on GPUs. These compilation accelerations are used in conjunction with parallelization methods.
 
 We employ the nexfort backend of onediff. Please install it before use:

@@ -4,7 +4,6 @@
   
   <picture>
     <img alt="xDiT" src="./assets/XDiTlogo.png" width=50%>
-
   </picture>
 
   </p>
@@ -44,7 +43,8 @@ Consequently, multi-GPU and multi-machine deployments are essential to maintain 
 
 To meet real-time demand for DiTs applications, parallel inference is a must.
 xDiT is an inference engine designed for the parallel deployment of DiTs on large scale. 
-xDiT provides a suite of efficient parallel inference approaches for Diffusion Models.
+xDiT provides a suite of efficient parallel inference approaches for Diffusion Models, as well as GPU kernel accelerations.
+
 
 1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention.
 
@@ -67,6 +67,12 @@ We also have implemented the following parallel stategies for reference:
 
 Optimization orthogonal to parallelization focuses on accelerating single GPU performance. 
 In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
+
+The overview of xDiT is shown as follows.
+
+<picture>
+  <img alt="xDiT" src="./assets/methods/xdit_overview.png">
+</picture>
 
 
 <h2 id="updates">📢 Updates</h2>

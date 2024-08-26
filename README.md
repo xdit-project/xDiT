@@ -295,7 +295,7 @@ We utilize two compilation acceleration techniques, [torch.compile](https://pyto
 We employ the nexfort backend of onediff. Please install it before use:
 
 ```
-pip install onediffx
+pip install onediff
 pip install -U nexfort
 ```
 

@@ -84,6 +84,7 @@ fi
 
 # PARALLLEL_VAE="--use_parallel_vae"
 
+# Another compile option is `--use_onediff` which will use onediff's compiler.
 COMPILE_FLAG="--use_torch_compile"
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \

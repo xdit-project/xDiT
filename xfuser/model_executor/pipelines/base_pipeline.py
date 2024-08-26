@@ -72,7 +72,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             pipeline.transformer = self._convert_transformer_backbone(
                 transformer,
                 enable_torch_compile=engine_config.runtime_config.use_torch_compile,
-                enable_one_diff=engine_config.runtime_config.use_one_diff,
+                enable_onediff=engine_config.runtime_config.use_onediff,
             )
         elif unet is not None:
             pipeline.unet = self._convert_unet_backbone(unet)
@@ -225,7 +225,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         initialize_runtime_state(pipeline=pipeline, engine_config=engine_config)
 
     def _convert_transformer_backbone(
-        self, transformer: nn.Module, enable_torch_compile: bool, enable_one_diff: bool
+        self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool
     ):
         if (
             get_pipeline_parallel_world_size() == 1
@@ -242,22 +242,22 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             wrapper = xFuserTransformerWrappersRegister.get_wrapper(transformer)
             transformer = wrapper(transformer)
 
-        if enable_torch_compile and enable_one_diff:
+        if enable_torch_compile and enable_onediff:
             logger.warning(
-                f"apply --use_torch_compile and --use_one_diff togather. we use torch compile only"
+                f"apply --use_torch_compile and --use_onediff togather. we use torch compile only"
             )
 
-        if enable_torch_compile or enable_one_diff:
+        if enable_torch_compile or enable_onediff:
             if getattr(transformer, "forward") is not None:
                 if enable_torch_compile:
                     optimized_transformer_forward = torch.compile(
                         getattr(transformer, "forward")
                     )
-                elif enable_one_diff:
+                elif enable_onediff:
                     # O3: +fp16 reduction
                     if not HAS_OF:
                         raise RuntimeError(
-                            "install onediff and nexfort to --use_one_diff"
+                            "install onediff and nexfort to --use_onediff"
                         )
                     options = {"mode": "O3"}  # mode can be O2 or O3
                     optimized_transformer_forward = od_compile(

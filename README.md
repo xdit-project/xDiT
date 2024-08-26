@@ -10,6 +10,10 @@
   </p>
   <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
   <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> </strong>
+  <p></p>
+
+[![](https://dcbadge.limes.pink/api/server/https://discord.gg/YEWzWfCF9S)](https://discord.gg/YEWzWfCF9S)
+
 </div>
 
 <h2 id="agenda">Table of Contents</h2>
@@ -118,34 +122,9 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 <h2 id="perf">📈 Performance</h2>
 
-Here are the benchmark results for Pixart-Alpha using the 20-step DPM solver as the scheduler across various image resolutions. To replicate these findings, please refer to the script at [./legacy/scripts/benchmark.sh](./legacy/scripts/benchmark.sh).
+1. [Flux Performance](./docs/performance/flux.md)
 
-**TBD**: Updates results on hybrid parallelism.
-
-1. The Latency on 4xA100-80GB (PCIe)
-
-<div align="center">
-    <img src="./assets/latency-A100-PCIe.png" alt="A100 PCIe latency">
-</div>
-
-2. The Latency on 8xL20-48GB (PCIe)
-
-<div align="center">
-    <img src="./assets/latency-L20.png" alt="L20 latency">
-</div>
-
-3. The Latency on 8xA100-80GB (NVLink)
-
-<div align="center">
-    <img src="./assets/latency-A100-NVLink.png" alt="latency-A100-NVLink">
-</div>
-
-4. The Latency on 4xT4-16GB (PCIe)
-
-<div align="center">
-    <img src="./assets/latency-T4.png" 
-    alt="latency-T4">
-</div>
+2. [Pixart-Alpha Legacy Performance](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

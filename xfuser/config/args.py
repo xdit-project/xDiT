@@ -90,6 +90,7 @@ class xFuserArgs:
     no_use_resolution_binning: bool = False
     seed: int = 42
     output_type: str = "pil"
+    enable_sequential_cpu_offload: bool = False
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -215,6 +216,11 @@ class xFuserArgs:
             type=str,
             default="pil",
             help="Output type of the pipeline.",
+        )
+        runtime_group.add_argument(
+            "--enable_sequential_cpu_offload",
+            action="store_true",
+            help="Offloading the weights to the CPU.",
         )
 
         return parser

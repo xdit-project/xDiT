@@ -22,7 +22,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 export MODEL_TYPE="Flux"
 
-CFG_ARGS="--use_cfg_parallel"
+# CFG_ARGS="--use_cfg_parallel"
 
 if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
     export SCRIPT=pixartalpha_example.py
@@ -55,9 +55,9 @@ fi
 
 mkdir -p ./results
 
-for HEIGHT in 1024 2048
+for HEIGHT in 1024
 do
-for N_GPUS in 8;
+for N_GPUS in 2;
 do 
 
 TASK_ARGS="--height $HEIGHT \
@@ -70,7 +70,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 
 # Flux only supports SP, do not set the pipefusion degree
 if [ "$MODEL_TYPE" = "Flux" ]; then
-PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 4"
+PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
 fi
@@ -82,6 +82,11 @@ fi
 # For high-resolution images, we use the latent output type to avoid runing the vae module. Used for measuring speed.
 # OUTPUT_ARGS="--output_type latent"
 
+# PARALLLEL_VAE="--use_parallel_vae"
+
+for FLAG in "--use_one_diff"
+do
+
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
@@ -92,7 +97,10 @@ $OUTPUT_ARGS \
 --warmup_steps 0 \
 --prompt "A small dog" \
 $CFG_ARGS \
---use_torch_compile
+$FLAG \
+--use_one_diff
+
+done
 
 done
 done

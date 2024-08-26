@@ -59,7 +59,11 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         return cls(pipeline, engine_config)
 
     def prepare_run(
-        self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
+        self,
+        input_config: InputConfig,
+        max_sequence_length,
+        steps: int = 3,
+        sync_steps: int = 1,
     ):
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
@@ -70,6 +74,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             prompt=prompt,
             num_inference_steps=steps,
             output_type="latent",
+            max_sequence_length=max_sequence_length,
             generator=torch.Generator(device="cuda").manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -317,6 +322,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 latents = (
                     latents / self.vae.config.scaling_factor
                 ) + self.vae.config.shift_factor
+
                 image = self.vae.decode(latents, return_dict=False)[0]
                 image = self.image_processor.postprocess(image, output_type=output_type)
 

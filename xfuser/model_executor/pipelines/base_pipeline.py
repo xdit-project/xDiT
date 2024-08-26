@@ -37,6 +37,15 @@ PACKAGES_CHECKER.check_diffusers_version()
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
 
+try:
+    import os
+    from onediff.infer_compiler import compile as od_compile
+
+    HAS_OF = True
+    os.environ["NEXFORT_FUSE_TIMESTEP_EMBEDDING"] = "0"
+    os.environ["NEXFORT_FX_FORCE_TRITON_SDPA"] = "1"
+except:
+    HAS_OF = False
 
 logger = init_logger(__name__)
 
@@ -63,6 +72,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             pipeline.transformer = self._convert_transformer_backbone(
                 transformer,
                 enable_torch_compile=engine_config.runtime_config.use_torch_compile,
+                enable_one_diff=engine_config.runtime_config.use_one_diff,
             )
         elif unet is not None:
             pipeline.unet = self._convert_unet_backbone(unet)
@@ -215,9 +225,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         initialize_runtime_state(pipeline=pipeline, engine_config=engine_config)
 
     def _convert_transformer_backbone(
-        self,
-        transformer: nn.Module,
-        enable_torch_compile: bool,
+        self, transformer: nn.Module, enable_torch_compile: bool, enable_one_diff: bool
     ):
         if (
             get_pipeline_parallel_world_size() == 1
@@ -234,11 +242,29 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             wrapper = xFuserTransformerWrappersRegister.get_wrapper(transformer)
             transformer = wrapper(transformer)
 
-        if enable_torch_compile:
+        if enable_torch_compile and enable_one_diff:
+            logger.warning(
+                f"apply --use_torch_compile and --use_one_diff togather. we use torch compile only"
+            )
+
+        if enable_torch_compile or enable_one_diff:
             if getattr(transformer, "forward") is not None:
-                optimized_transformer_forward = torch.compile(
-                    getattr(transformer, "forward")
-                )
+                if enable_torch_compile:
+                    optimized_transformer_forward = torch.compile(
+                        getattr(transformer, "forward")
+                    )
+                elif enable_one_diff:
+                    # O3: +fp16 reduction
+                    if not HAS_OF:
+                        raise RuntimeError(
+                            "install onediff and nexfort to --use_one_diff"
+                        )
+                    options = {"mode": "O3"}  # mode can be O2 or O3
+                    optimized_transformer_forward = od_compile(
+                        getattr(transformer, "forward"),
+                        backend="nexfort",
+                        options=options,
+                    )
                 setattr(transformer, "forward", optimized_transformer_forward)
             else:
                 raise AttributeError(

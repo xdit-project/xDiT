@@ -1,7 +1,7 @@
 set -x
 
-MODEL="/mnt/models/SD/PixArt-XL-2-1024-MS"
-SCRIPT="./examples/pixartalpha_example.py"
+# MODEL="/mnt/models/SD/PixArt-XL-2-1024-MS"
+# SCRIPT="./examples/pixartalpha_example.py"
 
 # MODEL="/mnt/models/SD/stable-diffusion-3-medium-diffusers"
 # SCRIPT="./examples/sd3_example.py"

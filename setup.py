@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
     setup(
         name="xfuser",
-        author="Jiannan Wang, Jiarui Fang, Jinzhe Pan, Aoyu Li",
+        author="xDiT Team",
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
@@ -21,7 +21,7 @@ if __name__ == "__main__":
             "accelerate==0.33.0",
             "beautifulsoup4>=4.12.3",
             "distvae",
-            "ftfy>=6.2.0",
+            "yunchang==0.2",
         ],
         url="https://github.com/xdit-project/xDiT.",
         description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",

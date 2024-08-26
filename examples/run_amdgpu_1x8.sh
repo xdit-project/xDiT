@@ -1,26 +1,48 @@
+#!/usr/bin/bash
+SCRIPT_ROOT=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )
+
 set -x
 
-# export NCCL_PXN_DISABLE=1
-# # export NCCL_DEBUG=INFO
-# export NCCL_SOCKET_IFNAME=eth0
-# export NCCL_IB_GID_INDEX=3
-# export NCCL_IB_DISABLE=0
-# export NCCL_NET_GDR_LEVEL=2
-# export NCCL_IB_QPS_PER_CONNECTION=4
-# export NCCL_IB_TC=160
-# export NCCL_IB_TIMEOUT=22
-# export NCCL_P2P=0
-# export CUDA_DEVICE_MAX_CONNECTIONS=1
+# single node disable IB device
+export NCCL_IB_DISABLE=1
+export RCCL_IB_DISABLE=1
 
+# enable DMA buffer
+export NCCL_ENABLE_DMABUF_SUPPORT=1
+export RCCL_ENABLE_DMABUF_SUPPORT=1
+
+export NCCL_DEBUG=INFO
+export RCCL_DEBUG=INFO
+
+# enable sharp in multinodes config
 
 # Select the model type from Pixart-alpha, Pixart-sigma, Sd3, or Flux
 # The model is downloaded to a specified location on disk, 
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
 
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+MASTER_ADDR=localhost
+MASTER_PORT=$(shuf -n 1 -i 10000-65535)
+NNODES=1
+NODE_RANK=0
+
+OUTPUT_BASEPATH=$SCRIPT_ROOT
+
+# pipeline parallel
+PP=${PP:-2}
+
+# tensor parllel
+TP=${TP:-1}
+
+# ring deg
+CP=${CP:-1}
+
+
+
 export PYTHONPATH=$PWD:$PYTHONPATH
 
-export MODEL_TYPE="Flux"
+export MODEL_TYPE="Pixart-alpha"
 
 CFG_ARGS="--use_cfg_parallel"
 
@@ -52,13 +74,23 @@ else
 fi
 
 
-
 mkdir -p ./results
 
-for HEIGHT in 1024
-do
-for N_GPUS in 4;
-do 
+# for HEIGHT in 1024
+# do
+# for N_GPUS in 8;
+# do 
+
+HEIGHT=1024
+N_GPUS=8
+
+DISTR_ARGS="
+  --nproc_per_node $N_GPUS \
+  --nnodes $NNODES \
+  --node_rank $NODE_RANK \
+  --master_addr $MASTER_ADDR \
+  --master_port $MASTER_PORT
+"
 
 TASK_ARGS="--height $HEIGHT \
 --width $HEIGHT \
@@ -66,15 +98,18 @@ TASK_ARGS="--height $HEIGHT \
 "
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree $PP --ulysses_degree 2 --ring_degree $CP"
 
 # Flux only supports SP, do not set the pipefusion degree
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 4 --ring_degree 1"
+echo "change PP from $PP to 1"
+PP=1
+PARALLEL_ARGS="--pipefusion_parallel_degree $PP --ulysses_degree 8 --ring_degree $CP"
 fi
 
+echo "PARALLEL ARGS : ${PARALLEL_ARGS}"
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
 # PIPEFUSION_ARGS="--num_pipeline_patch 8 "
@@ -82,11 +117,9 @@ fi
 # For high-resolution images, we use the latent output type to avoid runing the vae module. Used for measuring speed.
 # OUTPUT_ARGS="--output_type latent"
 
-# PARALLLEL_VAE="--use_parallel_vae"
+mkdir -p ${OUTPUT_BASEPATH}/log/${MODEL_TYPE}
 
-COMPILE_FLAG="--use_torch_compile"
-
-torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
+torchrun $DISTR_ARGS $SCRIPT_ROOT/examples/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
 $TASK_ARGS \
@@ -96,10 +129,9 @@ $OUTPUT_ARGS \
 --warmup_steps 0 \
 --prompt "A small dog" \
 $CFG_ARGS \
-$PARALLLEL_VAE \
-$COMPILE_FLAG
+  &> ${OUTPUT_BASEPATH}/log/${MODEL_TYPE}/${NODE_RANK}.log
 
-done
-done
+# done
+# done
 
 

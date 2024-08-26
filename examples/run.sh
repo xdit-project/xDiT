@@ -84,6 +84,8 @@ fi
 
 # PARALLLEL_VAE="--use_parallel_vae"
 
+COMPILE_FLAG="--use_torch_compile"
+
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
@@ -94,7 +96,8 @@ $OUTPUT_ARGS \
 --warmup_steps 0 \
 --prompt "A small dog" \
 $CFG_ARGS \
-$PARALLLEL_VAE
+$PARALLLEL_VAE \
+$COMPILE_FLAG
 
 done
 done

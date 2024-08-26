@@ -20,7 +20,7 @@ set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 
-export MODEL_TYPE="Pixart-alpha"
+export MODEL_TYPE="Flux"
 
 CFG_ARGS="--use_cfg_parallel"
 
@@ -38,13 +38,13 @@ elif [ "$MODEL_TYPE" = "Sd3" ]; then
     export INFERENCE_STEP=20
 elif [ "$MODEL_TYPE" = "Flux" ]; then
     export SCRIPT=flux_example.py
-    export MODEL_ID="/mnt/models/SD/FLUX.1-schnell"
+    export MODEL_ID="/cfs/dit/FLUX.1-schnell"
     export INFERENCE_STEP=4
     # Flux does not apply cfg
     export CFG_ARGS=""
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
     export SCRIPT=hunyuandit_example.py
-    export MODEL_ID="/mnt/models/SD/HunyuanDiT-v1.2-Diffusers"
+    export MODEL_ID="/cfs/dit/HunyuanDiT-v1.2-Diffusers"
     export INFERENCE_STEP=20
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
@@ -55,7 +55,7 @@ fi
 
 mkdir -p ./results
 
-for HEIGHT in 1024
+for HEIGHT in 1024 2048
 do
 for N_GPUS in 8;
 do 
@@ -70,9 +70,9 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 
 # Flux only supports SP, do not set the pipefusion degree
 if [ "$MODEL_TYPE" = "Flux" ]; then
-PARALLEL_ARGS="--ulysses_degree $N_GPUS"
+PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 4"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 8 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
 fi
 
 
@@ -91,7 +91,8 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
 --prompt "A small dog" \
-$CFG_ARGS
+$CFG_ARGS \
+--use_torch_compile
 
 done
 done

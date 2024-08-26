@@ -11,7 +11,7 @@ except:
     print("base env does not provide torch distribution")
 
 ## Constant
-HIP_VESION_PAT = r'HIP version: (\S+)'
+HIP_VERSION_PAT = r'HIP version: (\S+)'
 HIP_SDK_ROOT = "/opt/rocm"
 # currently only support MI30X (MI308X, MI300XA) datacenter intelligent computing accelerator
 ALLOWED_AMDGPU_ARCHS = ["gfx942"]
@@ -46,6 +46,7 @@ def _is_hip() -> bool:
     # target_amdgpu_arch = result.stdout
     print(f"target AMD gpu arch {result.stdout}")
     return has_rocm
+    
 def get_hipcc_rocm_version():
     assert _is_hip()
 
@@ -60,7 +61,7 @@ def get_hipcc_rocm_version():
         return None
 
     # Extract the version using a regular expression
-    match = re.search(HIP_VESION_PAT, result.stdout)
+    match = re.search(HIP_VERSION_PAT, result.stdout)
     if match:
         # Return the version string
         return match.group(1)

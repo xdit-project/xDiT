@@ -15,29 +15,40 @@ Currently, xDiT does not support PipeFusion for the Flux.1 schnell variant due t
 
 Additionally, since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatible with cfg parallel.
 
-### 扩展性展示
+### Scalability
 
-On an 8xA100 (80GB) GPUs interconnected via NVLink, the optimal strategy for USP is to allocate all parallelism to Ulysses. 
-The latency of a 1024px image generation in just 0.93 seconds and a 2048px image in 2.63 seconds, achieving a 4.2x speedup compared to a single A100. 
-The speedup is even more pronounced for higher resolution images, such as 4096px, where a 7.4x speedup is achieved.
+We conducted performance benchmarking using FLUX.1 [schnell] with 4 steps.
 
-
-<div align="center">
-    <img src="../../assets/performance/flux/flux_a100.jpg" 
-    alt="latency-flux_a100">
-</div>
-
-On an 8xL40 GPUs interconnected via PCIe Gen4, xDiT also demonstrates significant acceleration at a 4-GPU scale. 
-For a 1024px image, using a configuration with ulysses_degree=2 and ring_degree=2 results in lower latency compared to using Ulysses or ring alone, with an image generation time of 1.21 seconds. 
-However, using 8 GPUs can actually slow down the process due to communication traffic going through QPI. 
-For a 2048px image, an 8-GPU setup still achieves a 4x speedup.
- We anticipate that the integration of PipeFusion will enhance the scalability of the 8-GPU configuration.
+On a machine with 8xA100 (80GB) GPUs interconnected via NVLink, generating a 1024px image, the optimal strategy with USP is to apply ulysses_degree=#gpu. After using `torch.compile`, the generation of a 1024px image takes only 0.82 seconds!
 
 <div align="center">
-    <img src="../../assets/performance/flux/flux_l40.jpg" 
-    alt="latency-flux_l40">
+    <img src="../../assets/performance/flux/Flux-1K-A100.png" 
+    alt="latency-flux_a100_1k">
 </div>
 
+On the same 8xA100 (80GB) NVLink-interconnected machine, generating a 2048px image, after using `torch.compile`, the generation of a 2048px image takes only 2.4 seconds!
+
+<div align="center">
+    <img src="../../assets/performance/flux/Flux-2K-A100.png" 
+    alt="latency-flux_a100_2k">
+</div>
+
+On a machine with 8xL40 GPUs interconnected via PCIe Gen4, even with a 4-card setup using xDiT, there is significant acceleration. Generating a 1024px image with `ulysses_degree=2` and `ring_degree=2` results in lower latency compared to using Ulysses or ring alone, with a generation time of 1.41 seconds. Using 8xL40 actually slows down due to the need for QPI communication. 
+We anticipate that using PipeFusion will enhance the scalability of 8-card setups.
+
+We compared the performance of `torch.compile` and `onediff` on 1024px image generation tasks. On 1 and 8 GPUs, `torch.compile` performs slightly better, while on 2 and 4 GPUs, onediff performs slightly better.
+
+<div align="center">
+    <img src="../../assets/performance/flux/Flux-1k-L40.png" 
+    alt="latency-flux_l40_1k">
+</div>
+
+The performance of generating a 2048px image on 8xL40 GPUs is shown below. Due to the increased ratio of computation to communication, unlike the 1024px image generation tasks, using 8 GPUs results in lower latency compared to 4 cards, with the fastest image generation time reaching 3.67 seconds.
+
+<div align="center">
+    <img src="../../assets/performance/flux/Flux-2k-L40.png" 
+    alt="latency-flux_l40_2k">
+</div>
 
 ### Effect of VAE Parallel
 

@@ -18,23 +18,41 @@ xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少�
 
 
 ### 扩展性展示
+我们使用FLUX.1 [schnell]进行性能测试。
 
-在8xA100 (80GB) NVLink互联的机器上，USP最佳策略是把所有并行度都给Ulysses，生成1024px图片仅需0.93秒！生成2048px图片仅需2.63秒，相比单卡加速4.2倍。我们对更高分辨率图片生成加速效果更明显，比如4096px达到7.4x。
-
-
-<div align="center">
-    <img src="../../assets/performance/flux/flux_a100.jpg" 
-    alt="latency-flux_a100">
-</div>
-
-在PCIe Gen4互联的8xL40上，4卡规模xDiT也有很好的加速。生成1024px图片，使用ulysses_degree=2, ring_degree=2延迟低于单独使用ulysses或者ring，1.21秒可以生图。
-8卡相比反而会变慢，这是因为这是需要经过QPI通信。生成2048px，八卡也有4倍加速。我们预期使用PipeFusion会提升8卡的扩展性。
+在8xA100 (80GB) NVLink互联的机器上，生成1024px图片，USP最佳策略是把所有并行度都给Ulysses，使用torch.compile之后的生成1024px图片仅需0.82秒！
 
 <div align="center">
-    <img src="../../assets/performance/flux/flux_l40.jpg" 
-    alt="latency-flux_l40">
+    <img src="../../assets/performance/flux/Flux-1K-A100.png" 
+    alt="latency-flux_a100_1k">
 </div>
 
+
+在8xA100 (80GB) NVLink互联的机器上，生成2048px图片，使用torch.compile之后的生成1024px图片仅需2.4秒！
+
+<div align="center">
+    <img src="../../assets/performance/flux/Flux-2K-A100.png" 
+    alt="latency-flux_a100_2k">
+</div>
+
+在PCIe Gen4互联的8xL40上，4卡规模xDiT也有很好的加速。生成1024px图片，使用ulysses_degree=2, ring_degree=2延迟低于单独使用ulysses或者ring，1.41秒可以生图。
+8卡相比反而会变慢，这是因为这是需要经过QPI通信。我们预期使用PipeFusion会提升8卡的扩展性。
+
+我们在1024px图片生成任务上，对比`torch.compile`和`onediff`的性能差别。
+在1，8 GPU上，`torch.compile`略好，在2,4 GPU上`onediff`略好。
+
+<div align="center">
+    <img src="../../assets/performance/flux/Flux-1k-L40.png" 
+    alt="latency-flux_l40_1k">
+</div>
+
+
+8xL40上生成2048px图片性能如下图。因为计算和通信比例增大，所以和024px任务不同，8卡相比4卡延迟更低，生图最快可达3.67秒。
+
+<div align="center">
+    <img src="../../assets/performance/flux/Flux-2k-L40.png" 
+    alt="latency-flux_l40_2k">
+</div>
 
 ### VAE Parallel
 

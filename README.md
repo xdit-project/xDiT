@@ -37,13 +37,13 @@
 
 <h2 id="meet-xdit">🔥 Meet xDiT</h2>
 
-Diffusion Transformers (DiTs), pivotal in text-to-image and text-to-video models, are driving advancements in high-quality image and video generation. 
-With the escalating input sequence length in DiTs, the computational demand of the Attention mechanism grows **quadratically**! 
-Consequently, multi-GPU and multi-machine deployments are essential to maintain real-time performance in online services.
+Diffusion Transformers (DiTs) are driving advancements in high-quality image and video generation. 
+With the escalating input context length in DiTs, the computational demand of the Attention mechanism grows **quadratically**! 
+Consequently, multi-GPU and multi-machine deployments are essential to meet the **real-time** requirements in online services.
 
 To meet real-time demand for DiTs applications, parallel inference is a must.
 xDiT is an inference engine designed for the parallel deployment of DiTs on large scale. 
-xDiT provides a suite of efficient parallel inference approaches for Diffusion Models, as well as GPU kernel accelerations.
+xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as GPU kernel accelerations.
 
 
 1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention.

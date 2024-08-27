@@ -111,7 +111,9 @@ The overview of xDiT is shown as follows.
 
 1. [Flux Performance](./docs/performance/flux.md)
 
-2. [Pixart-Alpha Legacy Performance](./docs/performance/pixart_alpha_legacy.md)
+2. [HunyuanDiT Performance](./docs/performance/hunyuandit.md)
+
+3. [Pixart-Alpha Legacy Performance](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

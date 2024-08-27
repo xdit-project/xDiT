@@ -77,7 +77,6 @@ The overview of xDiT is shown as follows.
 
 <h2 id="updates">📢 Updates</h2>
 
-
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
 * 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example](examples/latte_example.py).
 * 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).
@@ -91,6 +90,8 @@ The overview of xDiT is shown as follows.
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
 
+<div align="center">
+
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
@@ -99,6 +100,8 @@ The overview of xDiT is shown as follows.
 | [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ |
 | [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ |
 | [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ |
+
+</div>
 
 ### Supported by legacy version only:
 
@@ -163,13 +166,15 @@ Runtime Options:
   --warmup_steps WARMUP_STEPS
                         Warmup steps in generation.
   --use_parallel_vae
+  --use_torch_compile   Enable torch.compile to accelerate inference in a single card
   --seed SEED           Random seed for operations.
   --output_type OUTPUT_TYPE
                         Output type of the pipeline.
+  --enable_sequential_cpu_offload
+                        Offloading the weights to the CPU.
 
 Parallel Processing Options:
-  --do_classifier_free_guidance
-  --use_split_batch     Use split batch in classifier_free_guidance. cfg_degree will be 2 if set
+  --use_cfg_parallel    Use split batch in classifier_free_guidance. cfg_degree will be 2 if set
   --data_parallel_degree DATA_PARALLEL_DEGREE
                         Data parallel degree.
   --ulysses_degree ULYSSES_DEGREE
@@ -240,7 +245,6 @@ The (<span style="color: red;">xDiT</span>) highlights the methods first propose
 <div align="center">
     <img src="assets/methods/xdit_method.png" alt="xdit methods">
 </div>
-
 
 The communication and memory costs associated with the aforementioned intra-image parallelism, except for the CFG and DP (they are inter-image parallel), in DiTs are detailed in the table below. (* denotes that communication can be overlapped with computation.)
 
@@ -333,10 +337,10 @@ We also welcome developers to join and contribute more features and models to th
 }
 
 @article{fang2024unified,
-  title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
-  author={Fang, Jiarui and Zhao, Shangchun},
-  journal={arXiv preprint arXiv:2405.07719},
-  year={2024}
+      title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
+      author={Fang, Jiarui and Zhao, Shangchun},
+      journal={arXiv preprint arXiv:2405.07719},
+      year={2024}
 }
 ```
 

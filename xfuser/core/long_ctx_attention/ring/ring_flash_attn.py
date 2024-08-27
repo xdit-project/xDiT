@@ -81,6 +81,7 @@ def ring_flash_attn_forward(
                 softmax_scale,
                 causal=causal and step == 0,
                 window_size=window_size,
+                softcap=0.0,
                 alibi_slopes=alibi_slopes,
                 return_softmax=True and dropout_p > 0,
             )

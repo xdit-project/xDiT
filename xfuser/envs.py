@@ -20,48 +20,34 @@ if TYPE_CHECKING:
 
 
 environment_variables: Dict[str, Callable[[], Any]] = {
-
     # ================== Runtime Env Vars ==================
-
     # used in distributed environment to determine the master address
-    'MASTER_ADDR':
-    lambda: os.getenv('MASTER_ADDR', ""),
-
+    "MASTER_ADDR": lambda: os.getenv("MASTER_ADDR", ""),
     # used in distributed environment to manually set the communication port
-    'MASTER_PORT':
-    lambda: int(os.getenv('MASTER_PORT', '0'))
-    if 'MASTER_PORT' in os.environ else None,
-
+    "MASTER_PORT": lambda: (
+        int(os.getenv("MASTER_PORT", "0")) if "MASTER_PORT" in os.environ else None
+    ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
-    "CUDA_HOME":
-    lambda: os.environ.get("CUDA_HOME", None),
-
+    "CUDA_HOME": lambda: os.environ.get("CUDA_HOME", None),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
-    "LOCAL_RANK":
-    lambda: int(os.environ.get("LOCAL_RANK", "0")),
-
+    "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
     # used to control the visible devices in the distributed setting
-    "CUDA_VISIBLE_DEVICES":
-    lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
-
+    "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
     # this is used for configuring the default logging level
-    "XDIT_LOGGING_LEVEL":
-    lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
+    "XDIT_LOGGING_LEVEL": lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
 }
 
 variables: Dict[str, Callable[[], Any]] = {
-
     # ================== Other Vars ==================
-
     # used in version checking
-    'CUDA_VERSION':
-    lambda: version.parse(torch.version.cuda),
-
-    'TORCH_VERSION':
-    lambda: version.parse(version.parse(torch.__version__).base_version),
+    "CUDA_VERSION": lambda: version.parse(torch.version.cuda),
+    "TORCH_VERSION": lambda: version.parse(
+        version.parse(torch.__version__).base_version
+    ),
 }
+
 
 class PackagesEnvChecker:
     _instance = None
@@ -74,11 +60,10 @@ class PackagesEnvChecker:
 
     def initialize(self):
         self.packages_info = {
-            'has_flash_attn': self.check_flash_attn(),
-            'has_long_ctx_attn': self.check_long_ctx_attn(),
-            'diffusers_version': self.check_diffusers_version(),
-        } 
-        
+            "has_flash_attn": self.check_flash_attn(),
+            "has_long_ctx_attn": self.check_long_ctx_attn(),
+            "diffusers_version": self.check_diffusers_version(),
+        }
 
     def check_flash_attn(self):
         try:
@@ -88,10 +73,16 @@ class PackagesEnvChecker:
                 return False
             else:
                 from flash_attn import flash_attn_func
+                from flash_attn import __version__
+
+                if __version__ < "2.6.0":
+                    raise ImportError(f"install flash_attn >= 2.6.0")
                 return True
         except ImportError:
-            logger.warning(f'Flash Attention library "flash_attn" not found, '
-                           f'using pytorch attention implementation')
+            logger.warning(
+                f'Flash Attention library "flash_attn" not found, '
+                f"using pytorch attention implementation"
+            )
             return False
 
     def check_long_ctx_attn(self):
@@ -103,20 +94,28 @@ class PackagesEnvChecker:
                 LongContextAttention,
                 LongContextAttentionQKVPacked,
             )
+
             return True
         except ImportError:
-            logger.warning(f'Ring Flash Attention library "yunchang" not found, '
-                           f'using pytorch attention implementation')
+            logger.warning(
+                f'Ring Flash Attention library "yunchang" not found, '
+                f"using pytorch attention implementation"
+            )
             return False
 
     def check_diffusers_version(self):
-        if version.parse(version.parse(diffusers.__version__).base_version) < version.parse("0.30.0"):
-            raise RuntimeError(f"Diffusers version: {version.parse(version.parse(diffusers.__version__).base_version)} is not supported,"
-                               f"please upgrade to version > 0.30.0")
+        if version.parse(
+            version.parse(diffusers.__version__).base_version
+        ) < version.parse("0.30.0"):
+            raise RuntimeError(
+                f"Diffusers version: {version.parse(version.parse(diffusers.__version__).base_version)} is not supported,"
+                f"please upgrade to version > 0.30.0"
+            )
         return version.parse(version.parse(diffusers.__version__).base_version)
 
     def get_packages_info(self):
         return self.packages_info
+
 
 PACKAGES_CHECKER = PackagesEnvChecker()
 

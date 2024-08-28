@@ -148,7 +148,10 @@ class CacheManager:
         )
 
         ulysses_world_size = get_ulysses_parallel_world_size()
-        if get_runtime_state().num_pipeline_patch == 1:
+        if (
+            not runtime_state_is_initialized()
+            or get_runtime_state().num_pipeline_patch == 1
+        ):
             return new_kv
         elif not get_runtime_state().patch_mode:
             pp_patches_token_num = get_runtime_state().pp_patches_token_num

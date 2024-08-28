@@ -12,8 +12,6 @@ from xfuser.model_executor.layers.attention_processor import (
 
 import torch
 import unittest
-from diffusers.models.attention import FeedForward
-from xfuser.model_executor.layers.feedforward import xFuserFeedForwardWrapper
 from xfuser.core.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -70,7 +68,7 @@ class TestHunyuanDiTAttention(unittest.TestCase):
             p2.data.copy_(p1.data)
 
         get_cache_manager().register_cache_entry(
-            self.attn2, layer_type="attn", cache_type="naive_cache"
+            self.attn2, layer_type="attn", cache_type="sequence_parallel_attn_cache"
         )
 
     def test_hunyuandit_attn(self):

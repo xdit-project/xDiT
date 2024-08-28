@@ -111,7 +111,7 @@ class DiTRuntimeState(RuntimeState):
             * pipeline.transformer.config.attention_head_dim,
         )
         self.pipeline_comm_extra_tensors_info = []
-        self.cache_manager = CacheManager()
+        # self.cache_manager = CacheManager()
 
     def set_input_parameters(
         self,
@@ -366,6 +366,7 @@ class DiTRuntimeState(RuntimeState):
 # _RUNTIME: Optional[RuntimeState] = None
 # TODO: change to RuntimeState after implementing the unet
 _RUNTIME: Optional[DiTRuntimeState] = None
+_CACHE_MGR = CacheManager()
 
 
 def runtime_state_is_initialized():
@@ -385,3 +386,9 @@ def initialize_runtime_state(pipeline: DiffusionPipeline, engine_config: EngineC
         )
     if hasattr(pipeline, "transformer"):
         _RUNTIME = DiTRuntimeState(pipeline=pipeline, config=engine_config)
+
+
+def get_cache_manager():
+    global _CACHE_MGR
+    assert _CACHE_MGR is not None, "Cache manager has not been initialized."
+    return _CACHE_MGR

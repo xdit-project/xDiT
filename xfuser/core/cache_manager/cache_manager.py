@@ -1,6 +1,7 @@
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 
+from xfuser.core.distributed.runtime_state import runtime_state_is_initialized
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -109,7 +110,8 @@ class CacheManager:
         from xfuser.core.distributed.runtime_state import get_runtime_state
 
         if (
-            get_runtime_state().num_pipeline_patch == 1
+            not runtime_state_is_initialized()
+            or get_runtime_state().num_pipeline_patch == 1
             or not get_runtime_state().patch_mode
         ):
             kv_cache = new_kv
@@ -212,3 +214,12 @@ class CacheManager:
         elif dim == 3:
             kv_cache[:, :, :, start_idx:end_idx, ...] = new_kv
         return kv_cache
+
+
+_CACHE_MGR = CacheManager()
+
+
+def get_cache_manager():
+    global _CACHE_MGR
+    assert _CACHE_MGR is not None, "Cache manager has not been initialized."
+    return _CACHE_MGR

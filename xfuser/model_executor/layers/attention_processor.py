@@ -21,7 +21,9 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sp_group,
 )
-from xfuser.core.distributed.runtime_state import get_cache_manager, get_runtime_state
+
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger

@@ -252,6 +252,7 @@ class DiTRuntimeState(RuntimeState):
         vae_scale_factor_spatial = self.vae_scale_factor_spatial
         latents_height = self.input_config.height // vae_scale_factor_spatial
         latents_width = self.input_config.width // vae_scale_factor_spatial
+        print(f"latents_height {latents_height}, latents_width {latents_width}, latent_height * latent_width {latents_height * latents_width}")
 
         if latents_height % num_sp_patches != 0:
             raise ValueError(

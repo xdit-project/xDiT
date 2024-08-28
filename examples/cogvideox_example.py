@@ -19,37 +19,37 @@ def main():
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
+    
+    print(f"starting: rank: {torch.distributed.get_rank()} memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
+
     pipe = xFuserCogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.float16,
     ).to(f"cuda:{local_rank}")
 
+    print(f"rank: {torch.distributed.get_rank()} memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
+    
     # NOTE DO NOT CALL THIS FUNCTION
     pipe.enable_model_cpu_offload(gpu_id=local_rank)
+    pipe.vae.enable_tiling()
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     
-    prompt_embeds, _ = pipe.encode_prompt(
-        prompt=input_config.prompt,
-        do_classifier_free_guidance=True,
-        num_videos_per_prompt=1,
-        max_sequence_length=226,
-        device=f"cuda:{local_rank}",
-        dtype=torch.float16,
-    )
+    print(f"rank: {torch.distributed.get_rank()} after encode_prompt memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
     
     output = pipe(
         height=input_config.height,
         width=input_config.width,
         num_frames=49,
-        # prompt=input_config.prompt,
+        prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         guidance_scale=6,
-        prompt_embeds=prompt_embeds,
     ).frames[0]
+    
+    print(f"rank: {torch.distributed.get_rank()} after pipe memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
     
     end_time = time.time()
     elapsed_time = end_time - start_time

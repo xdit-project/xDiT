@@ -41,7 +41,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_classes_to_wrap=[nn.Conv2d, CogVideoXPatchEmbed],
+            submodule_classes_to_wrap=[nn.Conv2d],
             submodule_name_to_wrap=["attn1"]
         )
     

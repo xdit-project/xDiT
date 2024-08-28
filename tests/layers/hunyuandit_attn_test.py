@@ -81,6 +81,9 @@ class TestHunyuanDiTAttention(unittest.TestCase):
             self.local_rank
         )
 
+        dist.broadcast(norm_hidden_states, 0)
+        dist.broadcast(image_rotary_emb, 0)
+
         attn_output1 = self.attn1(norm_hidden_states, image_rotary_emb)
         attn_output1_shard = torch.chunk(attn_output1, self.world_size, dim=1)[
             self.local_rank
@@ -89,16 +92,12 @@ class TestHunyuanDiTAttention(unittest.TestCase):
         norm_hidden_states_shard = torch.chunk(
             norm_hidden_states, self.world_size, dim=1
         )[self.local_rank]
-        image_rotary_emb_shard = torch.chunk(image_rotary_emb, self.world_size, dim=1)[
-            self.local_rank
-        ]
 
-        attn_output2_shard = self.attn2(
-            norm_hidden_states_shard, image_rotary_emb_shard
-        )
+        # NOTE(): use the full image_rotary_emb
+        attn_output2_shard = self.attn2(norm_hidden_states_shard, image_rotary_emb)
 
         # check if the outputs are close
-        print(attn_output1_shard - attn_output2_shard)
+        # print(attn_output1_shard - attn_output2_shard)
         self.assertTrue(
             torch.allclose(attn_output1_shard, attn_output2_shard, atol=1e-2)
         )

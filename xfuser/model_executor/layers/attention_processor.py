@@ -1003,6 +1003,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
+
             hidden_states = self.hybrid_seq_parallel_attn(
                 attn,
                 query,

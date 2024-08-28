@@ -20,7 +20,6 @@ def main():
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
     
-    print(f"starting: rank: {torch.distributed.get_rank()} memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
     pipe = xFuserCogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
@@ -28,7 +27,6 @@ def main():
         torch_dtype=torch.float16,
     ).to(f"cuda:{local_rank}")
 
-    print(f"rank: {torch.distributed.get_rank()} memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
     
     # NOTE DO NOT CALL THIS FUNCTION
     pipe.enable_model_cpu_offload(gpu_id=local_rank)
@@ -37,7 +35,6 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     
-    print(f"rank: {torch.distributed.get_rank()} after encode_prompt memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
     
     output = pipe(
         height=input_config.height,
@@ -49,7 +46,6 @@ def main():
         guidance_scale=6,
     ).frames[0]
     
-    print(f"rank: {torch.distributed.get_rank()} after pipe memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
     
     end_time = time.time()
     elapsed_time = end_time - start_time

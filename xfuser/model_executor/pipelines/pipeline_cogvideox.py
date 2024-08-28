@@ -202,7 +202,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             num_inference_steps=num_inference_steps,
         )
         
-        print(f"rank: {torch.distributed.get_rank()} before inner encode_prompt memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
@@ -218,7 +217,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         if do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             
-        print(f"rank: {torch.distributed.get_rank()} after inner encode_prompt memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
@@ -238,7 +236,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             latents,
         )
         
-        print(f"rank: {torch.distributed.get_rank()} after inner prepare_latents memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -259,7 +256,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
                 
-                print(f"rank: {torch.distributed.get_rank()} before inner transformer memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
                 
                 # predict noise model_output
                 noise_pred = self.transformer(
@@ -270,7 +266,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 )[0]
                 noise_pred = noise_pred.float()
                 
-                print(f"rank: {torch.distributed.get_rank()} after inner transformer memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
                 # perform guidance
                 if use_dynamic_cfg:
@@ -297,7 +292,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     )
                 latents = latents.to(prompt_embeds.dtype)
                 
-                print(f"rank: {torch.distributed.get_rank()} after scheduler memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
                 # call the callback, if provided
                 if callback_on_step_end is not None:
@@ -330,7 +324,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 ]
             latents = torch.cat(latents_list, dim=-2)
             
-        print(f"rank: {torch.distributed.get_rank()} after sp memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
         
         if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
             if not (output_type == "latents" or output_type == "latent"):
@@ -339,7 +332,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             else:
                 video = latents
                 
-        print(f"rank: {torch.distributed.get_rank()} after decode_latents memory: {torch.cuda.memory_allocated()}, max memory: {torch.cuda.max_memory_allocated()}")
 
         # Offload all models
         self.maybe_free_model_hooks()

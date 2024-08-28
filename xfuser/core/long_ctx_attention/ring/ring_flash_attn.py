@@ -4,8 +4,6 @@ from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
-from xfuser.core.distributed.runtime_state import get_runtime_state
-
 
 def ring_flash_attn_forward(
     process_group,

@@ -10,8 +10,6 @@ from yunchang.globals import PROCESS_GROUP
 from yunchang.comm.all_to_all import SeqAllToAll4D
 from yunchang.ulysses.attn_layer import torch_attn
 
-from xfuser.core.distributed.runtime_state import get_runtime_state
-
 
 class xFuserUlyssesAttention(UlyssesAttention):
     def __init__(

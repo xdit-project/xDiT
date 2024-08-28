@@ -977,7 +977,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             key = attn.norm_k(key)
 
         # Apply RoPE if needed
-        # print(f"{query.shape=}, {key.shape=}, {image_rotary_emb[0].shape=}")
+        # print(f"Q {query.shape}, {key.shape}, {image_rotary_emb[0].shape}")
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb)
             if not attn.is_cross_attention:

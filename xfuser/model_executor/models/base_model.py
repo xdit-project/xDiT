@@ -4,8 +4,8 @@ from functools import wraps
 
 import torch.nn as nn
 from xfuser.config import InputConfig, ParallelConfig, RuntimeConfig
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.parallel_state import get_sequence_parallel_world_size
-from xfuser.core.distributed.runtime_state import get_cache_manager, get_runtime_state
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.model_executor.layers import *
 from xfuser.core.distributed import get_world_group

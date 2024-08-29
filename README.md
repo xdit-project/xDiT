@@ -117,14 +117,15 @@ The overview of xDiT is shown as follows.
 
 <h3 id="perf_flux">Flux.1</h3>
 
-1. [Flux Performance](./docs/performance/flux.md)
+1. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-2. [HunyuanDiT Performance](./docs/performance/hunyuandit.md)
+2. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_pixart">Pixart</h3>
-3. [Pixart-Alpha Legacy Performance](./docs/performance/pixart_alpha_legacy.md)
+
+3. [Pixart-Alpha Performance Report (Legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

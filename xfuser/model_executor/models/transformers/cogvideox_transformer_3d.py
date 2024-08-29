@@ -41,7 +41,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_classes_to_wrap=[nn.Conv2d],
+            submodule_classes_to_wrap=[nn.Conv2d, CogVideoXPatchEmbed],
             submodule_name_to_wrap=["attn1"]
         )
     
@@ -55,6 +55,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         return_dict: bool = True,
     ):
         batch_size, num_frames, channels, height, width = hidden_states.shape
+        print(f"hidden_states.shape: {hidden_states.shape}")
 
         # 1. Time embedding
         timesteps = timestep
@@ -68,6 +69,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
+        print(f"hidden_states.shape: {hidden_states.shape}")
         # 3. Position embedding
         seq_length = height * width * num_frames // (self.config.patch_size**2)
 

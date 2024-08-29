@@ -258,7 +258,9 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         )
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            
             latents = self._init_video_sync_pipeline(latents)
+            
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue

@@ -244,6 +244,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+            latents = self._init_video_sync_pipeline(latents)
             # for DPM-solver++
             old_pred_original_sample = None
             for i, t in enumerate(timesteps):
@@ -255,7 +256,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-                
                 
                 # predict noise model_output
                 noise_pred = self.transformer(

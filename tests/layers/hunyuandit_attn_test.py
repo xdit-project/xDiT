@@ -119,11 +119,10 @@ class TestHunyuanDiTAttention(unittest.TestCase):
 
         # check if the outputs are close
 
-        if self.local_rank == 0:
-            print(attn_output1_shard - attn_output2_shard)
-            self.assertTrue(
-                torch.allclose(attn_output1_shard, attn_output2_shard, atol=1e-2)
-            )
+        print(attn_output1_shard - attn_output2_shard)
+        self.assertTrue(
+            torch.allclose(attn_output1_shard, attn_output2_shard, atol=1e-2)
+        )
 
 
 # torchrun --nproc_per_node=4 ./tests/layers/hunyuandit_attn_test.py

@@ -21,6 +21,9 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [Flux.1](#perf_flux)
+  - [HunyuanDiT](#perf_hunyuandit)
+  - [Pixart](#perf_pixart)
 - [🚀 QuickStart](#QuickStart)
 - [✨ xDiT's Arsenal](#secrets)
   - [Parallel Methods](#parallel)
@@ -103,16 +106,24 @@ The overview of xDiT is shown as follows.
 
 </div>
 
-### Supported by legacy version only:
+### Supported by legacy version only, including DistriFusion and Tensor Parallel as the standalong parallel strategies:
 
--  [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
+<div align="center">
+
+[🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
+</div>
 
 <h2 id="perf">📈 Performance</h2>
 
+<h3 id="perf_flux">Flux.1</h3>
+
 1. [Flux Performance](./docs/performance/flux.md)
+
+<h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
 2. [HunyuanDiT Performance](./docs/performance/hunyuandit.md)
 
+<h3 id="perf_pixart">Pixart</h3>
 3. [Pixart-Alpha Legacy Performance](./docs/performance/pixart_alpha_legacy.md)
 
 

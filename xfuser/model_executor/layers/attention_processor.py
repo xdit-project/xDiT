@@ -21,6 +21,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sp_group,
 )
+
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
@@ -266,7 +268,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+            key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
                 slice_dim=2,
@@ -417,7 +419,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+            key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
                 slice_dim=1,
@@ -645,7 +647,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             encoder_hidden_states_value_proj, value = value.split(
                 [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
             )
-            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+            key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
                 slice_dim=2,
@@ -815,7 +817,7 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+            key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
                 slice_dim=2,
@@ -983,7 +985,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_runtime_state().cache_manager.update_and_get_kv_cache(
+            key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
                 slice_dim=2,

@@ -67,6 +67,7 @@ class xFuserArgs:
     use_parallel_vae: bool = False
     # use_profiler: bool = False
     use_torch_compile: bool = False
+    use_onediff: bool = False
     # Parallel arguments
     # data parallel
     data_parallel_degree: int = 1
@@ -127,6 +128,11 @@ class xFuserArgs:
             "--use_torch_compile",
             action="store_true",
             help="Enable torch.compile to accelerate inference in a single card",
+        )
+        runtime_group.add_argument(
+            "--use_onediff",
+            action="store_true",
+            help="Enable onediff to accelerate inference in a single card",
         )
 
         # Parallel arguments
@@ -253,6 +259,7 @@ class xFuserArgs:
             # use_cuda_graph=self.use_cuda_graph,
             use_parallel_vae=self.use_parallel_vae,
             use_torch_compile=self.use_torch_compile,
+            use_onediff=self.use_onediff,
             # use_profiler=self.use_profiler,
         )
 

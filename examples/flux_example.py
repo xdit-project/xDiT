@@ -67,7 +67,7 @@ def main():
                 image_rank = dp_group_index * dp_batch_size + i
                 image.save(f"./results/flux_result_{parallel_info}_{image_rank}.png")
                 print(
-                    f"image {i} saved to ./results/flux_result_{parallel_info}_{image_rank}.png"
+                    f"image {i} saved to ./results/flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
                 )
 
     if get_world_group().rank == get_world_group().world_size - 1:

@@ -4,12 +4,11 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang import UlyssesAttention
 from yunchang.globals import PROCESS_GROUP
 from yunchang.comm.all_to_all import SeqAllToAll4D
 from yunchang.ulysses.attn_layer import torch_attn
-
-from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
 class xFuserUlyssesAttention(UlyssesAttention):
@@ -120,7 +119,7 @@ class xFuserUlyssesAttention(UlyssesAttention):
         )
 
         if self.use_kv_cache:
-            k, v = get_runtime_state().cache_manager.update_and_get_kv_cache(
+            k, v = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[k, v],
                 layer=attn,
                 slice_dim=1,

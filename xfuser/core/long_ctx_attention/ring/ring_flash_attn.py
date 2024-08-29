@@ -1,9 +1,8 @@
 import torch
 from flash_attn.flash_attn_interface import _flash_attn_forward
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
-
-from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
 def ring_flash_attn_forward(
@@ -42,7 +41,7 @@ def ring_flash_attn_forward(
     next_k, next_v = None, None
 
     if attn_layer is not None:
-        k, v = get_runtime_state().cache_manager.update_and_get_kv_cache(
+        k, v = get_cache_manager().update_and_get_kv_cache(
             new_kv=[k, v],
             layer=attn_layer,
             slice_dim=1,
@@ -81,6 +80,7 @@ def ring_flash_attn_forward(
                 softmax_scale,
                 causal=causal and step == 0,
                 window_size=window_size,
+                softcap=0.0,
                 alibi_slopes=alibi_slopes,
                 return_softmax=True and dropout_p > 0,
             )

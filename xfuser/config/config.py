@@ -48,6 +48,7 @@ class RuntimeConfig:
     use_parallel_vae: bool = False
     use_profiler: bool = False
     use_torch_compile: bool = False
+    use_onediff: bool = False
 
     def __post_init__(self):
         if self.use_cuda_graph:

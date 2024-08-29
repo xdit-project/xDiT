@@ -14,7 +14,6 @@ from xfuser.config.config import (
     EngineConfig,
 )
 from xfuser.logger import init_logger
-from ..cache_manager.cache_manager import CacheManager
 from .parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -113,7 +112,6 @@ class DiTRuntimeState(RuntimeState):
             * pipeline.transformer.config.attention_head_dim,
         )
         self.pipeline_comm_extra_tensors_info = []
-        self.cache_manager = CacheManager()
 
     def set_input_parameters(
         self,

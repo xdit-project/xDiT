@@ -30,7 +30,9 @@ class TestHunyuanDiTAttention(unittest.TestCase):
         initialize_runtime_state(None, None)
 
         self.dim = 32
-        num_attention_heads = 8
+        self.sequence_len = 20
+        self.num_attention_heads = 8
+        self.hidden_dim = self.dim // self.num_attention_heads
         qk_norm = True
         self.dtype = torch.bfloat16
 
@@ -38,8 +40,8 @@ class TestHunyuanDiTAttention(unittest.TestCase):
             Attention(
                 query_dim=self.dim,
                 cross_attention_dim=None,
-                dim_head=self.dim // num_attention_heads,
-                heads=num_attention_heads,
+                dim_head=self.dim // self.num_attention_heads,
+                heads=self.num_attention_heads,
                 qk_norm="layer_norm" if qk_norm else None,
                 eps=1e-6,
                 bias=True,
@@ -53,8 +55,8 @@ class TestHunyuanDiTAttention(unittest.TestCase):
             Attention(
                 query_dim=self.dim,
                 cross_attention_dim=None,
-                dim_head=self.dim // num_attention_heads,
-                heads=num_attention_heads,
+                dim_head=self.dim // self.num_attention_heads,
+                heads=self.num_attention_heads,
                 qk_norm="layer_norm" if qk_norm else None,
                 eps=1e-6,
                 bias=True,
@@ -74,26 +76,32 @@ class TestHunyuanDiTAttention(unittest.TestCase):
     def test_hunyuandit_attn(self):
         torch.manual_seed(0)
 
-        norm_hidden_states = torch.randn(1, 20, self.dim, dtype=self.dtype).cuda(
+        # prepare inputs
+        norm_hidden_states = torch.randn(
+            1, self.sequence_len, self.dim, dtype=self.dtype
+        ).cuda(self.local_rank)
+        dist.broadcast(norm_hidden_states, 0)
+
+        use_image_rotary_emb = False
+
+        # prepare rope parameters
+        cos = torch.randn(self.sequence_len, self.hidden_dim, dtype=self.dtype).cuda(
             self.local_rank
         )
-        cos = torch.randn(20, 8, 4, dtype=self.dtype).cuda(self.local_rank)
-
         dist.broadcast(cos, 0)
-        sin = torch.randn(20, 8, 4, dtype=self.dtype).cuda(self.local_rank)
+        sin = torch.randn(self.sequence_len, self.hidden_dim, dtype=self.dtype).cuda(
+            self.local_rank
+        )
         dist.broadcast(sin, 0)
-        image_rotary_emb = None
-
-        # cos_shard = torch.chunk(cos, self.world_size, dim=0)[self.local_rank]
-        # sin_shared = torch.chunk(sin, self.world_size, dim=0)[self.local_rank]
-        # image_rotary_emb_shard = cos_shard, sin_shared
-
-        dist.broadcast(norm_hidden_states, 0)
+        image_rotary_emb = cos, sin
+        cos_shard = torch.chunk(cos, self.world_size, dim=0)[self.local_rank]
+        sin_shared = torch.chunk(sin, self.world_size, dim=0)[self.local_rank]
+        image_rotary_emb_shard = cos_shard, sin_shared
 
         attn_output1 = self.attn1(
             norm_hidden_states,
-            encoder_hidden_states=norm_hidden_states,
-            image_rotary_emb=image_rotary_emb,
+            encoder_hidden_states=None,
+            image_rotary_emb=image_rotary_emb if use_image_rotary_emb else None,
         )
         attn_output1_shard = torch.chunk(attn_output1, self.world_size, dim=1)[
             self.local_rank
@@ -103,18 +111,19 @@ class TestHunyuanDiTAttention(unittest.TestCase):
             norm_hidden_states, self.world_size, dim=1
         )[self.local_rank]
 
-        # NOTE(): use the full image_rotary_emb
         attn_output2_shard = self.attn2(
             norm_hidden_states_shard,
-            encoder_hidden_states=norm_hidden_states,
-            image_rotary_emb=image_rotary_emb,
+            encoder_hidden_states=None,
+            image_rotary_emb=image_rotary_emb_shard if use_image_rotary_emb else None,
         )
 
         # check if the outputs are close
-        # print(attn_output1_shard - attn_output2_shard)
-        self.assertTrue(
-            torch.allclose(attn_output1_shard, attn_output2_shard, atol=1e-2)
-        )
+
+        if self.local_rank == 0:
+            print(attn_output1_shard - attn_output2_shard)
+            self.assertTrue(
+                torch.allclose(attn_output1_shard, attn_output2_shard, atol=1e-2)
+            )
 
 
 # torchrun --nproc_per_node=4 ./tests/layers/hunyuandit_attn_test.py

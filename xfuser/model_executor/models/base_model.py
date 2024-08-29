@@ -14,7 +14,6 @@ from xfuser.logger import init_logger
 logger = init_logger(__name__)
 
 
-# class xFuserModelBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
     wrapped_layers: List[xFuserLayerBaseWrapper]
 

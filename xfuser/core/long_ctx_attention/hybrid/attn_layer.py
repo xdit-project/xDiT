@@ -70,7 +70,6 @@ class xFuserLongContextAttention(LongContextAttention):
         Returns:
             * output (Tensor): context output
         """
-
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
         if self.use_pack_qkv:

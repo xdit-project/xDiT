@@ -36,6 +36,17 @@ HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
+def is_v100():
+    if not torch.cuda.is_available():
+        return False
+    device_name = torch.cuda.get_device_name(torch.cuda.current_device())
+    return "V100" in device_name
+
+def torch_compile_disable_if_v100(func):
+    if is_v100():
+        return torch.compiler.disable(func)
+    return func
+
 class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
     def __init__(
         self,
@@ -904,7 +915,9 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 )
         else:
             self.hybrid_seq_parallel_attn = None
-
+    
+    # NOTE() torch.compile dose not works for V100
+    @torch_compile_disable_if_v100
     def __call__(
         self,
         attn: Attention,

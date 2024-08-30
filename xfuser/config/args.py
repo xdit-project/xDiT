@@ -85,6 +85,7 @@ class xFuserArgs:
     # Input arguments
     height: int = 1024
     width: int = 1024
+    num_frames: int = 49
     num_inference_steps: int = 20
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
@@ -198,6 +199,9 @@ class xFuserArgs:
             "--width", type=int, default=1024, help="The width of image"
         )
         input_group.add_argument(
+            "--num_frames", type=int, default=49, help="The frames of video"
+        )
+        input_group.add_argument(
             "--prompt", type=str, nargs="*", default="", help="Prompt for the model."
         )
         input_group.add_argument("--no_use_resolution_binning", action="store_true")
@@ -292,6 +296,7 @@ class xFuserArgs:
         input_config = InputConfig(
             height=self.height,
             width=self.width,
+            num_frames=self.num_frames,
             use_resolution_binning=not self.no_use_resolution_binning,
             batch_size=len(self.prompt) if isinstance(self.prompt, list) else 1,
             prompt=self.prompt,

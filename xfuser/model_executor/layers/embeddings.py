@@ -1,7 +1,7 @@
 # adapted from https://github.com/huggingface/diffusers/blob/v0.29.0/src/diffusers/models/embeddings.py
 import torch
 
-from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed
+from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed, CogVideoXPatchEmbed
 import torch.distributed
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
@@ -104,3 +104,58 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
             pos_embed = torch.cat(pos_embed_list, dim=1)
 
         return (latent + pos_embed).to(latent.dtype)
+
+
+@xFuserLayerWrappersRegister.register(CogVideoXPatchEmbed)
+class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
+    def __init__(
+        self,
+        patch_embedding: CogVideoXPatchEmbed,
+    ):
+        super().__init__(
+            module=patch_embedding,
+        )
+
+    def forward(self, text_embeds: torch.Tensor, image_embeds: torch.Tensor):
+        r"""
+        Args:
+            text_embeds (`torch.Tensor`):
+                Input text embeddings. Expected shape: (batch_size, seq_length, embedding_dim).
+            image_embeds (`torch.Tensor`):
+                Input image embeddings. Expected shape: (batch_size, num_frames, channels, height, width).
+        """
+        text_embeds = self.text_proj(text_embeds)
+        batch, num_frames, channels, height, width = image_embeds.shape
+        
+        image_embeds = image_embeds.reshape(-1, channels, height, width)
+        image_embeds = self.proj(image_embeds)
+            
+        image_embeds = image_embeds.view(batch, num_frames, *image_embeds.shape[1:])
+        image_embeds = image_embeds.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
+        image_embeds = image_embeds.flatten(1, 2)  # [batch, num_frames x height x width, channels]
+        
+        if get_runtime_state().patch_mode:
+            start, end = get_runtime_state().pp_patches_token_start_end_idx_global[
+                get_runtime_state().pipeline_patch_idx
+            ]
+            image_embeds = image_embeds[
+                :,
+                start:end,
+                :,
+            ]
+        else:
+            image_embeds_list = [
+                image_embeds[
+                    :,
+                    get_runtime_state()
+                    .pp_patches_token_start_end_idx_global[i][0] : get_runtime_state()
+                    .pp_patches_token_start_end_idx_global[i][1],
+                    :,
+                ]
+                for i in range(get_runtime_state().num_pipeline_patch)
+            ]
+            image_embeds = torch.cat(image_embeds_list, dim=1)
+        embeds = torch.cat(
+            [text_embeds, image_embeds], dim=1
+        ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]
+        return embeds

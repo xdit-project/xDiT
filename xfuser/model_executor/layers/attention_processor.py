@@ -36,6 +36,17 @@ HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
+def is_v100():
+    if not torch.cuda.is_available():
+        return False
+    device_name = torch.cuda.get_device_name(torch.cuda.current_device())
+    return "V100" in device_name
+
+def torch_compile_disable_if_v100(func):
+    if is_v100():
+        return torch.compiler.disable(func)
+    return func
+
 class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
     def __init__(
         self,
@@ -904,7 +915,9 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 )
         else:
             self.hybrid_seq_parallel_attn = None
-
+    
+    # NOTE() torch.compile dose not works for V100
+    @torch_compile_disable_if_v100
     def __call__(
         self,
         attn: Attention,
@@ -977,7 +990,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             key = attn.norm_k(key)
 
         # Apply RoPE if needed
-        # print(f"{query.shape=}, {key.shape=}, {image_rotary_emb[0].shape=}")
+        # print(f"Q {query.shape}, {key.shape}, {image_rotary_emb[0].shape}")
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb)
             if not attn.is_cross_attention:
@@ -1003,6 +1016,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
+
             hidden_states = self.hybrid_seq_parallel_attn(
                 attn,
                 query,

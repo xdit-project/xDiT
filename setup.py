@@ -23,6 +23,7 @@ if __name__ == "__main__":
             "distvae",
             "yunchang==0.3",
             "flash_attn>=2.6.3",
+            "pytest",
         ],
         url="https://github.com/xdit-project/xDiT.",
         description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",

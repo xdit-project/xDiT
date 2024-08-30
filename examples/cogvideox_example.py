@@ -22,15 +22,19 @@ def main():
     
 
     pipe = xFuserCogVideoXPipeline.from_pretrained(
-        pretrained_model_name_or_path=engine_config.model_config.model,
-        engine_config=engine_config,
-        torch_dtype=torch.float16,
-    ).to(f"cuda:{local_rank}")
+        pretrained_model_name_or_path=engine_config.model_config.model, 
+        engine_config=engine_config, 
+        torch_dtype=torch.bfloat16, 
+    ) 
+    if args.enable_sequential_cpu_offload: 
+        pipe.enable_model_cpu_offload(gpu_id=local_rank)
+        pipe.vae.enable_tiling()
+    else: 
+        pipe = pipe.to(f"cuda:{local_rank}")
 
     
     # NOTE DO NOT CALL THIS FUNCTION
-    pipe.enable_model_cpu_offload(gpu_id=local_rank)
-    pipe.vae.enable_tiling()
+    
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

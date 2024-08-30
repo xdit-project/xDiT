@@ -253,116 +253,10 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.num_frames = num_frames or self.input_config.num_frames
         self.input_config.batch_size = batch_size or self.input_config.batch_size
         if self.cogvideox:
-            
+            self._calc_cogvideox_patches_metadata
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()
-
-    def _calc_cogvideox_patches_metadata(self):
-        num_sp_patches = get_sequence_parallel_world_size()
-        sp_patch_idx = get_sequence_parallel_rank()
-        patch_size = self.backbone_patch_size
-        vae_scale_factor = self.vae_scale_factor
-        latents_height = self.input_config.height // vae_scale_factor
-        latents_width = self.input_config.width // vae_scale_factor
-
-        if latents_height % num_sp_patches != 0:
-            raise ValueError(
-                "The height of the input is not divisible by the number of sequence parallel devices"
-            )
-
-        self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
-        # Pipeline patches
-        pipeline_patches_height = (
-            latents_height + self.num_pipeline_patch - 1
-        ) // self.num_pipeline_patch
-        # make sure pipeline_patches_height is a multiple of (num_sp_patches * patch_size)
-        pipeline_patches_height = (
-            (pipeline_patches_height + (num_sp_patches * patch_size) - 1)
-            // (patch_size * num_sp_patches)
-        ) * (patch_size * num_sp_patches)
-        # get the number of pipeline that matches patch height requirements
-        num_pipeline_patch = (
-            latents_height + pipeline_patches_height - 1
-        ) // pipeline_patches_height
-        if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
-                f"Pipeline patches num changed from "
-                f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
-                f"to input size and parallelisation requirements"
-            )
-        pipeline_patches_height_list = [
-            pipeline_patches_height for _ in range(num_pipeline_patch - 1)
-        ]
-        the_last_pp_patch_height = latents_height - pipeline_patches_height * (
-            num_pipeline_patch - 1
-        )
-        if the_last_pp_patch_height % (patch_size * num_sp_patches) != 0:
-            raise ValueError(
-                f"The height of the last pipeline patch is {the_last_pp_patch_height}, "
-                f"which is not a multiple of (patch_size * num_sp_patches): "
-                f"{patch_size} * {num_sp_patches}. Please try to adjust 'num_pipeline_patches "
-                f"or sp_degree argument so that the condition are met "
-            )
-        pipeline_patches_height_list.append(the_last_pp_patch_height)
-
-        # Sequence parallel patches
-        # len: sp_degree * num_pipeline_patches
-        flatten_patches_height = [
-            pp_patch_height // num_sp_patches
-            for _ in range(num_sp_patches)
-            for pp_patch_height in pipeline_patches_height_list
-        ]
-        flatten_patches_start_idx = [0] + [
-            sum(flatten_patches_height[:i])
-            for i in range(1, len(flatten_patches_height) + 1)
-        ]
-        pp_sp_patches_height = [
-            flatten_patches_height[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches
-            ]
-            for pp_patch_idx in range(num_pipeline_patch)
-        ]
-        pp_sp_patches_start_idx = [
-            flatten_patches_start_idx[
-                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1
-            ]
-            for pp_patch_idx in range(num_pipeline_patch)
-        ]
-
-        pp_patches_height = [
-            sp_patches_height[sp_patch_idx]
-            for sp_patches_height in pp_sp_patches_height
-        ]
-        pp_patches_start_idx_local = [0] + [
-            sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)
-        ]
-        pp_patches_start_end_idx_global = [
-            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
-            for sp_patches_start_idx in pp_sp_patches_start_idx
-        ]
-        pp_patches_token_start_end_idx_global = [
-            [
-                (latents_width // patch_size) * (start_idx // patch_size),
-                (latents_width // patch_size) * (end_idx // patch_size),
-            ]
-            for start_idx, end_idx in pp_patches_start_end_idx_global
-        ]
-        pp_patches_token_num = [
-            end - start for start, end in pp_patches_token_start_end_idx_global
-        ]
-        pp_patches_token_start_idx_local = [
-            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
-        ]
-        self.num_pipeline_patch = num_pipeline_patch
-        self.pp_patches_height = pp_patches_height
-        self.pp_patches_start_idx_local = pp_patches_start_idx_local
-        self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
-        self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
-        self.pp_patches_token_start_end_idx_global = (
-            pp_patches_token_start_end_idx_global
-        )
-        self.pp_patches_token_num = pp_patches_token_num
     
     def _calc_patches_metadata(self):
         num_sp_patches = get_sequence_parallel_world_size()
@@ -452,6 +346,112 @@ class DiTRuntimeState(RuntimeState):
             [
                 (latents_width // patch_size) * (start_idx // patch_size) * latents_frames,
                 (latents_width // patch_size) * (end_idx // patch_size) * latents_frames,
+            ]
+            for start_idx, end_idx in pp_patches_start_end_idx_global
+        ]
+        pp_patches_token_num = [
+            end - start for start, end in pp_patches_token_start_end_idx_global
+        ]
+        pp_patches_token_start_idx_local = [
+            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
+        ]
+        self.num_pipeline_patch = num_pipeline_patch
+        self.pp_patches_height = pp_patches_height
+        self.pp_patches_start_idx_local = pp_patches_start_idx_local
+        self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
+        self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
+        self.pp_patches_token_start_end_idx_global = (
+            pp_patches_token_start_end_idx_global
+        )
+        self.pp_patches_token_num = pp_patches_token_num
+    
+    def _calc_cogvideox_patches_metadata(self):
+        num_sp_patches = get_sequence_parallel_world_size()
+        sp_patch_idx = get_sequence_parallel_rank()
+        patch_size = self.backbone_patch_size
+        vae_scale_factor = self.vae_scale_factor
+        latents_height = self.input_config.height // vae_scale_factor
+        latents_width = self.input_config.width // vae_scale_factor
+
+        if latents_height % num_sp_patches != 0:
+            raise ValueError(
+                "The height of the input is not divisible by the number of sequence parallel devices"
+            )
+
+        self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
+        # Pipeline patches
+        pipeline_patches_height = (
+            latents_height + self.num_pipeline_patch - 1
+        ) // self.num_pipeline_patch
+        # make sure pipeline_patches_height is a multiple of (num_sp_patches * patch_size)
+        pipeline_patches_height = (
+            (pipeline_patches_height + (num_sp_patches * patch_size) - 1)
+            // (patch_size * num_sp_patches)
+        ) * (patch_size * num_sp_patches)
+        # get the number of pipeline that matches patch height requirements
+        num_pipeline_patch = (
+            latents_height + pipeline_patches_height - 1
+        ) // pipeline_patches_height
+        if num_pipeline_patch != self.num_pipeline_patch:
+            logger.warning(
+                f"Pipeline patches num changed from "
+                f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
+                f"to input size and parallelisation requirements"
+            )
+        pipeline_patches_height_list = [
+            pipeline_patches_height for _ in range(num_pipeline_patch - 1)
+        ]
+        the_last_pp_patch_height = latents_height - pipeline_patches_height * (
+            num_pipeline_patch - 1
+        )
+        if the_last_pp_patch_height % (patch_size * num_sp_patches) != 0:
+            raise ValueError(
+                f"The height of the last pipeline patch is {the_last_pp_patch_height}, "
+                f"which is not a multiple of (patch_size * num_sp_patches): "
+                f"{patch_size} * {num_sp_patches}. Please try to adjust 'num_pipeline_patches "
+                f"or sp_degree argument so that the condition are met "
+            )
+        pipeline_patches_height_list.append(the_last_pp_patch_height)
+
+        # Sequence parallel patches
+        # len: sp_degree * num_pipeline_patches
+        flatten_patches_height = [
+            pp_patch_height // num_sp_patches
+            for _ in range(num_sp_patches)
+            for pp_patch_height in pipeline_patches_height_list
+        ]
+        flatten_patches_start_idx = [0] + [
+            sum(flatten_patches_height[:i])
+            for i in range(1, len(flatten_patches_height) + 1)
+        ]
+        pp_sp_patches_height = [
+            flatten_patches_height[
+                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches
+            ]
+            for pp_patch_idx in range(num_pipeline_patch)
+        ]
+        pp_sp_patches_start_idx = [
+            flatten_patches_start_idx[
+                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1
+            ]
+            for pp_patch_idx in range(num_pipeline_patch)
+        ]
+
+        pp_patches_height = [
+            sp_patches_height[sp_patch_idx]
+            for sp_patches_height in pp_sp_patches_height
+        ]
+        pp_patches_start_idx_local = [0] + [
+            sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)
+        ]
+        pp_patches_start_end_idx_global = [
+            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
+            for sp_patches_start_idx in pp_sp_patches_start_idx
+        ]
+        pp_patches_token_start_end_idx_global = [
+            [
+                (latents_width // patch_size) * (start_idx // patch_size),
+                (latents_width // patch_size) * (end_idx // patch_size),
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]

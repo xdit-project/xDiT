@@ -63,12 +63,13 @@ class XfuserPipelineLoader:
 
     def load_pipeline(self, model_path, positive, negative):
         engine_config, input_config = self.setup_config(model_path, positive, negative)
-        local_rank = get_world_group().local_rank
+        # local_rank = get_world_group().local_rank
+        rank = 0
         pipeline = xFuserHunyuanDiTPipeline.from_pretrained(
             pretrained_model_name_or_path=engine_config.model_config.model,
             engine_config=engine_config,
             torch_dtype=torch.float16,
-        ).to(f"cuda:{local_rank}")
+        ).to(f"cuda:{rank}")
         pipeline.prepare_run(input_config)
 
         return (pipeline, )
@@ -79,7 +80,10 @@ class XfuserPipelineLoader:
             #     "Distributed environment is not initialized. " "Initializing..."
             # )
             print("Distributed environment is not initialized. " "Initializing...")
-            init_distributed_environment()
+            os.environ['MASTER_ADDR'] = 'localhost'
+            os.environ['MASTER_PORT'] = "25001"
+            init_distributed_environment(world_size=1, rank=0, local_rank=0)
+            torch.cuda.set_device(0)
 
         model_config = ModelConfig(
             model=model_path,

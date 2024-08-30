@@ -155,7 +155,6 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
                 for i in range(get_runtime_state().num_pipeline_patch)
             ]
             image_embeds = torch.cat(image_embeds_list, dim=1)
-        print(f"image_embeds: {image_embeds.shape}")
         embeds = torch.cat(
             [text_embeds, image_embeds], dim=1
         ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]

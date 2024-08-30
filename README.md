@@ -80,7 +80,7 @@ The overview of xDiT is shown as follows.
 
 <h2 id="updates">📢 Updates</h2>
 
-* 🎉**August 30, 2024**: Support CogVideoX. The inference scripts are [examples/latte_example](examples/cogvideox_example.py).
+* ⚙️**August 30, 2024**: Supporting(WIP) CogVideoX. The inference scripts are [examples/latte_example](examples/cogvideox_example.py).
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
 * 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example](examples/latte_example.py).
 * 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).

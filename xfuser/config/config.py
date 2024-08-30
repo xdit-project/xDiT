@@ -216,7 +216,7 @@ class EngineConfig:
 class InputConfig:
     height: int = 1024
     width: int = 1024
-    num_frames: int = 16
+    num_frames: int = 49
     use_resolution_binning: bool = (True,)
     batch_size: Optional[int] = None
     prompt: Union[str, List[str]] = ""

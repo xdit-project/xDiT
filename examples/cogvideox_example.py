@@ -38,7 +38,7 @@ def main():
     output = pipe(
         height=input_config.height,
         width=input_config.width,
-        num_frames=49,
+        num_frames=input_config.num_frames,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),

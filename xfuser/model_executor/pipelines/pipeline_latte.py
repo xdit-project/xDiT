@@ -67,7 +67,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         timesteps: Optional[List[int]] = None,
         guidance_scale: float = 7.5,
         num_images_per_prompt: int = 1,
-        video_length: int = 16,
+        num_frames: int = 16,
         height: int = 512,
         width: int = 512,
         eta: float = 0.0,
@@ -114,7 +114,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                 Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
                 1`. Higher guidance scale encourages to generate videos that are closely linked to the text `prompt`,
                 usually at the expense of lower video quality.
-            video_length (`int`, *optional*, defaults to 16):
+            num_frames (`int`, *optional*, defaults to 16):
                 The number of video frames that are generated. Defaults to 16 frames which at 8 frames per seconds
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of videos to generate per prompt.
@@ -171,7 +171,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
 
         # 0. Default
         decode_chunk_size = (
-            decode_chunk_size if decode_chunk_size is not None else video_length
+            decode_chunk_size if decode_chunk_size is not None else num_frames
         )
 
         # 1. Check inputs. Raise error if not correct
@@ -208,7 +208,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         get_runtime_state().set_video_input_parameters(
             height=height,
             width=width,
-            video_length=video_length,
+            num_frames=num_frames,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )
@@ -240,7 +240,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             latent_channels,
-            video_length,
+            num_frames,
             height,
             width,
             prompt_embeds.dtype,
@@ -358,7 +358,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
 
         if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
             if not (output_type == "latents" or output_type == "latent"):
-                video = self.decode_latents(latents, video_length, decode_chunk_size=14)
+                video = self.decode_latents(latents, num_frames, decode_chunk_size=14)
                 video = self.video_processor.postprocess_video(
                     video=video, output_type=output_type
                 )

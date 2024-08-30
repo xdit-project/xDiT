@@ -38,7 +38,7 @@ def main():
     output = pipe(
         height=input_config.height,
         width=input_config.width,
-        video_length=16,
+        num_frames=16,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type="pt",
@@ -60,7 +60,7 @@ def main():
         dp_group_index = global_rank // dp_group_world_size
         num_dp_groups = engine_config.parallel_config.dp_degree
         dp_batch_size = (input_config.batch_size + num_dp_groups - 1) // num_dp_groups
-        if input_config.video_length > 1:
+        if input_config.num_frames > 1:
             videos = (videos.clamp(0, 1) * 255).to(
                 dtype=torch.uint8
             )  # convert to uint8

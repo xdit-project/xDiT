@@ -212,6 +212,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         temb: Optional[torch.Tensor] = None,
+        latte_temporal_attention: Optional[bool] = False,
         *args,
         **kwargs,
     ):
@@ -288,7 +289,10 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if (HAS_LONG_CTX_ATTN 
+            and get_sequence_parallel_world_size() > 1 
+            and not latte_temporal_attention
+        ):
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)

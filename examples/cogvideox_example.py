@@ -32,13 +32,8 @@ def main():
     else: 
         pipe = pipe.to(f"cuda:{local_rank}")
 
-    
-    # NOTE DO NOT CALL THIS FUNCTION
-    
-
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
-    
     
     output = pipe(
         height=input_config.height,
@@ -49,7 +44,6 @@ def main():
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         guidance_scale=6,
     ).frames[0]
-    
     
     end_time = time.time()
     elapsed_time = end_time - start_time

@@ -44,6 +44,11 @@ def main():
         action="store_true",
         help="Do not use resolution binning",
     )
+    parser.add_argument(
+        "--output_type",
+        default="pil",
+        help="Output type (pil or latent)",
+    )
     args = parser.parse_args()
     MODEL_ID = args.model_id
     SIZES = args.sizes
@@ -70,7 +75,7 @@ def main():
                         pp_degree,
                         pp_degree * 2,
                     ]:
-                        for warmup_step in [0, 1, 2]:
+                        for warmup_step in [0]:
                             # pp_degree = 1, no warmup and num_pipeline_patches
                             if pp_degree == 1 and (
                                 warmup_step > 0 or num_pipeline_patches > 1
@@ -104,7 +109,7 @@ def main():
                                     flush=True,
                                 )
                                 cmd = (
-                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
+                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type {args.output_type} --model {MODEL_ID} "
                                     f"--height {size} --width {size} --warmup_steps {warmup_step} "
                                     f"{RESOLUTION_BINNING} --use_cfg_parallel --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
                                     f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches}"
@@ -116,7 +121,7 @@ def main():
                                     flush=True,
                                 )
                                 cmd = (
-                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
+                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type {args.output_type} --model {MODEL_ID} "
                                     f"--height {size} --width {size} --warmup_steps {warmup_step} "
                                     f"{RESOLUTION_BINNING} --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
                                     f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} "

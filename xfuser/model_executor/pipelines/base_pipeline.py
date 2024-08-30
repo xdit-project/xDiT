@@ -324,7 +324,6 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
     def _init_video_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
-
         latents_list = [
             latents[:, :, :, start_idx:end_idx, :]
             for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global

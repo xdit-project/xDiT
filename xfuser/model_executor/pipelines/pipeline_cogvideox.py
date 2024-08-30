@@ -242,7 +242,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
         # 7. Denoising loop
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-
+        
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             latents = self._init_video_sync_pipeline(latents)
             # for DPM-solver++
@@ -266,7 +266,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 )[0]
                 noise_pred = noise_pred.float()
                 
-
                 # perform guidance
                 if use_dynamic_cfg:
                     self._guidance_scale = 1 + guidance_scale * (
@@ -278,7 +277,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
                 
                 # compute the previous noisy sample x_t -> x_t-1
-                if not isinstance(self.scheduler, CogVideoXDPMScheduler):
+                if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
                 else:
                     latents, old_pred_original_sample = self.scheduler.step(
@@ -315,7 +314,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 latents_list += [
                     sp_latents_list[sp_patch_idx][
                         :,
-                        :, 
+                        :,
                         get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
                         get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
                         :
@@ -323,7 +322,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     for sp_patch_idx in range(sp_degree)
                 ]
             latents = torch.cat(latents_list, dim=-2)
-            
         
         if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
             if not (output_type == "latents" or output_type == "latent"):

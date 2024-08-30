@@ -346,6 +346,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                     sp_latents_list[sp_patch_idx][
                         :,
                         :,
+                        :,
                         get_runtime_state()
                         .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
                         .pp_patches_start_idx_local[pp_patch_idx + 1],

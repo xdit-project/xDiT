@@ -250,7 +250,7 @@ class DiTRuntimeState(RuntimeState):
         vae_scale_factor_spatial = self.vae_scale_factor_spatial
         latents_height = self.input_config.height // vae_scale_factor_spatial
         latents_width = self.input_config.width // vae_scale_factor_spatial
-        print(f"latents_height {latents_height}, latents_width {latents_width}, latent_height * latent_width {latents_height * latents_width}")
+        latents_frames = (self.input_config.num_frames - 1) // self.vae_scale_factor_temporal + 1
 
         if latents_height % num_sp_patches != 0:
             raise ValueError(
@@ -329,8 +329,8 @@ class DiTRuntimeState(RuntimeState):
         ]
         pp_patches_token_start_end_idx_global = [
             [
-                (latents_width // patch_size) * (start_idx // patch_size),
-                (latents_width // patch_size) * (end_idx // patch_size),
+                (latents_width // patch_size) * (start_idx // patch_size) * latents_frames,
+                (latents_width // patch_size) * (end_idx // patch_size) * latents_frames,
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]

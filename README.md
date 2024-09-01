@@ -25,6 +25,7 @@
   - [HunyuanDiT](#perf_hunyuandit)
   - [SD3](#perf_sd3)
   - [Pixart](#perf_pixart)
+  - [Latte](#perf_latte)
 - [🚀 QuickStart](#QuickStart)
 - [✨ xDiT's Arsenal](#secrets)
   - [Parallel Methods](#parallel)
@@ -132,7 +133,7 @@ The overview of xDiT is shown as follows.
 
 4. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
-<h3 id="perf_pixart">Pixart</h3>
+<h3 id="perf_latte">Pixart</h3>
 
 5. [Latte Performance Report](./docs/performance/latte.md)
 

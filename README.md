@@ -23,6 +23,7 @@
 - [📈 Performance](#perf)
   - [Flux.1](#perf_flux)
   - [HunyuanDiT](#perf_hunyuandit)
+  - [SD3](#perf_sd3)
   - [Pixart](#perf_pixart)
 - [🚀 QuickStart](#QuickStart)
 - [✨ xDiT's Arsenal](#secrets)
@@ -123,9 +124,17 @@ The overview of xDiT is shown as follows.
 
 2. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
+<h3 id="perf_sd3">SD3</h3>
+
+3. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+
 <h3 id="perf_pixart">Pixart</h3>
 
-3. [Pixart-Alpha Performance Report (Legacy)](./docs/performance/pixart_alpha_legacy.md)
+4. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+
+<h3 id="perf_pixart">Pixart</h3>
+
+5. [Latte Performance Report](./docs/performance/latte.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

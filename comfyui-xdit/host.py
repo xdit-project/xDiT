@@ -10,7 +10,14 @@ import torch.multiprocessing as mp
 
 from PIL import Image
 from flask import Flask, request, jsonify
-from xfuser import xFuserHunyuanDiTPipeline, xFuserArgs
+from xfuser import (
+    xFuserPixArtAlphaPipeline,
+    xFuserPixArtSigmaPipeline,
+    xFuserFluxPipeline,
+    xFuserStableDiffusion3Pipeline,
+    xFuserHunyuanDiTPipeline, 
+    xFuserArgs
+)
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_world_group,
@@ -63,11 +70,42 @@ def initialize():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     logger.info(f"Initializing model on GPU: {torch.cuda.current_device()}")
-    pipe = xFuserHunyuanDiTPipeline.from_pretrained(
-        pretrained_model_name_or_path=engine_config.model_config.model,
-        engine_config=engine_config,
-        torch_dtype=torch.float16,
-    ).to(f"cuda:{local_rank}")
+
+    model_name = engine_config.model_config.model.split("/")[-1]
+
+    if model_name == "PixArt-XL-2-1024-MS":
+        pipe = xFuserPixArtAlphaPipeline.from_pretrained(
+            pretrained_model_name_or_path=engine_config.model_config.model,
+            engine_config=engine_config,
+            torch_dtype=torch.float16,
+        ).to(f"cuda:{local_rank}")
+    elif model_name == "PixArt-Sigma-XL-2-2K-MS":
+        pipe = xFuserPixArtSigmaPipeline.from_pretrained(
+            pretrained_model_name_or_path=engine_config.model_config.model,
+            engine_config=engine_config,
+            torch_dtype=torch.float16,
+        ).to(f"cuda:{local_rank}")
+    elif model_name == "FLUX.1-schnell":
+        pipe = xFuserFluxPipeline.from_pretrained(
+            pretrained_model_name_or_path=engine_config.model_config.model,
+            engine_config=engine_config,
+            torch_dtype=torch.bfloat16,
+        ).to(f"cuda:{local_rank}")
+    elif model_name == "stable-diffusion-3-medium-diffusers":
+        pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
+            pretrained_model_name_or_path=engine_config.model_config.model,
+            engine_config=engine_config,
+            torch_dtype=torch.float16,
+        ).to(f"cuda:{local_rank}")
+    elif model_name == "HunyuanDiT-v1.2-Diffusers":
+        pipe = xFuserHunyuanDiTPipeline.from_pretrained(
+            pretrained_model_name_or_path=engine_config.model_config.model,
+            engine_config=engine_config,
+            torch_dtype=torch.float16,
+        ).to(f"cuda:{local_rank}")
+    else:
+        raise NotImplemented(f"{model_name} is currently not supported!")
+
     pipe.prepare_run(input_config)
     logger.info("Model initialization completed")
     initialized = True  # 设置初始化完成标志
@@ -83,7 +121,7 @@ def generate_image_parallel(prompt, num_inference_steps, seed):
         prompt=prompt,
         num_inference_steps=num_inference_steps,
         output_type="pil",
-        use_resolution_binning=input_config.use_resolution_binning,
+        # use_resolution_binning=input_config.use_resolution_binning,
         generator=torch.Generator(device=f"cuda:{local_rank}").manual_seed(seed),
     )
     end_time = time.time()

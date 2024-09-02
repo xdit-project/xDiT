@@ -33,7 +33,13 @@ class XfuserPipelineHostLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_path": (list(["/cfs/dit/HunyuanDiT-v1.2-Diffusers"]), ),
+                "model_path": (list([
+                    "/cfs/dit/HunyuanDiT-v1.2-Diffusers",
+                    "/cfs/dit/models/PixArt-XL-2-1024-MS",
+                    "/cfs/dit/PixArt-Sigma-XL-2-2K-MS",
+                    "/cfs/dit/models/stable-diffusion-3-medium-diffusers",
+                    "/cfs/dit/FLUX.1-schnell",
+                ]), ),
                 "width": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
                 "height": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
                 "warmup_steps": ("INT", {"default": 0, "min": 0, "max": 20, "step": 1}),
@@ -54,15 +60,18 @@ class XfuserPipelineHostLoader:
 
         if nproc_per_node == 8:
             pipefusion_parallel_degree = 4
+            ulysses_degree = 1
             CFG_ARGS="--use_cfg_parallel"   
         elif nproc_per_node == 4:
             pipefusion_parallel_degree = 4
+            ulysses_degree = 1
         elif nproc_per_node == 2:
             pipefusion_parallel_degree = 2
         elif nproc_per_node == 1:
             pipefusion_parallel_degree = 1
         else:
             pass
+
         cmd = [
             'torchrun',
             f'--nproc_per_node={nproc_per_node}',
@@ -137,7 +146,7 @@ class XfuserPipelineHost:
             output_bytes = base64.b64decode(output_base64)
             output = pickle.loads(output_bytes)
             image_path = response_data.get("image_path", "")
-            output.images[0].save(image_path )
+            output.images[0].save(image_path)
 
             print("Output object deserialized successfully")
             print(f"Image saved to {image_path}")

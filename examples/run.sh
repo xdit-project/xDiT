@@ -19,14 +19,14 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
 
-export MODEL_TYPE="CogVideoX"
+export MODEL_TYPE="Sd3"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
     ["Pixart-alpha"]="pixartalpha_example.py /mnt/models/SD/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
-    ["Sd3"]="sd3_example.py /mnt/models/SD/stable-diffusion-3-medium-diffusers 20"
-    ["Flux"]="flux_example.py /mnt/models/SD/FLUX.1-schnell 4"
+    ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
+    ["Flux"]="flux_example.py /cfs/dit/FLUX.1-schnell 4"
     ["HunyuanDiT"]="hunyuandit_example.py /mnt/models/SD/HunyuanDiT-v1.2-Diffusers 50"
     ["CogVideoX"]="cogvideox_example.py /cfs/dit/CogVideoX-2b 1"
 )

@@ -41,7 +41,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_classes_to_wrap=[nn.Conv2d],
+            submodule_classes_to_wrap=[nn.Conv2d, CogVideoXPatchEmbed],
             submodule_name_to_wrap=["attn1"]
         )
     
@@ -67,23 +67,17 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
-        # print(f"device: {torch.distributed.get_rank()}: hidden_states: {hidden_states.shape}")
         
         # 3. Position embedding
         seq_length = height * width * num_frames // (self.config.patch_size**2) * get_sequence_parallel_world_size()
 
         pos_embeds = self.pos_embedding[:, : self.config.max_text_seq_length + seq_length]
-        # print(f"device: {torch.distributed.get_rank()}: pos_embeds: {pos_embeds.shape}")
         txt_pos_embeds = pos_embeds[:, : self.config.max_text_seq_length]
-        # print(f"device: {torch.distributed.get_rank()}: txt_pos_embeds: {txt_pos_embeds.shape}")
         img_pos_embeds = pos_embeds[:, self.config.max_text_seq_length \
             + get_runtime_state().pp_patches_token_start_end_idx_global[0][0]
             : self.config.max_text_seq_length + \
                 get_runtime_state().pp_patches_token_start_end_idx_global[0][1]]
-        # print(f"device: {torch.distributed.get_rank()}: get_runtime_state().pp_patches_token_start_end_idx_global: {get_runtime_state().pp_patches_token_start_end_idx_global}")
-        # print(f"device: {torch.distributed.get_rank()}: img_pos_embeds: {img_pos_embeds.shape}")
         pos_embeds = torch.cat([txt_pos_embeds, img_pos_embeds], dim=1)
-        # print(f"device: {torch.distributed.get_rank()}: pos_embeds: {pos_embeds.shape}")
         
         hidden_states = hidden_states + pos_embeds
         hidden_states = self.embedding_dropout(hidden_states)
@@ -124,7 +118,6 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 6. Unpatchify
         p = self.config.patch_size
-        # print(f"device: {torch.distributed.get_rank()}: hidden_states: {hidden_states.shape}")
         output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, channels, p, p)
         output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
 

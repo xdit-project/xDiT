@@ -12,84 +12,60 @@ set -x
 # export NCCL_P2P=0
 # export CUDA_DEVICE_MAX_CONNECTIONS=1
 
+export PYTHONPATH=$PWD:$PYTHONPATH
 
-# Select the model type from Pixart-alpha, Pixart-sigma, Sd3, or Flux
+# Select the model type
 # The model is downloaded to a specified location on disk, 
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
 
-export PYTHONPATH=$PWD:$PYTHONPATH
+export MODEL_TYPE="Sd3"
+# Configuration for different model types
+# script, model_id, inference_step
+declare -A MODEL_CONFIGS=(
+    ["Pixart-alpha"]="pixartalpha_example.py /mnt/models/SD/PixArt-XL-2-1024-MS 20"
+    ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
+    ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
+    ["Flux"]="flux_example.py /cfs/dit/FLUX.1-schnell 4"
+    ["HunyuanDiT"]="hunyuandit_example.py /mnt/models/SD/HunyuanDiT-v1.2-Diffusers 50"
+    ["CogVideoX"]="cogvideox_example.py /cfs/dit/CogVideoX-2b 1"
+)
 
-export MODEL_TYPE="Flux"
-
-CFG_ARGS="--use_cfg_parallel"
-
-if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
-    export SCRIPT=pixartalpha_example.py
-    export MODEL_ID="/mnt/models/SD/PixArt-XL-2-1024-MS"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Pixart-sigma" ]; then
-    export SCRIPT=pixartsigma_example.py
-    export MODEL_ID="/cfs/dit/PixArt-Sigma-XL-2-2K-MS"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Sd3" ]; then
-    export SCRIPT=sd3_example.py
-    export MODEL_ID="/mnt/models/SD/stable-diffusion-3-medium-diffusers"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Flux" ]; then
-    export SCRIPT=flux_example.py
-    export MODEL_ID="/mnt/models/SD/FLUX.1-schnell"
-    export INFERENCE_STEP=4
-    # Flux does not apply cfg
-    export CFG_ARGS=""
-elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-    export SCRIPT=hunyuandit_example.py
-    export MODEL_ID="/mnt/models/SD/HunyuanDiT-v1.2-Diffusers"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Latte" ]; then
-    export SCRIPT=latte_example.py
-    export MODEL_ID="/mnt/models/SD/Latte-2b"
-    export INFERENCE_STEP=50
-    export height=512
-    export width=512
-elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
-    export SCRIPT=cogvideox_example.py
-    export MODEL_ID="/mnt/models/CogVideoX-2b"
-    export INFERENCE_STEP=50
-    export height=480
-    export width=720
-    export num_frames=9
+if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then
+    IFS=' ' read -r SCRIPT MODEL_ID INFERENCE_STEP <<< "${MODEL_CONFIGS[$MODEL_TYPE]}"
+    export SCRIPT MODEL_ID INFERENCE_STEP
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
 fi
 
-
-
 mkdir -p ./results
 
 for HEIGHT in 1024
 do
-for N_GPUS in 4;
+for N_GPUS in 8;
 do 
 
-TASK_ARGS="--height $HEIGHT \
---width $HEIGHT \
---no_use_resolution_binning \
-"
 
-# On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
+# task args
+if [ "$MODEL_TYPE" = "CogVideoX" ]; then
+  TASK_ARGS="--height 480 --width 720 --num_frames 9"
+else
+  TASK_ARGS="--height $HEIGHT --width $HEIGHT --no_use_resolution_binning"
+fi
 
 # Flux only supports SP, do not set the pipefusion degree
-if [ "$MODEL_TYPE" = "Flux" ]; then
+if [ "$MODEL_TYPE" = "Flux" ] || [ "$MODEL_TYPE" = "CogVideoX" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
-elif [ "$MODEL_TYPE" = "Latte" ]; then
-PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
-elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
-PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 1"
+export CFG_ARGS=""
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 4 --ring_degree 1"
+# HunyuanDiT asserts sp_degree <=2, or the output will be incorrect.
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 2 --ring_degree 1"
+export CFG_ARGS="--use_cfg_parallel"
+else
+# On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
+PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
+export CFG_ARGS="--use_cfg_parallel"
 fi
 
 
@@ -102,7 +78,7 @@ fi
 # PARALLLEL_VAE="--use_parallel_vae"
 
 # Another compile option is `--use_onediff` which will use onediff's compiler.
-COMPILE_FLAG="--use_torch_compile"
+# COMPILE_FLAG="--use_torch_compile"
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
@@ -119,5 +95,4 @@ $COMPILE_FLAG
 
 done
 done
-
 

@@ -24,6 +24,7 @@ if __name__ == "__main__":
             "yunchang==0.3",
             "flash_attn>=2.6.3",
             "pytest",
+            "opencv==4.7.0"
         ],
         url="https://github.com/xdit-project/xDiT.",
         description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",

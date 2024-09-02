@@ -452,11 +452,12 @@ class DiTRuntimeState(RuntimeState):
         ]
         pp_patches_token_start_end_idx_global = [
             [
-                (latents_width // patch_size) * (start_idx // patch_size) * latents_frames,
-                (latents_width // patch_size) * (end_idx // patch_size) * latents_frames,
+                (latents_width // patch_size) * (start_idx // patch_size) * latents_frames + int((start_idx / latents_height) * 226),
+                (latents_width // patch_size) * (end_idx // patch_size) * latents_frames + int((end_idx / latents_height) * 226),
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]
+        
         pp_patches_token_num = [
             end - start for start, end in pp_patches_token_start_end_idx_global
         ]
@@ -468,7 +469,9 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
-        self.pp_patches_token_start_end_idx_global = [[0, 2138]] if torch.distributed.get_rank() == 0 else [[2138, 4276]]
+        self.pp_patches_token_start_end_idx_global = (
+            pp_patches_token_start_end_idx_global
+        )
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):

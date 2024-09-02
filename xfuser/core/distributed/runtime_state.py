@@ -253,7 +253,7 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.num_frames = num_frames or self.input_config.num_frames
         self.input_config.batch_size = batch_size or self.input_config.batch_size
         if self.cogvideox:
-            self._calc_cogvideox_patches_metadata
+            self._calc_cogvideox_patches_metadata()
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()

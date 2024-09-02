@@ -46,6 +46,19 @@ elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
     export SCRIPT=hunyuandit_example.py
     export MODEL_ID="/mnt/models/SD/HunyuanDiT-v1.2-Diffusers"
     export INFERENCE_STEP=20
+elif [ "$MODEL_TYPE" = "Latte" ]; then
+    export SCRIPT=latte_example.py
+    export MODEL_ID="/mnt/models/SD/Latte-2b"
+    export INFERENCE_STEP=50
+    export height=512
+    export width=512
+elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
+    export SCRIPT=cogvideox_example.py
+    export MODEL_ID="/mnt/models/CogVideoX-2b"
+    export INFERENCE_STEP=50
+    export height=480
+    export width=720
+    export num_frames=9
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
@@ -71,6 +84,10 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1
 # Flux only supports SP, do not set the pipefusion degree
 if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
+elif [ "$MODEL_TYPE" = "Latte" ]; then
+PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
+elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 1"
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
 PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 4 --ring_degree 1"
 fi

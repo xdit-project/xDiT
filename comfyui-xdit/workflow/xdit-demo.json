@@ -1,0 +1,204 @@
+{
+  "last_node_id": 4,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 4,
+      "type": "PreviewImage",
+      "pos": [
+        1319,
+        348
+      ],
+      "size": {
+        "0": 548.5762939453125,
+        "1": 574.4868774414062
+      },
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    },
+    {
+      "id": 3,
+      "type": "XfuserPipelineHost",
+      "pos": [
+        670,
+        533
+      ],
+      "size": {
+        "0": 315,
+        "1": 146
+      },
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "STRINGC",
+          "link": 2
+        },
+        {
+          "name": "negative",
+          "type": "STRINGC",
+          "link": 3
+        },
+        {
+          "name": "host",
+          "type": "XFUSER_PIPELINE_HOST",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ],
+          "slot_index": 0,
+          "shape": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "XfuserPipelineHost"
+      },
+      "widgets_values": [
+        20,
+        1030,
+        "fixed"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "XfuserPipelineHostLoader",
+      "pos": [
+        22,
+        809
+      ],
+      "size": {
+        "0": 315,
+        "1": 226
+      },
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "XFUSER_PIPELINE_HOST",
+          "type": "XFUSER_PIPELINE_HOST",
+          "links": [
+            4
+          ],
+          "slot_index": 0,
+          "shape": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "XfuserPipelineHostLoader"
+      },
+      "widgets_values": [
+        "/cfs/dit/HunyuanDiT-v1.2-Diffusers",
+        1024,
+        1024,
+        0,
+        8
+      ]
+    },
+    {
+      "id": 1,
+      "type": "XfuserClipTextEncode",
+      "pos": [
+        24,
+        497
+      ],
+      "size": {
+        "0": 400,
+        "1": 200
+      },
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "STRINGC",
+          "links": [
+            2
+          ],
+          "shape": 3
+        },
+        {
+          "name": "negative",
+          "type": "STRINGC",
+          "links": [
+            3
+          ],
+          "shape": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "XfuserClipTextEncode"
+      },
+      "widgets_values": [
+        "一只站在山顶的鹈鹕",
+        ""
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      3,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      1,
+      0,
+      3,
+      0,
+      "STRINGC"
+    ],
+    [
+      3,
+      1,
+      1,
+      3,
+      1,
+      "STRINGC"
+    ],
+    [
+      4,
+      2,
+      0,
+      3,
+      2,
+      "XFUSER_PIPELINE_HOST"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7513148009015781,
+      "offset": [
+        200.39738281249956,
+        -65.59845703125033
+      ]
+    }
+  },
+  "version": 0.4
+}

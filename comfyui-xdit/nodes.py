@@ -2,28 +2,12 @@ import time
 import os
 import torch
 import torch.distributed
+import subprocess
+import requests
+import base64
+import pickle
 
 from .utils import convert_images_to_tensors
-from xfuser.core.distributed import init_distributed_environment
-from xfuser import xFuserHunyuanDiTPipeline, xFuserArgs
-from xfuser.config import FlexibleArgumentParser
-from xfuser.core.distributed import (
-    get_world_group,
-    is_dp_last_group,
-    get_data_parallel_world_size,
-    get_runtime_state,
-)
-from xfuser.config.config import (
-    EngineConfig,
-    ParallelConfig,
-    TensorParallelConfig,
-    PipeFusionParallelConfig,
-    SequenceParallelConfig,
-    DataParallelConfig,
-    ModelConfig,
-    InputConfig,
-    RuntimeConfig,
-)
 from multiprocessing import Process
 
 class XfuserClipTextEncode:
@@ -44,111 +28,88 @@ class XfuserClipTextEncode:
     def concat_embeds(self, positive, negative):
         return (positive, negative,)
 
-class XfuserPipelineLoader:
+class XfuserPipelineHostLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "positive": ("STRINGC",),
-                "negative": ("STRINGC",),
                 "model_path": (list(["/cfs/dit/HunyuanDiT-v1.2-Diffusers"]), ),
+                "width": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
+                "height": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
+                "warmup_steps": ("INT", {"default": 0, "min": 0, "max": 20, "step": 1}),
+                "nproc_per_node": ("INT", {"default": 8, "min": 1, "max": 8, "step": 1}),
             }
         }
 
-    RETURN_TYPES = ("XFUSER_PIPELINE",)
+    RETURN_TYPES = ("XFUSER_PIPELINE_HOST",)
 
-    FUNCTION = "load_pipeline"
+    FUNCTION = "launch_host"
 
     CATEGORY = "Xfuser"        
 
-    def load_pipeline(self, model_path, positive, negative):
-        engine_config, input_config = self.setup_config(model_path, positive, negative)
-        # local_rank = get_world_group().local_rank
-        rank = 0
-        pipeline = xFuserHunyuanDiTPipeline.from_pretrained(
-            pretrained_model_name_or_path=engine_config.model_config.model,
-            engine_config=engine_config,
-            torch_dtype=torch.float16,
-        ).to(f"cuda:{rank}")
-        pipeline.prepare_run(input_config)
+    def launch_host(self, model_path, width, height, warmup_steps, nproc_per_node):
+        ulysses_degree = 1
+        ring_degree = 1
+        CFG_ARGS=""
 
-        return (pipeline, )
-    
-    def setup_config(self, model_path, positive, negative):
-        if not torch.distributed.is_initialized():
-            # logger.warning(
-            #     "Distributed environment is not initialized. " "Initializing..."
-            # )
-            print("Distributed environment is not initialized. " "Initializing...")
-            os.environ['MASTER_ADDR'] = 'localhost'
-            os.environ['MASTER_PORT'] = "25001"
-            init_distributed_environment(world_size=1, rank=0, local_rank=0)
-            torch.cuda.set_device(0)
+        if nproc_per_node == 8:
+            pipefusion_parallel_degree = 4
+            CFG_ARGS="--use_cfg_parallel"   
+        elif nproc_per_node == 4:
+            pipefusion_parallel_degree = 4
+        elif nproc_per_node == 2:
+            pipefusion_parallel_degree = 2
+        elif nproc_per_node == 1:
+            pipefusion_parallel_degree = 1
+        else:
+            pass
+        cmd = [
+            'torchrun',
+            f'--nproc_per_node={nproc_per_node}',
+            './custom_nodes/comfyui-xdit-server/host.py',
+            f'--model={model_path}',
+            f'--pipefusion_parallel_degree={pipefusion_parallel_degree}',
+            f'--ulysses_degree={ulysses_degree}',
+            f'--ring_degree={ring_degree}',
+            f'--height={height}',
+            f'--width={width}',
+            f'--warmup_steps={warmup_steps}',
+            f'--prompt="setup"',
+            CFG_ARGS,
+        ]
 
-        model_config = ModelConfig(
-            model=model_path,
-            download_dir=None,
-            trust_remote_code=False,
-        )
+        # 过滤掉空字符串
+        cmd = [arg for arg in cmd if arg]
+         # 打印命令行参数
+        print("Running command:", " ".join(cmd))
 
-        runtime_config = RuntimeConfig(
-            warmup_steps=0,
-            # use_cuda_graph=self.use_cuda_graph,
-            use_parallel_vae=False,
-            use_torch_compile=False,
-            # use_profiler=self.use_profiler,
-        )
+        # 使用subprocess启动子进程
+        process = subprocess.Popen(cmd)
 
-        parallel_config = ParallelConfig(
-            dp_config=DataParallelConfig(
-                dp_degree=1,
-                use_cfg_parallel=False,
-            ),
-            sp_config=SequenceParallelConfig(
-                ulysses_degree=1,
-                ring_degree=1,
-            ),
-            tp_config=TensorParallelConfig(
-                tp_degree=1,
-                split_scheme="row",
-            ),
-            pp_config=PipeFusionParallelConfig(
-                pp_degree=1,
-                num_pipeline_patch=None,
-                attn_layer_num_for_pp=None,
-            ),
-        )
+        host = 'http://localhost:6000'
 
-        engine_config = EngineConfig(
-            model_config=model_config,
-            runtime_config=runtime_config,
-            parallel_config=parallel_config,
-        )
+        # 轮询 host 直到初始化完成
+        initialize_url = f"{host}/initialize"
+        while True:
+            try:
+                response = requests.get(initialize_url)
+                if response.status_code == 200 and response.json().get("status") == "initialized":
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(1)  # 等待一秒后重试
 
-        input_config = InputConfig(
-            height=1024,
-            width=1024,
-            use_resolution_binning=False,
-            batch_size=1,
-            prompt=positive,
-            negative_prompt=negative,
-            num_inference_steps=20,
-            seed=0,
-            output_type="pil",
-        )
+        return (f"{host}/generate", )
 
-        return engine_config, input_config
 
-class XfuserPipeline:
+class XfuserPipelineHost:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("XFUSER_PIPELINE",),
                 "positive": ("STRINGC",),
                 "negative": ("STRINGC",),
-                "width": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
-                "height": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
+                "host": ("XFUSER_PIPELINE_HOST",),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2 ** 32 - 1}),
             }
@@ -160,27 +121,40 @@ class XfuserPipeline:
 
     CATEGORY = "Xfuser"
 
-    def predict(self, pipeline, positive, negative, width, height, steps, seed):
-        output = pipeline(
-            height=height,
-            width=width,
-            prompt=positive,
-            negative_prompt=negative,
-            num_inference_steps=steps,
-            output_type="pil",
-            generator=torch.Generator(device="cuda").manual_seed(0)
-        )
+    def predict(self, host, positive, negative, steps, seed):
+        url = host
+        data = {
+            "prompt": positive,            
+            "num_inference_steps": steps,
+            "seed": seed,
+        }
+        response = requests.post(url, json=data)
+        response_data = response.json()
+
+        # 反序列化 output 对象
+        output_base64 = response_data.get("output", "")
+        if output_base64:
+            output_bytes = base64.b64decode(output_base64)
+            output = pickle.loads(output_bytes)
+            image_path = response_data.get("image_path", "")
+            output.images[0].save(image_path )
+
+            print("Output object deserialized successfully")
+            print(f"Image saved to {image_path}")
+        else:
+            output = None
+            print("No output object received")
         images = output.images
         return (convert_images_to_tensors(images), )
 
 NODE_CLASS_MAPPINGS = {
     "XfuserClipTextEncode": XfuserClipTextEncode,
-    "XfuserPipelineLoader": XfuserPipelineLoader,
-    "XfuserPipeline": XfuserPipeline
+    "XfuserPipelineHostLoader": XfuserPipelineHostLoader,
+    "XfuserPipelineHost": XfuserPipelineHost
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "XfuserClipTextEncode": "XfuserClipTextEncode",
-    "XfuserPipelineLoader": "XfuserPipelineLoader",
-    "XfuserPipeline": "XfuserPipeline"
+    "XfuserPipelineHostLoader": "XfuserPipelineHostLoader",
+    "XfuserPipelineHost": "XfuserPipelineHost"
 }

@@ -126,19 +126,12 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
         """
         text_embeds = self.text_proj(text_embeds)
         batch, num_frames, channels, height, width = image_embeds.shape
-        if torch.distributed.get_rank() == 0: print(f"ori image_embeds.shape: {image_embeds.shape}")
         image_embeds = image_embeds.reshape(-1, channels, height, width)
-        if torch.distributed.get_rank() == 0: print(f"reshape image_embeds.shape: {image_embeds.shape}")
         image_embeds = self.proj(image_embeds)
-        if torch.distributed.get_rank() == 0: print(f"proj image_embeds.shape: {image_embeds.shape}")
         image_embeds = image_embeds.view(batch, num_frames, *image_embeds.shape[1:])
-        if torch.distributed.get_rank() == 0: print(f"view image_embeds.shape: {image_embeds.shape}")
         image_embeds = image_embeds.flatten(3)
-        if torch.distributed.get_rank() == 0: print(f"flatten(3) image_embeds.shape: {image_embeds.shape}")
         image_embeds = image_embeds.transpose(2, 3)  # [batch, num_frames, height x width, channels]
-        if torch.distributed.get_rank() == 0: print(f".transpose(2, 3) image_embeds.shape: {image_embeds.shape}")
         image_embeds = image_embeds.flatten(1, 2)  # [batch, num_frames x height x width, channels]
-        if torch.distributed.get_rank() == 0: print(f"flatten(1, 2) image_embeds.shape: {image_embeds.shape}")
         # if get_runtime_state().patch_mode:
         #     start, end = get_runtime_state().pp_patches_token_start_end_idx_global[
         #         get_runtime_state().pipeline_patch_idx

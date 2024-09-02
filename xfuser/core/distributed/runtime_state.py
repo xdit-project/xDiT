@@ -96,6 +96,7 @@ class DiTRuntimeState(RuntimeState):
     #   torch.Size: size of tensor
     #   int: number of recv buffer it needs
     pipeline_comm_extra_tensors_info: List[Tuple[str, List[int], int]]
+    cogvideox: bool
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
@@ -467,9 +468,7 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_start_idx_local = pp_patches_start_idx_local
         self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
         self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
-        self.pp_patches_token_start_end_idx_global = (
-            pp_patches_token_start_end_idx_global
-        )
+        self.pp_patches_token_start_end_idx_global = [[0, 2138]] if torch.distributed.get_rank() == 0 else [[2138, 4276]]
         self.pp_patches_token_num = pp_patches_token_num
 
     def _reset_recv_buffer(self):

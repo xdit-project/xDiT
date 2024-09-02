@@ -244,7 +244,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            latents = self._init_video_sync_pipeline(latents)
+            # latents = self._init_video_sync_pipeline(latents)
             # for DPM-solver++
             old_pred_original_sample = None
             for i, t in enumerate(timesteps):
@@ -306,21 +306,21 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
         
-        if get_sequence_parallel_world_size() > 1:
-            sp_degree = get_sequence_parallel_world_size()
-            sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
-            latents_list = []
-            for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
-                latents_list += [
-                    sp_latents_list[sp_patch_idx][
-                        ...,
-                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
-                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
-                        :
-                    ]
-                    for sp_patch_idx in range(sp_degree)
-                ]
-            latents = torch.cat(latents_list, dim=-2)
+        # if get_sequence_parallel_world_size() > 1:
+        #     sp_degree = get_sequence_parallel_world_size()
+        #     sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
+        #     latents_list = []
+        #     for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
+        #         latents_list += [
+        #             sp_latents_list[sp_patch_idx][
+        #                 ...,
+        #                 get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
+        #                 get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
+        #                 :
+        #             ]
+        #             for sp_patch_idx in range(sp_degree)
+        #         ]
+        #     latents = torch.cat(latents_list, dim=-2)
         
         if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
             if not (output_type == "latents" or output_type == "latent"):

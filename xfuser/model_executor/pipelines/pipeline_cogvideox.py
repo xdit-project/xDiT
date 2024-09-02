@@ -313,8 +313,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
                 latents_list += [
                     sp_latents_list[sp_patch_idx][
-                        :,
-                        :,
+                        ...,
                         get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
                         get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
                         :

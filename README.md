@@ -141,8 +141,9 @@ The overview of xDiT is shown as follows.
     <details>
       <summary>Latte生成视频样例</summary>
       
-      <video controls loop src="https://github.com/dannyxiaocn/xDiT/blob/cogvideox/docs/results/latte_pool_cat.mp4?raw=true" type="video/mp4"></video>
-      <video controls loop src="https://github.com/dannyxiaocn/xDiT/blob/cogvideox/docs/results/latte_space_cat.mp4?raw=true" type="video/mp4"></video>
+      <video controls> <source src="https://github.com/dannyxiaocn/xDiT/blob/cogvideox/docs/results/latte_pool_cat.mp4?raw=true" type="video/mp4"></video>
+
+      <video controls> <source src="https://github.com/dannyxiaocn/xDiT/blob/cogvideox/docs/results/latte_space_cat.mp4?raw=true" type="video/mp4"></video>
 
     </details>
 

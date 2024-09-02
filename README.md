@@ -138,14 +138,13 @@ The overview of xDiT is shown as follows.
 <h3 id="perf_latte">Latte</h3>
 
 5. [Latte Performance Report](./docs/performance/latte.md)
-    <details>
-      <summary>Latte生成视频样例</summary>
+
+    Latte生成视频样例
       
       <video controls> <source src="https://github.com/dannyxiaocn/xDiT/blob/cogvideox/docs/results/latte_pool_cat.mp4?raw=true" type="video/mp4"></video>
 
       <video controls> <source src="https://github.com/dannyxiaocn/xDiT/blob/cogvideox/docs/results/latte_space_cat.mp4?raw=true" type="video/mp4"></video>
 
-    </details>
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

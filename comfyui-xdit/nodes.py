@@ -71,7 +71,6 @@ class XfuserPipelineHostLoader:
             pipefusion_parallel_degree = 1
         else:
             pass
-
         cmd = [
             'torchrun',
             f'--nproc_per_node={nproc_per_node}',

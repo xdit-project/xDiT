@@ -92,10 +92,6 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_token_start_idx_local: Optional[List[int]]
     pp_patches_token_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
-    # Storing the shape of a tensor that is not latent but requires pp communication
-    #   torch.Size: size of tensor
-    #   int: number of recv buffer it needs
-    pipeline_comm_extra_tensors_info: List[Tuple[str, List[int], int]]
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
@@ -122,7 +118,6 @@ class DiTRuntimeState(RuntimeState):
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
                 * pipeline.transformer.config.attention_head_dim,
             )
-        self.pipeline_comm_extra_tensors_info = []
 
     def set_input_parameters(
         self,
@@ -144,6 +139,7 @@ class DiTRuntimeState(RuntimeState):
             (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
             or (batch_size and self.input_config.batch_size != batch_size)
+            or not self.ready
         ):
             self._input_size_change(height, width, batch_size)
 
@@ -175,7 +171,7 @@ class DiTRuntimeState(RuntimeState):
             self._video_input_size_change(height, width, num_frames, batch_size)
 
         self.ready = True
-    
+
     def _set_cogvideox_parameters(
         self,
         vae_scale_factor_spatial: int,
@@ -257,7 +253,7 @@ class DiTRuntimeState(RuntimeState):
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()
-    
+
     def _calc_patches_metadata(self):
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
@@ -363,16 +359,18 @@ class DiTRuntimeState(RuntimeState):
             pp_patches_token_start_end_idx_global
         )
         self.pp_patches_token_num = pp_patches_token_num
-        
+
     def _calc_cogvideox_patches_metadata(self):
-        
+
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size
         vae_scale_factor_spatial = self.vae_scale_factor_spatial
         latents_height = self.input_config.height // vae_scale_factor_spatial
         latents_width = self.input_config.width // vae_scale_factor_spatial
-        latents_frames = (self.input_config.num_frames - 1) // self.vae_scale_factor_temporal + 1
+        latents_frames = (
+            self.input_config.num_frames - 1
+        ) // self.vae_scale_factor_temporal + 1
 
         if latents_height % num_sp_patches != 0:
             raise ValueError(
@@ -451,8 +449,12 @@ class DiTRuntimeState(RuntimeState):
         ]
         pp_patches_token_start_end_idx_global = [
             [
-                (latents_width // patch_size) * (start_idx // patch_size) * latents_frames,
-                (latents_width // patch_size) * (end_idx // patch_size) * latents_frames,
+                (latents_width // patch_size)
+                * (start_idx // patch_size)
+                * latents_frames,
+                (latents_width // patch_size)
+                * (end_idx // patch_size)
+                * latents_frames,
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]

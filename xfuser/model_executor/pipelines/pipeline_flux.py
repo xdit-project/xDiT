@@ -29,10 +29,9 @@ from xfuser.core.distributed import (
     get_pp_group,
     get_sequence_parallel_world_size,
     get_sp_group,
-    get_data_parallel_rank,
-    get_data_parallel_world_size,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
+    is_dp_last_group,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -61,7 +60,6 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
     def prepare_run(
         self,
         input_config: InputConfig,
-        max_sequence_length,
         steps: int = 3,
         sync_steps: int = 1,
     ):
@@ -74,7 +72,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             prompt=prompt,
             num_inference_steps=steps,
             output_type="latent",
-            max_sequence_length=max_sequence_length,
+            max_sequence_length=input_config.max_sequence_length,
             generator=torch.Generator(device="cuda").manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -121,6 +119,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -218,7 +217,6 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             batch_size = len(prompt)
         else:
             batch_size = prompt_embeds.shape[0]
-
         device = self._execution_device
 
         #! ---------------------------------------- ADDED BELOW ----------------------------------------
@@ -311,7 +309,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                     sync_only=True,
                 )
 
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+        if is_dp_last_group():
             if output_type == "latent":
                 image = latents
 

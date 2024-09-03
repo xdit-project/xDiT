@@ -4,7 +4,10 @@ from typing import List, Tuple, Callable, Optional, Union, Dict
 import torch
 import torch.distributed
 from diffusers import CogVideoXPipeline
-from diffusers.pipelines.cogvideo.pipeline_cogvideox import CogVideoXPipelineOutput, retrieve_timesteps
+from diffusers.pipelines.cogvideo.pipeline_cogvideox import (
+    CogVideoXPipelineOutput,
+    retrieve_timesteps,
+)
 from diffusers.schedulers import CogVideoXDPMScheduler, CogVideoXDDIMScheduler
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.utils import deprecate
@@ -24,13 +27,14 @@ from xfuser.core.distributed import (
     get_world_group,
     get_cfg_group,
     get_sp_group,
-    get_runtime_state, 
+    get_runtime_state,
     initialize_runtime_state,
     get_data_parallel_rank,
 )
 
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
+
 
 @xFuserPipelineWrapperRegister.register(CogVideoXPipeline)
 class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
@@ -70,10 +74,15 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         output_type: str = "pil",
         return_dict: bool = True,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 226,
+        **kwargs,
     ) -> Union[CogVideoXPipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
@@ -159,11 +168,15 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
-        height = height or self.transformer.config.sample_size * self.vae_scale_factor_spatial
-        width = width or self.transformer.config.sample_size * self.vae_scale_factor_spatial
+        height = (
+            height
+            or self.transformer.config.sample_size * self.vae_scale_factor_spatial
+        )
+        width = (
+            width or self.transformer.config.sample_size * self.vae_scale_factor_spatial
+        )
         num_videos_per_prompt = 1
 
-        
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
@@ -186,14 +199,12 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device
-        
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
-        
-        
+
         get_runtime_state().set_video_input_parameters(
             height=height,
             width=width,
@@ -201,7 +212,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )
-        
 
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
@@ -216,10 +226,11 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         )
         if do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device, timesteps
+        )
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents.
@@ -235,14 +246,15 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             generator,
             latents,
         )
-        
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        
+        num_warmup_steps = max(
+            len(timesteps) - num_inference_steps * self.scheduler.order, 0
+        )
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             latents = self._init_video_sync_pipeline(latents)
             # for DPM-solver++
@@ -251,12 +263,16 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 if self.interrupt:
                     continue
 
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = (
+                    torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                )
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-                
+
                 # predict noise model_output
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
@@ -265,20 +281,34 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     return_dict=False,
                 )[0]
                 noise_pred = noise_pred.float()
-                
+
                 # perform guidance
                 if use_dynamic_cfg:
                     self._guidance_scale = 1 + guidance_scale * (
-                        (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
+                        (
+                            1
+                            - math.cos(
+                                math.pi
+                                * (
+                                    (num_inference_steps - t.item())
+                                    / num_inference_steps
+                                )
+                                ** 5.0
+                            )
+                        )
+                        / 2
                     )
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
 
-                
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
-                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                    latents = self.scheduler.step(
+                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                    )[0]
                 else:
                     latents, old_pred_original_sample = self.scheduler.step(
                         noise_pred,
@@ -290,7 +320,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                         return_dict=False,
                     )
                 latents = latents.to(prompt_embeds.dtype)
-                
 
                 # call the callback, if provided
                 if callback_on_step_end is not None:
@@ -301,11 +330,15 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop(
+                        "negative_prompt_embeds", negative_prompt_embeds
+                    )
 
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
-        
+
         if get_sequence_parallel_world_size() > 1:
             sp_degree = get_sequence_parallel_world_size()
             sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
@@ -315,21 +348,23 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     sp_latents_list[sp_patch_idx][
                         :,
                         :,
-                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx]:
-                        get_runtime_state().pp_patches_start_idx_local[pp_patch_idx+1],
-                        :
+                        get_runtime_state()
+                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
+                        .pp_patches_start_idx_local[pp_patch_idx + 1],
+                        :,
                     ]
                     for sp_patch_idx in range(sp_degree)
                 ]
             latents = torch.cat(latents_list, dim=-2)
-        
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+
+        if is_dp_last_group():
             if not (output_type == "latents" or output_type == "latent"):
                 video = self.decode_latents(latents)
-                video = self.video_processor.postprocess_video(video=video, output_type=output_type)
+                video = self.video_processor.postprocess_video(
+                    video=video, output_type=output_type
+                )
             else:
                 video = latents
-                
 
         # Offload all models
         self.maybe_free_model_hooks()

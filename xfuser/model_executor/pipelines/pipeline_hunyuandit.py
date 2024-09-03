@@ -111,6 +111,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         target_size: Optional[Tuple[int, int]] = None,
         crops_coords_top_left: Tuple[int, int] = (0, 0),
         use_resolution_binning: bool = True,
+        **kwargs,
     ):
         r"""
         The call function to the pipeline for generation with HunyuanDiT.

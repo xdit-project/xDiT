@@ -137,6 +137,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.

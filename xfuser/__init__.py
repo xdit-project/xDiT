@@ -8,6 +8,7 @@ from xfuser.model_executor.pipelines import (
     xFuserCogVideoXPipeline,
 )
 from xfuser.config import xFuserArgs, EngineConfig
+from xfuser.parallel import xDiTParallel
 
 __all__ = [
     "xFuserPixArtAlphaPipeline",
@@ -19,4 +20,5 @@ __all__ = [
     "xFuserCogVideoXPipeline",
     "xFuserArgs",
     "EngineConfig",
+    "xDiTParallel",
 ]

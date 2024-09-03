@@ -150,16 +150,16 @@ pip install xfuser
 
 ### 2. Install from source 
 
-#### 2.1 Install yunchang for sequence parallel.
-
-Install yunchang from [feifeibear/long-context-attention](https://github.com/feifeibear/long-context-attention).
-Please note that it depends on flash attention and specific GPU model requirements. We recommend installing yunchang from the source code rather than using `pip install yunchang==0.3.0`.
-
-#### 2.2 Install xDiT
-
 ```
 python setup.py install
 ```
+
+Note that we use two self-maintained packages:
+
+1. [yunchang](https://github.com/feifeibear/long-context-attention)
+2. [DistVAE](https://github.com/xdit-project/DistVAE)
+
+The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
 
 ### 2. Usage
 

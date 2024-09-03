@@ -117,7 +117,9 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             batch_size = len(prompt) if isinstance(prompt, list) else 1
             if batch_size > 1:
                 dp_degree = get_runtime_state().parallel_config.dp_degree
-                dp_group_rank = get_world_group().rank // get_data_parallel_world_size()
+                dp_group_rank = get_world_group().rank // (
+                    get_world_group().world_size // get_data_parallel_world_size()
+                )
                 dp_group_batch_size = (batch_size + dp_degree - 1) // dp_degree
                 start_batch_idx = dp_group_rank * dp_group_batch_size
                 end_batch_idx = min(

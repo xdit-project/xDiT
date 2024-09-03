@@ -39,7 +39,7 @@ engine_config = None
 input_config = None
 local_rank = None
 logger = None
-initialized = False  # 新增变量
+initialized = False
 
 def setup_logger():
     global logger
@@ -85,12 +85,6 @@ def initialize():
             engine_config=engine_config,
             torch_dtype=torch.float16,
         ).to(f"cuda:{local_rank}")
-    elif model_name == "FLUX.1-schnell":
-        pipe = xFuserFluxPipeline.from_pretrained(
-            pretrained_model_name_or_path=engine_config.model_config.model,
-            engine_config=engine_config,
-            torch_dtype=torch.bfloat16,
-        ).to(f"cuda:{local_rank}")
     elif model_name == "stable-diffusion-3-medium-diffusers":
         pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=engine_config.model_config.model,
@@ -103,6 +97,12 @@ def initialize():
             engine_config=engine_config,
             torch_dtype=torch.float16,
         ).to(f"cuda:{local_rank}")
+    elif model_name == "FLUX.1-schnell":
+        pipe = xFuserFluxPipeline.from_pretrained(
+            pretrained_model_name_or_path=engine_config.model_config.model,
+            engine_config=engine_config,
+            torch_dtype=torch.float16,
+        ).to(f"cuda:{local_rank}")
     else:
         raise NotImplemented(f"{model_name} is currently not supported!")
 
@@ -110,7 +110,7 @@ def initialize():
     logger.info("Model initialization completed")
     initialized = True  # 设置初始化完成标志
 
-def generate_image_parallel(prompt, num_inference_steps, seed):
+def generate_image_parallel(prompt, num_inference_steps, seed, cfg):
     global pipe, local_rank, input_config
     logger.info(f"Starting image generation with prompt: {prompt}")
     torch.cuda.reset_peak_memory_stats()
@@ -121,8 +121,8 @@ def generate_image_parallel(prompt, num_inference_steps, seed):
         prompt=prompt,
         num_inference_steps=num_inference_steps,
         output_type="pil",
-        # use_resolution_binning=input_config.use_resolution_binning,
         generator=torch.Generator(device=f"cuda:{local_rank}").manual_seed(seed),
+        guidance_scale=cfg,
     )
     end_time = time.time()
     elapsed_time = end_time - start_time
@@ -156,29 +156,26 @@ def generate_image():
     prompt = data.get('prompt', input_config.prompt)
     num_inference_steps = data.get('num_inference_steps', input_config.num_inference_steps)
     seed = data.get('seed', input_config.seed)
+    cfg = data.get('cfg', 8.0)
 
     logger.info(f"Request parameters: prompt='{prompt}', steps={num_inference_steps}, seed={seed}")
     # 广播请求参数到所有进程
-    params = [prompt, num_inference_steps, seed]
+    params = [prompt, num_inference_steps, seed, cfg]
     dist.broadcast_object_list(params, src=0)
     logger.info("Parameters broadcasted to all processes")
 
-    output, elapsed_time = generate_image_parallel(prompt, num_inference_steps, seed)
+    output, elapsed_time = generate_image_parallel(prompt, num_inference_steps, seed, cfg)
 
 
     image_path = ""
     output_base64 = ""
     if dist.get_rank() == 0 and output is not None:
-        image_path = f"./results/hunyuandit_result_{int(time.time())}"
         # 序列化 output 对象并编码为 Base64 字符串
         output_bytes = pickle.dumps(output)
         output_base64 = base64.b64encode(output_bytes).decode('utf-8')
-        output.images[0].save(image_path+".png")
-        logger.info(f"Image saved to {image_path}.png")
     
     response = {
         "message": "Image generated successfully",
-        "image_path": image_path+".check.png",
         "elapsed_time": f"{elapsed_time:.2f} sec",
         "output": output_base64
     }
@@ -193,7 +190,7 @@ def run_host():
     else:
         while True:
             # 非主进程等待广播的参数
-            params = [None] * 3
+            params = [None] * 4
             logger.info(f"Rank {dist.get_rank()} waiting for tasks")
             dist.broadcast_object_list(params, src=0)
             if params[0] is None:
@@ -208,3 +205,4 @@ if __name__ == "__main__":
     logger.info(f"Process initialized. Rank: {dist.get_rank()}, Local Rank: {os.environ.get('LOCAL_RANK', 'Not Set')}")
     logger.info(f"Available GPUs: {torch.cuda.device_count()}")
     run_host()
+

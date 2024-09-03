@@ -10,6 +10,14 @@ import pickle
 from .utils import convert_images_to_tensors
 from multiprocessing import Process
 
+current_dir = os.path.dirname(__file__)
+custom_nodes_dir = os.path.dirname(current_dir)
+base_dir = os.path.dirname(custom_nodes_dir)
+
+models_dir = os.path.join(base_dir, "models")
+checkpoints_dir = os.path.join(models_dir, "checkpoints")
+xfuser_models = [d for d in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, d))]
+
 class XfuserClipTextEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -28,60 +36,63 @@ class XfuserClipTextEncode:
     def concat_embeds(self, positive, negative):
         return (positive, negative,)
 
-class XfuserPipelineHostLoader:
+class XfuserPipelineLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_path": (list([
-                    "/cfs/dit/HunyuanDiT-v1.2-Diffusers",
-                    "/cfs/dit/models/PixArt-XL-2-1024-MS",
-                    "/cfs/dit/PixArt-Sigma-XL-2-2K-MS",
-                    "/cfs/dit/models/stable-diffusion-3-medium-diffusers",
-                    "/cfs/dit/FLUX.1-schnell",
-                ]), ),
+                "model_name": (xfuser_models,), 
                 "width": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
                 "height": ("INT", {"default": 1024, "min": 1, "max": 8192, "step": 1}),
-                "warmup_steps": ("INT", {"default": 0, "min": 0, "max": 20, "step": 1}),
-                "nproc_per_node": ("INT", {"default": 8, "min": 1, "max": 8, "step": 1}),
+                "device_num": (list([1, 2, 4, 8]),),
             }
         }
 
-    RETURN_TYPES = ("XFUSER_PIPELINE_HOST",)
+    RETURN_TYPES = ("XFUSER_PIPELINE",)
 
     FUNCTION = "launch_host"
 
     CATEGORY = "Xfuser"        
 
-    def launch_host(self, model_path, width, height, warmup_steps, nproc_per_node):
+    def launch_host(self, model_name, width, height, device_num):
+        assert model_name in ["HunyuanDiT-v1.2-Diffusers", "PixArt-XL-2-1024-MS", "PixArt-Sigma-XL-2-2K-MS", "stable-diffusion-3-medium-diffusers", "FLUX.1-schnell"], \
+            "model_name must be one of the following: HunyuanDiT-v1.2-Diffusers, PixArt-XL-2-1024-MS, PixArt-Sigma-XL-2-2K-MS, stable-diffusion-3-medium-diffusers, FLUX.1-schnell"
+        model_path = os.path.join(checkpoints_dir, model_name)
+        nproc_per_node = min(device_num, torch.cuda.device_count())
         ulysses_degree = 1
         ring_degree = 1
         CFG_ARGS=""
 
         if nproc_per_node == 8:
             pipefusion_parallel_degree = 4
-            ulysses_degree = 1
             CFG_ARGS="--use_cfg_parallel"   
         elif nproc_per_node == 4:
             pipefusion_parallel_degree = 4
-            ulysses_degree = 1
         elif nproc_per_node == 2:
             pipefusion_parallel_degree = 2
         elif nproc_per_node == 1:
             pipefusion_parallel_degree = 1
         else:
             pass
+
+        if model_name == "FLUX.1-schnell":
+            pipefusion_parallel_degree = 1
+            ulysses_degree = nproc_per_node
+            ring_degree = 1
+            CFG_ARGS=""
+
+        host_script_path = os.path.join(current_dir, 'host.py')
+
         cmd = [
             'torchrun',
             f'--nproc_per_node={nproc_per_node}',
-            './custom_nodes/comfyui-xdit-server/host.py',
+            host_script_path,
             f'--model={model_path}',
             f'--pipefusion_parallel_degree={pipefusion_parallel_degree}',
             f'--ulysses_degree={ulysses_degree}',
             f'--ring_degree={ring_degree}',
             f'--height={height}',
             f'--width={width}',
-            f'--warmup_steps={warmup_steps}',
             f'--prompt="setup"',
             CFG_ARGS,
         ]
@@ -105,21 +116,22 @@ class XfuserPipelineHostLoader:
                     break
             except requests.exceptions.RequestException:
                 pass
-            time.sleep(1)  # 等待一秒后重试
+            time.sleep(1)
 
         return (f"{host}/generate", )
 
 
-class XfuserPipelineHost:
+class XfuserSampler:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
+                "pipeline": ("XFUSER_PIPELINE",),
                 "positive": ("STRINGC",),
                 "negative": ("STRINGC",),
-                "host": ("XFUSER_PIPELINE_HOST",),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2 ** 32 - 1}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
             }
         }
 
@@ -129,8 +141,8 @@ class XfuserPipelineHost:
 
     CATEGORY = "Xfuser"
 
-    def predict(self, host, positive, negative, steps, seed):
-        url = host
+    def predict(self, pipeline, positive, negative, steps, seed, cfg):
+        url = pipeline
         data = {
             "prompt": positive,            
             "num_inference_steps": steps,
@@ -144,11 +156,7 @@ class XfuserPipelineHost:
         if output_base64:
             output_bytes = base64.b64decode(output_base64)
             output = pickle.loads(output_bytes)
-            image_path = response_data.get("image_path", "")
-            output.images[0].save(image_path)
-
             print("Output object deserialized successfully")
-            print(f"Image saved to {image_path}")
         else:
             output = None
             print("No output object received")
@@ -157,12 +165,12 @@ class XfuserPipelineHost:
 
 NODE_CLASS_MAPPINGS = {
     "XfuserClipTextEncode": XfuserClipTextEncode,
-    "XfuserPipelineHostLoader": XfuserPipelineHostLoader,
-    "XfuserPipelineHost": XfuserPipelineHost
+    "XfuserPipelineLoader": XfuserPipelineLoader,
+    "XfuserSampler": XfuserSampler
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "XfuserClipTextEncode": "XfuserClipTextEncode",
-    "XfuserPipelineHostLoader": "XfuserPipelineHostLoader",
-    "XfuserPipelineHost": "XfuserPipelineHost"
+    "XfuserPipelineLoader": "XfuserPipelineLoader",
+    "XfuserSampler": "XfuserSampler"
 }

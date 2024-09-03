@@ -9,6 +9,7 @@ from xfuser.core.distributed import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_runtime_state,
+    is_dp_last_group,
 )
 import imageio
 
@@ -53,7 +54,7 @@ def main():
         f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
-    if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+    if is_dp_last_group():
         videos = output.frames.cpu()
         global_rank = get_world_group().rank
         dp_group_world_size = get_data_parallel_world_size()

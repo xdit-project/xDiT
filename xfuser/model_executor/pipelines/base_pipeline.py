@@ -302,18 +302,6 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def __call__(self):
         pass
 
-    def _set_extra_comm_tensor_for_pipeline(
-        self, extra_tensors_shape_dict: List[Tuple[str, List[int], int]] = []
-    ):
-        if (
-            get_runtime_state().pipeline_comm_extra_tensors_info
-            == extra_tensors_shape_dict
-        ):
-            return
-        for name, shape, cnt in extra_tensors_shape_dict:
-            get_pp_group().set_extra_tensors_recv_buffer(name, shape, cnt)
-        get_runtime_state().pipeline_comm_extra_tensors_info = extra_tensors_shape_dict
-
     def _init_sync_pipeline(self, latents: torch.Tensor):
         get_runtime_state().set_patched_mode(patch_mode=False)
 

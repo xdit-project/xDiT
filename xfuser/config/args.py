@@ -87,6 +87,7 @@ class xFuserArgs:
     width: int = 1024
     num_frames: int = 49
     num_inference_steps: int = 20
+    max_sequence_length: int = 256
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     no_use_resolution_binning: bool = False
@@ -218,6 +219,12 @@ class xFuserArgs:
             default=20,
             help="Number of inference steps.",
         )
+        input_group.add_argument(
+            "--max_sequence_length",
+            type=int,
+            default=256,
+            help="Max sequencen length of prompt",
+        )
         runtime_group.add_argument(
             "--seed", type=int, default=42, help="Random seed for operations."
         )
@@ -302,6 +309,7 @@ class xFuserArgs:
             prompt=self.prompt,
             negative_prompt=self.negative_prompt,
             num_inference_steps=self.num_inference_steps,
+            max_sequence_length=self.max_sequence_length,
             seed=self.seed,
             output_type=self.output_type,
         )

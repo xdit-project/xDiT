@@ -1,6 +1,5 @@
 import os
-from typing import Any, Type, Union
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from pathlib import Path
 
 from xfuser.config.config import InputConfig
 from xfuser.core.distributed import (
@@ -13,6 +12,7 @@ from xfuser.core.distributed.parallel_state import (
     get_data_parallel_world_size,
     is_dp_last_group,
 )
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 from xfuser.model_executor.pipelines.register import xFuserPipelineWrapperRegister
@@ -42,10 +42,13 @@ class xDiTParallel:
             f"ulysses{self.config.parallel_config.ulysses_degree}_ring{self.config.parallel_config.ring_degree}_"
             f"pp{self.config.parallel_config.pp_degree}_patch{self.config.parallel_config.pp_config.num_pipeline_patch}"
         )
-        prefix = f"{directory}/{prefix}_result_{parallel_info}_dprank{dp_rank}"
         if is_dp_last_group():
-            if not os.path.exists("results"):
-                os.mkdir("results")
+            path = Path(f"{directory}")
+            path.mkdir(mode=755, parents=True, exist_ok=True)
+            path = path / f"{prefix}_result_{parallel_info}_dprank{dp_rank}"
             for i, image in enumerate(self.result.images):
-                image.save(f"{prefix}_image{i}.png")
-                print(f"{prefix}_image{i}.png")
+                image.save(f"{str(path)}_image{i}.png")
+                print(f"{str(path)}_image{i}.png")
+
+    def __del__(self):
+        get_runtime_state().destory_distributed_env()

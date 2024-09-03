@@ -7,9 +7,10 @@ from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_world_group,
     is_dp_last_group,
-    get_data_parallel_world_size,
+    get_data_parallel_rank,
     get_runtime_state,
 )
+from xfuser.core.distributed.parallel_state import get_data_parallel_world_size
 
 
 def main():
@@ -45,10 +46,8 @@ def main():
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
     if input_config.output_type == "pil":
-        global_rank = get_world_group().rank
-        dp_group_world_size = get_data_parallel_world_size()
-        dp_group_index = global_rank // dp_group_world_size
-        num_dp_groups = engine_config.parallel_config.dp_degree
+        dp_group_index = get_data_parallel_rank()
+        num_dp_groups = get_data_parallel_world_size()
         dp_batch_size = (input_config.batch_size + num_dp_groups - 1) // num_dp_groups
         if is_dp_last_group():
             if not os.path.exists("results"):

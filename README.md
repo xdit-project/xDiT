@@ -161,7 +161,16 @@ Note that we use two self-maintained packages:
 
 The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
 
+<<<<<<< HEAD
 ### 3. Usage
+=======
+
+### 3. Launch a Http Service
+
+[Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
+
+### 4. Usage
+>>>>>>> main
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.

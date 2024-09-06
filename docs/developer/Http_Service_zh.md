@@ -6,6 +6,11 @@
 docker build -t xdit-server:0.3.1 -f ./docker/Dockerfile .
 ```
 
+或者直接从dockerhub拉取(版本号可能需要更新)
+```
+docker pull thufeifeibear/xdit-service:0.3.1
+```
+
 用下面方式启动一个服务，服务相关参数写在配置脚本config.json里。我们映射了磁盘文件到docker container中，因为需要传递下载的模型文件。注意映射端口6000，如果冲突请修改。
 
 ```

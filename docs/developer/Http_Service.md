@@ -6,6 +6,12 @@
 docker build -t xdit-server:0.3.1 -f ./docker/Dockerfile .
 ```
 
+or (version number may need to be updated)
+
+```
+docker pull thufeifeibear/xdit-service:0.3.1
+```
+
 Start the service using the following command. The service-related parameters are written in the configuration script `config.json`. We have mapped disk files to the Docker container because we need to pass the downloaded model files. Note the mapping of port 6000; if there is a conflict, please modify it.
 
 ```

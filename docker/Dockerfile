@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir --upgrade pip
 RUN pip uninstall -y apex
 
 # # Install flash_attn separately with --use-pep517 flag
-RUN pip install --no-cache-dir --use-pep517 flash_attn==2.6.3 flask
+RUN pip install --no-cache-dir --use-pep517 flash-attn==2.6.3 flask
 
 RUN pip install -i https://mirrors.cloud.tencent.com/pypi/simple xfuser
 

@@ -3,13 +3,13 @@
 ### Creating the Service Image
 
 ```
-docker build -t xdit-server-test:0.3.1 -f ./docker/Dockerfile .
+docker build -t xdit-server:0.3.1 -f ./docker/Dockerfile .
 ```
 
 Start the service using the following command. The service-related parameters are written in the configuration script `config.json`. We have mapped disk files to the Docker container because we need to pass the downloaded model files. Note the mapping of port 6000; if there is a conflict, please modify it.
 
 ```
-docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p 6000:6000 -v /cfs:/cfs xdit-server-test:0.3.1 --config ./config.json
+docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p 6000:6000 -v /cfs:/cfs xdit-server:0.3.1 --config ./config.json
 ```
 
 The content of `./config.json` includes the number of GPUs to use, the mixed parallelism strategy, the size of the output images, the storage location for generated images, and other information.

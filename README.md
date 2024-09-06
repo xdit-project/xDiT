@@ -161,7 +161,12 @@ Note that we use two self-maintained packages:
 
 The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
 
-### 2. Usage
+
+### 3. Launch a Http Service
+
+[Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
+
+### 4. Usage
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
@@ -247,7 +252,6 @@ examples/pixartalpha_example.py \
 --prompt "A small dog" \
 --use_cfg_parallel
 ```
-
 
 ⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
 The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution. 

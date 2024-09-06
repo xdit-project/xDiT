@@ -19,7 +19,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
 
-export MODEL_TYPE="Sd3"
+export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
@@ -43,7 +43,7 @@ mkdir -p ./results
 
 for HEIGHT in 1024
 do
-for N_GPUS in 8;
+for N_GPUS in 2;
 do 
 
 

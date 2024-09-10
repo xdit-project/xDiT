@@ -1,6 +1,16 @@
 from setuptools import find_packages, setup
 import os
+import subprocess
+import sys
 
+def get_cuda_version():
+    try:
+        nvcc_version = subprocess.check_output(["nvcc", "--version"]).decode("utf-8")
+        version_line = [line for line in nvcc_version.split('\n') if "release" in line][0]
+        cuda_version = version_line.split(' ')[-2].replace(',', '')
+        return 'cu' + cuda_version.replace('.', '')
+    except Exception as e:
+        return 'no_cuda'
 
 if __name__ == "__main__":
     with open("README.md", "r") as f:
@@ -27,7 +37,6 @@ if __name__ == "__main__":
         ],
         extras_require={
             "all": [
-                "yunchang==0.3",
                 "flash_attn>=2.6.3",
             ],
         },

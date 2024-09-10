@@ -136,7 +136,8 @@ class DiTRuntimeState(RuntimeState):
             self.input_config.seed = seed
             set_random_seed(seed)
         if (
-            (height and self.input_config.height != height)
+            not self.ready
+            or (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
             or (batch_size and self.input_config.batch_size != batch_size)
             or not self.ready
@@ -162,8 +163,10 @@ class DiTRuntimeState(RuntimeState):
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)
+        print(self.input_config)
         if (
-            (height and self.input_config.height != height)
+            not self.ready
+            or (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
             or (num_frames and self.input_config.num_frames != num_frames)
             or (batch_size and self.input_config.batch_size != batch_size)

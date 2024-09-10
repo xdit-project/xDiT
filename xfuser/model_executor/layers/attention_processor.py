@@ -1136,6 +1136,8 @@ if CogVideoXAttnProcessor2_0 is not None:
             encoder_hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
             image_rotary_emb: Optional[torch.Tensor] = None,
+            *args,
+            **kwargs,
         ) -> torch.Tensor:
             text_seq_length = encoder_hidden_states.size(1)
 

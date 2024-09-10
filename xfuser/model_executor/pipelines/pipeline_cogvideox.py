@@ -30,6 +30,7 @@ from xfuser.core.distributed import (
     get_runtime_state,
     initialize_runtime_state,
     get_data_parallel_rank,
+    is_dp_last_group,
 )
 
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
@@ -365,6 +366,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 )
             else:
                 video = latents
+        else:
+            video = [None for _ in range(batch_size)]
 
         # Offload all models
         self.maybe_free_model_hooks()

@@ -12,7 +12,6 @@ from diffusers.models.attention_processor import (
     JointAttnProcessor2_0,
     FluxAttnProcessor2_0,
     FluxSingleAttnProcessor2_0,
-    apply_rope,
     HunyuanAttnProcessor2_0,
 )
 try:
@@ -652,11 +651,10 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
 
         if image_rotary_emb is not None:
-            # YiYi to-do: update uising apply_rotary_emb
-            # from ..embeddings import apply_rotary_emb
-            # query = apply_rotary_emb(query, image_rotary_emb)
-            # key = apply_rotary_emb(key, image_rotary_emb)
-            query, key = apply_rope(query, key, image_rotary_emb)
+            from diffusers.models.embeddings import apply_rotary_emb
+
+            query = apply_rotary_emb(query, image_rotary_emb)
+            key = apply_rotary_emb(key, image_rotary_emb)
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:

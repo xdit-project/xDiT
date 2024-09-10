@@ -363,7 +363,6 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_token_num = pp_patches_token_num
 
     def _calc_cogvideox_patches_metadata(self):
-
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size
@@ -452,11 +451,9 @@ class DiTRuntimeState(RuntimeState):
         pp_patches_token_start_end_idx_global = [
             [
                 (latents_width // patch_size)
-                * (start_idx // patch_size)
-                * latents_frames,
+                * (start_idx // patch_size),
                 (latents_width // patch_size)
-                * (end_idx // patch_size)
-                * latents_frames,
+                * (end_idx // patch_size),
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]

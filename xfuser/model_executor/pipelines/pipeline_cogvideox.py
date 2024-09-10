@@ -8,9 +8,8 @@ from diffusers.pipelines.cogvideo.pipeline_cogvideox import (
     CogVideoXPipelineOutput,
     retrieve_timesteps,
 )
-from diffusers.schedulers import CogVideoXDPMScheduler, CogVideoXDDIMScheduler
+from diffusers.schedulers import CogVideoXDPMScheduler
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-from diffusers.utils import deprecate
 
 import math
 
@@ -265,8 +264,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             len(timesteps) - num_inference_steps * self.scheduler.order, 0
         )
 
+        latents, image_rotary_emb = self._init_sync_pipeline(latents, image_rotary_emb, latents.size(1))
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            latents, image_rotary_emb = self._init_sync_pipeline(latents, image_rotary_emb)
             # for DPM-solver++
             old_pred_original_sample = None
             for i, t in enumerate(timesteps):
@@ -387,20 +386,22 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
         return CogVideoXPipelineOutput(frames=video)
 
-    def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]]):
+    def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]], latents_frames: Optional[int] = None):
         latents = super()._init_video_sync_pipeline(latents)
         if image_rotary_emb is not None:
+            assert latents_frames is not None
+            d = image_rotary_emb[0].shape[-1]
             image_rotary_emb = (
                 torch.cat(
                     [
-                        image_rotary_emb[0][start_token_idx:end_token_idx, ...]
+                        image_rotary_emb[0].reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx].reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
                     dim=0,
                 ),
                 torch.cat(
                     [
-                        image_rotary_emb[1][start_token_idx:end_token_idx, ...]
+                        image_rotary_emb[1].reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx].reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
                     dim=0,

@@ -228,9 +228,9 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
         key: Tensor,
         value: Tensor,
         *,
-        joint_tensor_query=None,
-        joint_tensor_key=None,
-        joint_tensor_value=None,
+        joint_tensor_query,
+        joint_tensor_key,
+        joint_tensor_value,
         dropout_p=0.0,
         softmax_scale=None,
         causal=False,
@@ -254,27 +254,24 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
 
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
-        if joint_tensor_query is not None:
-            query = torch.cat([joint_tensor_query, query], dim=1)
+        query = torch.cat([joint_tensor_query, query], dim=1)
         ulysses_world_size = torch.distributed.get_world_size(self.ulysses_pg)
         ulysses_rank = torch.distributed.get_rank(self.ulysses_pg)
-
-        if joint_tensor_key is not None and joint_tensor_value is not None:
-            attn_heads_per_ulysses_rank = joint_tensor_key.shape[-2] // ulysses_world_size
-            joint_tensor_key = joint_tensor_key[
-                ...,
-                attn_heads_per_ulysses_rank
-                * ulysses_rank : attn_heads_per_ulysses_rank
-                * (ulysses_rank + 1),
-                :,
-            ]
-            joint_tensor_value = joint_tensor_value[
-                ...,
-                attn_heads_per_ulysses_rank
-                * ulysses_rank : attn_heads_per_ulysses_rank
-                * (ulysses_rank + 1),
-                :,
-            ]
+        attn_heads_per_ulysses_rank = joint_tensor_key.shape[-2] // ulysses_world_size
+        joint_tensor_key = joint_tensor_key[
+            ...,
+            attn_heads_per_ulysses_rank
+            * ulysses_rank : attn_heads_per_ulysses_rank
+            * (ulysses_rank + 1),
+            :,
+        ]
+        joint_tensor_value = joint_tensor_value[
+            ...,
+            attn_heads_per_ulysses_rank
+            * ulysses_rank : attn_heads_per_ulysses_rank
+            * (ulysses_rank + 1),
+            :,
+        ]
 
         if self.use_pack_qkv:
             # (3*bs, seq_len/N, head_cnt, head_size)

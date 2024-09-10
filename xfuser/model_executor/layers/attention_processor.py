@@ -1115,12 +1115,12 @@ if CogVideoXAttnProcessor2_0 is not None:
             )
             if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
                 from xfuser.core.long_ctx_attention import (
-                    xFuserFluxLongContextAttention,
+                    xFuserLongContextAttention,
                     xFuserUlyssesAttention,
                 )
 
                 if HAS_FLASH_ATTN:
-                    self.hybrid_seq_parallel_attn = xFuserFluxLongContextAttention(
+                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
@@ -1128,6 +1128,8 @@ if CogVideoXAttnProcessor2_0 is not None:
                         use_fa=False,
                         use_kv_cache=self.use_long_ctx_attn_kvcache,
                     )
+            else:
+                self.hybrid_seq_parallel_attn = None
 
         def __call__(
             self,

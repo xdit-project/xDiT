@@ -386,7 +386,12 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
         return CogVideoXPipelineOutput(frames=video)
 
-    def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]], latents_frames: Optional[int] = None):
+    def _init_sync_pipeline(
+        self,
+        latents: torch.Tensor,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        latents_frames: Optional[int] = None,
+    ):
         latents = super()._init_video_sync_pipeline(latents)
         if image_rotary_emb is not None:
             assert latents_frames is not None

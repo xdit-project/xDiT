@@ -1,5 +1,5 @@
 import inspect
-from typing import Optional
+from typing import Optional, Union, Tuple
 
 import torch
 from torch import nn
@@ -45,10 +45,61 @@ def is_v100():
     device_name = torch.cuda.get_device_name(torch.cuda.current_device())
     return "V100" in device_name
 
+
 def torch_compile_disable_if_v100(func):
     if is_v100():
         return torch.compiler.disable(func)
     return func
+
+
+def apply_rotary_emb(
+    x: torch.Tensor,
+    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+    use_real: bool = True,
+    use_real_unbind_dim: int = -1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply rotary embeddings to input tensors using the given frequency tensor. This function applies rotary embeddings
+    to the given query or key 'x' tensors using the provided frequency tensor 'freqs_cis'. The input tensors are
+    reshaped as complex numbers, and the frequency tensor is reshaped for broadcasting compatibility. The resulting
+    tensors contain rotary embeddings and are returned as real tensors.
+
+    Args:
+        x (`torch.Tensor`):
+            Query or key tensor to apply rotary embeddings. [B, H, S, D] xk (torch.Tensor): Key tensor to apply
+        freqs_cis (`Tuple[torch.Tensor]`): Precomputed frequency tensor for complex exponentials. ([S, D], [S, D],)
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+    """
+    if use_real:
+        cos, sin = freqs_cis  # [S, D]
+        cos = cos[None, None]
+        sin = sin[None, None]
+        cos, sin = cos.to(x.device), sin.to(x.device)
+
+        if use_real_unbind_dim == -1:
+            # Used for flux, cogvideox, hunyuan-dit
+            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
+            x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+        elif use_real_unbind_dim == -2:
+            # Used for Stable Audio
+            x_real, x_imag = x.reshape(*x.shape[:-1], 2, -1).unbind(-2)  # [B, S, H, D//2]
+            x_rotated = torch.cat([-x_imag, x_real], dim=-1)
+        else:
+            raise ValueError(f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2.")
+
+        out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
+
+        return out
+    else:
+        # used for lumina
+        x_rotated = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+        freqs_cis = freqs_cis.unsqueeze(2)
+        x_out = torch.view_as_real(x_rotated * freqs_cis).flatten(3)
+
+        return x_out.type_as(x)
+
 
 class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
     def __init__(
@@ -651,8 +702,6 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
 
         if image_rotary_emb is not None:
-            from diffusers.models.embeddings import apply_rotary_emb
-
             query = apply_rotary_emb(query, image_rotary_emb)
             key = apply_rotary_emb(key, image_rotary_emb)
 
@@ -826,11 +875,8 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 
         # Apply RoPE if needed
         if image_rotary_emb is not None:
-            # YiYi to-do: update using apply_rotary_emb
-            # from ..embeddings import apply_rotary_emb
-            # query = apply_rotary_emb(query, image_rotary_emb)
-            # key = apply_rotary_emb(key, image_rotary_emb)
-            query, key = apply_rope(query, key, image_rotary_emb)
+            query = apply_rotary_emb(query, image_rotary_emb)
+            key = apply_rotary_emb(key, image_rotary_emb)
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
@@ -996,8 +1042,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         # Apply RoPE if needed
         # print(f"Q {query.shape}, {key.shape}, {image_rotary_emb[0].shape}")
         if image_rotary_emb is not None:
-            from diffusers.models.embeddings import apply_rotary_emb
-
             query = apply_rotary_emb(query, image_rotary_emb)
             if not attn.is_cross_attention:
                 key = apply_rotary_emb(key, image_rotary_emb)
@@ -1169,8 +1213,6 @@ if CogVideoXAttnProcessor2_0 is not None:
 
             # Apply RoPE if needed
             if image_rotary_emb is not None:
-                from diffusers.models.embeddings import apply_rotary_emb
-
                 query[:, :, text_seq_length:] = apply_rotary_emb(query[:, :, text_seq_length:], image_rotary_emb)
                 if not attn.is_cross_attention:
                     key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)

@@ -163,7 +163,6 @@ class DiTRuntimeState(RuntimeState):
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)
-        print(self.input_config)
         if (
             not self.ready
             or (height and self.input_config.height != height)

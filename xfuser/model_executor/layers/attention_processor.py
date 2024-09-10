@@ -1182,7 +1182,7 @@ if CogVideoXAttnProcessor2_0 is not None:
                 key, value = get_cache_manager().update_and_get_kv_cache(
                     new_kv=[key, value],
                     layer=attn,
-                    slice_dim=1,
+                    slice_dim=2,
                     layer_type="attn",
                 )
             #! ---------------------------------------- KV CACHE ----------------------------------------

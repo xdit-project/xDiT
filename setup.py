@@ -14,7 +14,7 @@ def get_cuda_version():
 
 def get_install_requires(cuda_version):
     if cuda_version == 'cu124':
-        sys.stderr.write("ERROR: Manual installation required for CUDA 12.4 specific PyTorch version.\n")
+        sys.stderr.write("WARNING: Manual installation required for CUDA 12.4 specific PyTorch version.\n")
         sys.stderr.write("Please install PyTorch for CUDA 12.4 using the following command:\n")
         sys.stderr.write("pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124\n")
 

@@ -828,7 +828,7 @@ class xFuserFluxSingleAttnProcessor2_0(FluxSingleAttnProcessor2_0):
 
         # Apply RoPE if needed
         if image_rotary_emb is not None:
-            # YiYi to-do: update uising apply_rotary_emb
+            # YiYi to-do: update using apply_rotary_emb
             # from ..embeddings import apply_rotary_emb
             # query = apply_rotary_emb(query, image_rotary_emb)
             # key = apply_rotary_emb(key, image_rotary_emb)
@@ -936,8 +936,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         image_rotary_emb: Optional[torch.Tensor] = None,
         latte_temporal_attention: Optional[bool] = False,
     ) -> torch.Tensor:
-        from diffusers.models.embeddings import apply_rotary_emb
-
         residual = hidden_states
         if attn.spatial_norm is not None:
             hidden_states = attn.spatial_norm(hidden_states, temb)
@@ -1000,6 +998,8 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         # Apply RoPE if needed
         # print(f"Q {query.shape}, {key.shape}, {image_rotary_emb[0].shape}")
         if image_rotary_emb is not None:
+            from diffusers.models.embeddings import apply_rotary_emb
+
             query = apply_rotary_emb(query, image_rotary_emb)
             if not attn.is_cross_attention:
                 key = apply_rotary_emb(key, image_rotary_emb)
@@ -1171,7 +1171,7 @@ if CogVideoXAttnProcessor2_0 is not None:
 
             # Apply RoPE if needed
             if image_rotary_emb is not None:
-                from .embeddings import apply_rotary_emb
+                from diffusers.models.embeddings import apply_rotary_emb
 
                 query[:, :, text_seq_length:] = apply_rotary_emb(query[:, :, text_seq_length:], image_rotary_emb)
                 if not attn.is_cross_attention:
@@ -1192,7 +1192,6 @@ if CogVideoXAttnProcessor2_0 is not None:
                 query = query.transpose(1, 2)
                 key = key.transpose(1, 2)
                 value = value.transpose(1, 2)
-
                 hidden_states = self.hybrid_seq_parallel_attn(
                     attn,
                     query,

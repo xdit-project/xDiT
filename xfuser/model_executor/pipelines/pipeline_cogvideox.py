@@ -30,6 +30,8 @@ from xfuser.core.distributed import (
     get_runtime_state,
     initialize_runtime_state,
     get_data_parallel_rank,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
     is_dp_last_group,
 )
 
@@ -251,13 +253,20 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        # 7. Denoising loop
+        # 7. Create rotary embeds if required
+        image_rotary_emb = (
+            self._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
+            if self.transformer.config.use_rotary_positional_embeddings
+            else None
+        )
+
+        # 8. Denoising loop
         num_warmup_steps = max(
             len(timesteps) - num_inference_steps * self.scheduler.order, 0
         )
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            latents = self._init_video_sync_pipeline(latents)
+            latents, image_rotary_emb = self._init_sync_pipeline(latents, image_rotary_emb)
             # for DPM-solver++
             old_pred_original_sample = None
             for i, t in enumerate(timesteps):
@@ -279,6 +288,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     hidden_states=latent_model_input,
                     encoder_hidden_states=prompt_embeds,
                     timestep=timestep,
+                    image_rotary_emb=image_rotary_emb,
                     return_dict=False,
                 )[0]
                 noise_pred = noise_pred.float()
@@ -376,6 +386,27 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             return (video,)
 
         return CogVideoXPipelineOutput(frames=video)
+
+    def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]]):
+        latents = super()._init_video_sync_pipeline(latents)
+        if image_rotary_emb is not None:
+            image_rotary_emb = (
+                torch.cat(
+                    [
+                        image_rotary_emb[0][start_token_idx:end_token_idx, ...]
+                        for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
+                    ],
+                    dim=0,
+                ),
+                torch.cat(
+                    [
+                        image_rotary_emb[1][start_token_idx:end_token_idx, ...]
+                        for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
+                    ],
+                    dim=0,
+                ),
+            )
+        return latents, image_rotary_emb
 
     @property
     def interrupt(self):

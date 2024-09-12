@@ -1,7 +1,5 @@
 from setuptools import find_packages, setup
-import os
 import subprocess
-import sys
 
 def get_cuda_version():
     try:
@@ -36,7 +34,7 @@ if __name__ == "__main__":
             "flask",
         ],
         extras_require={
-            "all": [
+            "[flash_attn]": [
                 "flash_attn>=2.6.3",
             ],
         },

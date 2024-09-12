@@ -493,7 +493,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
     def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb):
         latents = super()._init_sync_pipeline(latents)
-        image_rotary_emb = (
+        image_rotary_emb = [
             torch.cat(
                 [
                     image_rotary_emb[0][start_token_idx:end_token_idx, ...]
@@ -508,7 +508,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 ],
                 dim=0,
             ),
-        )
+        ]
         return latents, image_rotary_emb
 
     def _init_async_pipeline(
@@ -540,7 +540,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         prompt_attention_mask_2: torch.Tensor,
         add_time_ids: torch.Tensor,
         style: torch.Tensor,
-        image_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
+        image_rotary_emb: torch.FloatTensor,
         device: torch.device,
         guidance_scale: float,
         guidance_rescale: float,
@@ -677,7 +677,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         prompt_attention_mask_2: torch.Tensor,
         add_time_ids: torch.Tensor,
         style: torch.Tensor,
-        image_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
+        image_rotary_emb: torch.FloatTensor,
         device: torch.device,
         guidance_scale: float,
         guidance_rescale: float,
@@ -860,7 +860,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         prompt_attention_mask_2: torch.FloatTensor,
         add_time_ids: torch.Tensor,
         style: torch.Tensor,
-        image_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
+        image_rotary_emb: torch.FloatTensor,
         t: Union[float, torch.Tensor],
         device: torch.device,
         guidance_scale: float,

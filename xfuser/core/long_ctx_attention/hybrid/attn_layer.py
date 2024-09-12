@@ -228,9 +228,6 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
         key: Tensor,
         value: Tensor,
         *,
-        joint_tensor_query,
-        joint_tensor_key,
-        joint_tensor_value,
         dropout_p=0.0,
         softmax_scale=None,
         causal=False,
@@ -238,6 +235,9 @@ class xFuserFluxLongContextAttention(xFuserLongContextAttention):
         alibi_slopes=None,
         deterministic=False,
         return_attn_probs=False,
+        joint_tensor_query=None,
+        joint_tensor_key=None,
+        joint_tensor_value=None,
         joint_strategy="front",
     ) -> Tensor:
         """forward

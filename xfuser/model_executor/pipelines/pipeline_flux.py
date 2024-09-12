@@ -389,7 +389,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         0, "encoder_hidden_states"
                     )
 
-                    # handle guidance
+            # handle guidance
             if self.transformer.config.guidance_embeds:
                 guidance = torch.tensor([guidance_scale], device=self._execution_device)
                 guidance = guidance.expand(latents.shape[0])

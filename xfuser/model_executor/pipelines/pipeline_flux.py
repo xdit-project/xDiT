@@ -345,7 +345,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         ]
         latents = torch.cat(latents_list, dim=-2)
         latent_image_ids_list = [
-            latent_image_ids[:, start_idx:end_idx, :]
+            latent_image_ids[start_idx:end_idx]
             for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
         ]
         latent_image_ids = torch.cat(latent_image_ids_list, dim=-2)
@@ -384,25 +384,17 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
-                if not is_pipeline_first_stage():
-                    encoder_hidden_states = get_pp_group().pipeline_recv(
-                        0, "encoder_hidden_states"
-                    )
 
-                    # handle guidance
+            # handle guidance
             if self.transformer.config.guidance_embeds:
                 guidance = torch.tensor([guidance_scale], device=self._execution_device)
                 guidance = guidance.expand(latents.shape[0])
             else:
                 guidance = None
 
-            latents, encoder_hidden_states = self._backbone_forward(
+            latents = self._backbone_forward(
                 latents=latents,
-                encoder_hidden_states=(
-                    prompt_embeds
-                    if is_pipeline_first_stage()
-                    else encoder_hidden_states
-                ),
+                encoder_hidden_states=prompt_embeds,
                 pooled_prompt_embeds=pooled_prompt_embeds,
                 text_ids=text_ids,
                 latent_image_ids=latent_image_ids,
@@ -440,10 +432,6 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
-                if not is_pipeline_last_stage():
-                    get_pp_group().pipeline_send(
-                        encoder_hidden_states, name="encoder_hidden_states"
-                    )
 
         if (
             sync_only
@@ -481,7 +469,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-        noise_pred, encoder_hidden_states = self.transformer(
+        noise_pred = self.transformer(
             hidden_states=latents,
             timestep=timestep / 1000,
             guidance=guidance,
@@ -493,7 +481,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return_dict=False,
         )[0]
 
-        return noise_pred, encoder_hidden_states
+        return noise_pred
 
     def _scheduler_step(
         self,

@@ -146,12 +146,16 @@ The overview of xDiT is shown as follows.
 
 ```
 pip install xfuser
+# Or optionally, with flash_attn
+pip install "xfuser[flash_attn]"
 ```
 
 ### 2. Install from source 
 
 ```
-python setup.py install
+pip install -e .
+# Or optionally, with flash_attn
+pip install -e ".[flash_attn]"
 ```
 
 Note that we use two self-maintained packages:

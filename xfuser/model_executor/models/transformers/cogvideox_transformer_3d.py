@@ -52,9 +52,11 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         encoder_hidden_states: torch.Tensor,
         timestep: Union[int, float, torch.LongTensor],
         timestep_cond: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         return_dict: bool = True,
     ):
         batch_size, num_frames, channels, height, width = hidden_states.shape
+
         # 1. Time embedding
         timesteps = timestep
         t_emb = self.time_proj(timesteps)
@@ -67,31 +69,13 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
-        # print(f"device: {torch.distributed.get_rank()}: hidden_states: {hidden_states.shape}")
-        
-        # 3. Position embedding
-        seq_length = height * width * num_frames // (self.config.patch_size**2) * get_sequence_parallel_world_size()
-
-        pos_embeds = self.pos_embedding[:, : self.config.max_text_seq_length + seq_length]
-        # print(f"device: {torch.distributed.get_rank()}: pos_embeds: {pos_embeds.shape}")
-        txt_pos_embeds = pos_embeds[:, : self.config.max_text_seq_length]
-        # print(f"device: {torch.distributed.get_rank()}: txt_pos_embeds: {txt_pos_embeds.shape}")
-        img_pos_embeds = pos_embeds[:, self.config.max_text_seq_length \
-            + get_runtime_state().pp_patches_token_start_end_idx_global[0][0]
-            : self.config.max_text_seq_length + \
-                get_runtime_state().pp_patches_token_start_end_idx_global[0][1]]
-        # print(f"device: {torch.distributed.get_rank()}: get_runtime_state().pp_patches_token_start_end_idx_global: {get_runtime_state().pp_patches_token_start_end_idx_global}")
-        # print(f"device: {torch.distributed.get_rank()}: img_pos_embeds: {img_pos_embeds.shape}")
-        pos_embeds = torch.cat([txt_pos_embeds, img_pos_embeds], dim=1)
-        # print(f"device: {torch.distributed.get_rank()}: pos_embeds: {pos_embeds.shape}")
-        
-        hidden_states = hidden_states + pos_embeds
         hidden_states = self.embedding_dropout(hidden_states)
 
-        encoder_hidden_states = hidden_states[:, : self.config.max_text_seq_length]
-        hidden_states = hidden_states[:, self.config.max_text_seq_length :]
+        text_seq_length = encoder_hidden_states.shape[1]
+        encoder_hidden_states = hidden_states[:, :text_seq_length]
+        hidden_states = hidden_states[:, text_seq_length:]
 
-        # 4. Transformer blocks
+        # 3. Transformer blocks
         for i, block in enumerate(self.transformer_blocks):
             if self.training and self.gradient_checkpointing:
 
@@ -107,6 +91,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
                     hidden_states,
                     encoder_hidden_states,
                     emb,
+                    image_rotary_emb,
                     **ckpt_kwargs,
                 )
             else:
@@ -114,17 +99,24 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
                     hidden_states=hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     temb=emb,
+                    image_rotary_emb=image_rotary_emb,
                 )
 
-        hidden_states = self.norm_final(hidden_states)
+        if not self.config.use_rotary_positional_embeddings:
+            # CogVideoX-2B
+            hidden_states = self.norm_final(hidden_states)
+        else:
+            # CogVideoX-5B
+            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+            hidden_states = self.norm_final(hidden_states)
+            hidden_states = hidden_states[:, text_seq_length:]
 
-        # 5. Final block
+        # 4. Final block
         hidden_states = self.norm_out(hidden_states, temb=emb)
         hidden_states = self.proj_out(hidden_states)
 
-        # 6. Unpatchify
+        # 5. Unpatchify
         p = self.config.patch_size
-        # print(f"device: {torch.distributed.get_rank()}: hidden_states: {hidden_states.shape}")
         output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, channels, p, p)
         output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
 

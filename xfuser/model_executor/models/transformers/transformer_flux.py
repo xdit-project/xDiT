@@ -92,10 +92,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
         else:
-            if (
-                joint_attention_kwargs is not None
-                and joint_attention_kwargs.get("scale", None) is not None
-            ):
+            if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
                 logger.warning(
                     "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
                 )
@@ -113,8 +110,20 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
         )
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-        # print(f"{txt_ids.shape=}, {img_ids.shape=}")
-        ids = torch.cat((txt_ids, img_ids), dim=1)
+        if txt_ids.ndim == 3:
+            logger.warning(
+                "Passing `txt_ids` 3d torch.Tensor is deprecated."
+                "Please remove the batch dimension and pass it as a 2d torch Tensor"
+            )
+            txt_ids = txt_ids[0]
+        if img_ids.ndim == 3:
+            logger.warning(
+                "Passing `img_ids` 3d torch.Tensor is deprecated."
+                "Please remove the batch dimension and pass it as a 2d torch Tensor"
+            )
+            img_ids = img_ids[0]
+
+        ids = torch.cat((txt_ids, img_ids), dim=0)
         image_rotary_emb = self.pos_embed(ids)
 
         for index_block, block in enumerate(self.transformer_blocks):
@@ -129,18 +138,14 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
-                encoder_hidden_states, hidden_states = (
-                    torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        hidden_states,
-                        encoder_hidden_states,
-                        temb,
-                        image_rotary_emb,
-                        **ckpt_kwargs,
-                    )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
+                    hidden_states,
+                    encoder_hidden_states,
+                    temb,
+                    image_rotary_emb,
+                    **ckpt_kwargs,
                 )
 
             else:
@@ -150,6 +155,12 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                     temb=temb,
                     image_rotary_emb=image_rotary_emb,
                 )
+
+            # controlnet residual
+            # if controlnet_block_samples is not None:
+            #     interval_control = len(self.transformer_blocks) / len(controlnet_block_samples)
+            #     interval_control = int(np.ceil(interval_control))
+            #     hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
 
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
@@ -165,9 +176,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = (
-                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                )
+                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -183,11 +192,19 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                     image_rotary_emb=image_rotary_emb,
                 )
 
+            # controlnet residual
+            # if controlnet_single_block_samples is not None:
+            #     interval_control = len(self.single_transformer_blocks) / len(controlnet_single_block_samples)
+            #     interval_control = int(np.ceil(interval_control))
+            #     hidden_states[:, encoder_hidden_states.shape[1] :, ...] = (
+            #         hidden_states[:, encoder_hidden_states.shape[1] :, ...]
+            #         + controlnet_single_block_samples[index_block // interval_control]
+            #     )
+
         hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...]
 
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
-        output = output, None
 
         if USE_PEFT_BACKEND:
             # remove `lora_scale` from each PEFT layer

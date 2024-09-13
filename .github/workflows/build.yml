@@ -1,0 +1,22 @@
+name: GitHub Actions Demo
+run-name: Pushed by ${{ github.actor }} 🚀
+on: [push]
+jobs:
+  test-xfuser:
+    name: Test xfuser
+    runs-on: [self-hosted, linux, x64]
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        python-versions: [3.10]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Uninstall xfuser
+        run: pip uninstall -y xfuser
+      - name: Install xfuser
+        run: pip install -e .
+      - name: Test xfuser
+        run: sh ./examples/run.sh
+      - name: Uninstall xfuser
+        run: pip uninstall -y xfuser

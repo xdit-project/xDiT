@@ -32,6 +32,9 @@ if __name__ == "__main__":
             "yunchang==0.3",
             "pytest",
             "flask",
+            "protobuf", # for SD3
+            "imageio", # for CogVideoX
+            "imageio-ffmpeg" # for CogVideoX
         ],
         extras_require={
             "[flash_attn]": [

@@ -19,6 +19,16 @@ HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
 
+def check_packages():
+    import diffusers
+
+    if not version.parse(diffusers.__version__) > version.parse("0.30.2"):
+        raise RuntimeError(
+            "This project requires diffusers version > 0.30.2. Currently, you can not install a correct version of diffusers by pip install."
+            "Please install it from source code!"
+        )
+
+
 def check_env():
     # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html
     if CUDA_VERSION < version.parse("11.3"):
@@ -30,17 +40,6 @@ def check_env():
             "If it is not released yet, please install nightly built PyTorch "
             "with `pip3 install --pre torch torchvision torchaudio --index-url "
             "https://download.pytorch.org/whl/nightly/cu121`"
-        )
-    try:
-        import diffusers
-
-        if version.parse(diffusers.__version__) > version.parse("0.30.2"):
-            raise RuntimeError(
-                "This project requires diffusers version >= 0.31.0 or above. It is not on pypi. Please install it from source code!"
-            )
-    except ImportError:
-        raise ImportError(
-            "diffusers is not installed. Please install it with `pip install diffusers`"
         )
 
 
@@ -62,6 +61,7 @@ class RuntimeConfig:
     use_onediff: bool = False
 
     def __post_init__(self):
+        check_packages()
         if self.use_cuda_graph:
             check_env()
 

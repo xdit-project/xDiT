@@ -63,10 +63,9 @@ def main():
         if is_dp_last_group():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
-                image.save(f"./results/flux_result_{parallel_info}_{image_rank}.png")
-                print(
-                    f"image {i} saved to ./results/flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
-                )
+                image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
+                image.save(f"./results/{image_name}")
+                print(f"image {i} saved to ./results/{image_name}")
 
     if get_world_group().rank == get_world_group().world_size - 1:
         print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")

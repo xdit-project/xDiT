@@ -14,11 +14,9 @@ from diffusers.models.attention_processor import (
     AttentionProcessor,
     FusedHunyuanAttnProcessor2_0,
     HunyuanAttnProcessor2_0,
-    FluxSingleAttnProcessor2_0,
 )
 from xfuser.model_executor.layers.attention_processor import (
     xFuserHunyuanAttnProcessor2_0,
-    xFuserFluxSingleAttnProcessor2_0,
 )
 
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
@@ -56,10 +54,6 @@ def run_attn_test(rank, world_size, attn_type: str):
 
     _type_dict = {
         "HunyuanDiT": (HunyuanAttnProcessor2_0(), xFuserHunyuanAttnProcessor2_0()),
-        "FluxSingle": (
-            FluxSingleAttnProcessor2_0(),
-            xFuserFluxSingleAttnProcessor2_0(),
-        ),
     }
     processor, parallel_processor = _type_dict[attn_type]
 
@@ -140,7 +134,7 @@ def run_attn_test(rank, world_size, attn_type: str):
     ), "Outputs are not close"
 
 
-@pytest.mark.parametrize("attn_type", ["HunyuanDiT", "FluxSingle"])
+@pytest.mark.parametrize("attn_type", ["HunyuanDiT"])
 def test_multi_process(attn_type):
     world_size = 4  # Number of processes
     processes = []
@@ -160,4 +154,4 @@ def test_multi_process(attn_type):
 
 
 if __name__ == "__main__":
-    test_multi_process("FluxSingle")
+    test_multi_process("HunyuanDiT")

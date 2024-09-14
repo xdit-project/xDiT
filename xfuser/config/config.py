@@ -31,6 +31,17 @@ def check_env():
             "with `pip3 install --pre torch torchvision torchaudio --index-url "
             "https://download.pytorch.org/whl/nightly/cu121`"
         )
+    try:
+        import diffusers
+
+        if version.parse(diffusers.__version__) > version.parse("0.30.2"):
+            raise RuntimeError(
+                "This project requires diffusers version >= 0.31.0 or above. It is not on pypi. Please install it from source code!"
+            )
+    except ImportError:
+        raise ImportError(
+            "diffusers is not installed. Please install it with `pip install diffusers`"
+        )
 
 
 @dataclass

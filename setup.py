@@ -1,14 +1,18 @@
 from setuptools import find_packages, setup
 import subprocess
 
+
 def get_cuda_version():
     try:
         nvcc_version = subprocess.check_output(["nvcc", "--version"]).decode("utf-8")
-        version_line = [line for line in nvcc_version.split('\n') if "release" in line][0]
-        cuda_version = version_line.split(' ')[-2].replace(',', '')
-        return 'cu' + cuda_version.replace('.', '')
+        version_line = [line for line in nvcc_version.split("\n") if "release" in line][
+            0
+        ]
+        cuda_version = version_line.split(" ")[-2].replace(",", "")
+        return "cu" + cuda_version.replace(".", "")
     except Exception as e:
-        return 'no_cuda'
+        return "no_cuda"
+
 
 if __name__ == "__main__":
     with open("README.md", "r") as f:
@@ -29,9 +33,10 @@ if __name__ == "__main__":
             "sentencepiece>=0.1.99",
             "beautifulsoup4>=4.12.3",
             "distvae",
-            "yunchang==0.3",
+            "yunchang>=0.3.0",
             "pytest",
             "flask",
+            "opencv-python",
         ],
         extras_require={
             "[flash_attn]": [

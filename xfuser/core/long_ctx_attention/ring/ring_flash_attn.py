@@ -26,7 +26,7 @@ def ring_flash_attn_forward(
         raise ValueError(
             f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
         )
-    elif joint_strategy is not "none" and (
+    elif joint_strategy != "none" and (
         joint_tensor_key is None or joint_tensor_value is None
     ):
         raise ValueError(

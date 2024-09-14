@@ -38,7 +38,6 @@ def main():
         pipe.enable_model_cpu_offload(gpu_id=local_rank)
         pipe.vae.enable_tiling()
     else:
-        print(f"local_rank: {local_rank}")
         device = torch.device(f"cuda:{local_rank}")
         pipe = pipe.to(device)
 

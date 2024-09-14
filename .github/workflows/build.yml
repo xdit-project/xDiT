@@ -9,14 +9,19 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        python-versions: [3.10]
+        python-versions: [3.11]
     steps:
       - uses: actions/checkout@v4
-      - name: Uninstall xfuser
-        run: pip uninstall -y xfuser
+
+      - name: Setup docker
+        run: docker run --rm --name mycuda -d -i -t --runtime=nvidia --gpus all -v /data/models/:/cfs/dit/ -v /home/github/actions-runner/_work/xDiT/xDiT:/code nvidia/cuda:12.6.1-cudnn-devel-rockylinux9 /bin/bash
+      - run: docker exec mycuda dnf update -y
+      - run: docker exec mycuda dnf install git python${{matrix.python-versions}} -y
+      - run: docker exec mycuda python${{matrix.python-versions}} -m ensurepip --upgrade
+      - run: docker exec mycuda pip${{matrix.python-versions}} install packaging wheel torch
       - name: Install xfuser
-        run: pip install -e .
+        run: docker exec -w /code mycuda pip${{matrix.python-versions}} install -e .
       - name: Test xfuser
-        run: sh ./examples/run.sh
-      - name: Uninstall xfuser
-        run: pip uninstall -y xfuser
+        run: docker exec -w /code mycuda sh -c "torchrun --nproc_per_node=4 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog'"
+      - name: Destroy docker
+        run: docker stop mycuda

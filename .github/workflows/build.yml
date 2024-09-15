@@ -10,15 +10,18 @@ jobs:
       max-parallel: 5
       matrix:
         python-versions: [3.11]
+        torch-versions: [4.2.1]
+        include:
+          - python-versions: 3.11
+            python-versions-full: 3_11
+          - torch-versions: 4.2.1
+            torch-versions-full: 4_2_1
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup docker
-        run: docker run --rm --name mycuda -d -i -t --runtime=nvidia --gpus all -v /data/models/:/cfs/dit/ -v /home/github/actions-runner/_work/xDiT/xDiT:/code nvidia/cuda:12.6.1-cudnn-devel-rockylinux9 /bin/bash
-      - run: docker exec mycuda dnf update -y
-      - run: docker exec mycuda dnf install git python${{matrix.python-versions}} -y
-      - run: docker exec mycuda python${{matrix.python-versions}} -m ensurepip --upgrade
-      - run: docker exec mycuda pip${{matrix.python-versions}} install packaging wheel torch
+        run: docker run --rm --name mycuda -d -i -t --runtime=nvidia --gpus all -v /data/models/:/cfs/dit/ -v /home/github/actions-runner/_work/xDiT/xDiT:/code xfusertest/test-py${{matrix.python-versions-full}}-torch${{matrix.torch-versions-full}} /bin/bash
+      - run: docker exec mycuda pip${{matrix.python-versions}} install torch
       - name: Install xfuser
         run: docker exec -w /code mycuda pip${{matrix.python-versions}} install -e .
       - name: Test xfuser

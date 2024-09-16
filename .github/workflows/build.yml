@@ -1,0 +1,29 @@
+name: GitHub Actions Demo
+run-name: Pushed by ${{ github.actor }} 🚀
+on: [push]
+jobs:
+  test-xfuser:
+    name: Test xfuser
+    runs-on: [self-hosted, linux, x64]
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        python-versions: [3.11]
+        torch-versions: [2.4.1]
+        include:
+          - python-versions: 3.11
+            python-versions-full: 3_11
+          - torch-versions: 2.4.1
+            torch-versions-full: 2_4_1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup docker
+        run: docker run --rm --name xfuser_test_docker -d -i -t --runtime=nvidia --gpus all -v /data/models/:/cfs/dit/ -v /home/github/actions-runner/_work/xDiT/xDiT:/code xfuser_cicd/test-py_${{matrix.python-versions-full}}-torch_${{matrix.torch-versions-full}} /bin/bash
+      - name: Install xfuser
+        run: docker exec -w /code xfuser_test_docker pip${{matrix.python-versions}} install -e .
+      - name: Test xfuser
+        run: docker exec -w /code xfuser_test_docker sh -c "torchrun --nproc_per_node=4 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog'"
+      - name: Destroy docker
+        run: docker stop xfuser_test_docker

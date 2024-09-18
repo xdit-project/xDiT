@@ -11,9 +11,9 @@ from diffusers.models.attention_processor import (
     AttnProcessor2_0,
     JointAttnProcessor2_0,
     FluxAttnProcessor2_0,
-    FluxSingleAttnProcessor2_0,
     HunyuanAttnProcessor2_0,
 )
+
 try:
     from diffusers.models.attention_processor import CogVideoXAttnProcessor2_0
 except ImportError:
@@ -80,14 +80,20 @@ def apply_rotary_emb(
 
         if use_real_unbind_dim == -1:
             # Used for flux, cogvideox, hunyuan-dit
-            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
+            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(
+                -1
+            )  # [B, S, H, D//2]
             x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
         elif use_real_unbind_dim == -2:
             # Used for Stable Audio
-            x_real, x_imag = x.reshape(*x.shape[:-1], 2, -1).unbind(-2)  # [B, S, H, D//2]
+            x_real, x_imag = x.reshape(*x.shape[:-1], 2, -1).unbind(
+                -2
+            )  # [B, S, H, D//2]
             x_rotated = torch.cat([-x_imag, x_real], dim=-1)
         else:
-            raise ValueError(f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2.")
+            raise ValueError(
+                f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2."
+            )
 
         out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
@@ -343,8 +349,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if (HAS_LONG_CTX_ATTN 
-            and get_sequence_parallel_world_size() > 1 
+        if (
+            HAS_LONG_CTX_ATTN
+            and get_sequence_parallel_world_size() > 1
             and not latte_temporal_attention
         ):
             query = query.transpose(1, 2)
@@ -638,7 +645,11 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         *args,
         **kwargs,
     ) -> torch.FloatTensor:
-        batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        batch_size, _, _ = (
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
+        )
 
         # `sample` projections.
         query = attn.to_q(hidden_states)
@@ -675,9 +686,13 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             ).transpose(1, 2)
 
             if attn.norm_added_q is not None:
-                encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
+                encoder_hidden_states_query_proj = attn.norm_added_q(
+                    encoder_hidden_states_query_proj
+                )
             if attn.norm_added_k is not None:
-                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
+                encoder_hidden_states_key_proj = attn.norm_added_k(
+                    encoder_hidden_states_key_proj
+                )
 
             num_encoder_hidden_states_tokens = encoder_hidden_states_query_proj.shape[2]
             num_query_tokens = query.shape[2]
@@ -808,7 +823,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 )
         else:
             self.hybrid_seq_parallel_attn = None
-    
+
     # NOTE() torch.compile dose not works for V100
     @torch_compile_disable_if_v100
     def __call__(
@@ -1029,12 +1044,18 @@ if CogVideoXAttnProcessor2_0 is not None:
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
             batch_size, sequence_length, _ = (
-                hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+                hidden_states.shape
+                if encoder_hidden_states is None
+                else encoder_hidden_states.shape
             )
 
             if attention_mask is not None:
-                attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-                attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+                attention_mask = attn.prepare_attention_mask(
+                    attention_mask, sequence_length, batch_size
+                )
+                attention_mask = attention_mask.view(
+                    batch_size, attn.heads, -1, attention_mask.shape[-1]
+                )
 
             query = attn.to_q(hidden_states)
             key = attn.to_k(hidden_states)
@@ -1054,9 +1075,13 @@ if CogVideoXAttnProcessor2_0 is not None:
 
             # Apply RoPE if needed
             if image_rotary_emb is not None:
-                query[:, :, text_seq_length:] = apply_rotary_emb(query[:, :, text_seq_length:], image_rotary_emb)
+                query[:, :, text_seq_length:] = apply_rotary_emb(
+                    query[:, :, text_seq_length:], image_rotary_emb
+                )
                 if not attn.is_cross_attention:
-                    key[:, :, text_seq_length:] = apply_rotary_emb(key[:, :, text_seq_length:], image_rotary_emb)
+                    key[:, :, text_seq_length:] = apply_rotary_emb(
+                        key[:, :, text_seq_length:], image_rotary_emb
+                    )
 
             #! ---------------------------------------- KV CACHE ----------------------------------------
             if not self.use_long_ctx_attn_kvcache:
@@ -1082,7 +1107,9 @@ if CogVideoXAttnProcessor2_0 is not None:
                     causal=False,
                     joint_strategy="none",
                 )
-                hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
+                hidden_states = hidden_states.reshape(
+                    batch_size, -1, attn.heads * head_dim
+                )
             else:
                 if HAS_FLASH_ATTN:
                     from flash_attn import flash_attn_func
@@ -1113,7 +1140,6 @@ if CogVideoXAttnProcessor2_0 is not None:
             # )
             # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
             #! ---------------------------------------- ATTENTION ----------------------------------------
-
 
             # linear proj
             hidden_states = attn.to_out[0](hidden_states)

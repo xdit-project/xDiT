@@ -20,10 +20,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup docker
-        run: docker run --rm --name xfuser_test_docker -d -i -t --runtime=nvidia --gpus all -v /data/models/:/cfs/dit/ -v /home/github/actions-runner/_work/xDiT/xDiT:/code xfuser_cicd/test-py_${{matrix.python-versions-full}}-torch_${{matrix.torch-versions-full}} /bin/bash
+        run: docker run --rm --name xfuser_test_docker -d -i -t --runtime=nvidia --gpus all -v ~/actions-runner/_work/xDiT/xDiT:/code xfuser_cicd/test-py_${{matrix.python-versions-full}}-torch_${{matrix.torch-versions-full}} /bin/bash
       - name: Install xfuser
         run: docker exec -w /code xfuser_test_docker pip${{matrix.python-versions}} install -e .
       - name: Test xfuser
-        run: docker exec -w /code xfuser_test_docker sh -c "torchrun --nproc_per_node=4 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog'"
+        run: docker exec -w /code xfuser_test_docker sh -c "torchrun --nproc_per_node=8 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog' --use_cfg_parallel"
       - name: Destroy docker
         run: docker stop xfuser_test_docker

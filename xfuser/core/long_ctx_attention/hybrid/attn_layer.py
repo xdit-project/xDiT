@@ -146,7 +146,22 @@ class xFuserJointLongContextAttention(xFuserLongContextAttention):
     ):
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
-        query = torch.cat([query, joint_tensor_query], dim=1)
+        supported_joint_strategy = ["none", "front", "rear"]
+        if joint_strategy not in supported_joint_strategy:
+            raise ValueError(
+                f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
+            )
+        elif joint_strategy != "none" and joint_tensor_query is None:
+            raise ValueError(
+                f"joint_tensor_query must not be None when joint_strategy is not None"
+            )
+        elif joint_strategy == "rear":
+            query = torch.cat([query, joint_tensor_query], dim=1)
+        elif joint_strategy == "front":
+            query = torch.cat([joint_tensor_query, query], dim=1)
+        else:
+            pass
+            
         ulysses_world_size = torch.distributed.get_world_size(self.ulysses_pg)
         ulysses_rank = torch.distributed.get_rank(self.ulysses_pg)
         attn_heads_per_ulysses_rank = joint_tensor_key.shape[-2] // ulysses_world_size

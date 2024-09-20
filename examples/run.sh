@@ -19,7 +19,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
 
-export MODEL_TYPE="Sd3"
+export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
@@ -55,8 +55,11 @@ else
 fi
 
 # Flux only supports SP, do not set the pipefusion degree
-if [ "$MODEL_TYPE" = "Flux" ] || [ "$MODEL_TYPE" = "CogVideoX" ]; then
+if [ "$MODEL_TYPE" = "Flux" ]; then
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
+export CFG_ARGS=""
+elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
+PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
 export CFG_ARGS=""
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
 # HunyuanDiT asserts sp_degree <=2, or the output will be incorrect.
@@ -64,7 +67,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 2 --ring_degree 1
 export CFG_ARGS="--use_cfg_parallel"
 else
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1"
 export CFG_ARGS="--use_cfg_parallel"
 fi
 

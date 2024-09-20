@@ -1,6 +1,9 @@
 name: GitHub Actions Demo
 run-name: Pushed by ${{ github.actor }} 🚀
-on: [push, pull_request]
+on:
+  push:
+  pull_request_target:
+    types: [assigned, opened, synchronize, reopened]
 jobs:
   upload:
     runs-on: ubuntu-latest

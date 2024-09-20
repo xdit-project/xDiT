@@ -4,6 +4,7 @@ on: [push, pull_request]
 jobs:
   upload:
     runs-on: ubuntu-latest
+    environment: main
     steps:
     - uses: actions/checkout@v4
     - name: Run a multi-line script

@@ -1,29 +1,42 @@
 name: GitHub Actions Demo
 run-name: Pushed by ${{ github.actor }} 🚀
-on: [push]
+on: [push, pull_request]
 jobs:
-  test-xfuser:
-    name: Test xfuser
-    runs-on: [self-hosted, linux, x64]
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        python-versions: [3.11]
-        torch-versions: [2.4.1]
-        include:
-          - python-versions: 3.11
-            python-versions-full: 3_11
-          - torch-versions: 2.4.1
-            torch-versions-full: 2_4_1
+  upload:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
+    - uses: actions/checkout@v4
+    - name: Run a multi-line script
+      run: git archive --format zip HEAD > xDiT.zip
+    - name: copy file via ssh password
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        port: ${{ secrets.SSH_PORT }}
+        username: ${{ secrets.SSH_USER }}
+        password: ${{ secrets.SSH_KEY }}
+        source: "xDiT.zip"
+        target: "~/"
+  setup-env-and-test:
+    needs: upload
+    runs-on: [self-hosted, linux, x64]
+    continue-on-error: true
+    steps:
+      - name: unzip
+        run: rm -rf ~/xDiT
+      - run: mkdir ~/xDiT
+      - run: unzip ~/xDiT.zip -d ~/xDiT
       - name: Setup docker
-        run: docker run --rm --name xfuser_test_docker -d -i -t --runtime=nvidia --gpus all -v /data/models/:/cfs/dit/ -v /home/github/actions-runner/_work/xDiT/xDiT:/code xfuser_cicd/test-py_${{matrix.python-versions-full}}-torch_${{matrix.torch-versions-full}} /bin/bash
+        run: docker run --rm --name xfuser_test_docker -d -i -t --runtime=nvidia --gpus all -v /cfs:/cfs -v /mnt:/mnt -v ~/xDiT:/code xfuser_cicd/test-py_3_11-torch_2_4_1 /bin/bash
       - name: Install xfuser
-        run: docker exec -w /code xfuser_test_docker pip${{matrix.python-versions}} install -e .
+        run: docker exec -w /code xfuser_test_docker pip3.11 install -e .
       - name: Test xfuser
-        run: docker exec -w /code xfuser_test_docker sh -c "torchrun --nproc_per_node=4 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog'"
+        run: docker exec -w /code xfuser_test_docker sh -c "torchrun --nproc_per_node=8 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog' --use_cfg_parallel"
+  clear-env:
+    needs: setup-env-and-test
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Remove Files
+        run: docker exec -w /code xfuser_test_docker sh -c "rm -r *"
       - name: Destroy docker
         run: docker stop xfuser_test_docker

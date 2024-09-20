@@ -39,7 +39,7 @@ if __name__ == "__main__":
             "opencv-python",
         ],
         extras_require={
-            "[flash_attn]": [
+            "flash_attn": [
                 "flash_attn>=2.6.3",
             ],
         },

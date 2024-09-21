@@ -38,6 +38,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sp_group,
     is_dp_last_group,
+    get_world_group
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -379,16 +380,25 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 )
 
         # * 8. Decode latents (only the last rank in a dp group)
+
+        if output_type != "latent":
+            if get_runtime_state().runtime_config.use_parallel_vae:
+                latents = get_world_group().broadcast_latent(latents,get_runtime_state().runtime_config.dtype)
+                latents = (
+                        latents / self.vae.config.scaling_factor
+                    ) + self.vae.config.shift_factor
+                image = self.vae.decode(latents, return_dict=False)[0]
+            else:
+                if is_dp_last_group():
+                    latents = (
+                        latents / self.vae.config.scaling_factor
+                    ) + self.vae.config.shift_factor
+                    image = self.vae.decode(latents, return_dict=False)[0]
+        
         if is_dp_last_group():
             if output_type == "latent":
                 image = latents
-
             else:
-                latents = (
-                    latents / self.vae.config.scaling_factor
-                ) + self.vae.config.shift_factor
-
-                image = self.vae.decode(latents, return_dict=False)[0]
                 image = self.image_processor.postprocess(image, output_type=output_type)
 
             # Offload all models

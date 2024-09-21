@@ -294,6 +294,22 @@ class GroupCoordinator:
             input_, src=self.ranks[src], group=self.device_group
         )
         return input_
+    
+    def broadcast_latent(self, input_: torch.Tensor, dtype: torch.dtype):
+        """Broadcast the final latent result
+        NOTE: we assume the last rank owns latents
+        """
+        device = f"cuda:{self.rank}"
+        if self.rank == self.world_size - 1:
+            input_shape = torch.tensor(input_.shape,dtype=torch.int).to(device)
+        else:
+            input_shape = torch.zeros(4,dtype=torch.int).cuda().to(device)
+        self.broadcast(input_shape,src=self.world_size-1)
+        
+        if self.rank != self.world_size - 1:
+            input_ = torch.zeros(torch.Size(input_shape),dtype=dtype).to(device)
+        self.broadcast(input_,src=self.world_size-1)
+        return input_
 
     def broadcast_object(self, obj: Optional[Any] = None, src: int = 0):
         """Broadcast the input object.

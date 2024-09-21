@@ -32,6 +32,7 @@ from xfuser.core.distributed import (
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     is_dp_last_group,
+    get_world_group
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -309,19 +310,30 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                     sync_only=True,
                 )
 
+        def vae_decode(latents):
+            latents = self._unpack_latents(
+                    latents, height, width, self.vae_scale_factor
+            )
+            latents = (
+                latents / self.vae.config.scaling_factor
+            ) + self.vae.config.shift_factor
+            
+            image = self.vae.decode(latents, return_dict=False)[0]
+            return image
+        
+        if not output_type == "latent":
+            if get_runtime_state().runtime_config.use_parallel_vae:
+                latents = get_world_group().broadcast_latent(latents,get_runtime_state().runtime_config.dtype)
+                image = vae_decode(latents)
+            else:
+                if is_dp_last_group():
+                    image = vae_decode(latents)
+        
         if is_dp_last_group():
             if output_type == "latent":
                 image = latents
 
             else:
-                latents = self._unpack_latents(
-                    latents, height, width, self.vae_scale_factor
-                )
-                latents = (
-                    latents / self.vae.config.scaling_factor
-                ) + self.vae.config.shift_factor
-
-                image = self.vae.decode(latents, return_dict=False)[0]
                 image = self.image_processor.postprocess(image, output_type=output_type)
 
             # Offload all models

@@ -27,16 +27,16 @@ jobs:
       - run: mkdir ~/xDiT
       - run: unzip ~/xDiT.zip -d ~/xDiT
       - name: Setup docker
-        run: docker run --rm --name xfuser_test_docker -d -i -t --runtime=nvidia --gpus all -v /cfs:/cfs -v /mnt:/mnt -v ~/xDiT:/code xfuser_cicd/test-py_3_11-torch_2_4_1 /bin/bash
+        run: docker run --rm --name xfuser_test_docker_${{github.repository_owner_id}} -d -i -t --runtime=nvidia --gpus all -v /cfs:/cfs -v /mnt:/mnt -v ~/xDiT:/code xfuser_cicd/test-py_3_11-torch_2_4_1 /bin/bash
       - name: Install xfuser
-        run: docker exec -w /code xfuser_test_docker pip3.11 install -e .
+        run: docker exec -w /code xfuser_test_docker_${{github.repository_owner_id}} pip3.11 install -e .
       - name: Test xfuser
-        run: docker exec -w /code xfuser_test_docker sh -c "torchrun --nproc_per_node=8 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog' --use_cfg_parallel"
+        run: docker exec -w /code xfuser_test_docker_${{github.repository_owner_id}} sh -c "torchrun --nproc_per_node=8 ./examples/sd3_example.py --model /cfs/dit/stable-diffusion-3-medium-diffusers --pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1 --height 1024 --width 1024 --no_use_resolution_binning --num_inference_steps 20 --warmup_steps 0 --prompt 'A small dog' --use_cfg_parallel"
   clear-env:
     needs: setup-env-and-test
     runs-on: [self-hosted, linux, x64]
     steps:
       - name: Remove Files
-        run: docker exec -w /code xfuser_test_docker sh -c "rm -r *"
+        run: docker exec -w /code xfuser_test_docker_${{github.repository_owner_id}} sh -c "rm -r *"
       - name: Destroy docker
-        run: docker stop xfuser_test_docker
+        run: docker stop xfuser_test_docker_${{github.repository_owner_id}}

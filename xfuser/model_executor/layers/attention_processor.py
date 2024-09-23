@@ -121,25 +121,6 @@ class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
         assert (to_k.bias is None) == (to_v.bias is None)
         assert to_k.weight.shape == to_v.weight.shape
 
-        in_size, out_size = to_k.in_features, to_k.out_features
-        to_kv = nn.Linear(
-            in_size,
-            out_size * 2,
-            bias=to_k.bias is not None,
-            device=to_k.weight.device,
-            dtype=to_k.weight.dtype,
-        )
-        to_kv.weight.data[:out_size].copy_(to_k.weight.data)
-        to_kv.weight.data[out_size:].copy_(to_v.weight.data)
-
-        if to_k.bias is not None:
-            assert to_v.bias is not None
-            to_kv.bias.data[:out_size].copy_(to_k.bias.data)
-            to_kv.bias.data[out_size:].copy_(to_v.bias.data)
-
-        self.to_kv = to_kv
-
-
 class xFuserAttentionProcessorRegister:
     _XFUSER_ATTENTION_PROCESSOR_MAPPING = {}
 
@@ -878,7 +859,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 encoder_hidden_states
             )
 
-        # kv = attn.to_kv(encoder_hidden_states)
         key = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
@@ -1013,12 +993,12 @@ if CogVideoXAttnProcessor2_0 is not None:
             )
             if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
                 from xfuser.core.long_ctx_attention import (
-                    xFuserLongContextAttention,
+                    xFuserJointLongContextAttention,
                     xFuserUlyssesAttention,
                 )
 
                 if HAS_FLASH_ATTN:
-                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    self.hybrid_seq_parallel_attn = xFuserJointLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
@@ -1040,6 +1020,7 @@ if CogVideoXAttnProcessor2_0 is not None:
             **kwargs,
         ) -> torch.Tensor:
             text_seq_length = encoder_hidden_states.size(1)
+            latent_seq_length = hidden_states.size(1)
 
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
@@ -1095,9 +1076,20 @@ if CogVideoXAttnProcessor2_0 is not None:
 
             #! ---------------------------------------- ATTENTION ----------------------------------------
             if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+                encoder_query = query[:, :, :text_seq_length, :]
+                query = query[:, :, text_seq_length:, :]
+                encoder_key = key[:, :, :text_seq_length, :]
+                key = key[:, :, text_seq_length:, :]
+                encoder_value = value[:, :, :text_seq_length, :]
+                value = value[:, :, text_seq_length:, :]
+
                 query = query.transpose(1, 2)
                 key = key.transpose(1, 2)
                 value = value.transpose(1, 2)
+                encoder_query = encoder_query.transpose(1, 2)
+                encoder_key = encoder_key.transpose(1, 2)
+                encoder_value = encoder_value.transpose(1, 2)
+
                 hidden_states = self.hybrid_seq_parallel_attn(
                     attn,
                     query,
@@ -1105,8 +1097,12 @@ if CogVideoXAttnProcessor2_0 is not None:
                     value,
                     dropout_p=0.0,
                     causal=False,
-                    joint_strategy="none",
+                    joint_tensor_query=encoder_query,
+                    joint_tensor_key=encoder_key,
+                    joint_tensor_value=encoder_value,
+                    joint_strategy="front",
                 )
+
                 hidden_states = hidden_states.reshape(
                     batch_size, -1, attn.heads * head_dim
                 )
@@ -1141,12 +1137,14 @@ if CogVideoXAttnProcessor2_0 is not None:
             # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
             #! ---------------------------------------- ATTENTION ----------------------------------------
 
+            assert text_seq_length + latent_seq_length == hidden_states.shape[1]
             # linear proj
             hidden_states = attn.to_out[0](hidden_states)
             # dropout
             hidden_states = attn.to_out[1](hidden_states)
 
+
             encoder_hidden_states, hidden_states = hidden_states.split(
-                [text_seq_length, hidden_states.size(1) - text_seq_length], dim=1
+                [text_seq_length, latent_seq_length], dim=1
             )
             return hidden_states, encoder_hidden_states

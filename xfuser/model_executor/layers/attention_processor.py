@@ -121,25 +121,6 @@ class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
         assert (to_k.bias is None) == (to_v.bias is None)
         assert to_k.weight.shape == to_v.weight.shape
 
-        '''in_size, out_size = to_k.in_features, to_k.out_features
-        to_kv = nn.Linear(
-            in_size,
-            out_size * 2,
-            bias=to_k.bias is not None,
-            device=to_k.weight.device,
-            dtype=to_k.weight.dtype,
-        )
-        to_kv.weight.data[:out_size].copy_(to_k.weight.data)
-        to_kv.weight.data[out_size:].copy_(to_v.weight.data)
-
-        if to_k.bias is not None:
-            assert to_v.bias is not None
-            to_kv.bias.data[:out_size].copy_(to_k.bias.data)
-            to_kv.bias.data[out_size:].copy_(to_v.bias.data)
-
-        self.to_kv = to_kv'''
-
-
 class xFuserAttentionProcessorRegister:
     _XFUSER_ATTENTION_PROCESSOR_MAPPING = {}
 
@@ -878,7 +859,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 encoder_hidden_states
             )
 
-        # kv = attn.to_kv(encoder_hidden_states)
         key = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 

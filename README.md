@@ -3,7 +3,7 @@
   <p align="center">
   
   <picture>
-    <img alt="xDiT" src="./assets/XDiTlogo.png" width=50%>
+    <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/XDiTlogo.png" width="50%">
   </picture>
 
   </p>

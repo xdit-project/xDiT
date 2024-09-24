@@ -27,6 +27,8 @@ from xfuser.core.distributed import (
     get_world_group,
     get_runtime_state,
     initialize_runtime_state,
+    is_dp_last_group,
+    get_sequence_parallel_rank,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
@@ -392,3 +394,66 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         else:
             raise ValueError("Invalid classifier free guidance rank")
         return concat_group_0
+    
+    def is_dp_last_group(self):
+        """Return True if in the last data parallel group, False otherwise.
+        Also include parallel vae situation.
+        """
+        if get_runtime_state().runtime_config.use_parallel_vae:
+            return get_world_group().rank == 0
+        else:
+            return is_dp_last_group()
+    
+    def gather_broadcast_latents(self, latents:torch.Tensor):
+        """gather latents from dp last group and broacast final latents
+        """
+        
+        # ---------gather latents from dp last group-----------
+        rank = get_world_group().rank
+        device = f"cuda:{rank}"
+
+        # all gather dp last group rank list
+        dp_rank_list = [torch.zeros(1, dtype=int, device=device) for _ in range(get_world_group().world_size)]
+        if is_dp_last_group():
+            gather_rank = int(rank)
+        else:
+            gather_rank = -1
+        torch.distributed.all_gather(dp_rank_list, torch.tensor([gather_rank],dtype=int,device=device))
+        
+        dp_rank_list = [int(dp_rank[0]) for dp_rank in dp_rank_list if int(dp_rank[0])!=-1]
+        dp_last_group = torch.distributed.new_group(dp_rank_list)
+
+        # gather latents from dp last group
+        if rank == dp_rank_list[-1]:
+            latents_list = [torch.zeros_like(latents) for _ in dp_rank_list]
+        else:
+            latents_list = None
+        if rank in dp_rank_list:
+            torch.distributed.gather(latents, latents_list, dst=dp_rank_list[-1], group=dp_last_group)
+
+        if rank == dp_rank_list[-1]:
+            latents = torch.cat(latents_list,dim=0)
+        
+        # ------broadcast latents to all nodes---------
+        src = dp_rank_list[-1]
+        latents_shape_len = torch.zeros(1,dtype=torch.int,device=device)
+        
+        # broadcast latents shape len
+        if rank == src:
+            latents_shape_len[0] = len(latents.shape)
+        get_world_group().broadcast(latents_shape_len,src=src)
+        
+        # broadcast latents shape
+        if rank == src:
+            input_shape = torch.tensor(latents.shape,dtype=torch.int,device=device)
+        else:
+            input_shape = torch.zeros(latents_shape_len[0],dtype=torch.int,device=device)
+        get_world_group().broadcast(input_shape,src=src)
+        
+        # broadcast latents
+        if rank != src:
+            dtype = get_runtime_state().runtime_config.dtype
+            latents = torch.zeros(torch.Size(input_shape),dtype=dtype,device=device)
+        get_world_group().broadcast(latents,src=src)
+
+        return latents

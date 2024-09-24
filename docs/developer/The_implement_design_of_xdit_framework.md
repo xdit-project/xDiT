@@ -50,7 +50,7 @@ In the xDiT framework, a wrapper approach is used to modify the required classes
 
 The organizational structure of model-related files in xDiT is as follows:
 
-![class_structure.png](../../assets/developer/class_structure.png)
+![class_structure.png](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/class_structure.png)
 
 - All model classes inherit from the base class `xFuserBaseWrapper`, which provides basic features such as getattr and runtime condition checking.
 - Four classes representing different model components inherit from `xFuserBaseWrapper`, including:

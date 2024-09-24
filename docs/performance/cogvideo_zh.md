@@ -7,13 +7,13 @@ CogVideo 是一个文本到视频的模型。xDiT 目前整合了 USP 技术（�
 CogVideoX-2b 模型的结果显示在下图中。我们可以看到，随着并行度的增加，延迟有效减少。而且 xDiT 具有相较于 diffusers 软件包中的原始推理最多 3.1 倍的加速。
 
 <div align="center">
-    <img src="../../assets/performance/cogvideo/cogvideo-l40-2b.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/cogvideo-l40-2b.png" 
     alt="latency-cogvideo-l40-2b">
 </div>
 
 同样地，对于 CogVideoX-5b 模型，xDiT 实现了最多 3.9 倍的加速。
 
 <div align="center">
-    <img src="../../assets/performance/cogvideo/cogvideo-l40-5b.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/cogvideo-l40-5b.png" 
     alt="latency-cogvideo-l40-5b">
 </div>

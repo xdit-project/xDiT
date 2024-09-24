@@ -4,7 +4,6 @@
   
   <picture>
     <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/XDiTlogo.png" width="50%">
-  </picture>
 
   </p>
   <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
@@ -76,7 +75,7 @@ In addition to utilizing well-known Attention optimization libraries, we leverag
 The overview of xDiT is shown as follows.
 
 <picture>
-  <img alt="xDiT" src="./assets/methods/xdit_overview.png">
+  <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/xdit_overview.png">
 </picture>
 
 
@@ -286,7 +285,7 @@ For the VAE module, xDiT offers a parallel implementation, [DistVAE](https://git
 The (<span style="color: red;">xDiT</span>) highlights the methods first proposed by use.
 
 <div align="center">
-    <img src="assets/methods/xdit_method.png" alt="xdit methods">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/xdit_method.png" alt="xdit methods">
 </div>
 
 The communication and memory costs associated with the aforementioned intra-image parallelism, except for the CFG and DP (they are inter-image parallel), in DiTs are detailed in the table below. (* denotes that communication can be overlapped with computation.)

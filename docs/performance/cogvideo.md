@@ -8,13 +8,13 @@ On a machine with L40 (PCIe) GPUs, we test the inference latency for generating 
 The results for the CogVideoX-2b model are depicted in the following figure. As we can see, the latency decreases as the degree of parallelism grows. And xDiT achieves an up to 3.1X speedup over the original inference implementation in the `diffusers` package.
 
 <div align="center">
-    <img src="../../assets/performance/cogvideo/cogvideo-l40-2b.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/cogvideo-l40-2b.png" 
     alt="latency-cogvideo-l40-2b">
 </div>
 
 Similarly, as for the CogVideoX-5b model, xDiT achieves an up to 3.9X speedup.
 
 <div align="center">
-    <img src="../../assets/performance/cogvideo/cogvideo-l40-5b.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/cogvideo-l40-5b.png" 
     alt="latency-cogvideo-l40-5b">
 </div>

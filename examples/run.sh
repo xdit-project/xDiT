@@ -28,7 +28,7 @@ declare -A MODEL_CONFIGS=(
     ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="flux_example.py /cfs/dit/FLUX.1-schnell 4"
     ["HunyuanDiT"]="hunyuandit_example.py /mnt/models/SD/HunyuanDiT-v1.2-Diffusers 50"
-    ["CogVideoX"]="cogvideox_example.py /cfs/dit/CogVideoX-2b 1"
+    ["CogVideoX"]="cogvideox_example.py /cfs/dit/CogVideoX-2b 20"
 )
 
 if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then

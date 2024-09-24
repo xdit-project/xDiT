@@ -119,25 +119,29 @@ The overview of xDiT is shown as follows.
 
 <h2 id="perf">📈 Performance</h2>
 
+<h3 id="perf_flux">CogVideo</h3>
+
+1. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+
 <h3 id="perf_flux">Flux.1</h3>
 
-1. [Flux Performance Report](./docs/performance/flux.md)
+2. [Flux Performance Report](./docs/performance/flux.md)
+
+<h3 id="perf_latte">Latte</h3>
+
+3. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-2. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+4. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-3. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+5. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-4. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
-
-<h3 id="perf_latte">Pixart</h3>
-
-5. [Latte Performance Report](./docs/performance/latte.md)
+6. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
@@ -289,27 +293,25 @@ The communication and memory costs associated with the aforementioned intra-imag
 
 As we can see, PipeFusion and Sequence Parallel achieve lowest communication cost on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
 
-𝒑: Number of pixels;
-𝒉𝒔: Model hidden size;
-𝑳: Number of model layers;
-𝑷: Total model parameters;
-𝑵: Number of parallel devices;
-𝑴: Number of patch splits;
-𝑸𝑶: Query and Output parameter count;
-𝑲𝑽: KV Activation parameter count;
+𝒑: Number of pixels;\
+𝒉𝒔: Model hidden size;\
+𝑳: Number of model layers;\
+𝑷: Total model parameters;\
+𝑵: Number of parallel devices;\
+𝑴: Number of patch splits;\
+𝑸𝑶: Query and Output parameter count;\
+𝑲𝑽: KV Activation parameter count;\
 𝑨 = 𝑸 = 𝑶 = 𝑲 = 𝑽: Equal parameters for Attention, Query, Output, Key, and Value;
 
-<div align="center">
 
-|          | attn-KV | communication cost | param memory | activations memory | extra buff memory |
-|:--------:|:-------:|:-----------------:|:-----:|:-----------:|:----------:|
-| Tensor Parallel | fresh | $4O(p \times hs)L$ | $\frac{1}{N}P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
-| DistriFusion* | stale | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $2AL = (KV)L$ |
-| Ring Sequence Parallel* | fresh | $2O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
-| Ulysses Sequence Parallel | fresh | $\frac{4}{N}O(p \times hs)L$ | $P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$ |
-| PipeFusion* | stale- | $2O(p \times hs)$ | $\frac{1}{N}P$ | $\frac{2}{M}A = \frac{1}{M}QO$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
+|                           | attn-KV | communication cost           | param memory   | activations memory             | extra buff memory                  |
+|:-------------------------:|:-------:|:----------------------------:|:--------------:|:------------------------------:|:----------------------------------:|
+| Tensor Parallel           | fresh   | $4O(p \times hs)L$           | $\frac{1}{N}P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$     |
+| DistriFusion*             | stale   | $2O(p \times hs)L$           | $P$            | $\frac{2}{N}A = \frac{1}{N}QO$ | $2AL = (KV)L$                      |
+| Ring Sequence Parallel*   | fresh   | $2O(p \times hs)L$           | $P$            | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$     |
+| Ulysses Sequence Parallel | fresh   | $\frac{4}{N}O(p \times hs)L$ | $P$            | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$     |
+| PipeFusion*               | stale-  | $2O(p \times hs)$            | $\frac{1}{N}P$ | $\frac{2}{M}A = \frac{1}{M}QO$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
 
-</div>
 
 <h4 id="PipeFusion">1.1. PipeFusion</h4>
 

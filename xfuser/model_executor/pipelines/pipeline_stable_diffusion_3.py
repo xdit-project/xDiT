@@ -390,13 +390,13 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         
         if not output_type == "latent":
             if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = get_world_group().broadcast_latent(latents,get_runtime_state().runtime_config.dtype)
+                latents = self.gather_broadcast_latents(latents)
                 image = vae_decode(latents)
             else:
                 if is_dp_last_group():
                     image = vae_decode(latents)
         
-        if is_dp_last_group():
+        if self.is_dp_last_group():
             if output_type == "latent":
                 image = latents
             else:

@@ -463,12 +463,12 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         
         if not output_type == "latent":
             if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = get_world_group().broadcast_latent(latents,get_runtime_state().runtime_config.dtype)
+                latents = self.gather_broadcast_latents(latents)
                 vae_decode(latents)
             else:
                 if is_dp_last_group():
                     vae_decode(latents)
-        if is_dp_last_group():
+        if self.is_dp_last_group():
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
                 image, has_nsfw_concept = self.run_safety_checker(

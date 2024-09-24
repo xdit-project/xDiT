@@ -9,7 +9,7 @@ torch.compile在除了8 GPU的场景下都来来了加速效果。
 
 
 <div align="center">
-    <img src="../../assets/performance/sd3/A100-SD3.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/sd3/A100-SD3.png" 
     alt="latency-sd3_a100">
 </div>
 
@@ -17,6 +17,6 @@ torch.compile在除了8 GPU的场景下都来来了加速效果。
 torch.compile都来了加速效果。
 
 <div align="center">
-    <img src="../../assets/performance/sd3/L40-SD3.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/sd3/L40-SD3.png" 
     alt="latency-hunyuandit_l40">
 </div>

@@ -8,7 +8,7 @@ PipeFusion innovatively harnesses input temporal redundancy—the similarity bet
 It significantly surpasses other methods in communication efficiency, particularly in multi-node setups connected via Ethernet and multi-GPU configurations linked with PCIe.
 
 <div align="center">
-    <img src="../../assets/overview.png" alt="PipeFusion Image">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/overview.png" alt="PipeFusion Image">
 </div>
 
 The above picture compares DistriFusion and PipeFusion.
@@ -25,14 +25,14 @@ Each device processes the computation task for one patch of its assigned stage i
 The PipeFusion pipeline workflow when $M$ = $N$ =4 is shown in the following picture.
 
 <div align="center">
-    <img src="../../assets/workflow.png" alt="Pipeline Image">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/workflow.png" alt="Pipeline Image">
 </div>
 
 
 We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as shown bolow. To conduct the FID experiment, follow the detailed instructions provided in the [documentation](../../docs/fid/FID.md).
 
 <div align="center">
-    <img src="../../assets/image_quality.png" alt="image_quality">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/image_quality.png" alt="image_quality">
 </div>
 
 

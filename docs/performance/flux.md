@@ -22,14 +22,14 @@ We conducted performance benchmarking using FLUX.1 [schnell] with 4 steps.
 On a machine with 8xA100 (80GB) GPUs interconnected via NVLink, generating a 1024px image, the optimal strategy with USP is to apply ulysses_degree=#gpu. After using `torch.compile`, the generation of a 1024px image takes only 0.82 seconds!
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-1K-A100.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1K-A100.png" 
     alt="latency-flux_a100_1k">
 </div>
 
 On the same 8xA100 (80GB) NVLink-interconnected machine, generating a 2048px image, after using `torch.compile`, the generation of a 2048px image takes only 2.4 seconds!
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-2K-A100.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-2K-A100.png" 
     alt="latency-flux_a100_2k">
 </div>
 
@@ -39,14 +39,14 @@ We anticipate that using PipeFusion will enhance the scalability of 8-card setup
 We compared the performance of `torch.compile` and `onediff` on 1024px image generation tasks. On 1 and 8 GPUs, `torch.compile` performs slightly better, while on 2 and 4 GPUs, onediff performs slightly better.
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-1k-L40.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1k-L40.png" 
     alt="latency-flux_l40_1k">
 </div>
 
 The performance of generating a 2048px image on 8xL40 GPUs is shown below. Due to the increased ratio of computation to communication, unlike the 1024px image generation tasks, using 8 GPUs results in lower latency compared to 4 cards, with the fastest image generation time reaching 3.67 seconds.
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-2k-L40.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-2k-L40.png" 
     alt="latency-flux_l40_2k">
 </div>
 
@@ -62,6 +62,6 @@ prompt是"A hyperrealistic portrait of a weathered sailor in his 60s, with deep-
 The quality of image generation at 2048px, 3072px, and 4096px resolutions is as follows. It is evident that the quality of the 4096px generated images is significantly lower.
 
 <div align="center">
-    <img src="../../assets/performance/flux/flux_image.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
 </div>

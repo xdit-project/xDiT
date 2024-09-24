@@ -226,8 +226,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        if do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        prompt_embeds = self._process_cfg_split_batch_latte(prompt_embeds, negative_prompt_embeds)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -272,9 +271,11 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 if self.interrupt:
                     continue
 
-                latent_model_input = (
-                    torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                )
+                if do_classifier_free_guidance:
+                    latent_model_input = torch.cat(
+                        [latents] * (2 // get_classifier_free_guidance_world_size())
+                    )
+
                 latent_model_input = self.scheduler.scale_model_input(
                     latent_model_input, t
                 )
@@ -295,21 +296,15 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 # perform guidance
                 if use_dynamic_cfg:
                     self._guidance_scale = 1 + guidance_scale * (
-                        (
-                            1
-                            - math.cos(
-                                math.pi
-                                * (
-                                    (num_inference_steps - t.item())
-                                    / num_inference_steps
-                                )
-                                ** 5.0
-                            )
-                        )
-                        / 2
+                        (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
                     )
                 if do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    if get_classifier_free_guidance_world_size() == 1:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    elif get_classifier_free_guidance_world_size() == 2:
+                        noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
+                            noise_pred, separate_tensors=True
+                        )
                     noise_pred = noise_pred_uncond + self.guidance_scale * (
                         noise_pred_text - noise_pred_uncond
                     )
@@ -344,9 +339,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                         "negative_prompt_embeds", negative_prompt_embeds
                     )
 
-                if i == len(timesteps) - 1 or (
-                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-                ):
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:

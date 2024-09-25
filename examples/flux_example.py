@@ -38,7 +38,7 @@ def main():
     start_time = time.time()
     output = pipe(
         height=input_config.height,
-        width=input_config.height,
+        width=input_config.width,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,

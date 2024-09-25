@@ -68,7 +68,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         timesteps: Optional[List[int]] = None,
         guidance_scale: float = 7.5,
         num_images_per_prompt: int = 1,
-        num_frames: int = 16,
+        video_length: int = 16,
         height: int = 512,
         width: int = 512,
         eta: float = 0.0,
@@ -116,7 +116,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                 Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
                 1`. Higher guidance scale encourages to generate videos that are closely linked to the text `prompt`,
                 usually at the expense of lower video quality.
-            num_frames (`int`, *optional*, defaults to 16):
+            video_length (`int`, *optional*, defaults to 16):
                 The number of video frames that are generated. Defaults to 16 frames which at 8 frames per seconds
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of videos to generate per prompt.
@@ -172,6 +172,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
         # 0. Default
+        num_frames = video_length
         decode_chunk_size = (
             decode_chunk_size if decode_chunk_size is not None else num_frames
         )

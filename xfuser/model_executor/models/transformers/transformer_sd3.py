@@ -80,7 +80,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         if USE_PEFT_BACKEND:
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
-        else:
+        elif joint_attention_kwargs and "scale" in joint_attention_kwargs:
             logger.warning(
                 "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
             )

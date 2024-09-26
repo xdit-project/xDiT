@@ -5,7 +5,6 @@ from typing import Union, Tuple, Optional
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteSchedulerOutput,
-    randn_tensor,
 )
 
 from pipefuser.utils import DistriConfig

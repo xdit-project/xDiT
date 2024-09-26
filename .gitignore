@@ -2,12 +2,9 @@
 .DS_Store
 build
 __pycache__
+pipefuser.egg-info
 *.log
 *.txt
 results/
 profile/
-.vscode/
-xfuser.egg-info/
-dist/*
-latte_output.mp4
-*.sh
+pipefusion.egg-info/

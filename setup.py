@@ -1,50 +1,30 @@
 from setuptools import find_packages, setup
-import subprocess
-
-
-def get_cuda_version():
-    try:
-        nvcc_version = subprocess.check_output(["nvcc", "--version"]).decode("utf-8")
-        version_line = [line for line in nvcc_version.split("\n") if "release" in line][
-            0
-        ]
-        cuda_version = version_line.split(" ")[-2].replace(",", "")
-        return "cu" + cuda_version.replace(".", "")
-    except Exception as e:
-        return "no_cuda"
+import os
 
 
 if __name__ == "__main__":
     with open("README.md", "r") as f:
         long_description = f.read()
-    fp = open("xfuser/__version__.py", "r").read()
+    fp = open("pipefuser/__version__.py", "r").read()
     version = eval(fp.strip().split()[-1])
 
     setup(
-        name="xfuser",
-        author="xDiT Team",
+        name="pipefusion",
+        author="Jiannan Wang, Jiarui Fang, Jinzhe Pan, Aoyu Li, Pengcheng Yang",
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
-            "torch>=2.1.0",
-            "accelerate>=0.33.0",
-            "diffusers@git+https://github.com/huggingface/diffusers",  # NOTE: diffusers>=0.32.3 is necessary for CogVideoX and Flux
-            "transformers>=4.39.1",
-            "sentencepiece>=0.1.99",
-            "beautifulsoup4>=4.12.3",
+            "torch>=2.2",
+            "diffusers==0.29.0",
+            "transformers",
+            "sentencepiece",
+            "accelerate",
+            "beautifulsoup4",
             "distvae",
-            "yunchang>=0.3.0",
-            "pytest",
-            "flask",
-            "opencv-python",
+            "ftfy",
         ],
-        extras_require={
-            "flash_attn": [
-                "flash_attn>=2.6.3",
-            ],
-        },
-        url="https://github.com/xdit-project/xDiT.",
-        description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",
+        url="https://github.com/PipeFusion/PipeFusion.",
+        description="PipeFusion: Parallel Inference Suite for Diffusion Transformers (DiTs)",
         long_description=long_description,
         long_description_content_type="text/markdown",
         version=version,

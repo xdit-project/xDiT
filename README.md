@@ -82,16 +82,15 @@ The overview of xDiT is shown as follows.
 
 <h2 id="updates">📢 Updates</h2>
 
-* 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example](examples/cogvideox_example.py).
+* 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
-* 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example](examples/latte_example.py).
-* 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).
-* 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference scripts are [examples/sd3_example](examples/sd3_example.py).
+* 🎉**August 15, 2024**: Support Hunyuan-DiT hybrid parallel version. The inference scripts are [examples/hunyuandit_example.py](examples/hunyuandit_example.py).
+* 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example.py](examples/latte_example.py).
+* 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example.py](examples/flux_example.py).
+* 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference scripts are [examples/sd3_example.py](examples/sd3_example.py).
 * 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
 * 🎉**July 17, 2024**: Rename the project to xDiT. The project has evolved from a collection of parallel methods into a unified inference framework and supported the hybrid parallel for DiTs.
-* 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [legacy/scripts/hunyuandit_example.py](./legacy/scripts/hunyuandit_example.py).
-* 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [legacy/scripts/sd3_example.py](./legacy/scripts/sd3_example.py).
-* 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [legacy/scripts/pixart_example.py](./legacy/scripts/pixart_example.py), DiT [legacy/scripts/ditxl_example.py](./legacy/scripts/ditxl_example.py) and SDXL [legacy/scripts/sdxl_example.py](./legacy/scripts/sdxl_example.py).
+* 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py). This version is currently in the `legacy` branch.
 
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
@@ -359,9 +358,9 @@ We conducted a major upgrade of this project in August 2024.
 
 The latest APIs is located in the [xfuser/](./xfuser/) directory, supports hybrid parallelism. It offers clearer and more structured code but currently supports fewer models.
 
-The legacy APIs is in the [legacy/](./legacy/) directory, limited to single parallelism. It supports a richer of parallel methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel. CFG Parallel can be hybrid with PipeFusion but not with other parallel methods.
+The legacy APIs is in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, limited to single parallelism. It supports a richer of parallel methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel. CFG Parallel can be hybrid with PipeFusion but not with other parallel methods.
 
-For models not yet supported by the latest APIs, you can run the examples in the [legacy/scripts/](./legacy/scripts/) directory. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
+For models not yet supported by the latest APIs, you can run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under branch `legacy`. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
 
 We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://github.com/xdit-project/xDiT/discussions).
 

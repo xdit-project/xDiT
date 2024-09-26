@@ -39,7 +39,7 @@ def main():
     output = pipe(
         height=input_config.height,
         width=input_config.width,
-        num_frames=16,
+        video_length=16,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type="pt",

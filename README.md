@@ -20,6 +20,7 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [CogVideoX](#perf_cogvideox)
   - [Flux.1](#perf_flux)
   - [HunyuanDiT](#perf_hunyuandit)
   - [SD3](#perf_sd3)
@@ -118,7 +119,7 @@ The overview of xDiT is shown as follows.
 
 <h2 id="perf">📈 Performance</h2>
 
-<h3 id="perf_flux">CogVideo</h3>
+<h3 id="perf_cogvideox">CogVideo</h3>
 
 1. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 

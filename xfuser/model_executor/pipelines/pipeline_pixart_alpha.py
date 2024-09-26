@@ -25,6 +25,7 @@ from xfuser.core.distributed import (
     get_sp_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
+    get_world_group
 )
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -359,12 +360,22 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
         # 8. Decode latents (only rank 0)
         #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if is_dp_last_group():
+        def vae_decode(latents):
+            image = self.vae.decode(
+                latents / self.vae.config.scaling_factor, return_dict=False
+            )[0]
+            return image
+        
+        if not output_type == "latent":
+            if get_runtime_state().runtime_config.use_parallel_vae:
+                latents = self.gather_broadcast_latents(latents)
+                image = vae_decode(latents)
+            else:
+                if is_dp_last_group():
+                    image = vae_decode(latents)
+        if self.is_dp_last_group():
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
-                image = self.vae.decode(
-                    latents / self.vae.config.scaling_factor, return_dict=False
-                )[0]
                 if use_resolution_binning:
                     image = self.image_processor.resize_and_crop_tensor(
                         image, orig_width, orig_height

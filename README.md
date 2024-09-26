@@ -82,12 +82,13 @@ The overview of xDiT is shown as follows.
 
 <h2 id="updates">📢 Updates</h2>
 
-* 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example](examples/cogvideox_example.py).
+* 🎉**September 26, 2024**: xDiT has been officially used by [CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
+* 🎉**September 23, 2024**: Support CogVideoX sequence parallel version. The inference script is [examples/cogvideox_example](examples/cogvideox_example.py).
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
-* 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example](examples/latte_example.py).
-* 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example](examples/flux_example.py).
-* 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference scripts are [examples/sd3_example](examples/sd3_example.py).
-* 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
+* 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference script is [examples/latte_example.py](examples/latte_example.py).
+* 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference script is [examples/flux_example.py](examples/flux_example.py).
+* 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference script is [examples/sd3_example.py](examples/sd3_example.py).
+* 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py) and [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
 * 🎉**July 17, 2024**: Rename the project to xDiT. The project has evolved from a collection of parallel methods into a unified inference framework and supported the hybrid parallel for DiTs.
 * 🎉**July 10, 2024**: Support HunyuanDiT. The inference script is [legacy/scripts/hunyuandit_example.py](./legacy/scripts/hunyuandit_example.py).
 * 🎉**June 26, 2024**: Support Stable Diffusion 3. The inference script is [legacy/scripts/sd3_example.py](./legacy/scripts/sd3_example.py).

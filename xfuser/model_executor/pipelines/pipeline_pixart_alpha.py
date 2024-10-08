@@ -47,6 +47,7 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         return cls(pipeline, engine_config)
 
     @torch.no_grad()
+    @xFuserPipelineBaseWrapper.enable_fast_attn
     @xFuserPipelineBaseWrapper.enable_data_parallel
     @xFuserPipelineBaseWrapper.check_to_use_naive_forward
     def __call__(

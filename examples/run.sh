@@ -19,7 +19,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 # or you can simply use the model's ID on Hugging Face, 
 # which will then be downloaded to the default cache path on Hugging Face.
 
-export MODEL_TYPE="CogVideoX"
+export MODEL_TYPE="Pixart-alpha"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
@@ -53,24 +53,42 @@ if [ "$MODEL_TYPE" = "Flux" ]; then
 N_GPUS=8
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 CFG_ARGS=""
+FAST_ATTN_ARGS=""
 
 # CogVideoX asserts sp_degree == ulysses_degree*ring_degree <= 2. Also, do not set the pipefusion degree.
 elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
 N_GPUS=4
 PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
 CFG_ARGS="--use_cfg_parallel"
+FAST_ATTN_ARGS=""
 
 # HunyuanDiT asserts sp_degree == ulysses_degree*ring_degree <= 2, or the output will be incorrect.
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
 N_GPUS=8
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
 CFG_ARGS="--use_cfg_parallel"
+FAST_ATTN_ARGS=""
+
+# Pixart-alpha can use DiTFastAttn to compression attention module, but DiTFastAttn can only use with data parallel
+elif [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
+N_GPUS=4
+PARALLEL_ARGS="--data_parallel_degree $N_GPUS"
+CFG_ARGS=""
+FAST_ATTN_ARGS="--use_fast_attn --window_size 512 --n_calib 4 --threshold 0.15 --use_cache --coco_path /data/mscoco/annotations/captions_val2014.json"
+
+# Pixart-sigma can use DiTFastAttn to compression attention module, but DiTFastAttn can only use with data parallel
+elif [ "$MODEL_TYPE" = "Pixart-sigma" ]; then
+N_GPUS=4
+PARALLEL_ARGS="--data_parallel_degree $N_GPUS"
+CFG_ARGS=""
+FAST_ATTN_ARGS="--use_fast_attn --window_size 512 --n_calib 4 --threshold 0.15 --use_cache --coco_path /data/mscoco/annotations/captions_val2014.json"
 
 else
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 N_GPUS=8
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
 CFG_ARGS="--use_cfg_parallel"
+FAST_ATTN_ARGS=""
 fi
 
 
@@ -95,5 +113,6 @@ $OUTPUT_ARGS \
 --warmup_steps 0 \
 --prompt "A small dog" \
 $CFG_ARGS \
+$FAST_ATTN_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG

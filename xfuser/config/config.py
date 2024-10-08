@@ -67,6 +67,21 @@ class RuntimeConfig:
 
 
 @dataclass
+class FastAttnConfig:
+    use_fast_attn: bool = False
+    n_step: int = 20
+    n_calib: int = 8
+    threshold: float = 0.5
+    window_size: int = 64
+    coco_path: Optional[str] = None
+    use_cache: bool = False
+
+    def __post_init__(self):
+        assert self.n_calib > 0, "n_calib must be greater than 0"
+        assert self.threshold > 0.0, "threshold must be greater than 0"
+
+
+@dataclass
 class DataParallelConfig:
     dp_degree: int = 1
     use_cfg_parallel: bool = False
@@ -217,6 +232,12 @@ class EngineConfig:
     model_config: ModelConfig
     runtime_config: RuntimeConfig
     parallel_config: ParallelConfig
+    fast_attn_config: FastAttnConfig
+
+    def __post_init__(self):
+        world_size = dist.get_world_size()
+        if self.fast_attn_config.use_fast_attn:
+            assert self.parallel_config.dp_degree == world_size, f"world_size must be equal to dp_degree when using DiTFastAttn"
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs."""

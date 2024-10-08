@@ -24,6 +24,10 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sp_group,
 )
+from xfuser.core.fast_attention import (
+    xFuserFastAttention,
+    get_fast_attn_enable,
+)
 
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.runtime_state import get_runtime_state
@@ -246,6 +250,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         else:
             self.hybrid_seq_parallel_attn = None
 
+        if get_fast_attn_enable():
+            self.fast_attn = xFuserFastAttention()
+
     def __call__(
         self,
         attn: Attention,
@@ -260,6 +267,11 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)
+
+        #! ---------------------------------------- Fast Attention ----------------------------------------
+        if get_fast_attn_enable():
+            return self.fast_attn(attn, hidden_states, encoder_hidden_states, attention_mask, temb, *args, **kwargs)
+        #! ---------------------------------------- Fast Attention ----------------------------------------
 
         residual = hidden_states
         if attn.spatial_norm is not None:
@@ -434,6 +446,9 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                     use_fa=False,
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
                 )
+
+        if get_fast_attn_enable():
+            self.fast_attn = xFuserFastAttention()
 
     def __call__(
         self,

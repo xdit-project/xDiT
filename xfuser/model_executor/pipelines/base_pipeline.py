@@ -30,6 +30,11 @@ from xfuser.core.distributed import (
     is_dp_last_group,
     get_sequence_parallel_rank,
 )
+from xfuser.core.fast_attention import (
+    get_fast_attn_enable,
+    initialize_fast_attn_state,
+    fast_attention_compression,
+)
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
@@ -38,6 +43,7 @@ PACKAGES_CHECKER.check_diffusers_version()
 
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
+from xfuser.model_executor.layers.attention_processor import *
 
 try:
     import os
@@ -61,6 +67,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         self.module: DiffusionPipeline
         self._init_runtime_state(pipeline=pipeline, engine_config=engine_config)
+        self._init_fast_attn_state(pipeline=pipeline, engine_config=engine_config)
 
         # backbone
         transformer = getattr(pipeline, "transformer", None)
@@ -110,6 +117,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         return self
 
     @staticmethod
+    def enable_fast_attn(func):
+        @wraps(func)
+        def fast_attn_fn(self, *args, **kwargs):
+            if get_fast_attn_enable():
+                for block in self.module.transformer.transformer_blocks:
+                    for layer in block.children():
+                        if isinstance(layer, xFuserAttentionBaseWrapper):
+                            layer.stepi = 0
+                            layer.cached_residual = None
+                            layer.cached_output = None
+                out = func(self, *args, **kwargs)
+                for block in self.module.transformer.transformer_blocks:
+                    for layer in block.children():
+                        if isinstance(layer, xFuserAttentionBaseWrapper):
+                            layer.stepi = 0
+                            layer.cached_residual = None
+                            layer.cached_output = None
+                return out
+            else:
+                return func(self, *args, **kwargs)
+
+        return fast_attn_fn
+
+    @staticmethod
     def enable_data_parallel(func):
         @wraps(func)
         def data_parallel_fn(self, *args, **kwargs):
@@ -145,6 +176,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
                 and get_tensor_model_parallel_world_size() == 1
+                and get_fast_attn_enable() == False
             ):
                 return self.module(*args, **kwargs)
             else:
@@ -192,6 +224,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def prepare_run(
         self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
     ):
+        if get_fast_attn_enable():
+            # set compression methods for DiTFastAttn
+            fast_attention_compression(self)
+
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
@@ -228,6 +264,11 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         initialize_runtime_state(pipeline=pipeline, engine_config=engine_config)
 
+    def _init_fast_attn_state(
+        self, pipeline: DiffusionPipeline, engine_config: EngineConfig
+    ):
+        initialize_fast_attn_state(pipeline=pipeline, single_config=engine_config.fast_attn_config)
+
     def _convert_transformer_backbone(
         self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool
     ):
@@ -236,6 +277,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             and get_sequence_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
             and get_tensor_model_parallel_world_size() == 1
+            and get_fast_attn_enable() == False
         ):
             logger.info(
                 "Transformer backbone found, but model parallelism is not enabled, "

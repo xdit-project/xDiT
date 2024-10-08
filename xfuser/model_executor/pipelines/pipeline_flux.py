@@ -422,6 +422,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 pass
             else:
                 latents = get_pp_group().pipeline_recv()
+                if not is_pipeline_first_stage():
+                    encoder_hidden_state = get_pp_group().pipeline_recv(
+                        0, "encoder_hidden_state"
+                    )
 
             # handle guidance
             if self.transformer.config.guidance_embeds:
@@ -430,9 +434,11 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             else:
                 guidance = None
 
-            latents = self._backbone_forward(
+            latents, encoder_hidden_state = self._backbone_forward(
                 latents=latents,
-                encoder_hidden_states=prompt_embeds,
+                encoder_hidden_states=(
+                    prompt_embeds if is_pipeline_first_stage() else encoder_hidden_state
+                ),
                 pooled_prompt_embeds=pooled_prompt_embeds,
                 text_ids=text_ids,
                 latent_image_ids=latent_image_ids,
@@ -470,6 +476,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 pass
             elif get_pipeline_parallel_world_size() > 1:
                 get_pp_group().pipeline_send(latents)
+                if not is_pipeline_last_stage():
+                    get_pp_group().pipeline_send(
+                        encoder_hidden_state, name="encoder_hidden_state"
+                    )
 
         if (
             sync_only
@@ -542,7 +552,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-        noise_pred = self.transformer(
+        noise_pred, encoder_hidden_states = self.transformer(
             hidden_states=latents,
             timestep=timestep / 1000,
             guidance=guidance,
@@ -554,7 +564,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return_dict=False,
         )[0]
 
-        return noise_pred
+        return noise_pred, encoder_hidden_states
 
     def _scheduler_step(
         self,

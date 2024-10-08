@@ -1,3 +1,8 @@
+# Copyright 2024 xDiT team.
+# Adapted from
+# https://github.com/thu-nics/DiTFastAttn/blob/main/modules/fast_attn_processor.py
+# Copyright (c) 2024 NICS-EFC Lab of Tsinghua University.
+
 import torch
 from diffusers.models.attention_processor import Attention
 from typing import Optional

@@ -1,3 +1,8 @@
+# Copyright 2024 xDiT team.
+# Adapted from
+# https://github.com/thu-nics/DiTFastAttn/blob/main/dit_fast_attention.py
+# Copyright (c) 2024 NICS-EFC Lab of Tsinghua University.
+
 import torch
 from xfuser.core.distributed import (
     get_dp_group,

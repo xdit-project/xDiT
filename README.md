@@ -92,6 +92,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models! The scripst is [./scripts/run_fast_pixart.py](./scripts/run_fast_pixart.py).
 * 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
 * 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
@@ -284,7 +285,7 @@ Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
 
 ![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
 
-Currently, if you need the xDiT parallel version for ComfyUI, please contact us via this [email](jiaruifang@tencent.com).
+Currently, if you need the xDiT parallel version for ComfyUI, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
 
 ### 2. Launch a Http Service
 

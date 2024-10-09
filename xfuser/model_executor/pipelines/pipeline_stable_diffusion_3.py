@@ -38,7 +38,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sp_group,
     is_dp_last_group,
-    get_world_group
+    get_world_group,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -380,14 +380,14 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
                 )
 
         # * 8. Decode latents (only the last rank in a dp group)
-        
+
         def vae_decode(latents):
             latents = (
-                    latents / self.vae.config.scaling_factor
-                ) + self.vae.config.shift_factor
+                latents / self.vae.config.scaling_factor
+            ) + self.vae.config.shift_factor
             image = self.vae.decode(latents, return_dict=False)[0]
             return image
-        
+
         if not output_type == "latent":
             if get_runtime_state().runtime_config.use_parallel_vae:
                 latents = self.gather_broadcast_latents(latents)
@@ -395,7 +395,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             else:
                 if is_dp_last_group():
                     image = vae_decode(latents)
-        
+
         if self.is_dp_last_group():
             if output_type == "latent":
                 image = latents
@@ -522,7 +522,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
 
         return latents
 
-    def _init_sd3_async_pipeline(
+    def _init_async_pipeline(
         self,
         num_timesteps: int,
         latents: torch.Tensor,
@@ -582,7 +582,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             return latents
         num_pipeline_patch = get_runtime_state().num_pipeline_patch
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
-        patch_latents = self._init_sd3_async_pipeline(
+        patch_latents = self._init_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,

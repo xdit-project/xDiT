@@ -42,7 +42,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 [FeedForward] if get_tensor_model_parallel_world_size() > 1 else []
             ),
             submodule_name_to_wrap=["attn"],
-            transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
+            # transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))

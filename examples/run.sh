@@ -1,24 +1,8 @@
 set -x
 
-# export NCCL_PXN_DISABLE=1
-# # export NCCL_DEBUG=INFO
-# export NCCL_SOCKET_IFNAME=eth0
-# export NCCL_IB_GID_INDEX=3
-# export NCCL_IB_DISABLE=0
-# export NCCL_NET_GDR_LEVEL=2
-# export NCCL_IB_QPS_PER_CONNECTION=4
-# export NCCL_IB_TC=160
-# export NCCL_IB_TIMEOUT=22
-# export NCCL_P2P=0
-# export CUDA_DEVICE_MAX_CONNECTIONS=1
-
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # Select the model type
-# The model is downloaded to a specified location on disk, 
-# or you can simply use the model's ID on Hugging Face, 
-# which will then be downloaded to the default cache path on Hugging Face.
-
 export MODEL_TYPE="Pixart-alpha"
 # Configuration for different model types
 # script, model_id, inference_step
@@ -28,7 +12,6 @@ declare -A MODEL_CONFIGS=(
     ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="flux_example.py /cfs/dit/FLUX.1-schnell 4"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
-    ["CogVideoX"]="cogvideox_example.py /cfs/dit/CogVideoX-2b 20"
 )
 
 if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then
@@ -42,55 +25,26 @@ fi
 mkdir -p ./results
 
 # task args
-if [ "$MODEL_TYPE" = "CogVideoX" ]; then
-  TASK_ARGS="--height 480 --width 720 --num_frames 9"
-else
-  TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
-fi
+TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
 # Flux only supports SP. Do not set the pipefusion degree.
 if [ "$MODEL_TYPE" = "Flux" ]; then
 N_GPUS=8
 PARALLEL_ARGS="--ulysses_degree $N_GPUS"
 CFG_ARGS=""
-FAST_ATTN_ARGS=""
-
-# CogVideoX asserts sp_degree == ulysses_degree*ring_degree <= 2. Also, do not set the pipefusion degree.
-elif [ "$MODEL_TYPE" = "CogVideoX" ]; then
-N_GPUS=4
-PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
-CFG_ARGS="--use_cfg_parallel"
-FAST_ATTN_ARGS=""
 
 # HunyuanDiT asserts sp_degree == ulysses_degree*ring_degree <= 2, or the output will be incorrect.
 elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
 N_GPUS=8
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
 CFG_ARGS="--use_cfg_parallel"
-FAST_ATTN_ARGS=""
-
-# Pixart-alpha can use DiTFastAttn to compression attention module, but DiTFastAttn can only use with data parallel
-elif [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
-N_GPUS=4
-PARALLEL_ARGS="--data_parallel_degree $N_GPUS"
-CFG_ARGS=""
-FAST_ATTN_ARGS="--use_fast_attn --window_size 512 --n_calib 4 --threshold 0.15 --use_cache --coco_path /data/mscoco/annotations/captions_val2014.json"
-
-# Pixart-sigma can use DiTFastAttn to compression attention module, but DiTFastAttn can only use with data parallel
-elif [ "$MODEL_TYPE" = "Pixart-sigma" ]; then
-N_GPUS=4
-PARALLEL_ARGS="--data_parallel_degree $N_GPUS"
-CFG_ARGS=""
-FAST_ATTN_ARGS="--use_fast_attn --window_size 512 --n_calib 4 --threshold 0.15 --use_cache --coco_path /data/mscoco/annotations/captions_val2014.json"
 
 else
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 N_GPUS=8
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
 CFG_ARGS="--use_cfg_parallel"
-FAST_ATTN_ARGS=""
 fi
-
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
 # PIPEFUSION_ARGS="--num_pipeline_patch 8 "
@@ -113,6 +67,5 @@ $OUTPUT_ARGS \
 --warmup_steps 0 \
 --prompt "A small dog" \
 $CFG_ARGS \
-$FAST_ATTN_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG

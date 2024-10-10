@@ -225,6 +225,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             width=width,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
+            max_condition_sequence_length=max_sequence_length,
         )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
@@ -518,7 +519,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         pooled_prompt_embeds: torch.Tensor,
         text_ids: torch.Tensor,
         latent_image_ids: torch.Tensor,
-        guidance_scale,
+        guidance,
         timesteps: List[int],
         num_warmup_steps: int,
         progress_bar,
@@ -529,10 +530,11 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return latents
         num_pipeline_patch = get_runtime_state().num_pipeline_patch
         num_pipeline_warmup_steps = get_runtime_state().runtime_config.warmup_steps
-        patch_latents = self._init_async_pipeline(
+        patch_latents, patch_latent_image_ids = self._init_async_pipeline(
             num_timesteps=len(timesteps),
             latents=latents,
             num_pipeline_warmup_steps=num_pipeline_warmup_steps,
+            latent_image_ids=latent_image_ids,
         )
         last_patch_latents = (
             [None for _ in range(num_pipeline_patch)]
@@ -576,6 +578,9 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                             else last_encoder_hidden_states
                         ),
                         pooled_prompt_embeds=pooled_prompt_embeds,
+                        text_ids=text_ids,
+                        latent_image_ids=patch_latent_image_ids[patch_idx],
+                        guidance=guidance,
                         t=t,
                     )
                 )
@@ -652,7 +657,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
         latents = None
         if is_pipeline_last_stage():
-            latents = torch.cat(patch_latents, dim=2)
+            latents = torch.cat(patch_latents, dim=-2)
             if get_sequence_parallel_world_size() > 1:
                 sp_degree = get_sequence_parallel_world_size()
                 sp_latents_list = get_sp_group().all_gather(
@@ -664,10 +669,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         sp_latents_list[sp_patch_idx][
                             ...,
                             get_runtime_state()
-                            .pp_patches_start_idx_local[
+                            .pp_patches_token_start_idx_local[
                                 pp_patch_idx
                             ] : get_runtime_state()
-                            .pp_patches_start_idx_local[pp_patch_idx + 1],
+                            .pp_patches_token_start_idx_local[pp_patch_idx + 1],
                             :,
                         ]
                         for sp_patch_idx in range(sp_degree)
@@ -680,6 +685,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         num_timesteps: int,
         latents: torch.Tensor,
         num_pipeline_warmup_steps: int,
+        latent_image_ids: torch.Tensor,
     ):
         get_runtime_state().set_patched_mode(patch_mode=True)
 
@@ -692,16 +698,21 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 else latents
             )
             patch_latents = list(
-                latents.split(get_runtime_state().pp_patches_height, dim=2)
+                latents.split(get_runtime_state().pp_patches_token_num, dim=-2)
             )
         elif is_pipeline_last_stage():
             patch_latents = list(
-                latents.split(get_runtime_state().pp_patches_height, dim=2)
+                latents.split(get_runtime_state().pp_patches_token_num, dim=-2)
             )
         else:
             patch_latents = [
                 None for _ in range(get_runtime_state().num_pipeline_patch)
             ]
+
+        patch_latent_image_ids = list(
+            latent_image_ids[start_idx:end_idx]
+            for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
+        )
 
         recv_timesteps = (
             num_timesteps - 1 if is_pipeline_first_stage() else num_timesteps
@@ -717,7 +728,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                 for patch_idx in range(get_runtime_state().num_pipeline_patch):
                     get_pp_group().add_pipeline_recv_task(patch_idx)
 
-        return patch_latents
+        return patch_latents, patch_latent_image_ids
 
     def _backbone_forward(
         self,

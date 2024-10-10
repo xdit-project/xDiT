@@ -16,6 +16,7 @@ from diffusers.utils import (
 from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     is_pipeline_first_stage,
+    is_pipeline_last_stage,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
@@ -42,7 +43,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 [FeedForward] if get_tensor_model_parallel_world_size() > 1 else []
             ),
             submodule_name_to_wrap=["attn"],
-            # transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
+            transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
@@ -223,7 +224,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
         if self.stage_info.after_flags["single_transformer_blocks"]:
             hidden_states = self.norm_out(hidden_states, temb)
-            output = self.proj_out(hidden_states)
+            output = self.proj_out(hidden_states), None
         else:
             output = hidden_states, encoder_hidden_states
 

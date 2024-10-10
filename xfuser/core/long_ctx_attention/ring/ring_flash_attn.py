@@ -41,7 +41,6 @@ def ring_flash_attn_forward(
     next_k, next_v = None, None
 
     if attn_layer is not None:
-        print(f"{k.shape=}, {v.shape=}")
         k, v = get_cache_manager().update_and_get_kv_cache(
             new_kv=[k, v],
             layer=attn_layer,

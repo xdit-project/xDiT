@@ -121,6 +121,7 @@ class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
         assert (to_k.bias is None) == (to_v.bias is None)
         assert to_k.weight.shape == to_v.weight.shape
 
+
 class xFuserAttentionProcessorRegister:
     _XFUSER_ATTENTION_PROCESSOR_MAPPING = {}
 
@@ -683,8 +684,10 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
         else:
-            num_encoder_hidden_states_tokens = 0
-            num_query_tokens = query.shape[2]
+            num_encoder_hidden_states_tokens = (
+                get_runtime_state().max_condition_sequence_length
+            )
+            num_query_tokens = query.shape[2] - num_encoder_hidden_states_tokens
 
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb)
@@ -1142,7 +1145,6 @@ if CogVideoXAttnProcessor2_0 is not None:
             hidden_states = attn.to_out[0](hidden_states)
             # dropout
             hidden_states = attn.to_out[1](hidden_states)
-
 
             encoder_hidden_states, hidden_states = hidden_states.split(
                 [text_seq_length, latent_seq_length], dim=1

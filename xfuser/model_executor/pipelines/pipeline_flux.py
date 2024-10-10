@@ -72,7 +72,6 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
-            output_type="latent",
             max_sequence_length=input_config.max_sequence_length,
             generator=torch.Generator(device="cuda").manual_seed(42),
         )

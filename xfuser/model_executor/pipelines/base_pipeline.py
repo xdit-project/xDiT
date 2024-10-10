@@ -89,7 +89,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if scheduler is not None:
             pipeline.scheduler = self._convert_scheduler(scheduler)
 
-        if vae is not None and engine_config.runtime_config.use_parallel_vae:
+        if vae is not None and engine_config.runtime_config.use_parallel_vae and not self.use_naive_forward():
             pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
@@ -167,17 +167,20 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return data_parallel_fn
 
-    @staticmethod
-    def check_to_use_naive_forward(func):
-        @wraps(func)
-        def check_naive_forward_fn(self, *args, **kwargs):
-            if (
+    def use_naive_forward(self):
+        return (
                 get_pipeline_parallel_world_size() == 1
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
                 and get_tensor_model_parallel_world_size() == 1
                 and get_fast_attn_enable() == False
-            ):
+            )
+        
+    @staticmethod
+    def check_to_use_naive_forward(func):
+        @wraps(func)
+        def check_naive_forward_fn(self, *args, **kwargs):
+            if self.use_naive_forward():
                 return self.module(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
@@ -237,7 +240,6 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             prompt=prompt,
             use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
-            output_type="latent",
             generator=torch.Generator(device="cuda").manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -441,7 +443,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         """Return True if in the last data parallel group, False otherwise.
         Also include parallel vae situation.
         """
-        if get_runtime_state().runtime_config.use_parallel_vae:
+        if get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward():
             return get_world_group().rank == 0
         else:
             return is_dp_last_group()

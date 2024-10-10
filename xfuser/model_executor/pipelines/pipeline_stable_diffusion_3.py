@@ -77,7 +77,6 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
-            output_type="latent",
             generator=torch.Generator(device="cuda").manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps

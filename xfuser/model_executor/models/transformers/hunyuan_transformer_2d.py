@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -41,6 +41,7 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
     def _split_transformer_blocks(
         self,
         transformer: nn.Module,
+        blocks_name: List[str] = [],
     ):
         if not hasattr(transformer, "blocks"):
             raise AttributeError(

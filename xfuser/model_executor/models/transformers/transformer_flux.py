@@ -13,7 +13,11 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
-from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_world_size
+from xfuser.core.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
+)
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.models.transformers.register import (
@@ -39,6 +43,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 [FeedForward] if get_tensor_model_parallel_world_size() > 1 else []
             ),
             submodule_name_to_wrap=["attn"],
+            transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
@@ -92,11 +97,16 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
         else:
-            if joint_attention_kwargs is not None and joint_attention_kwargs.get("scale", None) is not None:
+            if (
+                joint_attention_kwargs is not None
+                and joint_attention_kwargs.get("scale", None) is not None
+            ):
                 logger.warning(
                     "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
                 )
-        hidden_states = self.x_embedder(hidden_states)
+
+        if is_pipeline_first_stage():
+            hidden_states = self.x_embedder(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype) * 1000
         if guidance is not None:
@@ -108,7 +118,8 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             if guidance is None
             else self.time_text_embed(timestep, guidance, pooled_projections)
         )
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        if is_pipeline_first_stage():
+            encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
         if txt_ids.ndim == 3:
             logger.warning(
@@ -138,14 +149,18 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    encoder_hidden_states,
-                    temb,
-                    image_rotary_emb,
-                    **ckpt_kwargs,
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
+                encoder_hidden_states, hidden_states = (
+                    torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
+                        hidden_states,
+                        encoder_hidden_states,
+                        temb,
+                        image_rotary_emb,
+                        **ckpt_kwargs,
+                    )
                 )
 
             else:
@@ -162,6 +177,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             #     interval_control = int(np.ceil(interval_control))
             #     hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
 
+        # if self.stage_info.after_flags["transformer_blocks"]:
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         for index_block, block in enumerate(self.single_transformer_blocks):
@@ -176,7 +192,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
                     return custom_forward
 
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                ckpt_kwargs: Dict[str, Any] = (
+                    {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                )
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
@@ -201,10 +219,14 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             #         + controlnet_single_block_samples[index_block // interval_control]
             #     )
 
+        encoder_hidden_states = hidden_states[:, : encoder_hidden_states.shape[1], ...]
         hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...]
 
-        hidden_states = self.norm_out(hidden_states, temb)
-        output = self.proj_out(hidden_states)
+        if self.stage_info.after_flags["single_transformer_blocks"]:
+            hidden_states = self.norm_out(hidden_states, temb)
+            output = self.proj_out(hidden_states), None
+        else:
+            output = hidden_states, encoder_hidden_states
 
         if USE_PEFT_BACKEND:
             # remove `lora_scale` from each PEFT layer

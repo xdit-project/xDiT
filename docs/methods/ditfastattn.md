@@ -1,4 +1,4 @@
-### DiTFastAttn
+### DiTFastAttn: Attention Compression for Diffusion Transformer Models
 
 [DiTFastAttn](https://github.com/thu-nics/DiTFastAttn) is an acceleration solution for single-GPU DiTs inference, utilizing Input Temporal Reduction to reduce computational complexity through the following three methods:
 

@@ -92,7 +92,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
-* 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models! The scripst is [./scripts/run_fast_pixart.py](./scripts/run_fast_pixart.py).
+* 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
 * 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
 * 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
@@ -157,7 +157,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
-### 1. Install from pip (current [version](./xfuser/__version__.py))
+### 1. Install from pip
 
 ```
 pip install xfuser
@@ -189,7 +189,10 @@ You can easily modify the model type, model directory, and parallel options in t
 bash examples/run.sh
 ```
 
-To inspect the available options for the PixArt-alpha example, use the following command:
+---
+
+<details>
+<summary>Click to see available options for the PixArt-alpha example</summary>
 
 ```bash
 python ./examples/pixartalpha_example.py -h
@@ -249,10 +252,14 @@ Input Options:
                         Number of inference steps.
 ```
 
+</details>
+
+---
+
 Hybriding multiple parallelism techniques togather is essential for efficiently scaling. 
 It's important that the product of all parallel degrees matches the number of devices. 
-For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
-Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8.
+Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
+Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
 
 
 ```bash
@@ -376,7 +383,7 @@ For usage instructions, refer to the [example/run.sh](./examples/run.sh). Simply
 
 xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce computation cost of attention layer by leveraging redundancies between different steps of the Diffusion Model.
 
-[DiTFastAttn](./docs/methods/dittfastattn.md)
+[DiTFastAttn: Attention Compression for Diffusion Transformer Models](./docs/methods/ditfastattn.md)
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 

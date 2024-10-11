@@ -92,6 +92,7 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_token_start_idx_local: Optional[List[int]]
     pp_patches_token_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
+    max_condition_sequence_length: int
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
@@ -126,10 +127,12 @@ class DiTRuntimeState(RuntimeState):
         batch_size: Optional[int] = None,
         num_inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
+        max_condition_sequence_length: Optional[int] = None,
     ):
         self.input_config.num_inference_steps = (
             num_inference_steps or self.input_config.num_inference_steps
         )
+        self.max_condition_sequence_length = max_condition_sequence_length
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:
@@ -140,7 +143,6 @@ class DiTRuntimeState(RuntimeState):
             or (height and self.input_config.height != height)
             or (width and self.input_config.width != width)
             or (batch_size and self.input_config.batch_size != batch_size)
-            or not self.ready
         ):
             self._input_size_change(height, width, batch_size)
 
@@ -450,10 +452,8 @@ class DiTRuntimeState(RuntimeState):
         ]
         pp_patches_token_start_end_idx_global = [
             [
-                (latents_width // patch_size)
-                * (start_idx // patch_size),
-                (latents_width // patch_size)
-                * (end_idx // patch_size),
+                (latents_width // patch_size) * (start_idx // patch_size),
+                (latents_width // patch_size) * (end_idx // patch_size),
             ]
             for start_idx, end_idx in pp_patches_start_end_idx_global
         ]

@@ -1,4 +1,4 @@
-### DiTFastAttn
+### DiTFastAttn: Attention Compression for Diffusion Transformer Models
 
 [DiTFastAttn](https://github.com/thu-nics/DiTFastAttn)是一种针对单卡DiTs推理的加速方案，利用Input Temperal Reduction通过如下三种方式来减少计算量：
 

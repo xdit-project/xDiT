@@ -258,8 +258,8 @@ Input Options:
 
 Hybriding multiple parallelism techniques togather is essential for efficiently scaling. 
 It's important that the product of all parallel degrees matches the number of devices. 
-For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
-Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8.
+Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
+Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
 
 
 ```bash

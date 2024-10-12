@@ -27,6 +27,7 @@
   - [Pixart](#perf_pixart)
   - [Latte](#perf_latte)
 - [🚀 QuickStart](#QuickStart)
+- [🖼️ ComfyUI with xDiT](#comfyui)
 - [✨ xDiT's Arsenal](#secrets)
   - [Parallel Methods](#parallel)
     - [1. PipeFusion](#PipeFusion)
@@ -34,7 +35,9 @@
     - [3. Hybrid Parallel](#hybrid_parallel)
     - [4. CFG Parallel](#cfg_parallel)
     - [5. Parallel VAE](#parallel_vae)
-  - [Compilation Acceleration](#compilation)
+  - [Single GPU Acceleration](#1gpuacc)
+    - [Compilation Acceleration](#compilation)
+    - [DiTFastAttn](#dittfastattn)
 - [📚  Develop Guide](#dev-guide)
 - [🚧  History and Looking for Contributions](#history)
 - [📝 Cite Us](#cite-us)
@@ -46,14 +49,23 @@ Diffusion Transformers (DiTs) are driving advancements in high-quality image and
 With the escalating input context length in DiTs, the computational demand of the Attention mechanism grows **quadratically**! 
 Consequently, multi-GPU and multi-machine deployments are essential to meet the **real-time** requirements in online services.
 
+
+<h3 id="meet-xdit-parallel">Parallel Inference</h3>
+
 To meet real-time demand for DiTs applications, parallel inference is a must.
 xDiT is an inference engine designed for the parallel deployment of DiTs on large scale. 
-xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as GPU kernel accelerations.
+xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as computation accelerations.
+
+The overview of xDiT is shown as follows.
+
+<picture>
+  <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/xdit_overview.png">
+</picture>
 
 
-1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention.
+1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention proposed by use3.
 
-2. [PipeFusion](https://arxiv.org/abs/2405.14430), a patch level pipeline parallelism using displaced patch by taking advantage of the diffusion model characteristics.
+2. [PipeFusion](https://arxiv.org/abs/2405.14430), a sequence-level pipeline parallelism, similar to [TeraPipe](https://arxiv.org/abs/2102.07988) but takes advantage of the input temporal redundancy characteristics of diffusion models.
 
 3. Data Parallel: Processes multiple prompts or generates multiple images from a single prompt in parallel across images.
 
@@ -70,18 +82,17 @@ We also have implemented the following parallel stategies for reference:
 2. [DistriFusion](https://arxiv.org/abs/2402.19481)
 
 
-Optimization orthogonal to parallelization focuses on accelerating single GPU performance. 
-In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
+<h3 id="meet-xdit-perf">Computing Acceleration</h3>
 
-The overview of xDiT is shown as follows.
+Optimization orthogonal to parallel focuses on accelerating single GPU performance.
 
-<picture>
-  <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/xdit_overview.png">
-</picture>
+First, xDiT employs a series of kernel acceleration methods. In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
 
+Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https://github.com/thu-nics/DiTFastAttn), which exploits computational redundancies between different steps of the Diffusion Model to accelerate inference on a single GPU.
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
 * 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
 * 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
 * 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
@@ -103,7 +114,7 @@ The overview of xDiT is shown as follows.
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | 
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
-| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ❎ |
+| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ |
 | [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ |
 | [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ |
 | [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ |
@@ -146,7 +157,7 @@ The overview of xDiT is shown as follows.
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
-### 1. Install from pip (current [version](./xfuser/__version__.py))
+### 1. Install from pip
 
 ```
 pip install xfuser
@@ -178,7 +189,10 @@ You can easily modify the model type, model directory, and parallel options in t
 bash examples/run.sh
 ```
 
-To inspect the available options for the PixArt-alpha example, use the following command:
+---
+
+<details>
+<summary>Click to see available options for the PixArt-alpha example</summary>
 
 ```bash
 python ./examples/pixartalpha_example.py -h
@@ -238,10 +252,14 @@ Input Options:
                         Number of inference steps.
 ```
 
+</details>
+
+---
+
 Hybriding multiple parallelism techniques togather is essential for efficiently scaling. 
 It's important that the product of all parallel degrees matches the number of devices. 
-For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
-Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_split_batch) == number of devices == 8.
+Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
+Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
 
 
 ```bash
@@ -262,14 +280,25 @@ We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
 
+<h2 id="comfyui">🖼️ ComfyUI with xDiT</h2>
 
-### 4. Launch a Http Service
+### 1. Launch ComfyUI
+
+ComfyUI is currently the most popular way to use Diffusion Models.
+It provides users with a platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
+However, since ComfyUI was initially designed for personal computers with single-node, single-GPU capabilities, implementing native parallel acceleration still faces significant compatibility issues. To address this, we've used xDiT with the Ray framework to achieve seamless multi-GPU parallel adaptation on ComfyUI, significantly improving the generation speed of ComfyUI workflows.
+
+Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
+
+![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
+
+Currently, if you need the xDiT parallel version for ComfyUI, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
+
+### 2. Launch a Http Service
+
+You can also launch a http service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
-
-### 5. Launch ComfyUI
-
-[Launching ComfyUI](./docs/developer/ComfyUI_xdit.md)
 
 
 <h2 id="secrets">✨ The xDiT's Arsenal</h2>
@@ -333,7 +362,10 @@ As we can see, PipeFusion and Sequence Parallel achieve lowest communication cos
 
 [Patch Parallel VAE](./docs/methods/parallel_vae.md)
 
-<h3 id="compilation">Compilation Acceleration</h3>
+<h3 id="1gpuacc">Single GPU Acceleration</h3>
+
+
+<h4 id="compilation">Compilation Acceleration</h4>
 
 We utilize two compilation acceleration techniques, [torch.compile](https://pytorch.org/tutorials/intermediate/torch_compile_tutorial.html) and [onediff](https://github.com/siliconflow/onediff), to enhance runtime speed on GPUs. These compilation accelerations are used in conjunction with parallelization methods.
 
@@ -346,6 +378,12 @@ pip install -U nexfort
 
 For usage instructions, refer to the [example/run.sh](./examples/run.sh). Simply append `--use_torch_compile` or `--use_onediff` to your command. Note that these options are mutually exclusive, and their performance varies across different scenarios.
 
+
+<h4 id="dittfastattn">DiTFastAttn</h4>
+
+xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce computation cost of attention layer by leveraging redundancies between different steps of the Diffusion Model.
+
+[DiTFastAttn: Attention Compression for Diffusion Transformer Models](./docs/methods/ditfastattn.md)
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 

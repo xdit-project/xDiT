@@ -30,6 +30,11 @@ from xfuser.core.distributed import (
     is_dp_last_group,
     get_sequence_parallel_rank,
 )
+from xfuser.core.fast_attention import (
+    get_fast_attn_enable,
+    initialize_fast_attn_state,
+    fast_attention_compression,
+)
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
@@ -38,6 +43,7 @@ PACKAGES_CHECKER.check_diffusers_version()
 
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
+from xfuser.model_executor.layers.attention_processor import *
 
 try:
     import os
@@ -61,6 +67,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         self.module: DiffusionPipeline
         self._init_runtime_state(pipeline=pipeline, engine_config=engine_config)
+        self._init_fast_attn_state(pipeline=pipeline, engine_config=engine_config)
 
         # backbone
         transformer = getattr(pipeline, "transformer", None)
@@ -82,7 +89,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if scheduler is not None:
             pipeline.scheduler = self._convert_scheduler(scheduler)
 
-        if vae is not None and engine_config.runtime_config.use_parallel_vae:
+        if vae is not None and engine_config.runtime_config.use_parallel_vae and not self.use_naive_forward():
             pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
@@ -108,6 +115,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def to(self, *args, **kwargs):
         self.module = self.module.to(*args, **kwargs)
         return self
+
+    @staticmethod
+    def enable_fast_attn(func):
+        @wraps(func)
+        def fast_attn_fn(self, *args, **kwargs):
+            if get_fast_attn_enable():
+                for block in self.module.transformer.transformer_blocks:
+                    for layer in block.children():
+                        if isinstance(layer, xFuserAttentionBaseWrapper):
+                            layer.stepi = 0
+                            layer.cached_residual = None
+                            layer.cached_output = None
+                out = func(self, *args, **kwargs)
+                for block in self.module.transformer.transformer_blocks:
+                    for layer in block.children():
+                        if isinstance(layer, xFuserAttentionBaseWrapper):
+                            layer.stepi = 0
+                            layer.cached_residual = None
+                            layer.cached_output = None
+                return out
+            else:
+                return func(self, *args, **kwargs)
+
+        return fast_attn_fn
 
     @staticmethod
     def enable_data_parallel(func):
@@ -136,16 +167,20 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return data_parallel_fn
 
-    @staticmethod
-    def check_to_use_naive_forward(func):
-        @wraps(func)
-        def check_naive_forward_fn(self, *args, **kwargs):
-            if (
+    def use_naive_forward(self):
+        return (
                 get_pipeline_parallel_world_size() == 1
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
                 and get_tensor_model_parallel_world_size() == 1
-            ):
+                and get_fast_attn_enable() == False
+            )
+        
+    @staticmethod
+    def check_to_use_naive_forward(func):
+        @wraps(func)
+        def check_naive_forward_fn(self, *args, **kwargs):
+            if self.use_naive_forward():
                 return self.module(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
@@ -192,6 +227,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def prepare_run(
         self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
     ):
+        if get_fast_attn_enable():
+            # set compression methods for DiTFastAttn
+            fast_attention_compression(self)
+
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
@@ -201,7 +240,6 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             prompt=prompt,
             use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
-            output_type="latent",
             generator=torch.Generator(device="cuda").manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -228,6 +266,11 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         initialize_runtime_state(pipeline=pipeline, engine_config=engine_config)
 
+    def _init_fast_attn_state(
+        self, pipeline: DiffusionPipeline, engine_config: EngineConfig
+    ):
+        initialize_fast_attn_state(pipeline=pipeline, single_config=engine_config.fast_attn_config)
+
     def _convert_transformer_backbone(
         self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool
     ):
@@ -236,6 +279,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             and get_sequence_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
             and get_tensor_model_parallel_world_size() == 1
+            and get_fast_attn_enable() == False
         ):
             logger.info(
                 "Transformer backbone found, but model parallelism is not enabled, "
@@ -399,7 +443,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         """Return True if in the last data parallel group, False otherwise.
         Also include parallel vae situation.
         """
-        if get_runtime_state().runtime_config.use_parallel_vae:
+        if get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward():
             return get_world_group().rank == 0
         else:
             return is_dp_last_group()

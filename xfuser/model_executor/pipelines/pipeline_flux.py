@@ -74,6 +74,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             num_inference_steps=steps,
             max_sequence_length=input_config.max_sequence_length,
             generator=torch.Generator(device="cuda").manual_seed(42),
+            output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 
@@ -501,8 +502,8 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                     sp_latents_list[sp_patch_idx][
                         :,
                         get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx + 1],
+                        .pp_patches_token_start_idx_local[pp_patch_idx] : get_runtime_state()
+                        .pp_patches_token_start_idx_local[pp_patch_idx + 1],
                         :,
                     ]
                     for sp_patch_idx in range(sp_degree)

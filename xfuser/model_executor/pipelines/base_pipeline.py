@@ -241,6 +241,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
             generator=torch.Generator(device="cuda").manual_seed(42),
+            output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 

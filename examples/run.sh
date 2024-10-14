@@ -3,14 +3,14 @@ set -x
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # Select the model type
-export MODEL_TYPE="Pixart-alpha"
+export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
     ["Pixart-alpha"]="pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
     ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
-    ["Flux"]="flux_example.py /cfs/dit/FLUX.1-schnell 4"
+    ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev 28"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
 )
 
@@ -27,24 +27,10 @@ mkdir -p ./results
 # task args
 TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
-# Flux only supports SP. Do not set the pipefusion degree.
-if [ "$MODEL_TYPE" = "Flux" ]; then
 N_GPUS=8
-PARALLEL_ARGS="--ulysses_degree $N_GPUS"
-CFG_ARGS=""
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 1 --pipefusion_parallel_degree 8"
 
-# HunyuanDiT asserts sp_degree == ulysses_degree*ring_degree <= 2, or the output will be incorrect.
-elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-N_GPUS=8
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
-CFG_ARGS="--use_cfg_parallel"
-
-else
-# On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-N_GPUS=8
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
-CFG_ARGS="--use_cfg_parallel"
-fi
+# CFG_ARGS="--use_cfg_parallel"
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
 # PIPEFUSION_ARGS="--num_pipeline_patch 8 "
@@ -65,7 +51,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
---prompt "A small dog" \
+--prompt "brown dog laying on the ground with a metal bowl in front of him." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG

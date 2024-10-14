@@ -7,7 +7,7 @@
 
   </p>
   <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
-  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> </strong>
+  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
   <p></p>
 
 [![](https://dcbadge.limes.pink/api/server/https://discord.gg/YEWzWfCF9S)](https://discord.gg/YEWzWfCF9S)
@@ -284,15 +284,16 @@ Users can tune this value according to their specific tasks.
 
 ### 1. Launch ComfyUI
 
-ComfyUI is currently the most popular way to use Diffusion Models.
-It provides users with a platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
-However, since ComfyUI was initially designed for personal computers with single-node, single-GPU capabilities, implementing native parallel acceleration still faces significant compatibility issues. To address this, we've used xDiT with the Ray framework to achieve seamless multi-GPU parallel adaptation on ComfyUI, significantly improving the generation speed of ComfyUI workflows.
-
+ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
+It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
+Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. Leveraging the power of xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges.
 Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
 
 ![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
 
-Currently, if you need the xDiT parallel version for ComfyUI, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
+More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
+
+Currently, if you need the parallel version of ComfyUI applying xDiT, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
 
 ### 2. Launch a Http Service
 

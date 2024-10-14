@@ -6,7 +6,7 @@
 torch.compile带来的加速效果也很可观，同样并行方案有1.26x到1.76x加速效果，对于8 GPU的场景是最明显的，有1.76x加速。
 
 <div align="center">
-    <img src="../../assets/performance/hunuyuandit/A100-HunyuanDiT.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/hunuyuandit/A100-HunyuanDiT.png" 
     alt="latency-hunyuandit_a100">
 </div>
 
@@ -16,20 +16,20 @@ torch.compile带来的加速效果也很可观，同样并行方案有1.26x到1.
 torch.compile带来1.2x到1.43x加速。
 
 <div align="center">
-    <img src="../../assets/performance/hunuyuandit/L40-HunyuanDiT.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/hunuyuandit/L40-HunyuanDiT.png" 
     alt="latency-hunyuandit_l40">
 </div>
 
 在8xV100上的加速下如下图所示。torch.compile带来1.10x到1.30x加速。
 
 <div align="center">
-    <img src="../../assets/performance/hunuyuandit/V100-HunyuanDiT.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/hunuyuandit/V100-HunyuanDiT.png" 
     alt="latency-hunyuandit_v100">
 </div>
 
 在4xT4上的加速下如下图所示。
 
 <div align="center">
-    <img src="../../assets/performance/hunuyuandit/T4-HunyuanDiT.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/hunuyuandit/T4-HunyuanDiT.png" 
     alt="latency-hunyuandit_t4">
 </div>

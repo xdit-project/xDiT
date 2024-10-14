@@ -30,7 +30,7 @@ def main():
     start_time = time.time()
     output = pipe(
         height=input_config.height,
-        width=input_config.height,
+        width=input_config.width,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
@@ -49,7 +49,7 @@ def main():
         dp_group_index = get_data_parallel_rank()
         num_dp_groups = get_data_parallel_world_size()
         dp_batch_size = (input_config.batch_size + num_dp_groups - 1) // num_dp_groups
-        if is_dp_last_group():
+        if pipe.is_dp_last_group():
             if not os.path.exists("results"):
                 os.mkdir("results")
             for i, image in enumerate(output.images):

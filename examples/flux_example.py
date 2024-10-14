@@ -18,6 +18,7 @@ def main():
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
+    engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
 
     pipe = xFuserFluxPipeline.from_pretrained(
@@ -32,13 +33,13 @@ def main():
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
 
-    pipe.prepare_run(input_config)
+    pipe.prepare_run(input_config, steps=1)
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     output = pipe(
         height=input_config.height,
-        width=input_config.height,
+        width=input_config.width,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
@@ -60,7 +61,7 @@ def main():
         dp_group_index = get_data_parallel_rank()
         num_dp_groups = get_data_parallel_world_size()
         dp_batch_size = (input_config.batch_size + num_dp_groups - 1) // num_dp_groups
-        if is_dp_last_group():
+        if pipe.is_dp_last_group():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"

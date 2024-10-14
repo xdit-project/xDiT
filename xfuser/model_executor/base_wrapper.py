@@ -9,6 +9,7 @@ from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.core.fast_attention import get_fast_attn_enable
 
 
 class xFuserBaseWrapper(metaclass=ABCMeta):
@@ -40,6 +41,7 @@ class xFuserBaseWrapper(metaclass=ABCMeta):
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
                 and get_tensor_model_parallel_world_size() == 1
+                and get_fast_attn_enable() == False
             ):
                 return func(self, *args, **kwargs)
             if not get_runtime_state().is_ready():

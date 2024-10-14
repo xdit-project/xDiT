@@ -11,7 +11,7 @@ PipeFusion leverages the characteristic of Input Temporal Redundancy, using Stal
 We elaborate on this issue with the following illustration, which shows a mixed parallel method with pipe_degree=4 and sp_degree=2. Setting `num_pipeline_patch`=4, the image is divided into M=`num_pipeline_patch*sp_degree`=8 patches, labeled P0~P7.
 
 <div align="center">
-    <img src="../../assets/methods/hybrid_pp_scheme.png" alt="hybrid process group config" width="60%">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/hybrid_pp_scheme.png" alt="hybrid process group config" width="60%">
 </div>
 
 In the implementation of Standard SP Attention, the inputs Q, K, V, and the output O are all split along the sequence dimension, with consistent splitting pattern. 
@@ -21,11 +21,11 @@ Within this diffusion step, device=0 cannot obtain the fresh KV of P1,3,5,7 for 
 Standard SP only has 1/sp_degree of the fresh KV buffer, so it cannot achieve the correct results for mixed parallel inference.
 
 <div align="center">
-    <img src="../../assets/methods/hybrid_workflow.png" alt="hybrid parallel workflow">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/hybrid_workflow.png" alt="hybrid parallel workflow">
 </div>
 
 xDiT has customized the implementation of sequence parallelism to meet this mixed parallel requirement. xDiT uses `xFuserLongContextAttention` to store the intermediate results of SP in the KV Buffer. The effect is illustrated in the figure, where after each micro-step SP execution, the fresh KV of different rank devices within the SP Group is replicated. This way, after one diffusion step, the KV Buffer of all devices in the SP Group is updated to the latest, ready for use in the next Diffusion Step.
 
 <div align="center">
-    <img src="../../assets/methods/kvbuffer_hybrid.png" alt="kvbuffer in hybrid parallel">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/kvbuffer_hybrid.png" alt="kvbuffer in hybrid parallel">
 </div>

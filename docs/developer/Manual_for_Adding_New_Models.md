@@ -14,7 +14,7 @@
 
 The following diagram shows the calling relationships between different Classes in the xDiT project. If a new PixArt model is added, the added classes are circled in red.
 
-![class_structure.png](../../assets/developer/class_structure.png)
+![class_structure.png](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/class_structure.png)
 
 # 1. Pipeline Class
 

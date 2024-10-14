@@ -23,7 +23,7 @@ xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少�
 在8xA100 (80GB) NVLink互联的机器上，生成1024px图片，USP最佳策略是把所有并行度都给Ulysses，使用torch.compile之后的生成1024px图片仅需0.82秒！
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-1K-A100.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1K-A100.png" 
     alt="latency-flux_a100_1k">
 </div>
 
@@ -31,7 +31,7 @@ xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少�
 在8xA100 (80GB) NVLink互联的机器上，生成2048px图片，使用torch.compile之后的生成1024px图片仅需2.4秒！
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-2K-A100.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-2K-A100.png" 
     alt="latency-flux_a100_2k">
 </div>
 
@@ -42,7 +42,7 @@ xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少�
 在1，8 GPU上，`torch.compile`略好，在2,4 GPU上`onediff`略好。
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-1k-L40.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1k-L40.png" 
     alt="latency-flux_l40_1k">
 </div>
 
@@ -50,7 +50,7 @@ xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少�
 8xL40上生成2048px图片性能如下图。因为计算和通信比例增大，所以和024px任务不同，8卡相比4卡延迟更低，生图最快可达3.67秒。
 
 <div align="center">
-    <img src="../../assets/performance/flux/Flux-2k-L40.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-2k-L40.png" 
     alt="latency-flux_l40_2k">
 </div>
 
@@ -65,6 +65,6 @@ prompt是"A hyperrealistic portrait of a weathered sailor in his 60s, with deep-
 2048px，3072px和4096px生成质量如下，可以看到4096px生成已经质量很低了。
 
 <div align="center">
-    <img src="../../assets/performance/flux/flux_image.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
 </div>

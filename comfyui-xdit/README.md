@@ -55,4 +55,4 @@ python main.py
 
 You can load the default workflow in the comfyui-xdit/workflows folder: xdit-comfyui-demo.json
 
-![demo](img/demo.png)
+![demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/demo.png)

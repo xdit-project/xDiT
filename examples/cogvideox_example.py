@@ -1,3 +1,4 @@
+import logging
 import time
 import torch
 import torch.distributed
@@ -35,11 +36,20 @@ def main():
         torch_dtype=torch.bfloat16,
     )
     if args.enable_sequential_cpu_offload:
+        pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
+        logging.info(f"rank {local_rank} sequential CPU offload enabled")
+    elif args.enable_model_cpu_offload:
         pipe.enable_model_cpu_offload(gpu_id=local_rank)
-        pipe.vae.enable_tiling()
+        logging.info(f"rank {local_rank} model CPU offload enabled")
     else:
         device = torch.device(f"cuda:{local_rank}")
         pipe = pipe.to(device)
+
+    if args.enable_tiling:
+        pipe.vae.enable_tiling()
+
+    if args.enable_slicing:
+        pipe.vae.enable_slicing()
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

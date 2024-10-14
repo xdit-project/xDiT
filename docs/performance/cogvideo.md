@@ -1,6 +1,8 @@
 ## CogVideo Performance
 [Chinese Version](./cogvideo_zh.md)
 
+Details on how to apply xDiT to CogVideoX: [Leveraging xDiT to Parallelize the Open-Sourced Video Generation Model CogVideoX](https://medium.com/@xditproject/boosting-aigc-inference-leveraging-xdit-to-parallelize-the-cogvideox-text-to-video-workflow-8128e45b36e9)
+
 CogVideo functions as a text-to-video model. xDiT presently integrates USP techniques (including Ulysses attention and Ring attention) and CFG parallelism to enhance inference speed, while work on PipeFusion is ongoing. Due to constraints in video generation dimensions in CogVideo, the maximum parallelism level for USP is 2. Thus, xDiT can leverage up to 4 GPUs to execute CogVideo, despite the potential for additional GPUs within the machine.
 
 In a system equipped with L40 (PCIe) GPUs, we compared the inference performance of single-GPU CogVideoX utilizing the `diffusers` library with our parallelized versions for generating 49-frame (6-second) 720x480 videos.

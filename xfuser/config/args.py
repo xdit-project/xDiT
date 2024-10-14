@@ -247,6 +247,21 @@ class xFuserArgs:
             action="store_true",
             help="Offloading the weights to the CPU.",
         )
+        runtime_group.add_argument(
+            "--enable_model_cpu_offload",
+            action="store_true",
+            help="Offloading the weights to the CPU.",
+        )
+        runtime_group.add_argument(
+            "--enable_tiling",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
+        runtime_group.add_argument(
+            "--enable_slicing",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
 
         # DiTFastAttn arguments
         fast_attn_group = parser.add_argument_group("DiTFastAttn Options")

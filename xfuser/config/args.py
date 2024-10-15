@@ -94,7 +94,10 @@ class xFuserArgs:
     no_use_resolution_binning: bool = False
     seed: int = 42
     output_type: str = "pil"
+    enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
+    enable_tiling: bool = False
+    enable_slicing: bool = False
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8

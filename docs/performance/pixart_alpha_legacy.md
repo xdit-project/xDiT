@@ -6,24 +6,24 @@ To replicate these findings, please refer to the script at [legacy/scripts/bench
 1. The Latency on 4xA100-80GB (PCIe)
 
 <div align="center">
-    <img src="../../assets/latency-A100-PCIe.png" alt="A100 PCIe latency">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/latency-A100-PCIe.png" alt="A100 PCIe latency">
 </div>
 
 2. The Latency on 8xL20-48GB (PCIe)
 
 <div align="center">
-    <img src="../../assets/latency-L20.png" alt="L20 latency">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/latency-L20.png" alt="L20 latency">
 </div>
 
 3. The Latency on 8xA100-80GB (NVLink)
 
 <div align="center">
-    <img src="../../assets/latency-A100-NVLink.png" alt="latency-A100-NVLink">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/latency-A100-NVLink.png" alt="latency-A100-NVLink">
 </div>
 
 4. The Latency on 4xT4-16GB (PCIe)
 
 <div align="center">
-    <img src="../../assets/latency-T4.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/latency-T4.png" 
     alt="latency-T4">
 </div>

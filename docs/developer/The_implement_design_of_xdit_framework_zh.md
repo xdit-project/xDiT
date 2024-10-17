@@ -48,7 +48,7 @@ xfuser/model_executor
 
 xDiT中模型相关文件的组织结构如下：
 
-![class_structure.png](../../assets/developer/class_structure.png)
+![class_structure.png](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/class_structure.png)
 
 - 所有模型类均会继承于基类`xFuserBaseWrapper`，用以提供基础的getattr和运行时条件检查等特性
 - 四个代表不同模型组分的类分别继承于`xFuserBaseWrapper`，其中：

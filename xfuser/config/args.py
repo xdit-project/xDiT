@@ -11,6 +11,7 @@ from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.config import (
     EngineConfig,
+    FastAttnConfig,
     ParallelConfig,
     TensorParallelConfig,
     PipeFusionParallelConfig,
@@ -94,6 +95,13 @@ class xFuserArgs:
     seed: int = 42
     output_type: str = "pil"
     enable_sequential_cpu_offload: bool = False
+    # DiTFastAttn arguments
+    use_fast_attn: bool = False
+    n_calib: int = 8
+    threshold: float = 0.5
+    window_size: int = 64
+    coco_path: Optional[str] = None
+    use_cache: bool = False
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -239,6 +247,58 @@ class xFuserArgs:
             action="store_true",
             help="Offloading the weights to the CPU.",
         )
+        runtime_group.add_argument(
+            "--enable_model_cpu_offload",
+            action="store_true",
+            help="Offloading the weights to the CPU.",
+        )
+        runtime_group.add_argument(
+            "--enable_tiling",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
+        runtime_group.add_argument(
+            "--enable_slicing",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
+
+        # DiTFastAttn arguments
+        fast_attn_group = parser.add_argument_group("DiTFastAttn Options")
+        fast_attn_group.add_argument(
+            "--use_fast_attn",
+            action="store_true",
+            help="Use DiTFastAttn to accelerate single inference. Only data parallelism can be used with DITFastAttn.",
+        )
+        fast_attn_group.add_argument(
+            "--n_calib",
+            type=int,
+            default=8,
+            help="Number of prompts for compression method seletion.",
+        )
+        fast_attn_group.add_argument(
+            "--threshold",
+            type=float,
+            default=0.5,
+            help="Threshold for selecting attention compression method.",
+        )
+        fast_attn_group.add_argument(
+            "--window_size",
+            type=int,
+            default=64,
+            help="Size of window attention.",
+        )
+        fast_attn_group.add_argument(
+            "--coco_path",
+            type=str,
+            default=None,
+            help="Path of MS COCO annotation json file.",
+        )
+        fast_attn_group.add_argument(
+            "--use_cache",
+            action="store_true",
+            help="Use cache config for attention compression.",
+        )
 
         return parser
 
@@ -294,10 +354,21 @@ class xFuserArgs:
             ),
         )
 
+        fast_attn_config = FastAttnConfig(
+            use_fast_attn=self.use_fast_attn,
+            n_step=self.num_inference_steps,
+            n_calib=self.n_calib,
+            threshold=self.threshold,
+            window_size=self.window_size,
+            coco_path=self.coco_path,
+            use_cache=self.use_cache,
+        )
+
         engine_config = EngineConfig(
             model_config=model_config,
             runtime_config=runtime_config,
             parallel_config=parallel_config,
+            fast_attn_config=fast_attn_config,
         )
 
         input_config = InputConfig(

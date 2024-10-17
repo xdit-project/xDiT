@@ -8,13 +8,13 @@ On an 8xA100 (NVLink) machine, the optimal parallelization strategy varied depen
 torch.compile provided acceleration in all scenarios except for the 8 GPU configuration.
 
 <div align="center">
-    <img src="../../assets/performance/sd3/A100-SD3.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/sd3/A100-SD3.png" 
     alt="latency-sd3_a100">
 </div>
 
 The latency situation on 8xL40 (PCIe) is depicted in the graph below. Similarly, the optimal parallel strategies varied with different GPU scales. torch.compile delivered acceleration in all cases.
 
 <div align="center">
-    <img src="../../assets/performance/sd3/L40-SD3.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/sd3/L40-SD3.png" 
     alt="latency-hunyuandit_l40">
 </div>

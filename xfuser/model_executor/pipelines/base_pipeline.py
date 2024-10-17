@@ -27,6 +27,13 @@ from xfuser.core.distributed import (
     get_world_group,
     get_runtime_state,
     initialize_runtime_state,
+    is_dp_last_group,
+    get_sequence_parallel_rank,
+)
+from xfuser.core.fast_attention import (
+    get_fast_attn_enable,
+    initialize_fast_attn_state,
+    fast_attention_compression,
 )
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
@@ -36,6 +43,7 @@ PACKAGES_CHECKER.check_diffusers_version()
 
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
+from xfuser.model_executor.layers.attention_processor import *
 
 try:
     import os
@@ -59,6 +67,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         self.module: DiffusionPipeline
         self._init_runtime_state(pipeline=pipeline, engine_config=engine_config)
+        self._init_fast_attn_state(pipeline=pipeline, engine_config=engine_config)
 
         # backbone
         transformer = getattr(pipeline, "transformer", None)
@@ -80,7 +89,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if scheduler is not None:
             pipeline.scheduler = self._convert_scheduler(scheduler)
 
-        if vae is not None and engine_config.runtime_config.use_parallel_vae:
+        if vae is not None and engine_config.runtime_config.use_parallel_vae and not self.use_naive_forward():
             pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
@@ -106,6 +115,30 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def to(self, *args, **kwargs):
         self.module = self.module.to(*args, **kwargs)
         return self
+
+    @staticmethod
+    def enable_fast_attn(func):
+        @wraps(func)
+        def fast_attn_fn(self, *args, **kwargs):
+            if get_fast_attn_enable():
+                for block in self.module.transformer.transformer_blocks:
+                    for layer in block.children():
+                        if isinstance(layer, xFuserAttentionBaseWrapper):
+                            layer.stepi = 0
+                            layer.cached_residual = None
+                            layer.cached_output = None
+                out = func(self, *args, **kwargs)
+                for block in self.module.transformer.transformer_blocks:
+                    for layer in block.children():
+                        if isinstance(layer, xFuserAttentionBaseWrapper):
+                            layer.stepi = 0
+                            layer.cached_residual = None
+                            layer.cached_output = None
+                return out
+            else:
+                return func(self, *args, **kwargs)
+
+        return fast_attn_fn
 
     @staticmethod
     def enable_data_parallel(func):
@@ -134,16 +167,20 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return data_parallel_fn
 
-    @staticmethod
-    def check_to_use_naive_forward(func):
-        @wraps(func)
-        def check_naive_forward_fn(self, *args, **kwargs):
-            if (
+    def use_naive_forward(self):
+        return (
                 get_pipeline_parallel_world_size() == 1
                 and get_classifier_free_guidance_world_size() == 1
                 and get_sequence_parallel_world_size() == 1
                 and get_tensor_model_parallel_world_size() == 1
-            ):
+                and get_fast_attn_enable() == False
+            )
+        
+    @staticmethod
+    def check_to_use_naive_forward(func):
+        @wraps(func)
+        def check_naive_forward_fn(self, *args, **kwargs):
+            if self.use_naive_forward():
                 return self.module(*args, **kwargs)
             else:
                 return func(self, *args, **kwargs)
@@ -190,6 +227,10 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def prepare_run(
         self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1
     ):
+        if get_fast_attn_enable():
+            # set compression methods for DiTFastAttn
+            fast_attention_compression(self)
+
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
@@ -199,8 +240,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             prompt=prompt,
             use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
-            output_type="latent",
             generator=torch.Generator(device="cuda").manual_seed(42),
+            output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 
@@ -226,6 +267,11 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     ):
         initialize_runtime_state(pipeline=pipeline, engine_config=engine_config)
 
+    def _init_fast_attn_state(
+        self, pipeline: DiffusionPipeline, engine_config: EngineConfig
+    ):
+        initialize_fast_attn_state(pipeline=pipeline, single_config=engine_config.fast_attn_config)
+
     def _convert_transformer_backbone(
         self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool
     ):
@@ -234,6 +280,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             and get_sequence_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
             and get_tensor_model_parallel_world_size() == 1
+            and get_fast_attn_enable() == False
         ):
             logger.info(
                 "Transformer backbone found, but model parallelism is not enabled, "
@@ -392,3 +439,66 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         else:
             raise ValueError("Invalid classifier free guidance rank")
         return concat_group_0
+    
+    def is_dp_last_group(self):
+        """Return True if in the last data parallel group, False otherwise.
+        Also include parallel vae situation.
+        """
+        if get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward():
+            return get_world_group().rank == 0
+        else:
+            return is_dp_last_group()
+    
+    def gather_broadcast_latents(self, latents:torch.Tensor):
+        """gather latents from dp last group and broacast final latents
+        """
+        
+        # ---------gather latents from dp last group-----------
+        rank = get_world_group().rank
+        device = f"cuda:{rank}"
+
+        # all gather dp last group rank list
+        dp_rank_list = [torch.zeros(1, dtype=int, device=device) for _ in range(get_world_group().world_size)]
+        if is_dp_last_group():
+            gather_rank = int(rank)
+        else:
+            gather_rank = -1
+        torch.distributed.all_gather(dp_rank_list, torch.tensor([gather_rank],dtype=int,device=device))
+        
+        dp_rank_list = [int(dp_rank[0]) for dp_rank in dp_rank_list if int(dp_rank[0])!=-1]
+        dp_last_group = torch.distributed.new_group(dp_rank_list)
+
+        # gather latents from dp last group
+        if rank == dp_rank_list[-1]:
+            latents_list = [torch.zeros_like(latents) for _ in dp_rank_list]
+        else:
+            latents_list = None
+        if rank in dp_rank_list:
+            torch.distributed.gather(latents, latents_list, dst=dp_rank_list[-1], group=dp_last_group)
+
+        if rank == dp_rank_list[-1]:
+            latents = torch.cat(latents_list,dim=0)
+        
+        # ------broadcast latents to all nodes---------
+        src = dp_rank_list[-1]
+        latents_shape_len = torch.zeros(1,dtype=torch.int,device=device)
+        
+        # broadcast latents shape len
+        if rank == src:
+            latents_shape_len[0] = len(latents.shape)
+        get_world_group().broadcast(latents_shape_len,src=src)
+        
+        # broadcast latents shape
+        if rank == src:
+            input_shape = torch.tensor(latents.shape,dtype=torch.int,device=device)
+        else:
+            input_shape = torch.zeros(latents_shape_len[0],dtype=torch.int,device=device)
+        get_world_group().broadcast(input_shape,src=src)
+        
+        # broadcast latents
+        if rank != src:
+            dtype = get_runtime_state().runtime_config.dtype
+            latents = torch.zeros(torch.Size(input_shape),dtype=dtype,device=device)
+        get_world_group().broadcast(latents,src=src)
+
+        return latents

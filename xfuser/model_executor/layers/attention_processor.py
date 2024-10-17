@@ -24,6 +24,10 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sp_group,
 )
+from xfuser.core.fast_attention import (
+    xFuserFastAttention,
+    get_fast_attn_enable,
+)
 
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.runtime_state import get_runtime_state
@@ -120,24 +124,6 @@ class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
         assert isinstance(to_v, nn.Linear)
         assert (to_k.bias is None) == (to_v.bias is None)
         assert to_k.weight.shape == to_v.weight.shape
-
-        in_size, out_size = to_k.in_features, to_k.out_features
-        to_kv = nn.Linear(
-            in_size,
-            out_size * 2,
-            bias=to_k.bias is not None,
-            device=to_k.weight.device,
-            dtype=to_k.weight.dtype,
-        )
-        to_kv.weight.data[:out_size].copy_(to_k.weight.data)
-        to_kv.weight.data[out_size:].copy_(to_v.weight.data)
-
-        if to_k.bias is not None:
-            assert to_v.bias is not None
-            to_kv.bias.data[:out_size].copy_(to_k.bias.data)
-            to_kv.bias.data[out_size:].copy_(to_v.bias.data)
-
-        self.to_kv = to_kv
 
 
 class xFuserAttentionProcessorRegister:
@@ -265,6 +251,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         else:
             self.hybrid_seq_parallel_attn = None
 
+        if get_fast_attn_enable():
+            self.fast_attn = xFuserFastAttention()
+
     def __call__(
         self,
         attn: Attention,
@@ -279,6 +268,11 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)
+
+        #! ---------------------------------------- Fast Attention ----------------------------------------
+        if get_fast_attn_enable():
+            return self.fast_attn(attn, hidden_states, encoder_hidden_states, attention_mask, temb, *args, **kwargs)
+        #! ---------------------------------------- Fast Attention ----------------------------------------
 
         residual = hidden_states
         if attn.spatial_norm is not None:
@@ -453,6 +447,9 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                     use_fa=False,
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
                 )
+
+        if get_fast_attn_enable():
+            self.fast_attn = xFuserFastAttention()
 
     def __call__(
         self,
@@ -702,8 +699,10 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
         else:
-            num_encoder_hidden_states_tokens = 0
-            num_query_tokens = query.shape[2]
+            num_encoder_hidden_states_tokens = (
+                get_runtime_state().max_condition_sequence_length
+            )
+            num_query_tokens = query.shape[2] - num_encoder_hidden_states_tokens
 
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb)
@@ -878,7 +877,6 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                 encoder_hidden_states
             )
 
-        # kv = attn.to_kv(encoder_hidden_states)
         key = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
@@ -1013,12 +1011,12 @@ if CogVideoXAttnProcessor2_0 is not None:
             )
             if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
                 from xfuser.core.long_ctx_attention import (
-                    xFuserLongContextAttention,
+                    xFuserJointLongContextAttention,
                     xFuserUlyssesAttention,
                 )
 
                 if HAS_FLASH_ATTN:
-                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    self.hybrid_seq_parallel_attn = xFuserJointLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
@@ -1040,6 +1038,7 @@ if CogVideoXAttnProcessor2_0 is not None:
             **kwargs,
         ) -> torch.Tensor:
             text_seq_length = encoder_hidden_states.size(1)
+            latent_seq_length = hidden_states.size(1)
 
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
@@ -1095,9 +1094,20 @@ if CogVideoXAttnProcessor2_0 is not None:
 
             #! ---------------------------------------- ATTENTION ----------------------------------------
             if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+                encoder_query = query[:, :, :text_seq_length, :]
+                query = query[:, :, text_seq_length:, :]
+                encoder_key = key[:, :, :text_seq_length, :]
+                key = key[:, :, text_seq_length:, :]
+                encoder_value = value[:, :, :text_seq_length, :]
+                value = value[:, :, text_seq_length:, :]
+
                 query = query.transpose(1, 2)
                 key = key.transpose(1, 2)
                 value = value.transpose(1, 2)
+                encoder_query = encoder_query.transpose(1, 2)
+                encoder_key = encoder_key.transpose(1, 2)
+                encoder_value = encoder_value.transpose(1, 2)
+
                 hidden_states = self.hybrid_seq_parallel_attn(
                     attn,
                     query,
@@ -1105,8 +1115,12 @@ if CogVideoXAttnProcessor2_0 is not None:
                     value,
                     dropout_p=0.0,
                     causal=False,
-                    joint_strategy="none",
+                    joint_tensor_query=encoder_query,
+                    joint_tensor_key=encoder_key,
+                    joint_tensor_value=encoder_value,
+                    joint_strategy="front",
                 )
+
                 hidden_states = hidden_states.reshape(
                     batch_size, -1, attn.heads * head_dim
                 )
@@ -1141,12 +1155,14 @@ if CogVideoXAttnProcessor2_0 is not None:
             # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
             #! ---------------------------------------- ATTENTION ----------------------------------------
 
+            assert text_seq_length + latent_seq_length == hidden_states.shape[1]
             # linear proj
             hidden_states = attn.to_out[0](hidden_states)
             # dropout
             hidden_states = attn.to_out[1](hidden_states)
 
+
             encoder_hidden_states, hidden_states = hidden_states.split(
-                [text_seq_length, hidden_states.size(1) - text_seq_length], dim=1
+                [text_seq_length, latent_seq_length], dim=1
             )
             return hidden_states, encoder_hidden_states

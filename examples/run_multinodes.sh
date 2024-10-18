@@ -6,6 +6,7 @@ set -x
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0
+export NCCL_P2P_DISABLE=1
 
 #export NCCL_IB_GID_INDEX=3
 #export NCCL_IB_DISABLE=0
@@ -45,7 +46,7 @@ $PARALLEL_ARGS \
 $TASK_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
---warmup_steps=0 \
+--warmup_steps=1 \
 --prompt="brown dog laying on the ground with a metal bowl in front of him." \
 $CFG_ARGS \
 $PARALLLEL_VAE \

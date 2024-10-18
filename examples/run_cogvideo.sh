@@ -14,14 +14,15 @@ mkdir -p ./results
 TASK_ARGS="--height 480 --width 720 --num_frames 9"
 
 # CogVideoX parallel configuration
-N_GPUS=4
-PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
-CFG_ARGS="--use_cfg_parallel"
+N_GPUS=6
+PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 3"
+#CFG_ARGS="--use_cfg_parallel"
 
 # Uncomment and modify these as needed
 # PIPEFUSION_ARGS="--num_pipeline_patch 8"
 # OUTPUT_ARGS="--output_type latent"
 # PARALLLEL_VAE="--use_parallel_vae"
+ENABLE_TILING="--enable_tiling"
 # COMPILE_FLAG="--use_torch_compile"
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
@@ -35,4 +36,5 @@ $OUTPUT_ARGS \
 --prompt "A small dog" \
 $CFG_ARGS \
 $PARALLLEL_VAE \
+$ENABLE_TILING \
 $COMPILE_FLAG

@@ -23,6 +23,7 @@ CogVideo 是一个文本到视频的模型。xDiT 目前整合了 USP 技术（�
     alt="latency-cogvideo-a100-2b">
 </div>
 
+
 <div align="center">
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/cogvideo-a100-5b.png" 
     alt="latency-cogvideo-a100-5b">

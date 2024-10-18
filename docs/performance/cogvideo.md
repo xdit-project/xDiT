@@ -5,6 +5,7 @@ CogVideo is a model that converts text to video. xDiT currently integrates USP t
 
 As shown in the figures, for the base model CogVideoX-2b, significant reductions in inference latency were observed whether using Ulysses Attention, Ring Attention, or Classifier-Free Guidance (CFG) parallel processing. It is noteworthy that due to its lower communication overhead, the CFG parallel method outperforms the other two technologies in terms of performance. By combining sequential parallelism and CFG parallelism, we successfully increased inference efficiency. With increasing parallelism, the inference latency continues to decrease. In the optimal configuration, xDiT achieves a 4.29x acceleration relative to single GPU inference, reducing the time for each iteration to just 0.49 seconds. Given the default 50 iterations of CogVideoX, the end-to-end generation of a 24.5-second video can be completed in a total of 30 seconds.
 
+
 <div align="center">
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/cogvideo-l40-2b.png" 
     alt="latency-cogvideo-l40-2b">

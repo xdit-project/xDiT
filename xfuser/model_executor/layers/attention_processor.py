@@ -1161,6 +1161,7 @@ if CogVideoXAttnProcessor2_0 is not None:
             # dropout
             hidden_states = attn.to_out[1](hidden_states)
 
+
             encoder_hidden_states, hidden_states = hidden_states.split(
                 [text_seq_length, latent_seq_length], dim=1
             )

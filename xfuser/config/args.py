@@ -94,7 +94,10 @@ class xFuserArgs:
     no_use_resolution_binning: bool = False
     seed: int = 42
     output_type: str = "pil"
+    enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
+    enable_tiling: bool = False
+    enable_slicing: bool = False
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8
@@ -246,6 +249,21 @@ class xFuserArgs:
             "--enable_sequential_cpu_offload",
             action="store_true",
             help="Offloading the weights to the CPU.",
+        )
+        runtime_group.add_argument(
+            "--enable_model_cpu_offload",
+            action="store_true",
+            help="Offloading the weights to the CPU.",
+        )
+        runtime_group.add_argument(
+            "--enable_tiling",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
+        runtime_group.add_argument(
+            "--enable_slicing",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
         )
 
         # DiTFastAttn arguments

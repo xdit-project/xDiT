@@ -44,19 +44,33 @@ def main():
         action="store_true",
         help="Do not use resolution binning",
     )
+    parser.add_argument(
+        "--no_use_cfg_parallel",
+        action="store_true",
+        help="Do not use split batch parallelism",
+    )
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=20,
+        help="Number of inference steps",
+    )
     args = parser.parse_args()
     MODEL_ID = args.model_id
     SIZES = args.sizes
     SCRIPT = args.script
     N_GPUS = args.n_gpus
+    NOT_USE_CFG = args.no_use_cfg_parallel
+    STEPS = args.num_inference_steps
     RESOLUTION_BINNING = (
         "--no_use_resolution_binning" if args.no_use_resolution_binning else ""
     )
 
     visited = set()
     dp_degree = 1
+    cfg_degree_list = [1] if NOT_USE_CFG else [1, 2]
     for size in SIZES:
-        for cfg_degree in [1, 2]:
+        for cfg_degree in cfg_degree_list:
             model_parallel_degree = N_GPUS // cfg_degree
             for i in range(int(math.log2(model_parallel_degree)) + 1):
                 pp_degree = int(math.pow(2, i))
@@ -104,10 +118,10 @@ def main():
                                     flush=True,
                                 )
                                 cmd = (
-                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
+                                    f"torchrun --master_port 29501 --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
                                     f"--height {size} --width {size} --warmup_steps {warmup_step} "
                                     f"{RESOLUTION_BINNING} --use_cfg_parallel --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
-                                    f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches}"
+                                    f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} --num_inference_steps {STEPS}"
                                 )
                                 run_command(cmd)
                             else:
@@ -116,10 +130,10 @@ def main():
                                     flush=True,
                                 )
                                 cmd = (
-                                    f"torchrun --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
+                                    f"torchrun --master_port 29501 --nproc_per_node={N_GPUS} {SCRIPT} --prompt 'A small cat' --output_type 'latent' --model {MODEL_ID} "
                                     f"--height {size} --width {size} --warmup_steps {warmup_step} "
                                     f"{RESOLUTION_BINNING} --ulysses_degree {ulysses_degree} --ring_degree {ring_degree} "
-                                    f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} "
+                                    f"--pipefusion_parallel_degree {pp_degree} --num_pipeline_patch {num_pipeline_patches} --num_inference_steps {STEPS}"
                                 )
 
                                 run_command(cmd)

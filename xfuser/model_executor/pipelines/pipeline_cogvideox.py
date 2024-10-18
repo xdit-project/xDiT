@@ -343,22 +343,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:
-            sp_degree = get_sequence_parallel_world_size()
-            sp_latents_list = get_sp_group().all_gather(latents, separate_tensors=True)
-            latents_list = []
-            for pp_patch_idx in range(get_runtime_state().num_pipeline_patch):
-                latents_list += [
-                    sp_latents_list[sp_patch_idx][
-                        :,
-                        :,
-                        get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
-                        .pp_patches_start_idx_local[pp_patch_idx + 1],
-                        :,
-                    ]
-                    for sp_patch_idx in range(sp_degree)
-                ]
-            latents = torch.cat(latents_list, dim=-2)
+            latents = get_sp_group().all_gather(latents, dim=-2)
 
         if is_dp_last_group():
             if not (output_type == "latents" or output_type == "latent"):

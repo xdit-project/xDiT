@@ -14,9 +14,9 @@ mkdir -p ./results
 TASK_ARGS="--height 480 --width 720 --num_frames 9"
 
 # CogVideoX parallel configuration
-N_GPUS=4
-PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 1"
-CFG_ARGS="--use_cfg_parallel"
+N_GPUS=6
+PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 3"
+#CFG_ARGS="--use_cfg_parallel"
 
 # Uncomment and modify these as needed
 # PIPEFUSION_ARGS="--num_pipeline_patch 8"

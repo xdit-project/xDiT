@@ -25,7 +25,7 @@ def main():
         torch_dtype=torch.float16,
     ).to(f"cuda:{local_rank}")
 
-    model_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+    parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
     pipe.prepare_run(input_config)
 
@@ -65,7 +65,10 @@ def main():
                 )
 
     if get_world_group().rank == get_world_group().world_size - 1:
-        print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
+        print(
+            f"epoch time: {elapsed_time:.2f} sec, parameter memory: {parameter_peak_memory/1e9:.2f} GB, peak memory: {peak_memory/1e9:.2f} GB"
+        )
+
     get_runtime_state().destory_distributed_env()
 
 

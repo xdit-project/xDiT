@@ -27,9 +27,11 @@ mkdir -p ./results
 # task args
 TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
+
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 N_GPUS=8
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2"
+
 # CFG_ARGS="--use_cfg_parallel"
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
@@ -54,7 +56,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "A small dog" \
+--prompt "brown dog laying on the ground with a metal bowl in front of him." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG

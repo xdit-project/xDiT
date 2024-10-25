@@ -24,6 +24,7 @@ def main():
         engine_config=engine_config,
         torch_dtype=torch.float16,
     ).to(f"cuda:{local_rank}")
+    model_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
     pipe.prepare_run(input_config)
 
     torch.cuda.reset_peak_memory_stats()
@@ -62,7 +63,9 @@ def main():
                 print(img_file)
 
     if get_world_group().rank == get_world_group().world_size - 1:
-        print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
+        print(
+            f"{parallel_info}: epoch time: {elapsed_time:.2f} sec, model memory: {model_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB"
+        )
     get_runtime_state().destory_distributed_env()
 
 

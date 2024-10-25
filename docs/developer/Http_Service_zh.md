@@ -3,18 +3,18 @@
 ### 制作服务镜像
 
 ```
-docker build -t xdit-server:0.3.1 -f ./docker/Dockerfile .
+docker build -t xdit-service -f ./docker/Dockerfile .
 ```
 
 或者直接从dockerhub拉取(版本号可能需要更新)
 ```
-docker pull thufeifeibear/xdit-service:0.3.1
+docker pull thufeifeibear/xdit-service
 ```
 
 用下面方式启动一个服务，服务相关参数写在配置脚本config.json里。我们映射了磁盘文件到docker container中，因为需要传递下载的模型文件。注意映射端口6000，如果冲突请修改。
 
 ```
-docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p 6000:6000 -v /cfs:/cfs xdit-server:0.3.1 --config ./config.json
+docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p 6000:6000 -v /cfs:/cfs xdit-service --config ./config.json
 ```
 
 ./config.json中内容如下，包括启动GPU卡数，混合并行策略，输出图片的大小，生成图片存储位置等信息。

@@ -65,9 +65,7 @@ def main():
                 )
 
     if get_world_group().rank == get_world_group().world_size - 1:
-        print(
-            f"{parallel_info} epoch time: {elapsed_time:.2f} sec, overall memory: {peak_memory/1e9:.2f} GB, model memory: {model_memory/1e9:.2f} GB"
-        )
+        print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
     get_runtime_state().destory_distributed_env()
 
 

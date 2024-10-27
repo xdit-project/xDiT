@@ -22,7 +22,6 @@ For the 1024px task, hybrid parallel on 16xL40 is 1.16x lower than on 8xL40, whe
 For the 4096px task, hybrid parallel still benefits on 16 L40s, 1.9x lower than 8 GPUs, where the configuration is ulysses=2, ring=2, and pipefusion=4.
 The performance improvement dose not achieved with 16 GPUs 2048px tasks.
 
-
 <div align="center">
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-16L40-crop.png" 
     alt="scalability-flux_l40">
@@ -90,3 +89,4 @@ The quality of image generation at 2048px, 3072px, and 4096px resolutions is as 
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
 </div>
+

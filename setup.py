@@ -37,6 +37,8 @@ if __name__ == "__main__":
             "pytest",
             "flask",
             "opencv-python",
+            "imageio",
+            "imageio-ffmpeg",
         ],
         extras_require={
             "flash_attn": [

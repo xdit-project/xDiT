@@ -17,8 +17,10 @@ Since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatib
 We conducted performance benchmarking using FLUX.1 [dev] with 28 diffusion steps.
 
 The following figure shows the scalability of Flux.1 on two 8xL40 Nodes, 16xL40 GPUs in total. 
-Consequently, the performance improvement dose not achieved with 16 GPUs, and for 1024px and 2048px tasks.
+Althogh cfg parallel is not available, We can still achieve enhanced scalability by using PipeFusion as a method for parallel between nodes.
+For the 1024px task, hybrid parallel on 16xL40 is 1.16x lower than on 8xL40, where the best configuration is ulysses=4 and pipefusion=4.
 For the 4096px task, hybrid parallel still benefits on 16 L40s, 1.9x lower than 8 GPUs, where the configuration is ulysses=2, ring=2, and pipefusion=4.
+The performance improvement dose not achieved with 16 GPUs 2048px tasks.
 
 <div align="center">
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-16L40-crop.png" 

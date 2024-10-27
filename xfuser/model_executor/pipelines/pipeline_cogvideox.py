@@ -226,7 +226,9 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        prompt_embeds = self._process_cfg_split_batch_latte(prompt_embeds, negative_prompt_embeds)
+        prompt_embeds = self._process_cfg_split_batch_latte(
+            prompt_embeds, negative_prompt_embeds
+        )
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -253,7 +255,9 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
         # 7. Create rotary embeds if required
         image_rotary_emb = (
-            self._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
+            self._prepare_rotary_positional_embeddings(
+                height, width, latents.size(1), device
+            )
             if self.transformer.config.use_rotary_positional_embeddings
             else None
         )
@@ -263,7 +267,9 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             len(timesteps) - num_inference_steps * self.scheduler.order, 0
         )
 
-        latents, image_rotary_emb = self._init_sync_pipeline(latents, image_rotary_emb, latents.size(1))
+        latents, image_rotary_emb = self._init_sync_pipeline(
+            latents, image_rotary_emb, latents.size(1)
+        )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # for DPM-solver++
             old_pred_original_sample = None
@@ -296,7 +302,18 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 # perform guidance
                 if use_dynamic_cfg:
                     self._guidance_scale = 1 + guidance_scale * (
-                        (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
+                        (
+                            1
+                            - math.cos(
+                                math.pi
+                                * (
+                                    (num_inference_steps - t.item())
+                                    / num_inference_steps
+                                )
+                                ** 5.0
+                            )
+                        )
+                        / 2
                     )
                 if do_classifier_free_guidance:
                     if get_classifier_free_guidance_world_size() == 1:
@@ -339,7 +356,9 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                         "negative_prompt_embeds", negative_prompt_embeds
                     )
 
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:
@@ -377,14 +396,22 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             image_rotary_emb = (
                 torch.cat(
                     [
-                        image_rotary_emb[0].reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx].reshape(-1, d)
+                        image_rotary_emb[0]
+                        .reshape(latents_frames, -1, d)[
+                            :, start_token_idx:end_token_idx
+                        ]
+                        .reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
                     dim=0,
                 ),
                 torch.cat(
                     [
-                        image_rotary_emb[1].reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx].reshape(-1, d)
+                        image_rotary_emb[1]
+                        .reshape(latents_frames, -1, d)[
+                            :, start_token_idx:end_token_idx
+                        ]
+                        .reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
                     dim=0,

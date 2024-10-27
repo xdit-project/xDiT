@@ -90,7 +90,3 @@ The quality of image generation at 2048px, 3072px, and 4096px resolutions is as 
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
 </div>
-<<<<<<< HEAD
-
-=======
->>>>>>> main

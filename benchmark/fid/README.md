@@ -23,7 +23,7 @@ python3 process_ref_data.py --coco_json dataset_coco.json --num_samples 30000 --
 #### Sample Batch Generation
 Run the following command to generate the sample images:
 ```
-bash ./generate.sh
+bash ./benchmark/fid/generate.sh
 ``` 
 You can edit the `generate.sh` to change the model type, caption file, sample images folder, etc.
 

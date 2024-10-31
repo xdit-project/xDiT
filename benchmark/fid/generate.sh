@@ -1,7 +1,7 @@
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
-export CAPTION_FILE="/home/aoyuli/Projects/dataset/dataset_coco.json"
+export CAPTION_FILE="dataset_coco.json"
 export SAMPLE_IMAGES_FOLODER="sample_images"
 
 # Select the model type

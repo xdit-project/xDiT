@@ -7,7 +7,8 @@ from yunchang import LongContextAttention
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
 from xfuser.logger import init_logger
-from .utils import RING_IMPL_DICT
+from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
+
 
 logger = init_logger(__name__)
 
@@ -23,6 +24,14 @@ class xFuserLongContextAttention(LongContextAttention):
         use_pack_qkv: bool = False,
         use_kv_cache: bool = False,
     ) -> None:
+        """
+        Arguments:
+            scatter_idx: int = 2, the scatter dimension index for Ulysses All2All
+            gather_idx: int = 1, the gather dimension index for Ulysses All2All
+            ring_impl_type: str = "basic", the ring implementation type, currently only support "basic"
+            use_pack_qkv: bool = False, whether to use pack qkv in the input
+            use_kv_cache: bool = False, whether to use kv cache in the attention layer, which is applied in PipeFusion.
+        """
         super().__init__(
             scatter_idx=scatter_idx,
             gather_idx=gather_idx,
@@ -37,7 +46,7 @@ class xFuserLongContextAttention(LongContextAttention):
             raise RuntimeError(
                 f"ring_impl_type: {ring_impl_type} do not support SP kv cache."
             )
-        self.ring_attn_fn = RING_IMPL_DICT[ring_impl_type]
+        self.ring_attn_fn = xdit_ring_flash_attn_func
 
     @torch.compiler.disable
     def forward(

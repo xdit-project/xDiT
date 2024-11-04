@@ -2,8 +2,21 @@ import unittest
 import torch
 import torch.distributed as dist
 from xfuser.core.long_ctx_attention.ring.ring_flash_attn import xdit_ring_flash_attn_func
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from flash_attn import flash_attn_func
 import os
+
+from xfuser.model_executor.layers.attention_processor import (
+    xFuserAttnProcessor2_0,
+)
+from diffusers.models.attention_processor import (
+    Attention,
+)
+from xfuser.core.distributed import (
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+
 
 def init_dist(backend='nccl'):
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -13,7 +26,13 @@ def init_dist(backend='nccl'):
     print(f"Initializing distributed environment with rank {rank}, world size {world_size}, local rank {local_rank}")
     
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend=backend)
+    # dist.init_process_group(backend=backend)
+    init_distributed_environment(rank=rank, world_size=world_size)
+    if world_size > 1:
+        initialize_model_parallel(
+            sequence_parallel_degree=world_size , ring_degree=world_size // 2, ulysses_degree=2
+    )
+
     return rank, world_size
 
 class TestRingFlashAttn(unittest.TestCase):
@@ -151,6 +170,57 @@ class TestRingFlashAttn(unittest.TestCase):
 
         torch.testing.assert_close(ref_output, output_front, rtol=1e-3, atol=1e-3)
 
+    def test_xfuser_attn_layer(self):
+        """Test xFuserLongContextAttention layer in distributed mode"""
+        # Create test tensors
+        q, k, v, local_q, local_k, local_v = self._create_test_tensors()
+
+        attn = (
+            Attention(
+                query_dim=self.head_dim,
+                cross_attention_dim=None,
+                dim_head=self.head_dim,
+                heads=self.num_heads,
+                qk_norm="layer_norm",
+                eps=1e-6,
+                bias=True,
+                processor=xFuserAttnProcessor2_0(),
+            )
+            .cuda(self.rank)
+            .to(self.dtype)
+        )
+        # Create attention layer
+        attn_layer = xFuserLongContextAttention(
+            scatter_idx=2,
+            gather_idx=1,
+            ring_impl_type="basic",
+            use_kv_cache=False,
+        ).to(device=self.device, dtype=self.dtype)
+        
+        # print(f"attn: ring degree:{attn_layer.ring_pg.size()}, ulysses degree:{attn_layer.ulysses_pg.size()}")
+
+        # Run reference implementation on single GPU
+        with torch.no_grad():
+            ref_output = flash_attn_func(
+                q, k, v,
+                dropout_p=0.0,
+                window_size=(-1, -1),
+            )
+            ref_output = ref_output.chunk(self.world_size, dim=1)[self.rank]
+        
+        # Run distributed implementation
+        output = attn_layer(
+            attn=attn,
+            query=local_q,
+            key=local_k,
+            value=local_v,
+            dropout_p=0.0,
+            window_size=(-1, -1),
+        )
+        
+        # Compare results
+        torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
+        self.assertEqual(ref_output.shape, output.shape)
 # torchrun --nproc_per_node=2 -m unittest tests/core/test_ring_flash_attn.py
 if __name__ == '__main__':
     unittest.main() 

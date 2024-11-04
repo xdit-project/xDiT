@@ -7,7 +7,6 @@ from yunchang import LongContextAttention
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
 from xfuser.logger import init_logger
-from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
 
 
 logger = init_logger(__name__)
@@ -46,6 +45,8 @@ class xFuserLongContextAttention(LongContextAttention):
             raise RuntimeError(
                 f"ring_impl_type: {ring_impl_type} do not support SP kv cache."
             )
+        
+        from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
         self.ring_attn_fn = xdit_ring_flash_attn_func
 
     @torch.compiler.disable
@@ -74,11 +75,17 @@ class xFuserLongContextAttention(LongContextAttention):
             query (Tensor): query input to the layer
             key (Tensor): key input to the layer
             value (Tensor): value input to the layer
-            args: other args
+            args: other args,
+            joint_tensor_query: Tensor = None, a replicated tensor among processes appended to the front or rear of query, depends the joint_strategy  
+            joint_tensor_key: Tensor = None, a replicated tensor among processes appended to the front or rear of key, depends the joint_strategy
+            joint_tensor_value: Tensor = None, a replicated tensor among processes appended to the front or rear of value, depends the joint_strategy,
+            *args: the args same as flash_attn_interface
+            joint_strategy: str = "none", the joint strategy for joint attention, currently only support "front" and "rear"
 
         Returns:
             * output (Tensor): context output
         """
+        assert causal == False, "causal attention is not applied in DiTs"
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
         if self.use_pack_qkv:

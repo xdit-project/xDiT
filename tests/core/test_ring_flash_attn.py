@@ -1,7 +1,7 @@
 import unittest
 import torch
 import torch.distributed as dist
-from xfuser.core.long_ctx_attention.ring.ring_flash_attn import ring_flash_attn_func
+from xfuser.core.long_ctx_attention.ring.ring_flash_attn import xdit_ring_flash_attn_func
 from flash_attn import flash_attn_func
 import os
 
@@ -74,7 +74,7 @@ class TestRingFlashAttn(unittest.TestCase):
         ref_output = ref_output.chunk(self.world_size, dim=1)[self.rank]
 
         # Run ring flash attention
-        output = ring_flash_attn_func(
+        output = xdit_ring_flash_attn_func(
             q=local_q,
             k=local_k,
             v=local_v,
@@ -105,7 +105,7 @@ class TestRingFlashAttn(unittest.TestCase):
         ref_output = ref_output.chunk(self.world_size, dim=1)[self.rank]
 
         # Test front joint strategy
-        output_rear = ring_flash_attn_func(
+        output_rear = xdit_ring_flash_attn_func(
             q=local_q,
             k=local_k,
             v=local_v,
@@ -137,7 +137,7 @@ class TestRingFlashAttn(unittest.TestCase):
         ref_output = ref_output.chunk(self.world_size, dim=1)[self.rank]
 
         # Test front joint strategy
-        output_front = ring_flash_attn_func(
+        output_front = xdit_ring_flash_attn_func(
             q=local_q,
             k=local_k,
             v=local_v,

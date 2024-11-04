@@ -5,7 +5,7 @@ from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
 
-def ring_flash_attn_forward(
+def xdit_ring_flash_attn_forward(
     process_group,
     q: torch.Tensor,
     k: torch.Tensor,
@@ -123,7 +123,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         if attn_layer is None:
             k = k.contiguous()
             v = v.contiguous()
-        out, softmax_lse = ring_flash_attn_forward(
+        out, softmax_lse = xdit_ring_flash_attn_forward(
             group,
             q,
             k,
@@ -151,7 +151,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         return out if not return_softmax else (out, softmax_lse, None)
 
 
-def ring_flash_attn_func(
+def xdit_ring_flash_attn_func(
     q,
     k,
     v,

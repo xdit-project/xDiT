@@ -1,8 +1,10 @@
 import unittest
 import torch
 import torch.distributed as dist
-from xfuser.core.long_ctx_attention.ring.ring_flash_attn import xdit_ring_flash_attn_func
-from xfuser.core.long_ctx_attention import xFuserLongContextAttention, xFuserJointLongContextAttention, xFuserFluxLongContextAttention
+from xfuser.core.long_ctx_attention.ring.ring_flash_attn import (
+    xdit_ring_flash_attn_func,
+)
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from flash_attn import flash_attn_func
 import os
 
@@ -18,13 +20,15 @@ from xfuser.core.distributed import (
 )
 
 
-def init_dist(backend='nccl'):
+def init_dist(backend="nccl"):
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    print(f"Initializing distributed environment with rank {rank}, world size {world_size}, local rank {local_rank}")
-    
+    print(
+        f"Initializing distributed environment with rank {rank}, world size {world_size}, local rank {local_rank}"
+    )
+
     torch.cuda.set_device(local_rank)
     # dist.init_process_group(backend=backend)
     init_distributed_environment(rank=rank, world_size=world_size)
@@ -38,10 +42,13 @@ def init_dist(backend='nccl'):
         ulysses_degree = 1
 
     initialize_model_parallel(
-        sequence_parallel_degree=world_size , ring_degree=ring_degree, ulysses_degree=ulysses_degree
+        sequence_parallel_degree=world_size,
+        ring_degree=ring_degree,
+        ulysses_degree=ulysses_degree,
     )
 
     return rank, world_size, ring_degree, ulysses_degree
+
 
 class TestRingFlashAttn(unittest.TestCase):
     @classmethod
@@ -52,13 +59,12 @@ class TestRingFlashAttn(unittest.TestCase):
         cls.seq_len = 128
         cls.dtype = torch.float16
 
-        
         cls.rank, cls.world_size, cls.ring_degree, cls.ulysses_degree = init_dist()
-        cls.device = torch.device(f'cuda:{cls.rank}')
+        cls.device = torch.device(f"cuda:{cls.rank}")
 
     def setUp(self):
         torch.manual_seed(42 + self.rank)
-        
+
     @classmethod
     def tearDownClass(cls):
         dist.destroy_process_group()
@@ -91,34 +97,36 @@ class TestRingFlashAttn(unittest.TestCase):
         """Test xFuserLongContextAttention layer in distributed mode"""
         # Create test tensors
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
-        joint_q, joint_k, joint_v, local_joint_q, local_joint_k, local_joint_v = self._create_test_tensors()
+        joint_q, joint_k, joint_v, local_joint_q, local_joint_k, local_joint_v = (
+            self._create_test_tensors()
+        )
         joint_strategy = "rear"
 
         attn = None
 
         # Create attention layer
-        attn_layer = xFuserJointLongContextAttention(
+        attn_layer = xFuserLongContextAttention(
             scatter_idx=2,
             gather_idx=1,
             ring_impl_type="basic",
             use_kv_cache=False,
         ).to(device=self.device, dtype=self.dtype)
-        
+
         assert attn_layer.ring_pg.size() == self.ring_degree
         assert attn_layer.ulysses_pg.size() == self.ulysses_degree
 
         ref_output = flash_attn_func(
-            torch.cat([q, joint_q], dim=1), 
-            torch.cat([k, joint_k], dim=1), 
+            torch.cat([q, joint_q], dim=1),
+            torch.cat([k, joint_k], dim=1),
             torch.cat([v, joint_v], dim=1),
             dropout_p=0.0,
             window_size=(-1, -1),
         )
-        
+
         # Split ref_output into base and joint parts
-        base_out = ref_output[:, :self.seq_len, ::]  # First half for base attention
-        joint_out = ref_output[:, self.seq_len:, ::]  # Second half for joint attention
-        
+        base_out = ref_output[:, : self.seq_len, ::]  # First half for base attention
+        joint_out = ref_output[:, self.seq_len :, ::]  # Second half for joint attention
+
         # Get local shard for base output
         base_out_shard = base_out.chunk(self.world_size, dim=1)[self.rank]
         # Duplicate joint output as specified
@@ -153,12 +161,14 @@ class TestRingFlashAttn(unittest.TestCase):
             ring_impl_type="basic",
             use_kv_cache=False,
         ).to(device=self.device, dtype=self.dtype)
-        
+
         assert attn_layer.ring_pg.size() == self.ring_degree
         assert attn_layer.ulysses_pg.size() == self.ulysses_degree
 
         ref_output = flash_attn_func(
-            q, k, v,
+            q,
+            k,
+            v,
             dropout_p=0.0,
             window_size=(-1, -1),
         )
@@ -176,6 +186,7 @@ class TestRingFlashAttn(unittest.TestCase):
         assert torch.max(torch.abs(output - ref_output)) < 1e-3
         torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
 
+
 # torchrun --nproc_per_node=4 -m unittest tests/core/test_xfuser_attn.py
-if __name__ == '__main__':
-    unittest.main() 
+if __name__ == "__main__":
+    unittest.main()

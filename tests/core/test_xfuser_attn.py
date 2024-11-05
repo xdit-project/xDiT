@@ -137,13 +137,8 @@ class TestRingFlashAttn(unittest.TestCase):
             joint_tensor_value=joint_v,
             joint_strategy=joint_strategy,
         )
-        print(f"local_q: {local_q.shape}, joint_q: {joint_q.shape}")
-        print(f"output: {output.shape}")
-        print(f"ref_output: {ref_output.shape}")
-        print(f"output - ref: {output - ref_output}")
         # assert torch.max(torch.abs(output - ref_output)) < 1e-3
         torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
-
 
     def test_xfuser_attn_layer(self):
         """Test xFuserLongContextAttention layer in distributed mode"""

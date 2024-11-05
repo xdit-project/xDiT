@@ -1,5 +1,6 @@
 import torch
 from flash_attn.flash_attn_interface import _flash_attn_forward
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc

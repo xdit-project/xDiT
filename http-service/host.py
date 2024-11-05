@@ -28,11 +28,11 @@ from xfuser.core.distributed import (
 
 app = Flask(__name__)
 
-# 设置 NCCL 超时和错误处理
+# Set NCCL timeout and error handling
 os.environ["NCCL_BLOCKING_WAIT"] = "1"
 os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
-# 全局变量
+# Global variables
 pipe = None
 engine_config = None
 input_config = None
@@ -97,7 +97,7 @@ def initialize():
 
     pipe.prepare_run(input_config)
     logger.info("Model initialization completed")
-    initialized = True  # 设置初始化完成标志
+    initialized = True  # Set initialization completion flag
 
 
 def generate_image_parallel(
@@ -223,7 +223,7 @@ def run_host():
         app.run(host="0.0.0.0", port=6000)
     else:
         while True:
-            # 非主进程等待广播的参数
+            # Non-master processes wait for broadcasted parameters
             params = [None] * 5
             logger.info(f"Rank {dist.get_rank()} waiting for tasks")
             dist.broadcast_object_list(params, src=0)

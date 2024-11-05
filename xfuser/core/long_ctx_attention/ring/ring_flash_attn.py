@@ -6,7 +6,6 @@ from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
 
-
 def xdit_ring_flash_attn_forward(
     process_group,
     q: torch.Tensor,

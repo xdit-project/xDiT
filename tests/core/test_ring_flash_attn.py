@@ -166,4 +166,4 @@ class TestRingFlashAttn(unittest.TestCase):
 
 # torchrun --nproc_per_node=2 -m unittest tests/core/test_ring_flash_attn.py
 if __name__ == '__main__':
-    unittest.main() 
+    unittest.main()

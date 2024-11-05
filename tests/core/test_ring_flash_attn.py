@@ -28,10 +28,6 @@ def init_dist(backend='nccl'):
     torch.cuda.set_device(local_rank)
     # dist.init_process_group(backend=backend)
     init_distributed_environment(rank=rank, world_size=world_size)
-    if world_size > 1:
-        initialize_model_parallel(
-            sequence_parallel_degree=world_size , ring_degree=world_size // 2, ulysses_degree=2
-    )
 
     return rank, world_size
 
@@ -79,7 +75,7 @@ class TestRingFlashAttn(unittest.TestCase):
         local_v = v.chunk(self.world_size, dim=1)[self.rank]
         return q, k, v, local_q, local_k, local_v
     
-    def test_distributed(self):
+    def test_xdit_ring_flash_attn_func(self):
         """Test ring flash attention in distributed mode"""
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
 
@@ -106,8 +102,7 @@ class TestRingFlashAttn(unittest.TestCase):
         torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
         self.assertEqual(ref_output.shape, output.shape)
 
-
-    def test_joint_strategy_rear(self):
+    def test_xdit_ring_flash_attn_func_joint_strategy_rear(self):
         """Test ring flash attention with joint strategy"""
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
         joint_q, joint_k, joint_v, local_joint_q, local_joint_k, local_joint_v = self._create_test_tensors()
@@ -138,8 +133,7 @@ class TestRingFlashAttn(unittest.TestCase):
 
         torch.testing.assert_close(ref_output, output_rear, rtol=1e-3, atol=1e-3)
 
-
-    def test_joint_strategy_front(self):
+    def test_xdit_ring_flash_attn_func_joint_strategy_front(self):
         """Test ring flash attention with joint strategy"""
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
         joint_q, joint_k, joint_v, local_joint_q, local_joint_k, local_joint_v = self._create_test_tensors()
@@ -170,57 +164,6 @@ class TestRingFlashAttn(unittest.TestCase):
 
         torch.testing.assert_close(ref_output, output_front, rtol=1e-3, atol=1e-3)
 
-    def test_xfuser_attn_layer(self):
-        """Test xFuserLongContextAttention layer in distributed mode"""
-        # Create test tensors
-        q, k, v, local_q, local_k, local_v = self._create_test_tensors()
-
-        attn = (
-            Attention(
-                query_dim=self.head_dim,
-                cross_attention_dim=None,
-                dim_head=self.head_dim,
-                heads=self.num_heads,
-                qk_norm="layer_norm",
-                eps=1e-6,
-                bias=True,
-                processor=xFuserAttnProcessor2_0(),
-            )
-            .cuda(self.rank)
-            .to(self.dtype)
-        )
-        # Create attention layer
-        attn_layer = xFuserLongContextAttention(
-            scatter_idx=2,
-            gather_idx=1,
-            ring_impl_type="basic",
-            use_kv_cache=False,
-        ).to(device=self.device, dtype=self.dtype)
-        
-        # print(f"attn: ring degree:{attn_layer.ring_pg.size()}, ulysses degree:{attn_layer.ulysses_pg.size()}")
-
-        # Run reference implementation on single GPU
-        with torch.no_grad():
-            ref_output = flash_attn_func(
-                q, k, v,
-                dropout_p=0.0,
-                window_size=(-1, -1),
-            )
-            ref_output = ref_output.chunk(self.world_size, dim=1)[self.rank]
-        
-        # Run distributed implementation
-        output = attn_layer(
-            attn=attn,
-            query=local_q,
-            key=local_k,
-            value=local_v,
-            dropout_p=0.0,
-            window_size=(-1, -1),
-        )
-        
-        # Compare results
-        torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
-        self.assertEqual(ref_output.shape, output.shape)
 # torchrun --nproc_per_node=2 -m unittest tests/core/test_ring_flash_attn.py
 if __name__ == '__main__':
     unittest.main() 

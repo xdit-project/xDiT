@@ -2,7 +2,7 @@ import unittest
 import torch
 import torch.distributed as dist
 from xfuser.core.long_ctx_attention.ring.ring_flash_attn import xdit_ring_flash_attn_func
-from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention, xFuserJointLongContextAttention, xFuserFluxLongContextAttention
 from flash_attn import flash_attn_func
 import os
 
@@ -97,7 +97,7 @@ class TestRingFlashAttn(unittest.TestCase):
         attn = None
 
         # Create attention layer
-        attn_layer = xFuserLongContextAttention(
+        attn_layer = xFuserJointLongContextAttention(
             scatter_idx=2,
             gather_idx=1,
             ring_impl_type="basic",
@@ -122,7 +122,7 @@ class TestRingFlashAttn(unittest.TestCase):
         # Get local shard for base output
         base_out_shard = base_out.chunk(self.world_size, dim=1)[self.rank]
         # Duplicate joint output as specified
-        ref_joint_out = torch.cat([base_out_shard, joint_out], dim=1)
+        ref_output = torch.cat([base_out_shard, joint_out], dim=1)
 
         # Run distributed implementation
         output = attn_layer(
@@ -137,12 +137,15 @@ class TestRingFlashAttn(unittest.TestCase):
             joint_tensor_value=joint_v,
             joint_strategy=joint_strategy,
         )
+        print(f"local_q: {local_q.shape}, joint_q: {joint_q.shape}")
+        print(f"output: {output.shape}")
+        print(f"ref_output: {ref_output.shape}")
         print(f"output - ref: {output - ref_output}")
         # assert torch.max(torch.abs(output - ref_output)) < 1e-3
         torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
 
 
-    def xx_test_xfuser_attn_layer(self):
+    def test_xfuser_attn_layer(self):
         """Test xFuserLongContextAttention layer in distributed mode"""
         # Create test tensors
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
@@ -178,6 +181,6 @@ class TestRingFlashAttn(unittest.TestCase):
         assert torch.max(torch.abs(output - ref_output)) < 1e-3
         torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
 
-# torchrun --nproc_per_node=4 -m unittest tests/core/test_ring_flash_attn.py
+# torchrun --nproc_per_node=4 -m unittest tests/core/test_xfuser_attn.py
 if __name__ == '__main__':
     unittest.main() 

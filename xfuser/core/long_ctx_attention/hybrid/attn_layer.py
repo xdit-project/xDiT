@@ -7,10 +7,6 @@ from yunchang import LongContextAttention
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
 from xfuser.logger import init_logger
-<<<<<<< HEAD
-=======
-from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
->>>>>>> main
 
 
 logger = init_logger(__name__)
@@ -49,11 +45,8 @@ class xFuserLongContextAttention(LongContextAttention):
             raise RuntimeError(
                 f"ring_impl_type: {ring_impl_type} do not support SP kv cache."
             )
-<<<<<<< HEAD
         
         from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
-=======
->>>>>>> main
         self.ring_attn_fn = xdit_ring_flash_attn_func
 
     @torch.compiler.disable
@@ -79,6 +72,7 @@ class xFuserLongContextAttention(LongContextAttention):
         """forward
 
         Arguments:
+            attn (Attention): the attention module
             query (Tensor): query input to the layer
             key (Tensor): key input to the layer
             value (Tensor): value input to the layer

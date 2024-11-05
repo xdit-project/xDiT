@@ -13,7 +13,7 @@ def build_command(config):
     cmd = [
         "torchrun",
         f"--nproc_per_node={config['nproc_per_node']}",
-        "./comfyui-xdit/host.py",
+        "./http-service/host.py",
         f"--model={config['model']}",
         f"--pipefusion_parallel_degree={config['pipefusion_parallel_degree']}",
         f"--ulysses_degree={config['ulysses_degree']}",

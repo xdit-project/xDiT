@@ -2,8 +2,21 @@ import unittest
 import torch
 import torch.distributed as dist
 from xfuser.core.long_ctx_attention.ring.ring_flash_attn import xdit_ring_flash_attn_func
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from flash_attn import flash_attn_func
 import os
+
+from xfuser.model_executor.layers.attention_processor import (
+    xFuserAttnProcessor2_0,
+)
+from diffusers.models.attention_processor import (
+    Attention,
+)
+from xfuser.core.distributed import (
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+
 
 def init_dist(backend='nccl'):
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -13,7 +26,9 @@ def init_dist(backend='nccl'):
     print(f"Initializing distributed environment with rank {rank}, world size {world_size}, local rank {local_rank}")
     
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend=backend)
+    # dist.init_process_group(backend=backend)
+    init_distributed_environment(rank=rank, world_size=world_size)
+
     return rank, world_size
 
 class TestRingFlashAttn(unittest.TestCase):
@@ -60,7 +75,7 @@ class TestRingFlashAttn(unittest.TestCase):
         local_v = v.chunk(self.world_size, dim=1)[self.rank]
         return q, k, v, local_q, local_k, local_v
     
-    def test_distributed(self):
+    def test_xdit_ring_flash_attn_func(self):
         """Test ring flash attention in distributed mode"""
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
 
@@ -87,8 +102,7 @@ class TestRingFlashAttn(unittest.TestCase):
         torch.testing.assert_close(ref_output, output, rtol=1e-3, atol=1e-3)
         self.assertEqual(ref_output.shape, output.shape)
 
-
-    def test_joint_strategy_rear(self):
+    def test_xdit_ring_flash_attn_func_joint_strategy_rear(self):
         """Test ring flash attention with joint strategy"""
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
         joint_q, joint_k, joint_v, local_joint_q, local_joint_k, local_joint_v = self._create_test_tensors()
@@ -119,8 +133,7 @@ class TestRingFlashAttn(unittest.TestCase):
 
         torch.testing.assert_close(ref_output, output_rear, rtol=1e-3, atol=1e-3)
 
-
-    def test_joint_strategy_front(self):
+    def test_xdit_ring_flash_attn_func_joint_strategy_front(self):
         """Test ring flash attention with joint strategy"""
         q, k, v, local_q, local_k, local_v = self._create_test_tensors()
         joint_q, joint_k, joint_v, local_joint_q, local_joint_k, local_joint_v = self._create_test_tensors()
@@ -153,4 +166,4 @@ class TestRingFlashAttn(unittest.TestCase):
 
 # torchrun --nproc_per_node=2 -m unittest tests/core/test_ring_flash_attn.py
 if __name__ == '__main__':
-    unittest.main() 
+    unittest.main()

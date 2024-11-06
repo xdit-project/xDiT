@@ -271,7 +271,15 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 
         #! ---------------------------------------- Fast Attention ----------------------------------------
         if get_fast_attn_enable():
-            return self.fast_attn(attn, hidden_states, encoder_hidden_states, attention_mask, temb, *args, **kwargs)
+            return self.fast_attn(
+                attn,
+                hidden_states,
+                encoder_hidden_states,
+                attention_mask,
+                temb,
+                *args,
+                **kwargs,
+            )
         #! ---------------------------------------- Fast Attention ----------------------------------------
 
         residual = hidden_states
@@ -434,12 +442,12 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from xfuser.core.long_ctx_attention import (
-                xFuserJointLongContextAttention,
+                xFuserLongContextAttention,
                 xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserJointLongContextAttention(
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
@@ -618,12 +626,12 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         )
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             from xfuser.core.long_ctx_attention import (
-                xFuserFluxLongContextAttention,
+                xFuserLongContextAttention,
                 xFuserUlyssesAttention,
             )
 
             if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserFluxLongContextAttention(
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
@@ -1011,12 +1019,12 @@ if CogVideoXAttnProcessor2_0 is not None:
             )
             if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
                 from xfuser.core.long_ctx_attention import (
-                    xFuserJointLongContextAttention,
+                    xFuserLongContextAttention,
                     xFuserUlyssesAttention,
                 )
 
                 if HAS_FLASH_ATTN:
-                    self.hybrid_seq_parallel_attn = xFuserJointLongContextAttention(
+                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
@@ -1160,7 +1168,6 @@ if CogVideoXAttnProcessor2_0 is not None:
             hidden_states = attn.to_out[0](hidden_states)
             # dropout
             hidden_states = attn.to_out[1](hidden_states)
-
 
             encoder_hidden_states, hidden_states = hidden_states.split(
                 [text_seq_length, latent_seq_length], dim=1

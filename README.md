@@ -410,21 +410,37 @@ We also welcome developers to join and contribute more features and models to th
 
 <h2 id="cite-us">📝 Cite Us</h2>
 
-```
-@article{wang2024pipefusion,
-      title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
-      author={Jiannan Wang and Jiarui Fang and Jinzhe Pan and Aoyu Li and PengCheng Yang},
+
+[xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism](https://arxiv.org/abs/2411.01738)
+@misc{fang2024xditinferenceenginediffusion,
+      title={xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism}, 
+      author={Jiarui Fang and Jinzhe Pan and Xibo Sun and Aoyu Li and Jiannan Wang},
+      year={2024},
+      eprint={2411.01738},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2411.01738}, 
+}
+
+[PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://arxiv.org/abs/2405.14430)
+@misc{fang2024pipefusionpatchlevelpipelineparallelism,
+      title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference}, 
+      author={Jiarui Fang and Jinzhe Pan and Jiannan Wang and Aoyu Li and Xibo Sun},
+      year={2024},
+      eprint={2405.14430},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2405.14430}, 
+}
+
+[USP: A Unified Sequence Parallelism Approach for Long Context Generative AI](https://arxiv.org/abs/2405.07719)
+
+@misc{fang2024uspunifiedsequenceparallelism,
+      title={USP: A Unified Sequence Parallelism Approach for Long Context Generative AI}, 
+      author={Jiarui Fang and Shangchun Zhao},
       year={2024},
       eprint={2405.07719},
       archivePrefix={arXiv},
-      primaryClass={cs.CV}
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2405.07719}, 
 }
-
-@article{fang2024unified,
-      title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
-      author={Fang, Jiarui and Zhao, Shangchun},
-      journal={arXiv preprint arXiv:2405.07719},
-      year={2024}
-}
-```
-

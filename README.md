@@ -303,7 +303,7 @@ Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
 
 More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
 
-Currently, if you need the parallel version of ComfyUI applying xDiT, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject AT outlook DOT com](xditproject@outlook.com).
+Currently, if you need the parallel version of ComfyUI applying xDiT, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
 
 ### 2. Launch a Http Service
 

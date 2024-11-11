@@ -20,6 +20,7 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [Mochi-1](#perf_mochi1)
   - [CogVideoX](#perf_cogvideox)
   - [Flux.1](#perf_flux)
   - [HunyuanDiT](#perf_hunyuandit)
@@ -129,6 +130,10 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 </div>
 
 <h2 id="perf">📈 Performance</h2>
+
+<h3 id="perf_cogvideox">Mochi1</h3>
+
+1. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
@@ -297,7 +302,7 @@ Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
 
 More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
 
-Currently, if you need the parallel version of ComfyUI applying xDiT, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
+Currently, if you need the parallel version of ComfyUI applying xDiT, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject AT outlook DOT com](xditproject@outlook.com).
 
 ### 2. Launch a Http Service
 

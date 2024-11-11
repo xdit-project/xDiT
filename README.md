@@ -20,6 +20,7 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [Mochi-1](#perf_mochi1)
   - [CogVideoX](#perf_cogvideox)
   - [Flux.1](#perf_flux)
   - [HunyuanDiT](#perf_hunyuandit)
@@ -92,6 +93,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
 * 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
 * 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
 * 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
@@ -129,6 +131,10 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 </div>
 
 <h2 id="perf">📈 Performance</h2>
+
+<h3 id="perf_mochi1">Mochi1</h3>
+
+1. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
@@ -297,7 +303,7 @@ Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
 
 More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
 
-Currently, if you need the parallel version of ComfyUI applying xDiT, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
+Currently, if you need the parallel version of ComfyUI applying xDiT, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject AT outlook DOT com](xditproject@outlook.com).
 
 ### 2. Launch a Http Service
 

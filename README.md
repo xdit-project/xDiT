@@ -113,6 +113,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | 
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | 
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
@@ -154,27 +155,27 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
-1. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+2. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 
 <h3 id="perf_flux">Flux.1</h3>
 
-2. [Flux Performance Report](./docs/performance/flux.md)
+3. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_latte">Latte</h3>
 
-3. [Latte Performance Report](./docs/performance/latte.md)
+4. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-4. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+5. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-5. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+6. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-6. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+7. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
@@ -305,27 +306,7 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-<<<<<<< HEAD
-
-<h2 id="comfyui">🖼️ ComfyUI with xDiT</h2>
-
-### 1. Launch ComfyUI
-
-ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
-Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. Leveraging the power of xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges.
-Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
-
-![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
-
-More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
-
-Currently, if you need the parallel version of ComfyUI applying xDiT, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
-
-### 2. Launch a Http Service
-=======
 ### 5. Launch a Http Service
->>>>>>> main
 
 You can also launch a http service to generate images with xDiT.
 

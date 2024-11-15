@@ -130,6 +130,22 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 </div>
 
+
+<h2 id="comfyui">🖼️ TACO-DiT: ComfyUI with xDiT</h2>
+
+ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
+It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. 
+
+Using our commercial project **TACO-DiT**, a SaaS build on xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges. Below is the example of using TACO-DiT to accelerate a Flux workflow with LoRA:
+
+![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
+
+By using TACO-DiT, you could significantly reduce your ComfyUI workflow inference latency, and  boosting the throughput with Multi-GPUs. Now it is compatible with multiple Plug-ins, including Controlnet and loras.
+
+More features and details can be found in our Intro Video: [TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) and Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
+
+Currently, if you need the parallel version of ComfyUI, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
+
 <h2 id="perf">📈 Performance</h2>
 
 <h3 id="perf_mochi1">Mochi1</h3>
@@ -289,28 +305,11 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-
-<h2 id="comfyui">🖼️ ComfyUI with xDiT</h2>
-
-### 1. Launch ComfyUI
-
-ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
-Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. Leveraging the power of xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges.
-Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
-
-![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
-
-More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
-
-Currently, if you need the parallel version of ComfyUI applying xDiT, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
-
-### 2. Launch a Http Service
+### 5. Launch a Http Service
 
 You can also launch a http service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
-
 
 <h2 id="secrets">✨ The xDiT's Arsenal</h2>
 

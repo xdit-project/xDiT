@@ -8,7 +8,13 @@ from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang import UlyssesAttention
 from yunchang.globals import PROCESS_GROUP
 from yunchang.comm.all_to_all import SeqAllToAll4D
-from yunchang.kernels.attention import torch_attn
+
+from packaging.version import Version
+from yunchang import __version__
+if Version(__version__) < Version("0.4.0"):
+    from yunchang.ulysses.attn_layer import torch_attn
+else:
+    from yunchang.kernels.attention import torch_attn
 
 
 class xFuserUlyssesAttention(UlyssesAttention):

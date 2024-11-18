@@ -142,7 +142,11 @@ Using our commercial project **TACO-DiT**, a SaaS build on xDiT, we’ve success
 
 By using TACO-DiT, you could significantly reduce your ComfyUI workflow inference latency, and  boosting the throughput with Multi-GPUs. Now it is compatible with multiple Plug-ins, including Controlnet and loras.
 
-More features and details can be found in our Intro Video: [TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) and Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
+More features and details can be found in our Intro Video: 
++ [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) 
++ [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
+
+Medium article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
 
 Currently, if you need the parallel version of ComfyUI, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
 

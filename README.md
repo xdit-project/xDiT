@@ -113,6 +113,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | 
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | 
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
@@ -158,27 +159,27 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
-1. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+2. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 
 <h3 id="perf_flux">Flux.1</h3>
 
-2. [Flux Performance Report](./docs/performance/flux.md)
+3. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_latte">Latte</h3>
 
-3. [Latte Performance Report](./docs/performance/latte.md)
+4. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-4. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+5. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-5. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+6. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-6. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+7. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

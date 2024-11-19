@@ -162,7 +162,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 if isinstance(negative_prompt, List):
                     negative_prompt = negative_prompt[start_batch_idx:end_batch_idx]
                 kwargs["prompt"] = prompt
-                kwargs["negative_prompt"] = negative_prompt
+                if "negative_prompt" in kwargs:
+                    kwargs["negative_prompt"] = negative_prompt
             return func(self, *args, **kwargs)
 
         return data_parallel_fn

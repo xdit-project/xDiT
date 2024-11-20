@@ -125,20 +125,36 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
             image_embeds (`torch.Tensor`):
                 Input image embeddings. Expected shape: (batch_size, num_frames, channels, height, width).
         """
+        # height is the height of a batch on a GPU, sum_height is the total height of the video
         sum_height = (
             get_runtime_state().input_config.height
             // get_runtime_state().vae_scale_factor_spatial
         )
         text_embeds = self.text_proj(text_embeds)
-        batch, num_frames, channels, height, width = image_embeds.shape
-        
-        image_embeds = image_embeds.reshape(-1, channels, height, width)
-        image_embeds = self.proj(image_embeds)
-            
-        image_embeds = image_embeds.view(batch, num_frames, *image_embeds.shape[1:])
-        image_embeds = image_embeds.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
-        image_embeds = image_embeds.flatten(1, 2)  # [batch, num_frames x height x width, channels]
 
+        batch_size, num_frames, channels, height, width = image_embeds.shape
+        
+        if self.patch_size_t is None:
+            image_embeds = image_embeds.reshape(-1, channels, height, width)
+            image_embeds = self.proj(image_embeds)
+            image_embeds = image_embeds.view(batch_size, num_frames, *image_embeds.shape[1:])
+            image_embeds = image_embeds.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
+            image_embeds = image_embeds.flatten(1, 2)  # [batch, num_frames x height x width, channels]
+        else:
+            p = self.patch_size
+            p_t = self.patch_size_t
+
+            image_embeds = image_embeds.permute(0, 1, 3, 4, 2)
+            image_embeds = image_embeds.reshape(
+                batch_size, num_frames // p_t, p_t, height // p, p, width // p, p, channels
+            )
+            image_embeds = image_embeds.permute(0, 1, 3, 5, 7, 2, 4, 6).flatten(4, 7).flatten(1, 3)
+            image_embeds = self.proj(image_embeds)
+ 
+        embeds = torch.cat(
+            [text_embeds, image_embeds], dim=1
+        ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]
+           
         if self.use_positional_embeddings or self.use_learned_positional_embeddings:
             if self.use_learned_positional_embeddings and (self.sample_width != width or self.sample_height != sum_height):
                 raise ValueError(
@@ -154,7 +170,7 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
                 or self.sample_frames != pre_time_compression_frames
             ):
                 pos_embedding = self._get_positional_embeddings(sum_height, width, pre_time_compression_frames)
-                pos_embedding = pos_embedding.to(image_embeds.device, dtype=image_embeds.dtype)
+                pos_embedding = pos_embedding.to(embeds.device, dtype=embeds.dtype)
             else:
                 pos_embedding = self.pos_embedding
 
@@ -177,9 +193,6 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
             ]
             pos_embedding = torch.cat(pos_embed_list, dim=1)
 
-            image_embeds = image_embeds + pos_embedding
+            embeds[:, self.max_text_seq_length :] += pos_embedding
 
-        embeds = torch.cat(
-            [text_embeds, image_embeds], dim=1
-        ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]
         return embeds

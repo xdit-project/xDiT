@@ -61,16 +61,20 @@ def get_fast_attn_state() -> FastAttnState:
 
 def get_fast_attn_enable() -> bool:
     """Return whether fast attention is enabled."""
+    if get_fast_attn_state() is None:
+        return False
     return get_fast_attn_state().enable
 
 
 def get_fast_attn_step() -> int:
     """Return the fast attention step."""
+    assert get_fast_attn_state() is not None, "FastAttn state is not initialized"
     return get_fast_attn_state().n_step
 
 
 def get_fast_attn_calib() -> int:
     """Return the fast attention calibration."""
+    assert get_fast_attn_state() is not None, "FastAttn state is not initialized"
     return get_fast_attn_state().n_calib
 
 

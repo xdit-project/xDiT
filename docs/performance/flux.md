@@ -9,15 +9,39 @@ Deploying Flux.1 in real-time presents several challenges:
 
 2. VAE OOM: The VAE component experiences Out Of Memory (OOM) issues when attempting to generate images larger than 2048px on an A100 GPU with 80GB VRAM, despite the DiTs backbone's capability to handle higher resolutions.
 
-To address these challenges, xDiT employs a hybrid sequence parallel [USP](https://arxiv.org/abs/2405.07719) and [VAE Parallel](https://github.com/xdit-project/DistVAE) to scale Flux.1 inference across multiple GPUs.
+To address these challenges, xDiT employs a hybrid sequence parallel [USP](https://arxiv.org/abs/2405.07719), [PipeFusion](https://arxiv.org/abs/2405.14430) and [VAE Parallel](https://github.com/xdit-project/DistVAE) to scale Flux.1 inference across multiple GPUs.
+Since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatible with cfg parallel.
 
-Currently, xDiT does not support PipeFusion for the Flux.1 schnell variant due to its minimal sampling steps, as PipeFusion requires a warmup phase which is not suitable for this scenario. However, applying PipeFusion for the Pro and Dev versions is considered necessary and is still under development.
+### Scalability of Flux.1 Dev
 
-Additionally, since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatible with cfg parallel.
+We conducted performance benchmarking using FLUX.1 [dev] with 28 diffusion steps.
 
-### Scalability
+The following figure shows the scalability of Flux.1 on two 8xL40 Nodes, 16xL40 GPUs in total. 
+Althogh cfg parallel is not available, We can still achieve enhanced scalability by using PipeFusion as a method for parallel between nodes.
+For the 1024px task, hybrid parallel on 16xL40 is 1.16x lower than on 8xL40, where the best configuration is ulysses=4 and pipefusion=4.
+For the 4096px task, hybrid parallel still benefits on 16 L40s, 1.9x lower than 8 GPUs, where the configuration is ulysses=2, ring=2, and pipefusion=4.
+The performance improvement dose not achieved with 16 GPUs 2048px tasks.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-16L40-crop.png" 
+    alt="scalability-flux_l40">
+</div>
+
+
+The following figure demonstrates the scalability of Flux.1 on 8xA100 GPUs.
+For both the 1024px and the 2048px image generation tasks, SP-Ulysses exhibits the lowest latency among the single parallel methods. The optimal hybrid strategy also are SP-Ulysses in this case.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-A100-crop.png" 
+    alt="scalability-flux_l40">
+</div>
+
+Note that the latency shown in the above figure does not yet include the use of torch.compile, which would provide further performance improvements.
+
+### Scalability of Flux.1 Schnell
 
 We conducted performance benchmarking using FLUX.1 [schnell] with 4 steps.
+Since the step number is very small, we do not apply PipeFusion.
 
 On a machine with 8xA100 (80GB) GPUs interconnected via NVLink, generating a 1024px image, the optimal strategy with USP is to apply ulysses_degree=#gpu. After using `torch.compile`, the generation of a 1024px image takes only 0.82 seconds!
 
@@ -65,3 +89,4 @@ The quality of image generation at 2048px, 3072px, and 4096px resolutions is as 
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
 </div>
+

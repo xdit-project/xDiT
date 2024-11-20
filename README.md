@@ -20,6 +20,7 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [Mochi-1](#perf_mochi1)
   - [CogVideoX](#perf_cogvideox)
   - [Flux.1](#perf_flux)
   - [HunyuanDiT](#perf_hunyuandit)
@@ -92,6 +93,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
 * 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
 * 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
 * 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
@@ -111,6 +113,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | 
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | 
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
@@ -128,31 +131,55 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 </div>
 
+
+<h2 id="comfyui">🖼️ TACO-DiT: ComfyUI with xDiT</h2>
+
+ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
+It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. 
+
+Using our commercial project **TACO-DiT**, a SaaS build on xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges. Below is the example of using TACO-DiT to accelerate a Flux workflow with LoRA:
+
+![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
+
+By using TACO-DiT, you could significantly reduce your ComfyUI workflow inference latency, and  boosting the throughput with Multi-GPUs. Now it is compatible with multiple Plug-ins, including Controlnet and loras.
+
+More features and details can be found in our Intro Video: 
++ [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) 
++ [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
+
+Medium article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
+
+Currently, if you need the parallel version of ComfyUI, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
+
 <h2 id="perf">📈 Performance</h2>
+
+<h3 id="perf_mochi1">Mochi1</h3>
+
+1. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
-1. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+2. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 
 <h3 id="perf_flux">Flux.1</h3>
 
-2. [Flux Performance Report](./docs/performance/flux.md)
+3. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_latte">Latte</h3>
 
-3. [Latte Performance Report](./docs/performance/latte.md)
+4. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-4. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+5. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-5. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+6. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-6. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+7. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
@@ -180,7 +207,11 @@ Note that we use two self-maintained packages:
 
 The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
 
-### 3. Usage
+### 3. Docker
+
+We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev).
+
+### 4. Usage
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
@@ -279,28 +310,11 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-
-<h2 id="comfyui">🖼️ ComfyUI with xDiT</h2>
-
-### 1. Launch ComfyUI
-
-ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
-Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. Leveraging the power of xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges.
-Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
-
-![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
-
-More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
-
-Currently, if you need the parallel version of ComfyUI applying xDiT, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
-
-### 2. Launch a Http Service
+### 5. Launch a Http Service
 
 You can also launch a http service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
-
 
 <h2 id="secrets">✨ The xDiT's Arsenal</h2>
 
@@ -406,21 +420,49 @@ We also welcome developers to join and contribute more features and models to th
 
 <h2 id="cite-us">📝 Cite Us</h2>
 
+
+[xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism](https://arxiv.org/abs/2411.01738)
+
 ```
-@article{wang2024pipefusion,
-      title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
-      author={Jiannan Wang and Jiarui Fang and Jinzhe Pan and Aoyu Li and PengCheng Yang},
+@misc{fang2024xditinferenceenginediffusion,
+      title={xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism}, 
+      author={Jiarui Fang and Jinzhe Pan and Xibo Sun and Aoyu Li and Jiannan Wang},
+      year={2024},
+      eprint={2411.01738},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2411.01738}, 
+}
+
+```
+
+[PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://arxiv.org/abs/2405.14430)
+
+```
+@misc{fang2024pipefusionpatchlevelpipelineparallelism,
+      title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference}, 
+      author={Jiarui Fang and Jinzhe Pan and Jiannan Wang and Aoyu Li and Xibo Sun},
+      year={2024},
+      eprint={2405.14430},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2405.14430}, 
+}
+
+```
+
+[USP: A Unified Sequence Parallelism Approach for Long Context Generative AI](https://arxiv.org/abs/2405.07719)
+
+
+```
+@misc{fang2024uspunifiedsequenceparallelism,
+      title={USP: A Unified Sequence Parallelism Approach for Long Context Generative AI}, 
+      author={Jiarui Fang and Shangchun Zhao},
       year={2024},
       eprint={2405.07719},
       archivePrefix={arXiv},
-      primaryClass={cs.CV}
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2405.07719}, 
 }
 
-@article{fang2024unified,
-      title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
-      author={Fang, Jiarui and Zhao, Shangchun},
-      journal={arXiv preprint arXiv:2405.07719},
-      year={2024}
-}
 ```
-

@@ -8,17 +8,38 @@ Flux.1实时部署有如下挑战：
 
 2. VAE OOM：生成超过2048px的图片，在80GB VRAM的A100上VAE部分会出现OOM，即使DiTs主干有生成更高分辨图片分辨率能力，但是VAE已经不能承受图片之大了。
 
-xDiT使用xDiT的混合序列并行USP+VAE Parallel来将Flux.1推理扩展到多卡。
 
-xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少了，因为PipeFusion需要warmup所以不适合使用。
-但是对于Pro和Dev版本还是有必要加入PipeFusion的，还在Work In Progress。
+为了应对这些挑战，xDiT采用了混合序列并行[USP](https://arxiv.org/abs/2405.07719)、[PipeFusion](https://arxiv.org/abs/2405.14430)和[VAE并行](https://github.com/xdit-project/DistVAE)技术，以在多个GPU上扩展Flux.1的推理能力。
+由于Flux.1不使用无分类器引导(Classifier-Free Guidance, CFG)，因此它与cfg并行不兼容。
 
-另外，因为Flux.1没用CFG，所以没法使用cfg parallel。
+### Flux.1 Dev的扩展性
 
+我们使用FLUX.1 [dev]进行了性能基准测试,采用28个扩散步骤。
 
+下图展示了Flux.1在两个8xL40节点(总共16xL40 GPU)上的可扩展性。
+虽然无法使用cfg并行,但我们仍然可以通过使用PipeFusion作为节点间并行方法来实现增强的扩展性。
+对于1024px任务,16xL40上的混合并行比8xL40低1.16倍,其中最佳配置是ulysses=4和pipefusion=4。
+对于4096px任务,混合并行在16个L40上仍然有益,比8个GPU低1.9倍,其中配置为ulysses=2, ring=2和pipefusion=4。
+但在2048px任务中,16个GPU并未获得性能改进。
 
-### 扩展性展示
-我们使用FLUX.1 [schnell]进行性能测试。
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-16L40-crop.png" 
+    alt="scalability-flux_l40">
+</div>
+
+下图展示了Flux.1在8xA100 GPU上的可扩展性。
+对于1024px和2048px的图像生成任务,SP-Ulysses在单一并行方法中表现出最低的延迟。在这种情况下,最佳混合策略也是SP-Ulysses。
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-A100-crop.png" 
+    alt="scalability-flux_l40">
+</div>
+
+注意,上图所示的延迟尚未包括使用torch.compile,这将提供进一步的性能改进。
+
+### Flux.1 Schnell的扩展性
+我们使用FLUX.1 [schnell]进行了性能基准测试,采用4个扩散步骤。
+由于扩散步骤非常少,我们不使用PipeFusion。
 
 在8xA100 (80GB) NVLink互联的机器上，生成1024px图片，USP最佳策略是把所有并行度都给Ulysses，使用torch.compile之后的生成1024px图片仅需0.82秒！
 
@@ -54,7 +75,7 @@ xDiT还不支持Flux.1使用PipeFusion，因为schnell版本采样步数太少�
     alt="latency-flux_l40_2k">
 </div>
 
-### VAE Parallel
+### VAE并行
 
 在A100上，单卡使用Flux.1超过2048px就会OOM。这是因为Activation内存需求增加，同时卷积算子引发memory spike，二者共同导致的。
 
@@ -68,3 +89,4 @@ prompt是"A hyperrealistic portrait of a weathered sailor in his 60s, with deep-
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
 </div>
+

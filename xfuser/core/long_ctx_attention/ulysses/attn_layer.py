@@ -10,11 +10,11 @@ from yunchang.globals import PROCESS_GROUP
 from yunchang.comm.all_to_all import SeqAllToAll4D
 try:
     # yunchang > 0.4.0
-    from yunchang.ulysses.attn_layer import torch_attn
+    from yunchang.kernels.attention import torch_attn
 except:
     print(f"detect you are not use the latest yunchang. Please install yunchang>=0.4.0")
     try:
-        from yunchang.kernels.attention import torch_attn
+        from yunchang.ulysses.attn_layer import torch_attn
     except:
         raise ImportError(f"yunchang import torch_attn error")
 

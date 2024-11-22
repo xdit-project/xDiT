@@ -20,6 +20,7 @@ def build_command(config):
         f"--ring_degree={config['ring_degree']}",
         f"--height={config['height']}",
         f"--width={config['width']}",
+        f"--max_queue_size={config.get('max_queue_size', 4)}",
     ]
     if config.get("use_cfg_parallel", False):
         cmd.append("--use_cfg_parallel")
@@ -31,7 +32,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="config.json",
+        default="./http-service/config.json",
         help="Path to the configuration file",
     )
     args = parser.parse_args()

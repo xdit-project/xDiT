@@ -1,26 +1,14 @@
-## Launching a Text-to-Image Http Service
+## Launch a Text-to-Image Service
 
-### Creating the Service Image
+Launch an HTTP-based text-to-image service that generates images from textual descriptions (prompts) using the DiT model. The generated images can either be returned directly to users or saved to a specified disk location. To enhance processing efficiency, we've implemented a concurrent processing mechanism: requests containing prompts are stored in a request queue, and DiT processes these requests in parallel across multiple GPUs.
 
-```
-docker build -t xdit-server:0.3.1 -f ./docker/Dockerfile .
-```
-
-or (version number may need to be updated)
-
-```
-docker pull thufeifeibear/xdit-service:0.3.1
+```bash
+python ./http-service/launch_host.py --config ./http-service/config.json --max_queue_size 4
 ```
 
-Start the service using the following command. The service-related parameters are written in the configuration script `config.json`. We have mapped disk files to the Docker container because we need to pass the downloaded model files. Note the mapping of port 6000; if there is a conflict, please modify it.
+The default content in `./config.json` is shown below, which includes settings for the number of GPU cards, hybrid parallelism strategy, output image dimensions, and image storage location:
 
-```
-docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p 6000:6000 -v /cfs:/cfs xdit-server:0.3.1 --config ./config.json
-```
-
-The content of `./config.json` includes the number of GPUs to use, the mixed parallelism strategy, the size of the output images, the storage location for generated images, and other information.
-
-```
+```json
 {
     "nproc_per_node": 2,
     "model": "/cfs/dit/HunyuanDiT-v1.2-Diffusers",
@@ -34,10 +22,10 @@ The content of `./config.json` includes the number of GPUs to use, the mixed par
 }
 ```
 
-Access the service using an HTTP request. The `save_disk_path` is an optional parameter. If not set, an image is returned; if set, the generated image is saved in the corresponding directory on the disk.
+To interact with the service, send HTTP requests as shown below. The `save_disk_path` parameter is optional - if not set, the image will be returned directly; if set, the generated image will be saved to the specified directory on disk.
 
-```
-curl -X POST http://127.0.0.1:6001/generate \
+```bash
+curl -X POST http://127.0.0.1:6000/generate \
      -H "Content-Type: application/json" \
      -d '{
            "prompt": "A lovely rabbit",

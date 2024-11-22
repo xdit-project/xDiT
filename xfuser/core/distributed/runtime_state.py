@@ -93,6 +93,7 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_token_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
     max_condition_sequence_length: int
+    split_text_embed_in_sp: bool
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
@@ -128,11 +129,13 @@ class DiTRuntimeState(RuntimeState):
         num_inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
         max_condition_sequence_length: Optional[int] = None,
+        split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = (
             num_inference_steps or self.input_config.num_inference_steps
         )
         self.max_condition_sequence_length = max_condition_sequence_length
+        self.split_text_embed_in_sp = split_text_embed_in_sp
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:
@@ -156,12 +159,14 @@ class DiTRuntimeState(RuntimeState):
         batch_size: Optional[int] = None,
         num_inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
+        split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = (
             num_inference_steps or self.input_config.num_inference_steps
         )
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
+        self.split_text_embed_in_sp = split_text_embed_in_sp
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)

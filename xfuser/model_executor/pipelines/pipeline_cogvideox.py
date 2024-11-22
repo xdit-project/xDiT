@@ -16,21 +16,13 @@ import math
 from xfuser.config import EngineConfig
 
 from xfuser.core.distributed import (
-    get_data_parallel_world_size,
-    get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
+    get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
     get_classifier_free_guidance_world_size,
-    get_classifier_free_guidance_rank,
-    get_pipeline_parallel_rank,
-    get_pp_group,
-    get_world_group,
     get_cfg_group,
     get_sp_group,
     get_runtime_state,
-    initialize_runtime_state,
-    get_data_parallel_rank,
-    is_pipeline_first_stage,
-    is_pipeline_last_stage,
     is_dp_last_group,
 )
 
@@ -206,6 +198,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             num_frames=num_frames,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
         )
 
         # 3. Encode input prompt
@@ -219,8 +212,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        prompt_embeds = self._process_cfg_split_batch_latte(
-            prompt_embeds, negative_prompt_embeds
+        prompt_embeds = self._process_cfg_split_batch(
+            negative_prompt_embeds, prompt_embeds
         )
 
         # 4. Prepare timesteps
@@ -266,8 +259,8 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         p_t = self.transformer.config.patch_size_t or 1
-        latents, image_rotary_emb = self._init_sync_pipeline(
-            latents, image_rotary_emb, 
+        latents, prompt_embeds, image_rotary_emb = self._init_sync_pipeline(
+            latents, prompt_embeds, image_rotary_emb, 
             (latents.size(1) + p_t - 1) // p_t
         )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -301,18 +294,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 # perform guidance
                 if use_dynamic_cfg:
                     self._guidance_scale = 1 + guidance_scale * (
-                        (
-                            1
-                            - math.cos(
-                                math.pi
-                                * (
-                                    (num_inference_steps - t.item())
-                                    / num_inference_steps
-                                )
-                                ** 5.0
-                            )
-                        )
-                        / 2
+                        (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
                     )
                 if do_classifier_free_guidance:
                     if get_classifier_free_guidance_world_size() == 1:
@@ -381,10 +363,17 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
     def _init_sync_pipeline(
         self,
         latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         latents_frames: Optional[int] = None,
     ):
         latents = super()._init_video_sync_pipeline(latents)
+        
+        if get_runtime_state().split_text_embed_in_sp:
+            assert prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0, \
+                f"the length of text sequence {prompt_embeds.shape[-2]} is not divisible by sp_degree {get_sequence_parallel_world_size()}"
+            prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
         if image_rotary_emb is not None:
             assert latents_frames is not None
             d = image_rotary_emb[0].shape[-1]
@@ -412,7 +401,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     dim=0,
                 ),
             )
-        return latents, image_rotary_emb
+        return latents, prompt_embeds, image_rotary_emb
 
     @property
     def interrupt(self):

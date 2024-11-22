@@ -33,12 +33,11 @@ from xfuser.core.distributed import (
     get_runtime_state,
     get_cfg_group,
     get_classifier_free_guidance_world_size,
-    get_pipeline_parallel_rank,
     get_pp_group,
     get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
     get_sp_group,
     is_dp_last_group,
-    get_world_group,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -273,6 +272,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             width=width,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
         )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
@@ -412,6 +412,22 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         else:
             return None
 
+    def _init_sync_pipeline(self, latents: torch.Tensor, prompt_embeds: torch.Tensor):
+        get_runtime_state().set_patched_mode(patch_mode=False)
+
+        latents_list = [
+            latents[:, :, start_idx:end_idx, :]
+            for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global
+        ]
+        latents = torch.cat(latents_list, dim=-2)
+
+        if get_runtime_state().split_text_embed_in_sp:
+            assert prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0, \
+                f"the length of text sequence {prompt_embeds.shape[-2]} is not divisible by sp_degree {get_sequence_parallel_world_size()}"
+            prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        return latents, prompt_embeds
+
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
         self,
@@ -425,7 +441,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents = self._init_sync_pipeline(latents)
+        latents, prompt_embeds = self._init_sync_pipeline(latents, prompt_embeds)
         for i, t in enumerate(timesteps):
             if self.interrupt:
                 continue

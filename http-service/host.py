@@ -240,7 +240,7 @@ def process_queue():
                 queue_event.clear()
         
         try:
-            # 提取参数
+            # Extract parameters
             request_id = params["id"]
             prompt = params["prompt"]
             num_inference_steps = params["num_inference_steps"]
@@ -248,24 +248,24 @@ def process_queue():
             cfg = params["cfg"]
             save_disk_path = params["save_disk_path"]
             
-            # 广播参数到所有进程
+            # Broadcast parameters to all processes
             broadcast_params = [prompt, num_inference_steps, seed, cfg, save_disk_path]
             dist.broadcast_object_list(broadcast_params, src=0)
             
-            # 生成图像并获取结果
+            # Generate image and get results
             output, elapsed_time = generate_image_parallel(*broadcast_params)
             
-            # 处理输出结果
+            # Process output results
             if save_disk_path:
-                # output 是磁盘路径
+                # output is disk path
                 result = {
                     "message": "Image generated successfully",
                     "elapsed_time": f"{elapsed_time:.2f} sec",
-                    "output": output,  # 这里是文件路径
+                    "output": output,  # This is the file path
                     "save_to_disk": True
                 }
             else:
-                # 处理 base64 输出
+                # Process base64 output
                 if output and hasattr(output, "images") and output.images:
                     output_base64 = base64.b64encode(output.images[0].tobytes()).decode("utf-8")
                 else:
@@ -278,7 +278,7 @@ def process_queue():
                     "save_to_disk": False
                 }
             
-            # 存储结果
+            # Store results
             results_store[request_id] = result
             
         except Exception as e:

@@ -1,23 +1,13 @@
 ## 启动一个文生图服务
 
-### 制作服务镜像
+
+启动一个基于HTTP的文本生成图像服务。该服务接收用户的文本描述（prompt），利用DiT模型生成相应的图像。生成的图像可以直接返回给用户，或保存到指定的磁盘位置。为了提高处理效率，我们实现了一个并发处理机制：使用请求队列来存储incoming requests，并通过xdit在多个GPU上并行处理队列中的请求。
 
 ```
-docker build -t xdit-service -f ./docker/Dockerfile .
+python ./http-service/launch_host.py --config ./http-service/config.json --max_queue_size 4
 ```
 
-或者直接从dockerhub拉取(版本号可能需要更新)
-```
-docker pull thufeifeibear/xdit-service
-```
-
-用下面方式启动一个服务，服务相关参数写在配置脚本config.json里。我们映射了磁盘文件到docker container中，因为需要传递下载的模型文件。注意映射端口6000，如果冲突请修改。
-
-```
-docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -p 6000:6000 -v /cfs:/cfs xdit-service --config ./config.json
-```
-
-./config.json中内容如下，包括启动GPU卡数，混合并行策略，输出图片的大小，生成图片存储位置等信息。
+./config.json中默认内容如下，包括启动GPU卡数，混合并行策略，输出图片的大小，生成图片存储位置等信息。
 
 ```
 {
@@ -35,9 +25,8 @@ docker run --gpus all -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
 
 使用http请求访问服务，"save_disk_path"是一个可选项，如果不设置则返回一个图片，如果设置则将生成图片存在磁盘上对应位置的目录中。
 
-
 ```
-curl -X POST http://127.0.0.1:6001/generate \
+curl -X POST http://127.0.0.1:6000/generate \
      -H "Content-Type: application/json" \
      -d '{
            "prompt": "A lovely rabbit",
@@ -47,4 +36,3 @@ curl -X POST http://127.0.0.1:6001/generate \
            "save_disk_path": "/tmp"
          }'
 ```
-

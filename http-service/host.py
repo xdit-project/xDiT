@@ -208,10 +208,9 @@ def queue_image_request():
 @app.route("/status/<request_id>", methods=["GET"])
 def check_status(request_id):
     if request_id in results_store:
-        result = results_store.pop(request_id)  # 获取并删除结果
+        result = results_store.pop(request_id) 
         return jsonify(result), 200
     
-    # 检查是否在队列中
     position = None
     with queue_lock:
         for i, req in enumerate(request_queue):

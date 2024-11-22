@@ -22,6 +22,8 @@ def main():
 
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
+    
+    assert engine_args.use_parallel_vae is False, "parallel VAE not implemented for CogVideo"
 
     pipe = xFuserCogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,

@@ -28,7 +28,6 @@ from xfuser.core.distributed import (
     get_runtime_state,
     initialize_runtime_state,
     is_dp_last_group,
-    get_sequence_parallel_rank,
 )
 from xfuser.core.fast_attention import (
     get_fast_attn_enable,
@@ -408,39 +407,33 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
     def _process_cfg_split_batch(
         self,
-        concat_group_0_negative: torch.Tensor,
-        concat_group_0: torch.Tensor,
-        concat_group_1_negative: torch.Tensor,
-        concat_group_1: torch.Tensor,
+        negative_embeds: torch.Tensor,
+        embeds: torch.Tensor,
+        negative_embdes_mask: torch.Tensor = None,
+        embeds_mask: torch.Tensor = None,
     ):
         if get_classifier_free_guidance_world_size() == 1:
-            concat_group_0 = torch.cat([concat_group_0_negative, concat_group_0], dim=0)
-            concat_group_1 = torch.cat([concat_group_1_negative, concat_group_1], dim=0)
+            embeds = torch.cat([negative_embeds, embeds], dim=0)
         elif get_classifier_free_guidance_rank() == 0:
-            concat_group_0 = concat_group_0_negative
-            concat_group_1 = concat_group_1_negative
+            embeds = negative_embeds
         elif get_classifier_free_guidance_rank() == 1:
-            concat_group_0 = concat_group_0
-            concat_group_1 = concat_group_1
+            embeds = embeds
         else:
             raise ValueError("Invalid classifier free guidance rank")
-        return concat_group_0, concat_group_1
 
-    def _process_cfg_split_batch_latte(
-        self,
-        concat_group_0: torch.Tensor,
-        concat_group_0_negative: torch.Tensor,
-    ):
+        if negative_embdes_mask is None:
+            return embeds
+
         if get_classifier_free_guidance_world_size() == 1:
-            concat_group_0 = torch.cat([concat_group_0_negative, concat_group_0], dim=0)
+            embeds_mask = torch.cat([negative_embdes_mask, embeds_mask], dim=0)
         elif get_classifier_free_guidance_rank() == 0:
-            concat_group_0 = concat_group_0_negative
+            embeds_mask = negative_embdes_mask
         elif get_classifier_free_guidance_rank() == 1:
-            concat_group_0 = concat_group_0
+            embeds_mask = embeds_mask
         else:
             raise ValueError("Invalid classifier free guidance rank")
-        return concat_group_0
-    
+        return embeds, embeds_mask
+
     def is_dp_last_group(self):
         """Return True if in the last data parallel group, False otherwise.
         Also include parallel vae situation.

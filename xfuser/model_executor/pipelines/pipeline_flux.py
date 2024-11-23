@@ -28,11 +28,11 @@ from xfuser.core.distributed import (
     get_runtime_state,
     get_pp_group,
     get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
     get_sp_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     is_dp_last_group,
-    get_world_group,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -226,6 +226,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
             max_condition_sequence_length=max_sequence_length,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
         )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
@@ -381,7 +382,8 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return None
 
     def _init_sync_pipeline(
-        self, latents: torch.Tensor, latent_image_ids: torch.Tensor
+        self, latents: torch.Tensor, latent_image_ids: torch.Tensor, 
+        prompt_embeds: torch.Tensor, text_ids: torch.Tensor
     ):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
@@ -395,7 +397,18 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
         ]
         latent_image_ids = torch.cat(latent_image_ids_list, dim=-2)
-        return latents, latent_image_ids
+
+        if get_runtime_state().split_text_embed_in_sp:
+            assert prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0, \
+                f"the length of text sequence {prompt_embeds.shape[-2]} is not divisible by sp_degree {get_sequence_parallel_world_size()}"
+            prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        if get_runtime_state().split_text_embed_in_sp:
+            assert text_ids.shape[-2] % get_sequence_parallel_world_size() == 0, \
+                f"the length of text sequence {text_ids.shape[-2]} is not divisible by sp_degree {get_sequence_parallel_world_size()}"
+            text_ids = torch.chunk(text_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        return latents, latent_image_ids, prompt_embeds, text_ids
 
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
@@ -413,7 +426,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents, latent_image_ids = self._init_sync_pipeline(latents, latent_image_ids)
+        latents, latent_image_ids, prompt_embeds, text_ids = self._init_sync_pipeline(latents, latent_image_ids, prompt_embeds, text_ids)
         for i, t in enumerate(timesteps):
             if self.interrupt:
                 continue

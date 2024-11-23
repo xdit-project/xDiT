@@ -22,16 +22,22 @@ def xdit_ring_flash_attn_forward(
     joint_tensor_value=None,
     joint_strategy="none",
 ):
-    supported_joint_strategy = ["none", "front", "rear"]
-    if joint_strategy not in supported_joint_strategy:
+    is_joint = False
+    if (joint_tensor_key is not None and 
+        joint_tensor_value is not None):
+        supported_joint_strategy = ["front", "rear"]
+        if joint_strategy not in supported_joint_strategy:
+            raise ValueError(
+                f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
+            )
+        else:
+            is_joint = True
+    elif (joint_tensor_key is None and 
+        joint_tensor_value is None):
+        pass
+    else:
         raise ValueError(
-            f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
-        )
-    elif joint_strategy != "none" and (
-        joint_tensor_key is None or joint_tensor_value is None
-    ):
-        raise ValueError(
-            f"joint_tensor_key & joint_tensor_value must not be None when joint_strategy is not None"
+            f"joint_tensor_key and joint_tensor_value should be None or not None simultaneously."
         )
 
     comm = RingComm(process_group)
@@ -57,19 +63,19 @@ def xdit_ring_flash_attn_forward(
             next_v: torch.Tensor = comm.send_recv(v)
             comm.commit()
 
-        if joint_strategy == "rear":
+        if is_joint and joint_strategy == "rear":
             if step + 1 == comm.world_size:
                 key = torch.cat([k, joint_tensor_key], dim=1)
                 value = torch.cat([v, joint_tensor_value], dim=1)
             else:
                 key, value = k, v
-        elif joint_strategy == "front":
+        elif is_joint and joint_strategy == "front":
             if step == 0:
                 key = torch.cat([joint_tensor_key, k], dim=1)
                 value = torch.cat([joint_tensor_value, v], dim=1)
             else:
                 key, value = k, v
-        elif joint_strategy == "none":
+        else:
             key, value = k, v
 
         if not causal or step <= comm.rank:

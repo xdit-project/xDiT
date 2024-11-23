@@ -453,19 +453,28 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            if get_runtime_state().split_text_embed_in_sp:
+                query = torch.cat([query, encoder_hidden_states_query_proj], dim=1)
+                key = torch.cat([key, encoder_hidden_states_key_proj], dim=1)
+                value = torch.cat([value, encoder_hidden_states_value_proj], dim=1)
+                
+                encoder_hidden_states_query_proj = None
+                encoder_hidden_states_key_proj = None
+                encoder_hidden_states_value_proj = None
+            else:
+                encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+                    batch_size, -1, attn.heads, head_dim
+                )
+                encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+                    batch_size, -1, attn.heads, head_dim
+                )
+                encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+                    batch_size, -1, attn.heads, head_dim
+                )
             query = query.view(batch_size, -1, attn.heads, head_dim)
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
 
-            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            )
-            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            )
-            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            )
             hidden_states = self.hybrid_seq_parallel_attn(
                 attn,
                 query,
@@ -682,15 +691,20 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
-            encoder_hidden_states_query_proj, query = query.split(
-                [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
-            )
-            encoder_hidden_states_key_proj, key = key.split(
-                [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
-            )
-            encoder_hidden_states_value_proj, value = value.split(
-                [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
-            )
+            if get_runtime_state().split_text_embed_in_sp:
+                encoder_hidden_states_query_proj = None
+                encoder_hidden_states_key_proj = None
+                encoder_hidden_states_value_proj = None
+            else:
+                encoder_hidden_states_query_proj, query = query.split(
+                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
+                )
+                encoder_hidden_states_key_proj, key = key.split(
+                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
+                )
+                encoder_hidden_states_value_proj, value = value.split(
+                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
+                )
             hidden_states = self.hybrid_seq_parallel_attn(
                 attn,
                 query,
@@ -1043,19 +1057,25 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            encoder_query = query[:, :, :text_seq_length, :]
-            query = query[:, :, text_seq_length:, :]
-            encoder_key = key[:, :, :text_seq_length, :]
-            key = key[:, :, text_seq_length:, :]
-            encoder_value = value[:, :, :text_seq_length, :]
-            value = value[:, :, text_seq_length:, :]
+            if get_runtime_state().split_text_embed_in_sp:
+                encoder_query = None
+                encoder_key = None
+                encoder_value = None
+            else:
+                encoder_query = query[:, :, :text_seq_length, :]
+                query = query[:, :, text_seq_length:, :]
+                encoder_key = key[:, :, :text_seq_length, :]
+                key = key[:, :, text_seq_length:, :]
+                encoder_value = value[:, :, :text_seq_length, :]
+                value = value[:, :, text_seq_length:, :]
+
+                encoder_query = encoder_query.transpose(1, 2)
+                encoder_key = encoder_key.transpose(1, 2)
+                encoder_value = encoder_value.transpose(1, 2)
 
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
-            encoder_query = encoder_query.transpose(1, 2)
-            encoder_key = encoder_key.transpose(1, 2)
-            encoder_value = encoder_value.transpose(1, 2)
 
             hidden_states = self.hybrid_seq_parallel_attn(
                 attn,

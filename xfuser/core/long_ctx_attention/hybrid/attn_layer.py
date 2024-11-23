@@ -85,23 +85,31 @@ class xFuserLongContextAttention(LongContextAttention):
         Returns:
             * output (Tensor): context output
         """
-        supported_joint_strategy = ["none", "front", "rear"]
-        if joint_strategy not in supported_joint_strategy:
-            raise ValueError(
-                f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
-            )
-        elif joint_strategy != "none" and joint_tensor_query is None:
-            raise ValueError(
-                f"joint_tensor_query must not be None when joint_strategy is not None"
-            )
-        elif joint_strategy == "rear":
-            query = torch.cat([query, joint_tensor_query], dim=1)
-        elif joint_strategy == "front":
-            query = torch.cat([joint_tensor_query, query], dim=1)
-        else:
+        is_joint = False
+        if (joint_tensor_query is not None and 
+            joint_tensor_key is not None and 
+            joint_tensor_value is not None):
+            supported_joint_strategy = ["front", "rear"]
+            if joint_strategy not in supported_joint_strategy:
+                raise ValueError(
+                    f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
+                )
+            elif joint_strategy == "rear":
+                query = torch.cat([query, joint_tensor_query], dim=1)
+                is_joint = True
+            else:
+                query = torch.cat([joint_tensor_query, query], dim=1)
+                is_joint = True
+        elif (joint_tensor_query is None and 
+            joint_tensor_key is None and 
+            joint_tensor_value is None):
             pass
+        else:
+            raise ValueError(
+                f"joint_tensor_query, joint_tensor_key, and joint_tensor_value should be None or not None simultaneously."
+            )
 
-        if joint_strategy != "none":
+        if is_joint:
             ulysses_world_size = torch.distributed.get_world_size(self.ulysses_pg)
             ulysses_rank = torch.distributed.get_rank(self.ulysses_pg)
             attn_heads_per_ulysses_rank = (

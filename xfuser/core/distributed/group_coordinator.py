@@ -223,15 +223,18 @@ class GroupCoordinator:
             # Convert negative dim to positive.
             dim += input_.dim()
         # Allocate output tensor.
-        input_size = input_.size()
+        input_size = list(input_.size())
+        input_size[0] *= world_size
         output_tensor = torch.empty(
-            (world_size,) + input_size, dtype=input_.dtype, device=input_.device
+            input_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
         torch.distributed.all_gather_into_tensor(
             output_tensor, input_, group=self.device_group
         )
         if dim != 0:
+            input_size[0] //= world_size
+            output_tensor = output_tensor.reshape([world_size, ] + input_size)
             output_tensor = output_tensor.movedim(0, dim)
 
         if separate_tensors:

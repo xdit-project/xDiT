@@ -7,7 +7,7 @@
 
   </p>
   <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
-  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
+  <a href="#cite-us">📝 Papers</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
   <p></p>
 
 [![](https://dcbadge.limes.pink/api/server/https://discord.gg/YEWzWfCF9S)](https://discord.gg/YEWzWfCF9S)
@@ -467,4 +467,18 @@ We also welcome developers to join and contribute more features and models to th
       url={https://arxiv.org/abs/2405.07719}, 
 }
 
+```
+
+[Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study](https://arxiv.org/abs/2411.13588)
+
+```
+@misc{sun2024unveilingredundancydiffusiontransformers,
+      title={Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study}, 
+      author={Xibo Sun and Jiarui Fang and Aoyu Li and Jinzhe Pan},
+      year={2024},
+      eprint={2411.13588},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2411.13588}, 
+}
 ```

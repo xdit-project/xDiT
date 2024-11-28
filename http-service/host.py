@@ -7,6 +7,10 @@ import io
 import logging
 import base64
 import torch.multiprocessing as mp
+from queue import Queue
+import threading
+import asyncio
+from collections import deque
 
 from PIL import Image
 from flask import Flask, request, jsonify
@@ -39,6 +43,13 @@ input_config = None
 local_rank = None
 logger = None
 initialized = False
+args = None
+
+# a global queue to store request prompts
+request_queue = deque()
+queue_lock = threading.Lock()
+queue_event = threading.Event()
+results_store = {}  # store request results
 
 
 def setup_logger():
@@ -62,10 +73,12 @@ def check_initialize():
 
 
 def initialize():
-    global pipe, engine_config, input_config, local_rank, initialized
+    global pipe, engine_config, input_config, local_rank, initialized, args
     mp.set_start_method("spawn", force=True)
 
     parser = FlexibleArgumentParser(description="xFuser Arguments")
+    parser.add_argument("--max_queue_size", type=int, default=4,
+                       help="Maximum size of the request queue")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -161,65 +174,127 @@ def generate_image_parallel(
 
 
 @app.route("/generate", methods=["POST"])
-def generate_image():
+def queue_image_request():
     logger.info("Received POST request for image generation")
     data = request.json
-    prompt = data.get("prompt", input_config.prompt)
-    num_inference_steps = data.get(
-        "num_inference_steps", input_config.num_inference_steps
-    )
-    seed = data.get("seed", input_config.seed)
-    cfg = data.get("cfg", 8.0)
-    save_disk_path = data.get("save_disk_path")
+    request_id = str(time.time())
+    
+    with queue_lock:
+        # Check queue size
+        if len(request_queue) >= args.max_queue_size:
+            return jsonify({
+                "error": "Queue is full, please try again later",
+                "queue_size": len(request_queue)
+            }), 503
+        
+        request_params = {
+            "id": request_id,
+            "prompt": data.get("prompt", input_config.prompt),
+            "num_inference_steps": data.get("num_inference_steps", input_config.num_inference_steps),
+            "seed": data.get("seed", input_config.seed),
+            "cfg": data.get("cfg", 8.0),
+            "save_disk_path": data.get("save_disk_path")
+        }
+        
+        request_queue.append(request_params)
+        queue_event.set()
+    
+    return jsonify({
+        "message": "Request accepted",
+        "request_id": request_id,
+        "status_url": f"/status/{request_id}"
+    }), 202
 
-    # Check if save_disk_path is valid, if not, set it to a default directory
-    if save_disk_path:
-        if not os.path.isdir(save_disk_path):
-            default_path = os.path.join(os.path.expanduser("~"), "tacodit_output")
-            os.makedirs(default_path, exist_ok=True)
-            logger.warning(
-                f"Invalid save_disk_path. Using default path: {default_path}"
-            )
-            save_disk_path = default_path
-    else:
-        save_disk_path = None
+@app.route("/status/<request_id>", methods=["GET"])
+def check_status(request_id):
+    if request_id in results_store:
+        result = results_store.pop(request_id) 
+        return jsonify(result), 200
+    
+    position = None
+    with queue_lock:
+        for i, req in enumerate(request_queue):
+            if req["id"] == request_id:
+                position = i
+                break
+    
+    if position is not None:
+        return jsonify({
+            "status": "pending",
+            "queue_position": position
+        }), 202
+    
+    return jsonify({"status": "not_found"}), 404
 
-    logger.info(
-        f"Request parameters: prompt='{prompt}', steps={num_inference_steps}, seed={seed}, save_disk_path={save_disk_path}"
-    )
-    # Broadcast request parameters to all processes
-    params = [prompt, num_inference_steps, seed, cfg, save_disk_path]
-    dist.broadcast_object_list(params, src=0)
-    logger.info("Parameters broadcasted to all processes")
-
-    output, elapsed_time = generate_image_parallel(*params)
-
-    if save_disk_path:
-        # output is a disk path
-        output_base64 = ""
-        image_path = save_disk_path
-    else:
-        # Ensure output is not None before accessing its attributes
-        if output and hasattr(output, "images") and output.images:
-            output_base64 = base64.b64encode(output.images[0].tobytes()).decode("utf-8")
-        else:
-            output_base64 = ""
-        image_path = ""
-
-    response = {
-        "message": "Image generated successfully",
-        "elapsed_time": f"{elapsed_time:.2f} sec",
-        "output": output_base64 if not save_disk_path else output,
-        "save_to_disk": save_disk_path is not None,
-    }
-
-    # logger.info(f"Sending response: {response}")
-    return jsonify(response)
+def process_queue():
+    while True:
+        queue_event.wait()
+        
+        with queue_lock:
+            if not request_queue:
+                queue_event.clear()
+                continue
+            
+            params = request_queue.popleft()
+            if not request_queue:
+                queue_event.clear()
+        
+        try:
+            # Extract parameters
+            request_id = params["id"]
+            prompt = params["prompt"]
+            num_inference_steps = params["num_inference_steps"]
+            seed = params["seed"]
+            cfg = params["cfg"]
+            save_disk_path = params["save_disk_path"]
+            
+            # Broadcast parameters to all processes
+            broadcast_params = [prompt, num_inference_steps, seed, cfg, save_disk_path]
+            dist.broadcast_object_list(broadcast_params, src=0)
+            
+            # Generate image and get results
+            output, elapsed_time = generate_image_parallel(*broadcast_params)
+            
+            # Process output results
+            if save_disk_path:
+                # output is disk path
+                result = {
+                    "message": "Image generated successfully",
+                    "elapsed_time": f"{elapsed_time:.2f} sec",
+                    "output": output,  # This is the file path
+                    "save_to_disk": True
+                }
+            else:
+                # Process base64 output
+                if output and hasattr(output, "images") and output.images:
+                    output_base64 = base64.b64encode(output.images[0].tobytes()).decode("utf-8")
+                else:
+                    output_base64 = ""
+                
+                result = {
+                    "message": "Image generated successfully",
+                    "elapsed_time": f"{elapsed_time:.2f} sec",
+                    "output": output_base64,
+                    "save_to_disk": False
+                }
+            
+            # Store results
+            results_store[request_id] = result
+            
+        except Exception as e:
+            logger.error(f"Error processing request {params['id']}: {str(e)}")
+            results_store[request_id] = {
+                "error": str(e),
+                "status": "failed"
+            }
 
 
 def run_host():
     if dist.get_rank() == 0:
         logger.info("Starting Flask host on rank 0")
+        # process 0 will process the queue in a separate thread
+        queue_thread = threading.Thread(target=process_queue, daemon=True)
+        queue_thread.start()
         app.run(host="0.0.0.0", port=6000)
     else:
         while True:

@@ -2,6 +2,7 @@ import time
 import os
 import torch
 import torch.distributed
+from transformers import T5EncoderModel
 from xfuser import xFuserPixArtAlphaPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -19,10 +20,18 @@ def main():
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
+    text_encoder = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder", torch_dtype=torch.float16)
+    if args.use_fp8_t5_encoder:
+        from optimum.quanto import freeze, qfloat8, quantize
+        print(f"rank {local_rank} quantizing text encoder")
+        quantize(text_encoder, weights=qfloat8)
+        freeze(text_encoder)
+
     pipe = xFuserPixArtAlphaPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.float16,
+        text_encoder=text_encoder,
     ).to(f"cuda:{local_rank}")
     model_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
     pipe.prepare_run(input_config)

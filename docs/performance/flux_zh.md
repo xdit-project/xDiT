@@ -14,9 +14,32 @@ Flux.1实时部署有如下挑战：
 
 ### Flux.1 Dev的扩展性
 
-我们使用FLUX.1 [dev]进行了性能基准测试,采用28个扩散步骤。
+我们使用FLUX.1-dev进行了性能基准测试,采用28个扩散步骤。
 
-下图展示了Flux.1在两个8xL40节点(总共16xL40 GPU)上的可扩展性。
+下表是4xH100上，使用不同的USP策略的延迟（Sec）。因为H100优异的NVLink带宽，使用USP比使用PipeFusion更恰当。torch.compile优化对H100至关重要，4xH100上获得了2.6倍加速。
+
+<div align="center">
+
+| Configuration | PyTorch (Sec) | torch.compile (Sec) |
+|--------------|---------|---------|
+| 1 GPU | 6.71 | 4.30 |
+| Ulysses-2 | 4.38 | 2.68 |
+| Ring-2 | 5.31 | 2.60 |
+| Ulysses-2 x Ring-2 | 5.19 | 1.80 |
+| Ulysses-4 | 4.24 | 1.63 |
+| Ring-4 | 5.11 | 1.98 |
+
+</div>
+
+下图展示Flux.1-dev在4xH100上的延迟指标。xDiT成功在1.6秒内生成1024px图片！
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1K-H100.png" 
+    alt="scalability-flux_h100">
+</div>
+
+
+下图展示了Flux.1-dev在两个8xL40节点(总共16xL40 GPU)上的可扩展性。
 虽然无法使用cfg并行,但我们仍然可以通过使用PipeFusion作为节点间并行方法来实现增强的扩展性。
 对于1024px任务,16xL40上的混合并行比8xL40低1.16倍,其中最佳配置是ulysses=4和pipefusion=4。
 对于4096px任务,混合并行在16个L40上仍然有益,比8个GPU低1.9倍,其中配置为ulysses=2, ring=2和pipefusion=4。

@@ -16,6 +16,31 @@ Since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatib
 
 We conducted performance benchmarking using FLUX.1 [dev] with 28 diffusion steps.
 
+The table below shows the latency (in seconds) using different USP strategies on 4xH100. Due to H100's excellent NVLink bandwidth, using USP is more appropriate than using PipeFusion.
+torch.compile optimization is crucial for H100, achieving a 2.6x speedup on 4xH100.
+On 2xH100, Ring achieves the lowest latency, while on 4xH100, Ulysses performs best. The hybrid-SP strategy Ulysses-2 x Ring-2 performs slightly worse than Ulysses-4 on 4xH100.
+The speedup on 4xH100 compared to a single H100 is 2.63x.
+
+<div align="center">
+
+| Configuration | PyTorch (Sec) | torch.compile (Sec) |
+|--------------|---------|---------|
+| 1 GPU | 6.71 | 4.30 |
+| Ulysses-2 | 4.38 | 2.68 |
+| Ring-2 | 5.31 | 2.60 |
+| Ulysses-2 x Ring-2 | 5.19 | 1.80 |
+| Ulysses-4 | 4.24 | 1.63 |
+| Ring-4 | 5.11 | 1.98 |
+
+</div>
+
+The figure below shows the latency metrics of Flux.1-dev on 4xH100. xDiT successfully generates a 1024px image in 1.6 seconds!
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1K-H100.png" 
+    alt="scalability-flux_h100">
+</div>
+
 The following figure shows the scalability of Flux.1 on two 8xL40 Nodes, 16xL40 GPUs in total. 
 Althogh cfg parallel is not available, We can still achieve enhanced scalability by using PipeFusion as a method for parallel between nodes.
 For the 1024px task, hybrid parallel on 16xL40 is 1.16x lower than on 8xL40, where the best configuration is ulysses=4 and pipefusion=4.
@@ -26,7 +51,6 @@ The performance improvement dose not achieved with 16 GPUs 2048px tasks.
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-16L40-crop.png" 
     alt="scalability-flux_l40">
 </div>
-
 
 The following figure demonstrates the scalability of Flux.1 on 8xA100 GPUs.
 For both the 1024px and the 2048px image generation tasks, SP-Ulysses exhibits the lowest latency among the single parallel methods. The optimal hybrid strategy also are SP-Ulysses in this case.
@@ -81,7 +105,7 @@ This is due to the increased memory requirements for activations, along with mem
 
 By leveraging Parallel VAE, xDiT is able to demonstrate its capability for generating images at higher resolutions, enabling us to produce images with even greater detail and clarity. Applying `--use_parallel_vae` in the [runing script](../../examples/run.sh).
 
-prompt是"A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He’s wearing a faded blue captain’s hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
+prompt is "A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He’s wearing a faded blue captain’s hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
 
 The quality of image generation at 2048px, 3072px, and 4096px resolutions is as follows. It is evident that the quality of the 4096px generated images is significantly lower.
 

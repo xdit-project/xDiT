@@ -39,6 +39,7 @@ if __name__ == "__main__":
             "opencv-python",
             "imageio",
             "imageio-ffmpeg",
+            "optimum-quanto"
         ],
         extras_require={
             "flash_attn": [

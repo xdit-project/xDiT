@@ -422,9 +422,10 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         latents = torch.cat(latents_list, dim=-2)
 
         if get_runtime_state().split_text_embed_in_sp:
-            assert prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0, \
-                f"the length of text sequence {prompt_embeds.shape[-2]} is not divisible by sp_degree {get_sequence_parallel_world_size()}"
-            prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+            if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+            else:
+                get_runtime_state().split_text_embed_in_sp = False                
 
         return latents, prompt_embeds
 

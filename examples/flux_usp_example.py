@@ -1,5 +1,8 @@
+# Flux inference with USP
+# from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_flux.py
+
 import functools
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
 
 import logging
 import time
@@ -40,8 +43,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         timestep: torch.LongTensor = None,
         img_ids: torch.Tensor = None,
         txt_ids: torch.Tensor = None,
-        controlnet_block_samples: Optional[List[torch.Tensor]] = None,
-        controlnet_single_block_samples: Optional[List[torch.Tensor]] = None,
         **kwargs,
     ):
         if isinstance(timestep, torch.Tensor) and timestep.ndim != 0 and timestep.shape[0] == hidden_states.shape[0]:

@@ -19,8 +19,7 @@ from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
-    get_sequence_parallel_rank,
-    get_sp_group,
+    get_pipeline_parallel_world_size
 )
 from xfuser.core.fast_attention import (
     xFuserFastAttention,
@@ -33,6 +32,9 @@ from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
 from xfuser.envs import PACKAGES_CHECKER
+
+if torch.__version__ >= '2.5.0':
+    from xfuser.model_executor.layers.usp import USP
 
 logger = init_logger(__name__)
 
@@ -687,7 +689,14 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if get_pipeline_parallel_world_size() == 1 and torch.__version__ >= '2.5.0' and get_runtime_state().split_text_embed_in_sp:
+            hidden_states = USP(
+                query, key, value, dropout_p=0.0, is_causal=False
+            )
+            hidden_states = hidden_states.transpose(1, 2).reshape(
+                batch_size, -1, attn.heads * head_dim
+            )
+        elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)

@@ -28,7 +28,7 @@ if __name__ == "__main__":
         install_requires=[
             "torch>=2.1.0",
             "accelerate>=0.33.0",
-            "diffusers>=0.31",  # NOTE: diffusers>=0.31.0 is necessary for CogVideoX and Flux
+            "diffusers==0.31",  # NOTE: diffusers>=0.31.0 is necessary for CogVideoX and Flux
             "transformers>=4.39.1",
             "sentencepiece>=0.1.99",
             "beautifulsoup4>=4.12.3",

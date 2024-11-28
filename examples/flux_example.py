@@ -2,6 +2,7 @@ import logging
 import time
 import torch
 import torch.distributed
+from transformers import T5EncoderModel
 from xfuser import xFuserFluxPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -20,11 +21,19 @@ def main():
     engine_config, input_config = engine_args.create_config()
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
+    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=torch.bfloat16)
+
+    if args.use_fp8_t5_encoder:
+        from optimum.quanto import freeze, qfloat8, quantize
+        logging.info(f"rank {local_rank} quantizing text encoder 2")
+        quantize(text_encoder_2, weights=qfloat8)
+        freeze(text_encoder_2)
 
     pipe = xFuserFluxPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.bfloat16,
+        text_encoder_2=text_encoder_2,
     )
 
     if args.enable_sequential_cpu_offload:

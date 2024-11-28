@@ -105,6 +105,7 @@ class xFuserArgs:
     window_size: int = 64
     coco_path: Optional[str] = None
     use_cache: bool = False
+    use_fp8_t5_encoder: bool = False
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -265,6 +266,11 @@ class xFuserArgs:
             action="store_true",
             help="Making VAE decode a tile at a time to save GPU memory.",
         )
+        runtime_group.add_argument(
+            "--use_fp8_t5_encoder",
+            action="store_true",
+            help="Quantize the T5 text encoder.",
+        )
 
         # DiTFastAttn arguments
         fast_attn_group = parser.add_argument_group("DiTFastAttn Options")
@@ -335,6 +341,7 @@ class xFuserArgs:
             use_torch_compile=self.use_torch_compile,
             use_onediff=self.use_onediff,
             # use_profiler=self.use_profiler,
+            use_fp8_t5_encoder=self.use_fp8_t5_encoder,
         )
 
         parallel_config = ParallelConfig(

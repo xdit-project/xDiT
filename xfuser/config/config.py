@@ -59,6 +59,7 @@ class RuntimeConfig:
     use_profiler: bool = False
     use_torch_compile: bool = False
     use_onediff: bool = False
+    use_fp8_t5_encoder: bool = False
 
     def __post_init__(self):
         check_packages()

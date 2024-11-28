@@ -1,5 +1,8 @@
+# Flux inference with USP
+# from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_flux.py
+
 import functools
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
 
 import logging
 import time
@@ -25,7 +28,7 @@ from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
 )
 
-from xfuser.model_executor.layers.attention_processor_usp import xFuserFluxAttnProcessor2_0USP
+from xfuser.model_executor.layers.attention_processor import xFuserFluxAttnProcessor2_0
 
 def parallelize_transformer(pipe: DiffusionPipeline):
     transformer = pipe.transformer
@@ -40,8 +43,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         timestep: torch.LongTensor = None,
         img_ids: torch.Tensor = None,
         txt_ids: torch.Tensor = None,
-        controlnet_block_samples: Optional[List[torch.Tensor]] = None,
-        controlnet_single_block_samples: Optional[List[torch.Tensor]] = None,
         **kwargs,
     ):
         if isinstance(timestep, torch.Tensor) and timestep.ndim != 0 and timestep.shape[0] == hidden_states.shape[0]:
@@ -54,7 +55,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
         
         for block in transformer.transformer_blocks + transformer.single_transformer_blocks:
-            block.attn.processor = xFuserFluxAttnProcessor2_0USP()
+            block.attn.processor = xFuserFluxAttnProcessor2_0()
         
         output = original_forward(
             hidden_states,

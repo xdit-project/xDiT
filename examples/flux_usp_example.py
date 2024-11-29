@@ -116,15 +116,15 @@ def main():
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         pipe.transformer = torch.compile(pipe.transformer, mode="max-autotune-no-cudagraphs")
 
-    # warmup
-    output = pipe(
-        height=input_config.height,
-        width=input_config.width,
-        prompt=input_config.prompt,
-        num_inference_steps=1,
-        output_type=input_config.output_type,
-        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-    ).images
+        # one step to warmup the torch compiler
+        output = pipe(
+            height=input_config.height,
+            width=input_config.width,
+            prompt=input_config.prompt,
+            num_inference_steps=1,
+            output_type=input_config.output_type,
+            generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+        ).images
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

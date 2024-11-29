@@ -35,6 +35,8 @@ from xfuser.envs import PACKAGES_CHECKER
 
 if torch.__version__ >= '2.5.0':
     from xfuser.model_executor.layers.usp import USP
+else:
+    from xfuser.model_executor.layers.usp_pre250 import USP
 
 logger = init_logger(__name__)
 
@@ -689,7 +691,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if get_pipeline_parallel_world_size() == 1 and torch.__version__ >= '2.5.0' and get_runtime_state().split_text_embed_in_sp:
+        if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
             hidden_states = USP(
                 query, key, value, dropout_p=0.0, is_causal=False
             )

@@ -671,7 +671,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             key = apply_rotary_emb(key, image_rotary_emb)
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
-        if not self.use_long_ctx_attn_kvcache:
+        if get_runtime_state().num_pipeline_patch > 1 and not self.use_long_ctx_attn_kvcache:
             encoder_hidden_states_key_proj, key = key.split(
                 [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
             )

@@ -44,7 +44,7 @@ As shown in the figure, regardless of Ulysses Attention, Ring Attention or CFG p
     alt="latency-cogvideo1.5-5b-l40">
 </div>
 
-xDiT can also achieve similar acceleration effects when generating 81-frame 1360x768 resolution video on H20 and L20.
+We further compared the acceleration effects of xDiT in generating a video of 81 frames at a resolution of 1360x768 on H20 and L20. As observed from the figure below, the inference latency of CogVideoX1.5-5B on these two devices is remarkably similar. Given the higher price of H20 compared to L20, L20 demonstrates a better cost-effectiveness.
 
 
 <div align="center">

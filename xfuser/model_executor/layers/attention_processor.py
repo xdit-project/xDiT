@@ -35,6 +35,8 @@ from xfuser.envs import PACKAGES_CHECKER
 
 if torch.__version__ >= '2.5.0':
     from xfuser.model_executor.layers.usp import USP
+else:
+    from xfuser.model_executor.layers.usp_legacy import USP
 
 logger = init_logger(__name__)
 
@@ -671,7 +673,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             key = apply_rotary_emb(key, image_rotary_emb)
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
-        if not self.use_long_ctx_attn_kvcache:
+        if get_runtime_state().num_pipeline_patch > 1 and not self.use_long_ctx_attn_kvcache:
             encoder_hidden_states_key_proj, key = key.split(
                 [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
             )
@@ -689,7 +691,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if get_pipeline_parallel_world_size() == 1 and torch.__version__ >= '2.5.0' and get_runtime_state().split_text_embed_in_sp:
+        if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
             hidden_states = USP(
                 query, key, value, dropout_p=0.0, is_causal=False
             )
@@ -1055,7 +1057,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                 )
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
-        if not self.use_long_ctx_attn_kvcache:
+        if get_pipeline_parallel_world_size() == 1 and not self.use_long_ctx_attn_kvcache:
             key, value = get_cache_manager().update_and_get_kv_cache(
                 new_kv=[key, value],
                 layer=attn,
@@ -1065,7 +1067,14 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
+            hidden_states = USP(
+                query, key, value, dropout_p=0.0, is_causal=False
+            )
+            hidden_states = hidden_states.transpose(1, 2).reshape(
+                batch_size, -1, attn.heads * head_dim
+            )
+        elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
             if get_runtime_state().split_text_embed_in_sp:
                 encoder_query = None
                 encoder_key = None

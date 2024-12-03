@@ -41,3 +41,16 @@ CogVideoX/CogVideoX1.5 是有文本/图像生成视频的模型。xDiT 目前整
     alt="latency-cogvideo1.5-5b-l40">
 </div>
 
+我们对xDiT在H20和L20上生成81帧1360x768分辨率视频的加速效果进行了进一步比较。从下图可以观察到，在这两台设备上，CogVideoX1.5-5B的推理延迟非常相似，然而考虑到H20的价格高于L20，L20展现出了更高的性价比。
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-h20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-l20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>

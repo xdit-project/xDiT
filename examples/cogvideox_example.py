@@ -46,6 +46,16 @@ def main():
     if args.enable_slicing:
         pipe.vae.enable_slicing()
 
+    # warmup
+    output = pipe(
+        height=input_config.height,
+        width=input_config.width,
+        num_frames=input_config.num_frames,
+        prompt=input_config.prompt,
+        num_inference_steps=1,
+        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+    ).frames[0]
+
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 
@@ -56,7 +66,6 @@ def main():
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-        guidance_scale=6,
     ).frames[0]
 
     end_time = time.time()

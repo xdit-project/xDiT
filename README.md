@@ -411,15 +411,14 @@ xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce comput
 
 <h2 id="history">🚧  History and Looking for Contributions</h2>
 
-We conducted a major upgrade of this project in August 2024.
+We conducted a major upgrade of this project in August 2024, introducing a new set of APIs that are now the preferred choice for all users.
 
-The latest APIs is located in the [xfuser/](./xfuser/) directory, supports hybrid parallelism. It offers clearer and more structured code but currently supports fewer models.
+The latest APIs, located in the [xfuser/](./xfuser/) directory, support hybrid parallelism and offer a clearer, more structured codebase. These APIs are designed to be the standard for all future development and should be the go-to choice for anyone looking to leverage the full potential of our project.
 
-The legacy APIs is in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, limited to single parallelism. It supports a richer of parallel methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel. CFG Parallel can be hybrid with PipeFusion but not with other parallel methods.
+The legacy APIs, located in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, are now considered outdated and do not support hybrid parallelism. Despite this limitation, they offer a broader range of individual parallelization methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel.
+For users working with Pixart models, you can still run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under the `legacy` branch. However, for all other models, we strongly recommend adopting the formal APIs to ensure optimal performance and compatibility.
 
-For models not yet supported by the latest APIs, you can run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under branch `legacy`. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
-
-We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://github.com/xdit-project/xDiT/discussions).
+We also warmly welcome developers to join us in enhancing the project. If you have ideas for new features or models, please share them in our [issues](https://github.com/xdit-project/xDiT/issues). Your contributions are invaluable in driving the project forward and ensuring it meets the needs of the community.
 
 <h2 id="cite-us">📝 Cite Us</h2>
 

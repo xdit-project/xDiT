@@ -93,6 +93,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**November 28, 2024**: xDiT achieves 1.6 sec end-to-end latency for 28-step [Flux.1-Dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) inference on 4xH100!
 * 🎉**November 20, 2024**: xDiT supports [CogVideoX-1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) and achieved 6.12x speedup compare to the implementation in diffusers!
 * 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
 * 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
@@ -312,9 +313,9 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-### 5. Launch a Http Service
+### 5. Launch an Http Service
 
-You can also launch a http service to generate images with xDiT.
+You can also launch an http service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
 
@@ -426,14 +427,11 @@ We also welcome developers to join and contribute more features and models to th
 [xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism](https://arxiv.org/abs/2411.01738)
 
 ```
-@misc{fang2024xditinferenceenginediffusion,
-      title={xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism}, 
-      author={Jiarui Fang and Jinzhe Pan and Xibo Sun and Aoyu Li and Jiannan Wang},
-      year={2024},
-      eprint={2411.01738},
-      archivePrefix={arXiv},
-      primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2411.01738}, 
+@article{fang2024xdit,
+  title={xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism},
+  author={Fang, Jiarui and Pan, Jinzhe and Sun, Xibo and Li, Aoyu and Wang, Jiannan},
+  journal={arXiv preprint arXiv:2411.01738},
+  year={2024}
 }
 
 ```
@@ -441,14 +439,11 @@ We also welcome developers to join and contribute more features and models to th
 [PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://arxiv.org/abs/2405.14430)
 
 ```
-@misc{fang2024pipefusionpatchlevelpipelineparallelism,
-      title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference}, 
-      author={Jiarui Fang and Jinzhe Pan and Jiannan Wang and Aoyu Li and Xibo Sun},
-      year={2024},
-      eprint={2405.14430},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2405.14430}, 
+@article{fang2024pipefusion,
+  title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference},
+  author={Jiarui Fang and Jinzhe Pan and Jiannan Wang and Aoyu Li and Xibo Sun},
+  journal={arXiv preprint arXiv:2405.14430},
+  year={2024}
 }
 
 ```
@@ -457,14 +452,11 @@ We also welcome developers to join and contribute more features and models to th
 
 
 ```
-@misc{fang2024uspunifiedsequenceparallelism,
-      title={USP: A Unified Sequence Parallelism Approach for Long Context Generative AI}, 
-      author={Jiarui Fang and Shangchun Zhao},
-      year={2024},
-      eprint={2405.07719},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2405.07719}, 
+@article{fang2024unified,
+  title={A Unified Sequence Parallelism Approach for Long Context Generative AI},
+  author={Fang, Jiarui and Zhao, Shangchun},
+  journal={arXiv preprint arXiv:2405.07719},
+  year={2024}
 }
 
 ```
@@ -472,13 +464,11 @@ We also welcome developers to join and contribute more features and models to th
 [Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study](https://arxiv.org/abs/2411.13588)
 
 ```
-@misc{sun2024unveilingredundancydiffusiontransformers,
-      title={Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study}, 
-      author={Xibo Sun and Jiarui Fang and Aoyu Li and Jinzhe Pan},
-      year={2024},
-      eprint={2411.13588},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2411.13588}, 
+@article{sun2024unveiling,
+  title={Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study},
+  author={Sun, Xibo and Fang, Jiarui and Li, Aoyu and Pan, Jinzhe},
+  journal={arXiv preprint arXiv:2411.13588},
+  year={2024}
 }
+
 ```

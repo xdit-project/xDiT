@@ -41,3 +41,16 @@ CogVideoX/CogVideoX1.5 是有文本/图像生成视频的模型。xDiT 目前整
     alt="latency-cogvideo1.5-5b-l40">
 </div>
 
+在H20和L20上生成81帧1360x768分辨率的视频时，xDiT也可获得相似的加速效果。
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-h20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-l20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>

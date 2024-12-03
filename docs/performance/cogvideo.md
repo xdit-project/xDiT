@@ -43,3 +43,17 @@ As shown in the figure, regardless of Ulysses Attention, Ring Attention or CFG p
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-l40.png" 
     alt="latency-cogvideo1.5-5b-l40">
 </div>
+
+xDiT can also achieve similar acceleration effects when generating 81-frame 1360x768 resolution video on H20 and L20.
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-h20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-l20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>

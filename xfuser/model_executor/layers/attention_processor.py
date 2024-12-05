@@ -717,7 +717,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
                     [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
                 )
             hidden_states = self.hybrid_seq_parallel_attn(
-                attn,
+                attn if get_runtime_state().num_pipeline_patch > 1 else None,
                 query,
                 key,
                 value,
@@ -1056,16 +1056,6 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                     key[:, :, text_seq_length:], image_rotary_emb
                 )
 
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-        if get_pipeline_parallel_world_size() == 1 and not self.use_long_ctx_attn_kvcache:
-            key, value = get_cache_manager().update_and_get_kv_cache(
-                new_kv=[key, value],
-                layer=attn,
-                slice_dim=2,
-                layer_type="attn",
-            )
-        #! ---------------------------------------- KV CACHE ----------------------------------------
-
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
             hidden_states = USP(
@@ -1096,7 +1086,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
             value = value.transpose(1, 2)
 
             hidden_states = self.hybrid_seq_parallel_attn(
-                attn,
+                None,
                 query,
                 key,
                 value,

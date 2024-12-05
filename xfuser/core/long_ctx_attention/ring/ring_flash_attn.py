@@ -5,7 +5,6 @@ from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
-from xfuser.core.distributed import get_runtime_state
 
 
 def xdit_ring_flash_attn_forward(
@@ -49,7 +48,7 @@ def xdit_ring_flash_attn_forward(
 
     next_k, next_v = None, None
 
-    if get_runtime_state().num_pipeline_patch > 1 and attn_layer is not None:
+    if attn_layer is not None:
         k, v = get_cache_manager().update_and_get_kv_cache(
             new_kv=[k, v],
             layer=attn_layer,

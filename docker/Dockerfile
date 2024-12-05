@@ -20,11 +20,11 @@ RUN pip install xfuser
 RUN pip install flask
 
 # Copy the entire comfyui-xdit directory into the container
-COPY ./comfyui-xdit /app/comfyui-xdit
+COPY ./http-service /app/http-service
 
 # Change to the xDiT directory
 WORKDIR /app
 
 # Set ENTRYPOINT with CMD as default arguments
-ENTRYPOINT ["python", "/app/comfyui-xdit/launch_host.py"]
-CMD ["--config", "./comfyui-xdit/config.json"]
+# ENTRYPOINT ["python", "/app/comfyui-xdit/launch_host.py"]
+# CMD ["--config", "./comfyui-xdit/config.json"]

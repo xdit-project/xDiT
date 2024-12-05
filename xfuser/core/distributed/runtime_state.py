@@ -516,7 +516,8 @@ def runtime_state_is_initialized():
 
 
 def get_runtime_state():
-    assert _RUNTIME is not None, "Runtime state has not been initialized."
+    if _RUNTIME is None:
+        logger.warning("Runtime state has not been initialized.")
     return _RUNTIME
 
 

@@ -189,18 +189,21 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 
 ### 1. Install from pip
 
+We set diffusers as an optional installation requirement.
+First, if you only use the USP interface, you don't need to install diffusers. Second, different models have different requirements for diffusers - for example, the latest models may need to be installed from the diffusers main branch.
+
 ```
 pip install xfuser
-# Or optionally, with flash_attn
-pip install "xfuser[flash_attn]"
+# Or optionally, with diffusers
+pip install "xfuser[diffusers]"
 ```
 
 ### 2. Install from source 
 
 ```
 pip install -e .
-# Or optionally, with flash_attn
-pip install -e ".[flash_attn]"
+# Or optionally, with diffusers
+pip install -e ".[diffusers]"
 ```
 
 Note that we use two self-maintained packages:

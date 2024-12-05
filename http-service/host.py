@@ -145,7 +145,8 @@ def generate_image_parallel(
             logger.info(f"Image saved to: {file_path}")
 
         output = file_path
-    else:
+    # single gpu didn't need to distribute
+    elif dist.get_world_size() > 1:
         if is_dp_last_group():
             # serialize output object
             output_bytes = pickle.dumps(output)

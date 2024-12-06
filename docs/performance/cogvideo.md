@@ -43,3 +43,17 @@ As shown in the figure, regardless of Ulysses Attention, Ring Attention or CFG p
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-l40.png" 
     alt="latency-cogvideo1.5-5b-l40">
 </div>
+
+We further compared the acceleration effects of xDiT in generating a video of 81 frames at a resolution of 1360x768 on H20 and L20. As observed from the figure below, the inference latency of CogVideoX1.5-5B on these two devices is remarkably similar. Given the higher price of H20 compared to L20, L20 demonstrates a better cost-effectiveness.
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-h20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>
+
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/cogvideo/latency-cogvideo1.5-5b-l20.png" 
+    alt="latency-cogvideo1.5-5b-l40">
+</div>

@@ -1,12 +1,11 @@
-# This file implements USP with torch version >= '2.5.0'
+# This file implements USP with torch version < '2.5.0'
 import torch
 from torch.nn import functional as F
-from torch.distributed.tensor.experimental._attention import _templated_ring_attention
-aten = torch.ops.aten
 
 import torch.distributed._functional_collectives as ft_c
 
 from yunchang.globals import PROCESS_GROUP
+from yunchang.ring.ring_flash_attn import ring_flash_attn_forward
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -14,17 +13,21 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
 )
 
-    
+
 def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
-    out, *_ = _templated_ring_attention(
+    query = query.transpose(1,2).contiguous()
+    key = key.transpose(1,2).contiguous()
+    value = value.transpose(1,2).contiguous()
+    out, *_ = ring_flash_attn_forward(
         PROCESS_GROUP.RING_PG,
-        aten._scaled_dot_product_flash_attention,
         query,
         key,
         value,
+        softmax_scale=query.shape[-1] ** (-0.5),
         dropout_p=dropout_p,
-        is_causal=is_causal
+        causal=is_causal,
     )
+    out = out.transpose(1,2).contiguous()
     return out
 
 
@@ -77,6 +80,7 @@ def _ft_c_output_all_to_all(x):
     return x
 
 
+@torch.compiler.disable
 def USP(query, key, value, dropout_p=0.0, is_causal=False):
     if get_sequence_parallel_world_size() == 1:
         out = F.scaled_dot_product_attention(

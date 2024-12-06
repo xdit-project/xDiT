@@ -128,6 +128,7 @@ def generate_image_parallel(
         output_type="pil",
         generator=torch.Generator(device=f"cuda:{local_rank}").manual_seed(seed),
         guidance_scale=cfg,
+        max_sequence_length=input_config.max_sequence_length
     )
     end_time = time.time()
     elapsed_time = end_time - start_time

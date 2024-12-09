@@ -7,8 +7,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 # CogVideoX configuration
 SCRIPT=cogvideox_i2v_example.py
 
-# MODEL_ID="/cfs/dit/CogVideoX1.5-5B-I2V"
-MODEL_ID="/sse_ard/pretrained_models/cogvideox1.5-5b-i2v/"
+MODEL_ID="/cfs/dit/CogVideoX1.5-5B-I2V"
 INFERENCE_STEP=50
 
 mkdir -p ./results/cuda
@@ -27,7 +26,7 @@ CFG_ARGS="--use_cfg_parallel"
 # PARALLLEL_VAE="--use_parallel_vae"
 ENABLE_TILING="--enable_tiling"
 # COMPILE_FLAG="--use_torch_compile"
-ENABLE_MODEL_CPU_OFFLOAD="--enable_model_cpu_offload"
+# ENABLE_MODEL_CPU_OFFLOAD="--enable_model_cpu_offload"
 
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
@@ -39,14 +38,12 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
 --prompt "An astronaut hatching from an egg, on the surface of the moon, the darkness and depth of space realised in the background. High quality, ultrarealistic detail and breath-taking movie-like camera shot." \
---image "/home/qinlei/Projects/astronaut.jpg" \
+--image "astronaut.jpg" \
 --seed 1024 \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $ENABLE_TILING \
 $COMPILE_FLAG \
 $ENABLE_MODEL_CPU_OFFLOAD
-
-# --image "astronaut.jpg" \
 
 

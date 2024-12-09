@@ -93,6 +93,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**December 7, 2024**: xDiT is the official parallel inference engine for [HunyuanVideo](https://github.com/Tencent-Hunyuan/HunyuanVideo), reducing 5-sec video generation latency from 31 minutes to 5 minutes!
 * 🎉**November 28, 2024**: xDiT achieves 1.6 sec end-to-end latency for 28-step [Flux.1-Dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) inference on 4xH100!
 * 🎉**November 20, 2024**: xDiT supports [CogVideoX-1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) and achieved 6.12x speedup compare to the implementation in diffusers!
 * 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
@@ -158,31 +159,35 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 
 <h3 id="perf_mochi1">Mochi1</h3>
 
-1. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
+1. [HunyuanVideo Performance Report](./docs/performance/hunyuanvideo.md)
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
-2. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+2. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
+
+<h3 id="perf_cogvideox">CogVideo</h3>
+
+3. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 
 <h3 id="perf_flux">Flux.1</h3>
 
-3. [Flux Performance Report](./docs/performance/flux.md)
+4. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_latte">Latte</h3>
 
-4. [Latte Performance Report](./docs/performance/latte.md)
+5. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-5. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+6. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-6. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+7. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-7. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+8. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

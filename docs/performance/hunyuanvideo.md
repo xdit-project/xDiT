@@ -1,6 +1,6 @@
 ## HunyuanVideo Performance Report
 
-xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)'s official parallel inference engine. On H100 and H20 GPUs, xDiT reduces the generation time of 1028x720 videos from 31 minutes to 5 minutes, and 960x960 videos from 28 minutes to 6 minutes.
+xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo?tab=readme-ov-file#-parallel-inference-on-multiple-gpus-by-xdit)'s official parallel inference engine. On H100 and H20 GPUs, xDiT reduces the generation time of 1028x720 videos from 31 minutes to 5 minutes, and 960x960 videos from 28 minutes to 6 minutes.
 
 ### 1280x720 Resolution (129 frames, 50 steps) - Ulysses Latency (seconds)
 
@@ -8,7 +8,7 @@ xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)'s official paral
 
 | GPU Type | 1 GPU | 2 GPUs | 4 GPUs | 8 GPUs |
 |----------|--------|---------|---------|---------|
-| H100 | 1904.08 | 925.04 | 514.08 | 337.58 |
+| H100 | 1,904.08 | 925.04 | 514.08 | 337.58 |
 | H20 | 6,639.17 | 3,400.55 | 1,762.86 | 940.97 |
 
 </center>

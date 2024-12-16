@@ -6,6 +6,7 @@ from .transformer_flux import xFuserFluxTransformer2DWrapper
 from .latte_transformer_3d import xFuserLatteTransformer3DWrapper
 from .hunyuan_transformer_2d import xFuserHunyuanDiT2DWrapper
 from .cogvideox_transformer_3d import xFuserCogVideoXTransformer3DWrapper
+from .consisid_transformer_3d import xFuserConsisIDTransformer3DWrapper
 
 __all__ = [
     "xFuserTransformerWrappersRegister",
@@ -15,5 +16,6 @@ __all__ = [
     "xFuserFluxTransformer2DWrapper",
     "xFuserLatteTransformer3DWrapper",
     "xFuserCogVideoXTransformer3DWrapper",
+    "xFuserConsisIDTransformer3DWrapper",
     "xFuserHunyuanDiT2DWrapper",
 ]

@@ -12,12 +12,16 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 from xfuser.core.distributed.parallel_state import get_data_parallel_world_size
+from xfuser.executor.ray_utils import initialize_ray_cluster
+from xfuser.executor.gpu_executor import RayGPUExecutor
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
+    executor = RayGPUExecutor(engine_config) # load model
+    executor.execute(input_config)
     local_rank = get_world_group().local_rank
     text_encoder_3 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_3", torch_dtype=torch.float16)
     if args.use_fp8_t5_encoder:
@@ -33,7 +37,6 @@ def main():
     ).to(f"cuda:{local_rank}")
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
-
     pipe.prepare_run(input_config)
 
     torch.cuda.reset_peak_memory_stats()

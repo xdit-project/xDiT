@@ -188,6 +188,10 @@ class ParallelConfig:
     sp_config: SequenceParallelConfig
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
+    distributed_executor_backend: Optional[str] = None
+    world_size: int = 1
+    rank: int = 0
+    worker_cls: str = "xfuser.worker.worker.Worker"
 
     def __post_init__(self):
         assert self.tp_config is not None, "tp_config must be set"

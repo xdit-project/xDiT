@@ -1,4 +1,4 @@
-# 新模型添加手册
+# 利用xDiT中PipeFusion, 序列并行，和CFG并行能力加速模型推理
 
 <aside>
 💡 以pixart-alpha为例，并行版本模型支持的全过程如下

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Tuple
 
 from xfuser.worker.utils import update_environment_variables, resolve_obj_by_qualname
-
+from xfuser.config.config import EngineConfig
 
 class BaseWorkerWrapper(ABC):
     def __init__(self, worker_cls: str):
@@ -34,10 +34,9 @@ class BaseWorkerWrapper(ABC):
 
 
 class RayWorkerWrapper(BaseWorkerWrapper):
-    def __init__(self, *args, **kwargs) -> None:
-        print(f"RayWorkerWrapper init with args: {args} and kwargs: {kwargs}")
-        super().__init__(*args, **kwargs)
-        self.init_worker()
+    def __init__(self, engine_config: EngineConfig, bundle_id: int) -> None:
+        super().__init__(engine_config.parallel_config.worker_cls)
+        self.init_worker(engine_config.parallel_config, bundle_id)
 
     def get_node_and_gpu_ids(
         self,

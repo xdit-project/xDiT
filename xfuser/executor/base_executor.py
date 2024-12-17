@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from xfuser.config.config import EngineConfig
+from xfuser.config.config import EngineConfig,ParallelConfig
 
 
 class BaseExecutor(ABC):
@@ -9,6 +9,7 @@ class BaseExecutor(ABC):
         engine_config: EngineConfig,
     ):
         self.engine_config = engine_config
+        self.parallel_config = engine_config.parallel_config
         self._init_executor()
 
     @abstractmethod

@@ -16,6 +16,6 @@ For a detailed guide on leveraging CFG parallelism, USP, and PipeFusion using xD
 
 [Parallelize new models with USP provided by xDiT](adding_model_usp.md)
 
-[Parallelize new models with CFG and sequence parallelism provided by xDiT](adding_model_cfg_usp.md)
+[Parallelize new models with CFG parallelism and USP provided by xDiT](adding_model_cfg_usp.md)
 
 [Parallelize new models with PipeFusion, USP, and CFG parallelism provided by xDiT](adding_model_pipefusion.md)

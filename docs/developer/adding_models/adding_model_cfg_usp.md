@@ -1,4 +1,4 @@
-# Parallelize new models with CFG and sequence parallelism provided by xDiT
+# Parallelize new models with CFG parallelism and USP provided by xDiT
 
 The following two tutorials provide detailed instructions on how to implement CFG parallelism and USP (Unified Sequence Parallelism) supported by xDiT for a new DiT model:
 
@@ -6,7 +6,7 @@ The following two tutorials provide detailed instructions on how to implement CF
 
 [Parallelize new models with CFG parallelism provided by xDiT](adding_model_cfg.md)
 
-Both parallelization methods can be employed simultaneously. To do so, the level of parallelization for both CFG parallelism and USP needs to be specified as shown below:
+Both parallelization methods can be employed simultaneously. To do so, the level of parallelization for both CFG parallelism and USP needs to be specified as shown below. The number of GPUs should be equal to 2 times the degrees of ulysses attention times the degrees of ring attention:
 
 ```python
 from xfuser.core.distributed import initialize_model_parallel

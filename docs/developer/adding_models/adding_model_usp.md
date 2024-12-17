@@ -29,7 +29,7 @@ init_distributed_environment(
 )
 ```
 
-Next, we specify the level of sequential parallelization. The number of GPUs should be equal to the degrees of ulysses attention and the degrees of ring attention:
+Next, we specify the level of sequential parallelization. The number of GPUs should be equal to the degrees of ulysses attention times the degrees of ring attention:
 
 ```python
 from xfuser.core.distributed import initialize_model_parallel

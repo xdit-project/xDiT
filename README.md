@@ -20,6 +20,7 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [HunyuanVideo](#perf_hunyuanvideo)
   - [Mochi-1](#perf_mochi1)
   - [CogVideoX](#perf_cogvideox)
   - [Flux.1](#perf_flux)
@@ -54,7 +55,7 @@ Consequently, multi-GPU and multi-machine deployments are essential to meet the 
 <h3 id="meet-xdit-parallel">Parallel Inference</h3>
 
 To meet real-time demand for DiTs applications, parallel inference is a must.
-xDiT is an inference engine designed for the parallel deployment of DiTs on large scale. 
+xDiT is an inference engine designed for the parallel deployment of DiTs on a large scale. 
 xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as computation accelerations.
 
 The overview of xDiT is shown as follows.
@@ -77,7 +78,7 @@ The four parallel methods in xDiT can be configured in a hybrid manner, optimizi
 As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
 If the model you require is not available in the model zoo, developing it yourself is straightforward; please refer to our [Dev Guide](#dev-guide).
 
-We also have implemented the following parallel stategies for reference:
+We also have implemented the following parallel strategies for reference:
 
 1. Tensor Parallelism
 2. [DistriFusion](https://arxiv.org/abs/2402.19481)
@@ -85,7 +86,7 @@ We also have implemented the following parallel stategies for reference:
 
 <h3 id="meet-xdit-perf">Computing Acceleration</h3>
 
-Optimization orthogonal to parallel focuses on accelerating single GPU performance.
+Optimization is orthogonal to parallel focuses on accelerating single GPU performance.
 
 First, xDiT employs a series of kernel acceleration methods. In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
 
@@ -93,6 +94,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**December 7, 2024**: xDiT is the official parallel inference engine for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo), reducing 5-sec video generation latency from 31 minutes to 5 minutes!
 * 🎉**November 28, 2024**: xDiT achieves 1.6 sec end-to-end latency for 28-step [Flux.1-Dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) inference on 4xH100!
 * 🎉**November 20, 2024**: xDiT supports [CogVideoX-1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) and achieved 6.12x speedup compare to the implementation in diffusers!
 * 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
@@ -115,6 +117,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |
+| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | 
 | [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | 
 | [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | 
 | [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | 
@@ -127,7 +130,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 </div>
 
-### Supported by legacy version only, including DistriFusion and Tensor Parallel as the standalong parallel strategies:
+### Supported by legacy version only, including DistriFusion and Tensor Parallel as the standalone parallel strategies:
 
 <div align="center">
 
@@ -156,51 +159,58 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 
 <h2 id="perf">📈 Performance</h2>
 
-<h3 id="perf_mochi1">Mochi1</h3>
+<h3 id="perf_hunyuanvideo">HunyuanVideo</h3>
 
-1. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
+1. [HunyuanVideo Performance Report](./docs/performance/hunyuanvideo.md)
+
+<h3 id="perf_cogvideox">Mochi1</h3>
+
+2. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
-2. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+3. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 
 <h3 id="perf_flux">Flux.1</h3>
 
-3. [Flux Performance Report](./docs/performance/flux.md)
+4. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_latte">Latte</h3>
 
-4. [Latte Performance Report](./docs/performance/latte.md)
+5. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-5. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+6. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-6. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+7. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-7. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+8. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
 ### 1. Install from pip
 
+We set diffusers as an optional installation requirement.
+First, if you only use the USP interface, you don't need to install diffusers. Second, different models have different requirements for diffusers - for example, the latest models may need to be installed from the diffusers main branch.
+
 ```
 pip install xfuser
-# Or optionally, with flash_attn
-pip install "xfuser[flash_attn]"
+# Or optionally, with diffusers
+pip install "xfuser[diffusers]"
 ```
 
 ### 2. Install from source 
 
 ```
 pip install -e .
-# Or optionally, with flash_attn
-pip install -e ".[flash_attn]"
+# Or optionally, with diffusers
+pip install -e ".[diffusers]"
 ```
 
 Note that we use two self-maintained packages:

@@ -194,7 +194,6 @@ class ParallelConfig:
     tp_config: TensorParallelConfig
     distributed_executor_backend: Optional[str] = None
     world_size: int = 1 # FIXME: remove this
-    rank: int = 0
     worker_cls: str = "xfuser.worker.worker.Worker"
 
     def __post_init__(self):

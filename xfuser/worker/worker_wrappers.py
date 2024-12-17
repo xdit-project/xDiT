@@ -34,9 +34,9 @@ class BaseWorkerWrapper(ABC):
 
 
 class RayWorkerWrapper(BaseWorkerWrapper):
-    def __init__(self, engine_config: EngineConfig, bundle_id: int) -> None:
+    def __init__(self, engine_config: EngineConfig, rank: int) -> None:
         super().__init__(engine_config.parallel_config.worker_cls)
-        self.init_worker(engine_config.parallel_config, bundle_id)
+        self.init_worker(engine_config.parallel_config, rank)
 
     def get_node_and_gpu_ids(
         self,

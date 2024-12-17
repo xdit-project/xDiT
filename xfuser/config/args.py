@@ -79,7 +79,6 @@ class xFuserArgs:
     # tensor parallel
     tensor_parallel_degree: int = 1
     split_scheme: Optional[str] = "row"
-    rank: int = 0
     world_size: int = 1
     # pipefusion parallel
     pipefusion_parallel_degree: int = 1
@@ -153,12 +152,6 @@ class xFuserArgs:
 
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
-        parallel_group.add_argument(
-            "--rank",
-            type=int,
-            default=0,
-            help="Rank of the process.",
-        )
         parallel_group.add_argument(
             "--world_size",
             type=int,
@@ -384,7 +377,6 @@ class xFuserArgs:
                 world_size=self.world_size,
             ),
             world_size=self.world_size,
-            rank=self.rank,
         )
 
         fast_attn_config = FastAttnConfig(

@@ -61,7 +61,6 @@ $OUTPUT_ARGS \
 --warmup_steps 1 \
 --prompt "brown dog laying on the ground with a metal bowl in front of him." \
 --world_size 2 \
---rank 0 \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

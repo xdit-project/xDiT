@@ -23,8 +23,7 @@ class RayGPUExecutor(GPUExecutor):
         self._init_ray_workers()
 
     def _init_ray_workers(self):
-        placement_group = initialize_ray_cluster(
-            self.engine_config.parallel_config,ray_address="0.0.0.0:6379")
+        placement_group = initialize_ray_cluster(self.engine_config.parallel_config)
 
         # create placement group and worker wrapper instance for lazy load worker
         self.workers = []

@@ -65,7 +65,7 @@ The overview of xDiT is shown as follows.
 </picture>
 
 
-1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention proposed by use3.
+1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach proposed by us combining DeepSpeed-Ulysses, Ring-Attention.
 
 2. [PipeFusion](https://arxiv.org/abs/2405.14430), a sequence-level pipeline parallelism, similar to [TeraPipe](https://arxiv.org/abs/2102.07988) but takes advantage of the input temporal redundancy characteristics of diffusion models.
 
@@ -76,7 +76,7 @@ The overview of xDiT is shown as follows.
 The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
 
 As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
-If the model you require is not available in the model zoo, developing it yourself is straightforward; please refer to our [Dev Guide](#dev-guide).
+If the model you require is not available in the model zoo, developing it by yourself is not so difficult; please refer to our [Dev Guide](#dev-guide).
 
 We also have implemented the following parallel strategies for reference:
 
@@ -86,7 +86,7 @@ We also have implemented the following parallel strategies for reference:
 
 <h3 id="meet-xdit-perf">Computing Acceleration</h3>
 
-Optimization is orthogonal to parallel focuses on accelerating single GPU performance.
+Optimization is orthogonal to parallel and focuses on accelerating performance on a single GPU.
 
 First, xDiT employs a series of kernel acceleration methods. In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
 
@@ -94,7 +94,7 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
-* 🎉**December 7, 2024**: xDiT is the official parallel inference engine for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo), reducing 5-sec video generation latency from 31 minutes to 5 minutes!
+* 🎉**December 7, 2024**: xDiT is the official parallel inference engine for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo), reducing the 5-sec video generation latency from 31 minutes to 5 minutes on 8xH100!
 * 🎉**November 28, 2024**: xDiT achieves 1.6 sec end-to-end latency for 28-step [Flux.1-Dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) inference on 4xH100!
 * 🎉**November 20, 2024**: xDiT supports [CogVideoX-1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) and achieved 6.12x speedup compare to the implementation in diffusers!
 * 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
@@ -153,7 +153,7 @@ More features and details can be found in our Intro Video:
 + [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) 
 + [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
 
-Medium article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
+The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
 
 Currently, if you need the parallel version of ComfyUI, please fill in this [application form ](https://forms.office.com/r/LjG3xJDF80) or contact [xditproject@outlook.com](mailto:xditproject@outlook.com).
 

@@ -7,7 +7,8 @@ from diffusers.models.embeddings import PatchEmbed, CogVideoXPatchEmbed
 
 from diffusers.models import CogVideoXTransformer3DModel
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
+from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
+# from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
 
 from xfuser.model_executor.models import xFuserModelBaseWrapper
 from xfuser.logger import init_logger
@@ -52,25 +53,25 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         encoder_hidden_states: torch.Tensor,
         timestep: Union[int, float, torch.LongTensor],
         timestep_cond: Optional[torch.Tensor] = None,
-        ofs: Optional[Union[int, float, torch.LongTensor]] = None,
+        # ofs: Optional[Union[int, float, torch.LongTensor]] = None,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        attention_kwargs: Optional[Dict[str, Any]] = None,
+        # attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ):
-        if attention_kwargs is not None:
-            attention_kwargs = attention_kwargs.copy()
-            lora_scale = attention_kwargs.pop("scale", 1.0)
-        else:
-            lora_scale = 1.0
+        # if attention_kwargs is not None:
+        #     attention_kwargs = attention_kwargs.copy()
+        #     lora_scale = attention_kwargs.pop("scale", 1.0)
+        # else:
+        #     lora_scale = 1.0
 
-        if USE_PEFT_BACKEND:
-            # weight the lora layers by setting `lora_scale` for each PEFT layer
-            scale_lora_layers(self, lora_scale)
-        else:
-            if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
-                logger.warning(
-                    "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
-                )
+        # if USE_PEFT_BACKEND:
+        #     # weight the lora layers by setting `lora_scale` for each PEFT layer
+        #     scale_lora_layers(self, lora_scale)
+        # else:
+        #     if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
+        #         logger.warning(
+        #             "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
+        #         )
 
         batch_size, num_frames, channels, height, width = hidden_states.shape
 
@@ -84,11 +85,11 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         t_emb = t_emb.to(dtype=hidden_states.dtype)
         emb = self.time_embedding(t_emb, timestep_cond)
 
-        if self.ofs_embedding is not None:
-            ofs_emb = self.ofs_proj(ofs)
-            ofs_emb = ofs_emb.to(dtype=hidden_states.dtype)
-            ofs_emb = self.ofs_embedding(ofs_emb)
-            emb = emb + ofs_emb
+        # if self.ofs_embedding is not None:
+        #     ofs_emb = self.ofs_proj(ofs)
+        #     ofs_emb = ofs_emb.to(dtype=hidden_states.dtype)
+        #     ofs_emb = self.ofs_embedding(ofs_emb)
+        #     emb = emb + ofs_emb
 
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
@@ -140,20 +141,23 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 5. Unpatchify
         p = self.config.patch_size
-        p_t = self.config.patch_size_t
+        output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, channels, p, p)
+        output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
+        # p_t = self.config.patch_size_t
 
-        if p_t is None:
-            output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, -1, p, p)
-            output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
-        else:
-            output = hidden_states.reshape(
-                batch_size, (num_frames + p_t - 1) // p_t, height // p, width // p, -1, p_t, p, p
-            )
-            output = output.permute(0, 1, 5, 4, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(1, 2)
 
-        if USE_PEFT_BACKEND:
-            # remove `lora_scale` from each PEFT layer
-            unscale_lora_layers(self, lora_scale)
+        # if p_t is None:
+        #     output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, -1, p, p)
+        #     output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
+        # else:
+        #     output = hidden_states.reshape(
+        #         batch_size, (num_frames + p_t - 1) // p_t, height // p, width // p, -1, p_t, p, p
+        #     )
+        #     output = output.permute(0, 1, 5, 4, 2, 6, 3, 7).flatten(6, 7).flatten(4, 5).flatten(1, 2)
+
+        # if USE_PEFT_BACKEND:
+        #     # remove `lora_scale` from each PEFT layer
+        #     unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)

@@ -336,14 +336,14 @@ class xFuserArgs:
     def create_config(
         self,
     ) -> Tuple[EngineConfig, InputConfig]:
-        if not torch.distributed.is_initialized():
-            logger.warning(
-                "Distributed environment is not initialized. " "Initializing..."
-            )
-            init_distributed_environment(
-                rank=self.rank,
-                world_size=self.world_size,
-            )
+        # if not torch.distributed.is_initialized():
+        #     logger.warning(
+        #         "Distributed environment is not initialized. " "Initializing..."
+        #     )
+        #     init_distributed_environment(
+        #         rank=self.rank,
+        #         world_size=self.world_size,
+        #     )
 
         model_config = ModelConfig(
             model=self.model,
@@ -365,19 +365,23 @@ class xFuserArgs:
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,
                 use_cfg_parallel=self.use_cfg_parallel,
+                world_size=self.world_size,
             ),
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
+                world_size=self.world_size,
             ),
             tp_config=TensorParallelConfig(
                 tp_degree=self.tensor_parallel_degree,
                 split_scheme=self.split_scheme,
+                world_size=self.world_size,
             ),
             pp_config=PipeFusionParallelConfig(
                 pp_degree=self.pipefusion_parallel_degree,
                 num_pipeline_patch=self.num_pipeline_patch,
                 attn_layer_num_for_pp=self.attn_layer_num_for_pp,
+                world_size=self.world_size,
             ),
             world_size=self.world_size,
             rank=self.rank,

@@ -9,7 +9,7 @@ export MODEL_TYPE="Sd3"
 declare -A MODEL_CONFIGS=(
     ["Pixart-alpha"]="pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
-    ["Sd3"]="sd3_ray_example.py /media/nudt/2E8C08758C0839BB/diffusion 20"
+    ["Sd3"]="ray_example.py /data/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev 28"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
 )
@@ -30,7 +30,7 @@ TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 N_GPUS=1
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 1"
+PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1"
 
 # CFG_ARGS="--use_cfg_parallel"
 
@@ -51,7 +51,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 1
 
 # export CUDA_VISIBLE_DEVICES=4,5,6,7
 
-MASTER_ADDR=0.0.0.0  MASTER_PORT=6378 python ./examples/$SCRIPT \
+python ./examples/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
 $TASK_ARGS \
@@ -60,6 +60,8 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
 --prompt "brown dog laying on the ground with a metal bowl in front of him." \
+--world_size 2 \
+--rank 0 \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

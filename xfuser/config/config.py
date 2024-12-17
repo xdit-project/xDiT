@@ -86,6 +86,7 @@ class FastAttnConfig:
 class DataParallelConfig:
     dp_degree: int = 1
     use_cfg_parallel: bool = False
+    world_size: int = 1
 
     def __post_init__(self):
         assert self.dp_degree >= 1, "dp_degree must greater than or equal to 1"
@@ -95,12 +96,12 @@ class DataParallelConfig:
             self.cfg_degree = 2
         else:
             self.cfg_degree = 1
-        assert self.dp_degree * self.cfg_degree <= dist.get_world_size(), (
+        assert self.dp_degree * self.cfg_degree <= self.world_size, (
             "dp_degree * cfg_degree must be less than or equal to "
             "world_size because of classifier free guidance"
         )
         assert (
-            dist.get_world_size() % (self.dp_degree * self.cfg_degree) == 0
+            self.world_size % (self.dp_degree * self.cfg_degree) == 0
         ), "world_size must be divisible by dp_degree * cfg_degree"
 
 
@@ -108,6 +109,7 @@ class DataParallelConfig:
 class SequenceParallelConfig:
     ulysses_degree: Optional[int] = None
     ring_degree: Optional[int] = None
+    world_size: int = 1
 
     def __post_init__(self):
         if self.ulysses_degree is None:
@@ -138,11 +140,12 @@ class SequenceParallelConfig:
 class TensorParallelConfig:
     tp_degree: int = 1
     split_scheme: Optional[str] = "row"
+    world_size: int = 1
 
     def __post_init__(self):
         assert self.tp_degree >= 1, "tp_degree must greater than 1"
         assert (
-            self.tp_degree <= dist.get_world_size()
+            self.tp_degree <= self.world_size
         ), "tp_degree must be less than or equal to world_size"
 
 
@@ -151,13 +154,14 @@ class PipeFusionParallelConfig:
     pp_degree: int = 1
     num_pipeline_patch: Optional[int] = None
     attn_layer_num_for_pp: Optional[List[int]] = (None,)
+    world_size: int = 1
 
     def __post_init__(self):
         assert (
             self.pp_degree is not None and self.pp_degree >= 1
         ), "pipefusion_degree must be set and greater than 1 to use pipefusion"
         assert (
-            self.pp_degree <= dist.get_world_size()
+            self.pp_degree <= self.world_size
         ), "pipefusion_degree must be less than or equal to world_size"
         if self.num_pipeline_patch is None:
             self.num_pipeline_patch = self.pp_degree
@@ -189,7 +193,7 @@ class ParallelConfig:
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
     distributed_executor_backend: Optional[str] = None
-    world_size: int = 1
+    world_size: int = 1 # FIXME: remove this
     rank: int = 0
     worker_cls: str = "xfuser.worker.worker.Worker"
 
@@ -205,10 +209,10 @@ class ParallelConfig:
             * self.tp_config.tp_degree
             * self.pp_config.pp_degree
         )
-        world_size = dist.get_world_size()
+        world_size = self.world_size
         assert parallel_world_size == world_size, (
             f"parallel_world_size {parallel_world_size} "
-            f"must be equal to world_size {dist.get_world_size()}"
+            f"must be equal to world_size {self.world_size}"
         )
         assert (
             world_size % (self.dp_config.dp_degree * self.dp_config.cfg_degree) == 0
@@ -240,7 +244,7 @@ class EngineConfig:
     fast_attn_config: FastAttnConfig
 
     def __post_init__(self):
-        world_size = dist.get_world_size()
+        world_size = self.parallel_config.world_size
         if self.fast_attn_config.use_fast_attn:
             assert self.parallel_config.dp_degree == world_size, f"world_size must be equal to dp_degree when using DiTFastAttn"
 

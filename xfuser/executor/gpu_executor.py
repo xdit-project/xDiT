@@ -1,14 +1,13 @@
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from xfuser.executor.base_executor import BaseExecutor
 from xfuser.executor.ray_utils import initialize_ray_cluster
 from xfuser.logger import init_logger
 from xfuser.worker.worker_wrappers import RayWorkerWrapper
-from xfuser.config.config import InputConfig
+from xfuser.config.config import InputConfig, EngineConfig
 
 logger = init_logger(__name__)
 
@@ -20,13 +19,12 @@ class GPUExecutor(BaseExecutor):
 
 class RayGPUExecutor(GPUExecutor):
     workers = []
-
     def _init_executor(self):
         self._init_ray_workers()
-        self.load_model()
 
     def _init_ray_workers(self):
-        placement_group = initialize_ray_cluster(self.engine_config.parallel_config)
+        placement_group = initialize_ray_cluster(
+            self.engine_config.parallel_config,ray_address="0.0.0.0:6379")
 
         # create placement group and worker wrapper instance for lazy load worker
         self.workers = []
@@ -44,12 +42,11 @@ class RayGPUExecutor(GPUExecutor):
                 num_cpus=0,
                 num_gpus=1,
                 scheduling_strategy=scheduling_strategy,
-            )(RayWorkerWrapper).remote(self.engine_config.parallel_config.worker_cls)
+            )(RayWorkerWrapper).remote(self.engine_config,bundle_id)
             self.workers.append(worker)
 
         self.node_metadata = {}
-   
-    
+
     def _run_workers(
         self,
         method: str,
@@ -57,7 +54,6 @@ class RayGPUExecutor(GPUExecutor):
         async_run_tensor_parallel_workers_only: bool = False,
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
-
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers. Can be used in the following
@@ -101,9 +97,11 @@ class RayGPUExecutor(GPUExecutor):
 
         return ray_worker_outputs
     
-    
-    def load_model(self):
-        self._run_workers("load_model")
-        
-    def execute(self,input_config: InputConfig):
+    def init_distributed_environment(self):
+        self._run_workers("init_worker_distributed_environment")
+
+    def load_model(self,engine_config: EngineConfig):
+        self._run_workers("load_model",engine_config)
+
+    def execute(self, input_config: InputConfig):
         self._run_workers("execute", input_config)

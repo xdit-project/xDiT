@@ -13,6 +13,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.parallel_state import get_data_parallel_world_size
 
+
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
@@ -25,6 +26,7 @@ def main():
         print(f"rank {local_rank} quantizing text encoder 2")
         quantize(text_encoder_3, weights=qfloat8)
         freeze(text_encoder_3)
+
     pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,

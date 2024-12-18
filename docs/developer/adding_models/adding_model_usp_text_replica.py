@@ -99,9 +99,20 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
                 )
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
+        encoder_query = query[:, :, :text_seq_length, :]
+        query = query[:, :, text_seq_length:, :]
+        encoder_key = key[:, :, :text_seq_length, :]
+        key = key[:, :, text_seq_length:, :]
+        encoder_value = value[:, :, :text_seq_length, :]
+        value = value[:, :, text_seq_length:, :]
+
+        encoder_query = encoder_query.transpose(1, 2)
+        encoder_key = encoder_key.transpose(1, 2)
+        encoder_value = encoder_value.transpose(1, 2)
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
+        
         hidden_states = self.hybrid_seq_parallel_attn(
             None,
             query,
@@ -109,6 +120,10 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
             value,
             dropout_p=0.0,
             causal=False,
+            joint_tensor_query=encoder_query,
+            joint_tensor_key=encoder_key,
+            joint_tensor_value=encoder_value,
+            joint_strategy="front",
         )
 
         hidden_states = hidden_states.reshape(
@@ -145,7 +160,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         rope_h, rope_w = hidden_states.shape[-2] // 2, hidden_states.shape[-1] // 2
         
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
-        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
         if image_rotary_emb is not None:
             freqs_cos, freqs_sin = image_rotary_emb
             dim_thw = freqs_cos.shape[-1]
@@ -188,7 +202,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
     def new_patch_embed(
         self, text_embeds: torch.Tensor, image_embeds: torch.Tensor
     ):
-        text_embeds = get_sp_group().all_gather(text_embeds.contiguous(), dim=-2)
         image_embeds = get_sp_group().all_gather(image_embeds.contiguous(), dim=-2)
         batch, embed_height, embed_width = image_embeds.shape[0], image_embeds.shape[-2] // 2, image_embeds.shape[-1] // 2
         text_len = text_embeds.shape[-2]
@@ -198,7 +211,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         text_embeds = output[:,:text_len,:]
         image_embeds = output[:,text_len:,:].reshape(batch, -1, embed_height, embed_width, output.shape[-1])
 
-        text_embeds = torch.chunk(text_embeds, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
         image_embeds = torch.chunk(image_embeds, get_sequence_parallel_world_size(),dim=-3)[get_sequence_parallel_rank()]
         image_embeds = image_embeds.reshape(batch, -1, image_embeds.shape[-1])
         return torch.cat([text_embeds, image_embeds], dim=1)

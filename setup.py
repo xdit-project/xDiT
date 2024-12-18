@@ -39,7 +39,7 @@ if __name__ == "__main__":
             "imageio",
             "imageio-ffmpeg",
             "optimum-quanto",
-            "flash_attn>=2.7.0"  # flash_attn>=2.7.0 with torch>=2.4.0 wraps ops with torch.ops
+            "flash_attn>=2.6.3"  # flash_attn>=2.7.0 with torch>=2.4.0 wraps ops with torch.ops
         ],
         extras_require={
             "diffusers": [

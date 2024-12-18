@@ -193,6 +193,6 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
             ]
             pos_embedding = torch.cat(pos_embed_list, dim=1)
 
-            embeds[:, self.max_text_seq_length :] += pos_embedding
+            embeds[:, text_embeds.shape[1] :] += pos_embedding
 
         return embeds

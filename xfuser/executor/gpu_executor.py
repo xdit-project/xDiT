@@ -8,7 +8,7 @@ from xfuser.executor.ray_utils import initialize_ray_cluster
 from xfuser.logger import init_logger
 from xfuser.worker.worker_wrappers import RayWorkerWrapper
 from xfuser.config.config import InputConfig, EngineConfig
-
+from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 logger = init_logger(__name__)
 
 
@@ -17,10 +17,11 @@ class GPUExecutor(BaseExecutor):
         pass
 
 
-class RayGPUExecutor(GPUExecutor):
+class RayDiffusionPipeline(GPUExecutor):
     workers = []
     def _init_executor(self):
         self._init_ray_workers()
+        self._run_workers("init_worker_distributed_environment")
 
     def _init_ray_workers(self):
         placement_group = initialize_ray_cluster(self.engine_config.parallel_config)
@@ -96,11 +97,14 @@ class RayGPUExecutor(GPUExecutor):
 
         return ray_worker_outputs
     
-    def init_distributed_environment(self):
-        self._run_workers("init_worker_distributed_environment")
+    @classmethod
+    def from_pretrained(cls,PipelineClass,pretrained_model_name_or_path: str,engine_config: EngineConfig,**kwargs):
+        pipeline = cls(engine_config)
+        pipeline._run_workers("from_pretrained",PipelineClass,pretrained_model_name_or_path,engine_config,**kwargs)
+        return pipeline
 
-    def load_model(self,engine_config: EngineConfig):
-        self._run_workers("load_model",engine_config)
+    def prepare_run(self, input_config: InputConfig, steps: int = 3, sync_steps: int = 1):
+        self._run_workers("prepare_run",input_config,steps,sync_steps)
 
-    def execute(self, input_config: InputConfig):
-        self._run_workers("execute", input_config)
+    def __call__(self,**kwargs):
+        return self._run_workers("execute",**kwargs)

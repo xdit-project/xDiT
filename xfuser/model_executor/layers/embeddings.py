@@ -1,3 +1,4 @@
+
 # adapted from https://github.com/huggingface/diffusers/blob/v0.29.0/src/diffusers/models/embeddings.py
 import torch
 
@@ -170,8 +171,7 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
                 or self.sample_frames != pre_time_compression_frames
             ):
                 pos_embedding = self._get_positional_embeddings(sum_height, width, pre_time_compression_frames)
-                pos_embedding = pos_embedding.to(image_embeds.device, dtype=image_embeds.dtype)
-                # pos_embedding = pos_embedding.to(embeds.device, dtype=embeds.dtype)
+                pos_embedding = pos_embedding.to(embeds.device, dtype=embeds.dtype)
             else:
                 pos_embedding = self.pos_embedding
 
@@ -194,15 +194,11 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
             ]
             pos_embedding = torch.cat(pos_embed_list, dim=1)
 
-            image_embeds = image_embeds + pos_embedding
             embeds[:, self.max_text_seq_length :] += pos_embedding
 
-        embeds = torch.cat(
-            [text_embeds, image_embeds], dim=1
-        ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]
-
         return embeds
-    
+
+
 
 
 @xFuserLayerWrappersRegister.register(CogVideoXPatchEmbed)
@@ -256,7 +252,6 @@ class xFuserConsisIDPatchEmbedWrapper(xFuserLayerBaseWrapper):
             ):
                 pos_embedding = self._get_positional_embeddings(sum_height, width, pre_time_compression_frames)
                 pos_embedding = pos_embedding.to(image_embeds.device, dtype=image_embeds.dtype)
-                # pos_embedding = pos_embedding.to(embeds.device, dtype=embeds.dtype)
             else:
                 pos_embedding = self.pos_embedding
 
@@ -280,11 +275,10 @@ class xFuserConsisIDPatchEmbedWrapper(xFuserLayerBaseWrapper):
             pos_embedding = torch.cat(pos_embed_list, dim=1)
 
             image_embeds = image_embeds + pos_embedding
-            # embeds[:, self.max_text_seq_length :] += pos_embedding
+
 
         embeds = torch.cat(
             [text_embeds, image_embeds], dim=1
         ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]
 
         return embeds
-

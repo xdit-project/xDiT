@@ -12,15 +12,11 @@ from diffusers.models.attention_processor import (
     JointAttnProcessor2_0,
     FluxAttnProcessor2_0,
     HunyuanAttnProcessor2_0,
-    CogVideoXAttnProcessor2_0
+    CogVideoXAttnProcessor2_0,
+    ConsisIDAttnProcessor2_0,
 )
 
-try:
-    from diffusers.models.attention_processor import CogVideoXAttnProcessor2_0
-except ImportError:
-    CogVideoXAttnProcessor2_0 = None
-# 1.5
-# from diffusers.models.embeddings import apply_rotary_emb
+from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -61,59 +57,6 @@ def torch_compile_disable_if_v100(func):
     if is_v100():
         return torch.compiler.disable(func)
     return func
-
-def apply_rotary_emb(
-    x: torch.Tensor,
-    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
-    use_real: bool = True,
-    use_real_unbind_dim: int = -1,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensor. This function applies rotary embeddings
-    to the given query or key 'x' tensors using the provided frequency tensor 'freqs_cis'. The input tensors are
-    reshaped as complex numbers, and the frequency tensor is reshaped for broadcasting compatibility. The resulting
-    tensors contain rotary embeddings and are returned as real tensors.
-    Args:
-        x (`torch.Tensor`):
-            Query or key tensor to apply rotary embeddings. [B, H, S, D] xk (torch.Tensor): Key tensor to apply
-        freqs_cis (`Tuple[torch.Tensor]`): Precomputed frequency tensor for complex exponentials. ([S, D], [S, D],)
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-    """
-    if use_real:
-        cos, sin = freqs_cis  # [S, D]
-        cos = cos[None, None]
-        sin = sin[None, None]
-        cos, sin = cos.to(x.device), sin.to(x.device)
-
-        if use_real_unbind_dim == -1:
-            # Used for flux, cogvideox, hunyuan-dit
-            x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(
-                -1
-            )  # [B, S, H, D//2]
-            x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
-        elif use_real_unbind_dim == -2:
-            # Used for Stable Audio
-            x_real, x_imag = x.reshape(*x.shape[:-1], 2, -1).unbind(
-                -2
-            )  # [B, S, H, D//2]
-            x_rotated = torch.cat([-x_imag, x_real], dim=-1)
-        else:
-            raise ValueError(
-                f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2."
-            )
-
-        out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
-
-        return out
-    else:
-        # used for lumina
-        x_rotated = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-        freqs_cis = freqs_cis.unsqueeze(2)
-        x_out = torch.view_as_real(x_rotated * freqs_cis).flatten(3)
-
-        return x_out.type_as(x)
-
 
 
 class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
@@ -1026,107 +969,108 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         return hidden_states
 
 
-if CogVideoXAttnProcessor2_0 is not None:
+@xFuserAttentionProcessorRegister.register(CogVideoXAttnProcessor2_0)
+class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
+    r"""
+    Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
+    query and key vectors, but does not include spatial normalization.
+    """
 
-    @xFuserAttentionProcessorRegister.register(CogVideoXAttnProcessor2_0)
-    class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
-        r"""
-        Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
-        query and key vectors, but does not include spatial normalization.
-        """
-
-        def __init__(self):
-            super().__init__()
-            use_long_ctx_attn_kvcache = True
-            self.use_long_ctx_attn_kvcache = (
-                HAS_LONG_CTX_ATTN
-                and use_long_ctx_attn_kvcache
-                and get_sequence_parallel_world_size() > 1)
-
-            if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-                from xfuser.core.long_ctx_attention import (
-                    xFuserLongContextAttention,
-                    xFuserUlyssesAttention,
-                )            
-
-                if HAS_FLASH_ATTN:
-                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                        use_kv_cache=self.use_long_ctx_attn_kvcache
-                    )
-                else:
-                    self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
-                        use_fa=False,
-                        use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    )
-            else:
-                self.hybrid_seq_parallel_attn = None
-
-        def __call__(
-            self,
-            attn: Attention,
-            hidden_states: torch.Tensor,
-            encoder_hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            image_rotary_emb: Optional[torch.Tensor] = None,
-            *args,
-            **kwargs,
-        ) -> torch.Tensor:
-            text_seq_length = encoder_hidden_states.size(1)
-            latent_seq_length = hidden_states.size(1)
-
-            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-
-            batch_size, sequence_length, _ = (
-                hidden_states.shape
-                if encoder_hidden_states is None
-                else encoder_hidden_states.shape
+    def __init__(self):
+        super().__init__()
+        use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            from xfuser.core.long_ctx_attention import (
+                xFuserLongContextAttention,
+                xFuserUlyssesAttention,
             )
 
-            if attention_mask is not None:
-                attention_mask = attn.prepare_attention_mask(
-                    attention_mask, sequence_length, batch_size
+            if HAS_FLASH_ATTN:
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
-                attention_mask = attention_mask.view(
-                    batch_size, attn.heads, -1, attention_mask.shape[-1]
+            else:
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
+        else:
+            self.hybrid_seq_parallel_attn = None
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        text_seq_length = encoder_hidden_states.size(1)
+        latent_seq_length = hidden_states.size(1)
+
+        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
+        )
+
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(
+                attention_mask, sequence_length, batch_size
+            )
+            attention_mask = attention_mask.view(
+                batch_size, attn.heads, -1, attention_mask.shape[-1]
+            )
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # Apply RoPE if needed
+        if image_rotary_emb is not None:
+            query[:, :, text_seq_length:] = apply_rotary_emb(
+                query[:, :, text_seq_length:], image_rotary_emb
+            )
+            if not attn.is_cross_attention:
+                key[:, :, text_seq_length:] = apply_rotary_emb(
+                    key[:, :, text_seq_length:], image_rotary_emb
                 )
 
-            query = attn.to_q(hidden_states)
-            key = attn.to_k(hidden_states)
-            value = attn.to_v(hidden_states)
-
-            inner_dim = key.shape[-1]
-            head_dim = inner_dim // attn.heads
-
-            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-            if attn.norm_q is not None:
-                query = attn.norm_q(query)
-            if attn.norm_k is not None:
-                key = attn.norm_k(key)
-            
-            # Apply RoPE if needed
-            if image_rotary_emb is not None:
-                query[:, :, text_seq_length:] = apply_rotary_emb(
-                    query[:, :, text_seq_length:], image_rotary_emb
-                )
-                if not attn.is_cross_attention:
-                    key[:, :, text_seq_length:] = apply_rotary_emb(
-                        key[:, :, text_seq_length:], image_rotary_emb
-                    )
-
-            #! ---------------------------------------- KV CACHE ----------------------------------------
-            if not self.use_long_ctx_attn_kvcache:
-                key, value = get_cache_manager().update_and_get_kv_cache(
-                    new_kv=[key, value],
-                    layer=attn,
-                    slice_dim=2,
-                    layer_type="attn",)
-
-
-            #! ---------------------------------------- ATTENTION ----------------------------------------
-            if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        #! ---------------------------------------- ATTENTION ----------------------------------------
+        if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
+            hidden_states = USP(
+                query, key, value, dropout_p=0.0, is_causal=False
+            )
+            hidden_states = hidden_states.transpose(1, 2).reshape(
+                batch_size, -1, attn.heads * head_dim
+            )
+        elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            if get_runtime_state().split_text_embed_in_sp:
+                encoder_query = None
+                encoder_key = None
+                encoder_value = None
+            else:
                 encoder_query = query[:, :, :text_seq_length, :]
                 query = query[:, :, text_seq_length:, :]
                 encoder_key = key[:, :, :text_seq_length, :]
@@ -1134,243 +1078,243 @@ if CogVideoXAttnProcessor2_0 is not None:
                 encoder_value = value[:, :, :text_seq_length, :]
                 value = value[:, :, text_seq_length:, :]
 
-                query = query.transpose(1, 2)
-                key = key.transpose(1, 2)
-                value = value.transpose(1, 2)
                 encoder_query = encoder_query.transpose(1, 2)
                 encoder_key = encoder_key.transpose(1, 2)
                 encoder_value = encoder_value.transpose(1, 2)
 
-                hidden_states = self.hybrid_seq_parallel_attn(
-                    attn,
-                    query,
-                    key,
-                    value,
-                    dropout_p=0.0,
-                    causal=False,
-                    joint_tensor_query=encoder_query,
-                    joint_tensor_key=encoder_key,
-                    joint_tensor_value=encoder_value,
-                    joint_strategy="front",)
-                
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+
+            hidden_states = self.hybrid_seq_parallel_attn(
+                None,
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                causal=False,
+                joint_tensor_query=encoder_query,
+                joint_tensor_key=encoder_key,
+                joint_tensor_value=encoder_value,
+                joint_strategy="front",
+            )
+
+            hidden_states = hidden_states.reshape(
+                batch_size, -1, attn.heads * head_dim
+            )
+        else:
+            if HAS_FLASH_ATTN:
+                from flash_attn import flash_attn_func
+
+                query = query.transpose(1, 2)
+                key = key.transpose(1, 2)
+                value = value.transpose(1, 2)
+                hidden_states = flash_attn_func(
+                    query, key, value, dropout_p=0.0, causal=False
+                )
                 hidden_states = hidden_states.reshape(
                     batch_size, -1, attn.heads * head_dim
                 )
 
             else:
-                if HAS_FLASH_ATTN:
-                    from flash_attn import flash_attn_func
+                # the output of sdp = (batch, num_heads, seq_len, head_dim)
+                # TODO: add support for attn.scale when we move to Torch 2.1
+                hidden_states = F.scaled_dot_product_attention(
+                    query, key, value, dropout_p=0.0, is_causal=False
+                )
+                hidden_states = hidden_states.transpose(1, 2).reshape(
+                    batch_size, -1, attn.heads * head_dim
+                )
 
-                    query = query.transpose(1, 2)
-                    key = key.transpose(1, 2)
-                    value = value.transpose(1, 2)
-                    hidden_states = flash_attn_func(
-                        query, key, value, dropout_p=0.0, causal=False
-                    )
-                    hidden_states = hidden_states.reshape(
-                        batch_size, -1, attn.heads * head_dim
-                    )
+        #! ORIGIN
+        # hidden_states = F.scaled_dot_product_attention(
+        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        # )
+        # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        #! ---------------------------------------- ATTENTION ----------------------------------------
 
-                else:
-                    # the output of sdp = (batch, num_heads, seq_len, head_dim)
-                    # TODO: add support for attn.scale when we move to Torch 2.1
-                    hidden_states = F.scaled_dot_product_attention(
-                        query, key, value, dropout_p=0.0, is_causal=False
-                    )
-                    hidden_states = hidden_states.transpose(1, 2).reshape(
-                        batch_size, -1, attn.heads * head_dim
-                    )
+        assert text_seq_length + latent_seq_length == hidden_states.shape[1]
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
 
-            #! ORIGIN
-            # hidden_states = F.scaled_dot_product_attention(
-            #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-            # )
-            # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-            #! ---------------------------------------- ATTENTION ----------------------------------------
 
-            assert text_seq_length + latent_seq_length == hidden_states.shape[1]
-            # linear proj
-            hidden_states = attn.to_out[0](hidden_states)
-            # dropout
-            hidden_states = attn.to_out[1](hidden_states)
+        encoder_hidden_states, hidden_states = hidden_states.split(
+            [text_seq_length, latent_seq_length], dim=1
+        )
+        return hidden_states, encoder_hidden_states
+    
 
-            encoder_hidden_states, hidden_states = hidden_states.split(
-                [text_seq_length, latent_seq_length], dim=1
+
+@xFuserAttentionProcessorRegister.register(ConsisIDAttnProcessor2_0)
+class xFuserConsisIDAttnProcessor2_0(ConsisIDAttnProcessor2_0):
+    r"""
+    Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
+    query and key vectors, but does not include spatial normalization.
+    """
+
+    def __init__(self):
+        super().__init__()
+        use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1)
+
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            from xfuser.core.long_ctx_attention import (
+                xFuserLongContextAttention,
+                xFuserUlyssesAttention,
+            )            
+
+            if HAS_FLASH_ATTN:
+                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                )
+            else:
+                self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
+                    use_fa=False,
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                )
+        else:
+            self.hybrid_seq_parallel_attn = None
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        text_seq_length = encoder_hidden_states.size(1)
+        latent_seq_length = hidden_states.size(1)
+
+        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
+        )
+
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(
+                attention_mask, sequence_length, batch_size
             )
-            return hidden_states, encoder_hidden_states
+            attention_mask = attention_mask.view(
+                batch_size, attn.heads, -1, attention_mask.shape[-1]
+            )
 
-# @xFuserAttentionProcessorRegister.register(CogVideoXAttnProcessor2_0)
-# class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
-#     r"""
-#     Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
-#     query and key vectors, but does not include spatial normalization.
-#     """
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
 
-    # def __init__(self):
-    #     super().__init__()
-    #     use_long_ctx_attn_kvcache = True
-    #     self.use_long_ctx_attn_kvcache = (
-    #         HAS_LONG_CTX_ATTN
-    #         and use_long_ctx_attn_kvcache
-    #         and get_sequence_parallel_world_size() > 1
-    #     )
-    #     if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-    #         from xfuser.core.long_ctx_attention import (
-    #             xFuserLongContextAttention,
-    #             xFuserUlyssesAttention,
-    #         )
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
 
-        #     if HAS_FLASH_ATTN:
-        #         self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-        #             use_kv_cache=self.use_long_ctx_attn_kvcache
-        #         )
-        #     else:
-        #         self.hybrid_seq_parallel_attn = xFuserUlyssesAttention(
-        #             use_fa=False,
-        #             use_kv_cache=self.use_long_ctx_attn_kvcache,
-        #         )
-        # else:
-        #     self.hybrid_seq_parallel_attn = None
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-    # def __call__(
-    #     self,
-    #     attn: Attention,
-    #     hidden_states: torch.Tensor,
-    #     encoder_hidden_states: torch.Tensor,
-    #     attention_mask: Optional[torch.Tensor] = None,
-    #     image_rotary_emb: Optional[torch.Tensor] = None,
-    #     *args,
-    #     **kwargs,
-    # ) -> torch.Tensor:
-    #     text_seq_length = encoder_hidden_states.size(1)
-    #     latent_seq_length = hidden_states.size(1)
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+        
+        # Apply RoPE if needed
+        if image_rotary_emb is not None:
+            query[:, :, text_seq_length:] = apply_rotary_emb(
+                query[:, :, text_seq_length:], image_rotary_emb
+            )
+            if not attn.is_cross_attention:
+                key[:, :, text_seq_length:] = apply_rotary_emb(
+                    key[:, :, text_seq_length:], image_rotary_emb
+                )
 
-    #     hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-
-    #     batch_size, sequence_length, _ = (
-    #         hidden_states.shape
-    #         if encoder_hidden_states is None
-    #         else encoder_hidden_states.shape
-    #     )
-
-    #     if attention_mask is not None:
-    #         attention_mask = attn.prepare_attention_mask(
-    #             attention_mask, sequence_length, batch_size
-    #         )
-    #         attention_mask = attention_mask.view(
-    #             batch_size, attn.heads, -1, attention_mask.shape[-1]
-    #         )
-
-    #     query = attn.to_q(hidden_states)
-    #     key = attn.to_k(hidden_states)
-    #     value = attn.to_v(hidden_states)
-
-    #     inner_dim = key.shape[-1]
-    #     head_dim = inner_dim // attn.heads
-
-    #     query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-    #     key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-    #     value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-    #     if attn.norm_q is not None:
-    #         query = attn.norm_q(query)
-    #     if attn.norm_k is not None:
-    #         key = attn.norm_k(key)
-
-    #     # Apply RoPE if needed
-    #     if image_rotary_emb is not None:
-    #         query[:, :, text_seq_length:] = apply_rotary_emb(
-    #             query[:, :, text_seq_length:], image_rotary_emb
-    #         )
-    #         if not attn.is_cross_attention:
-    #             key[:, :, text_seq_length:] = apply_rotary_emb(
-    #                 key[:, :, text_seq_length:], image_rotary_emb
-    #             )
-
-    #     #! ---------------------------------------- ATTENTION ----------------------------------------
-    #     if get_pipeline_parallel_world_size() == 1 and get_runtime_state().split_text_embed_in_sp:
-    #         hidden_states = USP(
-    #             query, key, value, dropout_p=0.0, is_causal=False
-    #         )
-    #         hidden_states = hidden_states.transpose(1, 2).reshape(
-    #             batch_size, -1, attn.heads * head_dim
-    #         )
-    #     elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-    #         if get_runtime_state().split_text_embed_in_sp:
-    #             encoder_query = None
-    #             encoder_key = None
-    #             encoder_value = None
-    #         else:
-    #             encoder_query = query[:, :, :text_seq_length, :]
-    #             query = query[:, :, text_seq_length:, :]
-    #             encoder_key = key[:, :, :text_seq_length, :]
-    #             key = key[:, :, text_seq_length:, :]
-    #             encoder_value = value[:, :, :text_seq_length, :]
-    #             value = value[:, :, text_seq_length:, :]
-
-    #             encoder_query = encoder_query.transpose(1, 2)
-    #             encoder_key = encoder_key.transpose(1, 2)
-    #             encoder_value = encoder_value.transpose(1, 2)
-
-    #         query = query.transpose(1, 2)
-    #         key = key.transpose(1, 2)
-    #         value = value.transpose(1, 2)
-
-    #         hidden_states = self.hybrid_seq_parallel_attn(
-    #             None,
-    #             query,
-    #             key,
-    #             value,
-    #             dropout_p=0.0,
-    #             causal=False,
-    #             joint_tensor_query=encoder_query,
-    #             joint_tensor_key=encoder_key,
-    #             joint_tensor_value=encoder_value,
-    #             joint_strategy="front",
-    #         )
-
-    #         hidden_states = hidden_states.reshape(
-    #             batch_size, -1, attn.heads * head_dim
-    #         )
-    #     else:
-    #         if HAS_FLASH_ATTN:
-    #             from flash_attn import flash_attn_func
-
-    #             query = query.transpose(1, 2)
-    #             key = key.transpose(1, 2)
-    #             value = value.transpose(1, 2)
-    #             hidden_states = flash_attn_func(
-    #                 query, key, value, dropout_p=0.0, causal=False
-    #             )
-    #             hidden_states = hidden_states.reshape(
-    #                 batch_size, -1, attn.heads * head_dim
-    #             )
-
-    #         else:
-    #             # the output of sdp = (batch, num_heads, seq_len, head_dim)
-    #             # TODO: add support for attn.scale when we move to Torch 2.1
-    #             hidden_states = F.scaled_dot_product_attention(
-    #                 query, key, value, dropout_p=0.0, is_causal=False
-    #             )
-    #             hidden_states = hidden_states.transpose(1, 2).reshape(
-    #                 batch_size, -1, attn.heads * head_dim
-    #             )
-
-    #     #! ORIGIN
-    #     # hidden_states = F.scaled_dot_product_attention(
-    #     #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-    #     # )
-    #     # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-    #     #! ---------------------------------------- ATTENTION ----------------------------------------
-
-    #     assert text_seq_length + latent_seq_length == hidden_states.shape[1]
-    #     # linear proj
-    #     hidden_states = attn.to_out[0](hidden_states)
-    #     # dropout
-    #     hidden_states = attn.to_out[1](hidden_states)
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+        if not self.use_long_ctx_attn_kvcache:
+            key, value = get_cache_manager().update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=2,
+                layer_type="attn",)
 
 
-    #     encoder_hidden_states, hidden_states = hidden_states.split(
-    #         [text_seq_length, latent_seq_length], dim=1
-    #     )
-    #     return hidden_states, encoder_hidden_states
+        #! ---------------------------------------- ATTENTION ----------------------------------------
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            encoder_query = query[:, :, :text_seq_length, :]
+            query = query[:, :, text_seq_length:, :]
+            encoder_key = key[:, :, :text_seq_length, :]
+            key = key[:, :, text_seq_length:, :]
+            encoder_value = value[:, :, :text_seq_length, :]
+            value = value[:, :, text_seq_length:, :]
+
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            encoder_query = encoder_query.transpose(1, 2)
+            encoder_key = encoder_key.transpose(1, 2)
+            encoder_value = encoder_value.transpose(1, 2)
+
+            hidden_states = self.hybrid_seq_parallel_attn(
+                attn,
+                query,
+                key,
+                value,
+                dropout_p=0.0,
+                causal=False,
+                joint_tensor_query=encoder_query,
+                joint_tensor_key=encoder_key,
+                joint_tensor_value=encoder_value,
+                joint_strategy="front",)
+            
+            hidden_states = hidden_states.reshape(
+                batch_size, -1, attn.heads * head_dim
+            )
+
+        else:
+            if HAS_FLASH_ATTN:
+                from flash_attn import flash_attn_func
+
+                query = query.transpose(1, 2)
+                key = key.transpose(1, 2)
+                value = value.transpose(1, 2)
+                hidden_states = flash_attn_func(
+                    query, key, value, dropout_p=0.0, causal=False
+                )
+                hidden_states = hidden_states.reshape(
+                    batch_size, -1, attn.heads * head_dim
+                )
+
+            else:
+                # the output of sdp = (batch, num_heads, seq_len, head_dim)
+                # TODO: add support for attn.scale when we move to Torch 2.1
+                hidden_states = F.scaled_dot_product_attention(
+                    query, key, value, dropout_p=0.0, is_causal=False
+                )
+                hidden_states = hidden_states.transpose(1, 2).reshape(
+                    batch_size, -1, attn.heads * head_dim
+                )
+
+        #! ORIGIN
+        # hidden_states = F.scaled_dot_product_attention(
+        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        # )
+        # hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        #! ---------------------------------------- ATTENTION ----------------------------------------
+
+        assert text_seq_length + latent_seq_length == hidden_states.shape[1]
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        encoder_hidden_states, hidden_states = hidden_states.split(
+            [text_seq_length, latent_seq_length], dim=1
+        )
+        return hidden_states, encoder_hidden_states
+   

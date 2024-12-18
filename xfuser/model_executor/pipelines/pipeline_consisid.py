@@ -1,5 +1,6 @@
 import os
-from typing import Any, List, Tuple, Callable, Optional, Union, Dict
+from typing import List, Tuple, Callable, Optional, Union, Dict
+# from typing import Any, List, Tuple, Callable, Optional, Union, Dict
 
 import torch
 import torch.distributed
@@ -52,9 +53,9 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         self,
         prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
+        height: int = 480,
+        width: int = 720,
+        num_frames: int = 49,
         num_inference_steps: int = 50,
         timesteps: Optional[List[int]] = None,
         guidance_scale: float = 6,
@@ -67,12 +68,16 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: str = "pil",
         return_dict: bool = True,
-        attention_kwargs: Optional[Dict[str, Any]] = None,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 226,
+        **kwargs,
     ) -> Union[CogVideoXPipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
@@ -154,12 +159,24 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             `tuple`. When returning a tuple, the first element is a list with the generated images.
         """
 
+        if num_frames > 49:
+            raise ValueError(
+                "The number of frames must be less than 49 for now due to static positional embeddings. This will be updated in the future to remove this limitation."
+            )
+
+
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
-        height = height or self.transformer.config.sample_height * self.vae_scale_factor_spatial
-        width = width or self.transformer.config.sample_width * self.vae_scale_factor_spatial
-        num_frames = num_frames or self.transformer.config.sample_frames
+
+        height = (
+            height
+            or self.transformer.config.sample_size * self.vae_scale_factor_spatial
+        )
+        width = (
+            width or self.transformer.config.sample_size * self.vae_scale_factor_spatial
+        )
+
 
         num_videos_per_prompt = 1
 
@@ -174,7 +191,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             negative_prompt_embeds,
         )
         self._guidance_scale = guidance_scale
-        self._attention_kwargs = attention_kwargs
+        # self._attention_kwargs = attention_kwargs
         self._interrupt = False
 
         # 2. Default call parameters
@@ -217,18 +234,13 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         )
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device, timesteps
+        )
+        # timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents.
-        latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
-
-        # For CogVideoX 1.5, the latent frames should be padded to make it divisible by patch_size_t
-        patch_size_t = self.transformer.config.patch_size_t
-        additional_frames = 0
-        if patch_size_t is not None and latent_frames % patch_size_t != 0:
-            additional_frames = patch_size_t - latent_frames % patch_size_t
-            num_frames += additional_frames * self.vae_scale_factor_temporal
 
         latent_channels = self.transformer.config.in_channels
         latents = self.prepare_latents(
@@ -256,12 +268,13 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         )
 
         # 8. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        num_warmup_steps = max(
+            len(timesteps) - num_inference_steps * self.scheduler.order, 0
+        )
+        # num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
-        p_t = self.transformer.config.patch_size_t or 1
-        latents, prompt_embeds, image_rotary_emb = self._init_sync_pipeline(
-            latents, prompt_embeds, image_rotary_emb, 
-            (latents.size(1) + p_t - 1) // p_t
+        latents, image_rotary_emb = self._init_sync_pipeline(
+            latents, image_rotary_emb, latents.size(1)
         )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # for DPM-solver++
@@ -275,7 +288,10 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                         [latents] * (2 // get_classifier_free_guidance_world_size())
                     )
 
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
+                # latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
@@ -286,7 +302,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     encoder_hidden_states=prompt_embeds,
                     timestep=timestep,
                     image_rotary_emb=image_rotary_emb,
-                    attention_kwargs=attention_kwargs,
+                    # attention_kwargs=attention_kwargs,
                     return_dict=False,
                 )[0]
                 noise_pred = noise_pred.float()
@@ -309,7 +325,10 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
-                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                    latents = self.scheduler.step(
+                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                    )[0]
+                    # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
                 else:
                     latents, old_pred_original_sample = self.scheduler.step(
                         noise_pred,
@@ -331,7 +350,10 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop(
+                        "negative_prompt_embeds", negative_prompt_embeds
+                    )
+                    # negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
                 if i == len(timesteps) - 1 or (
                     (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
@@ -342,11 +364,15 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             latents = get_sp_group().all_gather(latents, dim=-2)
 
         if is_dp_last_group():
-            if not output_type == "latent":
-                # Discard any padding frames that were added for CogVideoX 1.5
-                latents = latents[:, additional_frames:]
+            if not (output_type == "latents" or output_type == "latent"):
+            # if not output_type == "latent":
+            #     # Discard any padding frames that were added for CogVideoX 1.5
+            #     latents = latents[:, additional_frames:]
                 video = self.decode_latents(latents)
-                video = self.video_processor.postprocess_video(video=video, output_type=output_type)
+                video = self.video_processor.postprocess_video(
+                    video=video, output_type=output_type
+                )
+                # video = self.video_processor.postprocess_video(video=video, output_type=output_type)
             else:
                 video = latents
         else:
@@ -363,18 +389,10 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
     def _init_sync_pipeline(
         self,
         latents: torch.Tensor,
-        prompt_embeds: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         latents_frames: Optional[int] = None,
     ):
         latents = super()._init_video_sync_pipeline(latents)
-        
-        if get_runtime_state().split_text_embed_in_sp:
-            if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
-            else:
-                get_runtime_state().split_text_embed_in_sp = False                
-
         if image_rotary_emb is not None:
             assert latents_frames is not None
             d = image_rotary_emb[0].shape[-1]
@@ -402,7 +420,10 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     dim=0,
                 ),
             )
-        return latents, prompt_embeds, image_rotary_emb
+        return latents, image_rotary_emb
+    
+    
+
 
     @property
     def interrupt(self):

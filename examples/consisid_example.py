@@ -20,6 +20,14 @@ def main():
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
 
+
+    # Check if ulysses_degree is valid
+    num_heads = 30
+    if engine_args.ulysses_degree > 0 and num_heads % engine_args.ulysses_degree != 0:
+        raise ValueError(
+            f"ulysses_degree ({engine_args.ulysses_degree}) must be a divisor of the number of heads ({num_heads})"
+        )
+
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
     
@@ -79,6 +87,7 @@ def main():
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
     if is_dp_last_group():
+        world_size = get_data_parallel_world_size()
         resolution = f"{input_config.width}x{input_config.height}"
         output_filename = f"results/cogvideox_{parallel_info}_{resolution}.mp4"
         export_to_video(output, output_filename, fps=8)

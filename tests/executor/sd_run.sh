@@ -9,7 +9,7 @@ export MODEL_TYPE="Sd3"
 declare -A MODEL_CONFIGS=(
     ["Pixart-alpha"]="pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
-    ["Sd3"]="ray_example.py /data/stable-diffusion-3-medium-diffusers 20"
+    ["Sd3"]="./test_ray.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev 28"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
 )
@@ -29,7 +29,7 @@ TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-N_GPUS=1
+N_GPUS=2
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1"
 
 # CFG_ARGS="--use_cfg_parallel"
@@ -49,9 +49,9 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1
 # Use this flag to quantize the T5 text encoder, which could reduce the memory usage and have no effect on the result quality.
 # QUANTIZE_FLAG="--use_fp8_t5_encoder"
 
-# export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1
 
-python ./examples/$SCRIPT \
+python ./tests/executor/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
 $TASK_ARGS \
@@ -60,7 +60,8 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
 --prompt "brown dog laying on the ground with a metal bowl in front of him." \
---world_size 2 \
+--use_ray \
+--ray_world_size $N_GPUS \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

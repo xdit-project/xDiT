@@ -43,8 +43,8 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_model(
-        self, engine_config: EngineConfig,*args, **kwargs
+    def from_pretrained(
+        self, PipelineClass, engine_config: EngineConfig,**kwargs,
     ):
         raise NotImplementedError
 
@@ -73,46 +73,23 @@ class Worker(WorkerBase):
             world_size=self.parallel_config.world_size,
         )
 
-    def load_model(self,engine_config: EngineConfig):
+    def from_pretrained(self,PipelineClass, pretrained_model_name_or_path: str, engine_config: EngineConfig,**kwargs,):
         local_rank = get_world_group().local_rank
-        pipeline_map = {
-            "PixArt-XL-2-1024-MS": xFuserPixArtAlphaPipeline,
-            "PixArt-Sigma-XL-2-2K-MS": xFuserPixArtSigmaPipeline,
-            "stable-diffusion-3-medium-diffusers": xFuserStableDiffusion3Pipeline,
-            "HunyuanDiT-v1.2-Diffusers": xFuserHunyuanDiTPipeline,
-            "FLUX.1-schnell": xFuserFluxPipeline,
-        }
-        model_name = engine_config.model_config.model.split("/")[-1]
-        PipelineClass = pipeline_map.get(model_name)
-        if PipelineClass is None:
-            raise NotImplementedError(f"{model_name} is currently not supported!")
-        if model_name == "stable-diffusion-3-medium-diffusers": # FIXME: hard code 
-            text_encoder = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_3", torch_dtype=torch.float16)
-            pipe = PipelineClass.from_pretrained(
-                pretrained_model_name_or_path=engine_config.model_config.model,
-                engine_config=engine_config,
-                torch_dtype=torch.float16,
-                text_encoder_3=text_encoder, # FIXME: hard code 
-            ).to(f"cuda:{local_rank}")
-        else:
-            pipe = PipelineClass.from_pretrained(
-                pretrained_model_name_or_path=engine_config.model_config.model,
-                engine_config=engine_config,
-                torch_dtype=torch.float16,
-            ).to(f"cuda:{local_rank}")
+        pipe = PipelineClass.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            engine_config=engine_config,
+            **kwargs
+        ).to(f"cuda:{local_rank}")
         self.pipe = pipe
         return
+    
+    def prepare_run(self,input_config: InputConfig,steps: int = 3,sync_steps: int = 1):
+        self.pipe.prepare_run(input_config,steps,sync_steps)
 
-    def execute(self, input_config: InputConfig):
-        self.pipe.prepare_run(input_config)
-        output = self.pipe(
-            height=input_config.height,
-            width=input_config.width,
-            prompt=input_config.prompt,
-            num_inference_steps=input_config.num_inference_steps,
-            output_type=input_config.output_type,
-            generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-        )
+    def execute(self, **kwargs):
+        time_start = time.time()
+        output = self.pipe(**kwargs)
+        time_end = time.time()
         if self.pipe.is_dp_last_group():
             if not os.path.exists("results"):
                 os.mkdir("results")
@@ -123,4 +100,5 @@ class Worker(WorkerBase):
                 print(
                     f"image {i} saved to /data/results/stable_diffusion_3_result_{i}.png"
                 )
-        return
+            print(f"time cost: {time_end - time_start}")
+        return output

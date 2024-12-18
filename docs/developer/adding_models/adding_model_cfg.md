@@ -19,6 +19,8 @@ CFG parallelism, depicted in the following figure, leverages 2 GPUs to process t
     alt="multiple-gpus.png">
 </div>
 
+Note that, for DiT models with no CFG functionality, such as Flux and HunyuanVideo, CFG parallelism cannot be applied.
+
 To accelerate CogVideoX inference using CFG parallelism, specific modifications are required in the original process:
 
 ## 1. Initialization

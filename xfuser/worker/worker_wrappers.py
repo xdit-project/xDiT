@@ -1,8 +1,10 @@
+# Copyright 2024 The xDiT team.
+# Adapted from
+# https://github.com/vllm-project/vllm/blob/main/vllm/worker/worker_base.py
+# Copyright (c) 2023, vLLM team. All rights reserved.
 import os
-import ray
-import importlib
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Tuple
+from abc import ABC
+from typing import Any, Dict
 
 from xfuser.worker.utils import update_environment_variables, resolve_obj_by_qualname
 from xfuser.config.config import EngineConfig
@@ -37,10 +39,3 @@ class RayWorkerWrapper(BaseWorkerWrapper):
     def __init__(self, engine_config: EngineConfig, rank: int) -> None:
         super().__init__(engine_config.parallel_config.worker_cls)
         self.init_worker(engine_config.parallel_config, rank)
-
-    def get_node_and_gpu_ids(
-        self,
-    ) -> Tuple[str, List[int]]:
-        gpu_ids = ray.get_gpu_ids()
-        node_id = ray.get_runtime_context().get_node_id()
-        return node_id, gpu_ids

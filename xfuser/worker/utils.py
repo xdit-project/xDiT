@@ -1,3 +1,7 @@
+# Copyright 2024 The xDiT team.
+# Adapted from
+# https://github.com/vllm-project/vllm/blob/main/vllm/utils.py
+# Copyright (c) 2023, vLLM team. All rights reserved.
 import os
 from typing import Dict, Any
 import importlib.util

@@ -1,3 +1,4 @@
+# from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_hunyuan_video.py
 import functools
 from typing import Any, Dict, Union
 import logging

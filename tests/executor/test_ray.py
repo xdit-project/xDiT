@@ -6,15 +6,8 @@ from transformers import T5EncoderModel
 from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
 from xfuser.executor.gpu_executor import RayDiffusionPipeline
 from xfuser.config import FlexibleArgumentParser
-from xfuser.core.distributed import (
-    get_world_group,
-    is_dp_last_group,
-    get_data_parallel_rank,
-    get_runtime_state,
-)
-from xfuser.core.distributed.parallel_state import get_data_parallel_world_size
 from xfuser.executor.gpu_executor import RayDiffusionPipeline
-from xfuser.worker.worker import xFuserPixArtAlphaPipeline, xFuserPixArtSigmaPipeline, xFuserStableDiffusion3Pipeline, xFuserHunyuanDiTPipeline, xFuserFluxPipeline
+from xfuser.model_executor.pipelines import xFuserPixArtAlphaPipeline, xFuserPixArtSigmaPipeline, xFuserStableDiffusion3Pipeline, xFuserHunyuanDiTPipeline, xFuserFluxPipeline
 
 def main():
     os.environ["MASTER_ADDR"] = "localhost"
@@ -62,6 +55,16 @@ def main():
     elapsed_time = end_time - start_time
 
     print(f"elapsed time:{elapsed_time}")
+    if not os.path.exists("results"):
+        os.mkdir("results")
+    # output is a list of results from each worker, we take the last one
+    for i, image in enumerate(output[-1].images):
+        image.save(
+            f"/data/results/stable_diffusion_3_result_{i}.png"
+        )
+        print(
+            f"image {i} saved to /data/results/stable_diffusion_3_result_{i}.png"
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,10 @@
+# Copyright 2024 The xDiT team.
+# Adapted from
+# https://github.com/vllm-project/vllm/blob/main/vllm/executor/executor_base.py
+# Copyright (c) 2023, vLLM team. All rights reserved.
 from abc import ABC, abstractmethod
 
-from xfuser.config.config import EngineConfig,ParallelConfig
+from xfuser.config.config import EngineConfig
 
 
 class BaseExecutor(ABC):

@@ -1,3 +1,7 @@
+# Copyright 2024 The xDiT team.
+# Adapted from
+# https://github.com/vllm-project/vllm/blob/main/vllm/executor/gpu_executor.py
+# Copyright (c) 2023, vLLM team. All rights reserved.
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from itertools import islice, repeat

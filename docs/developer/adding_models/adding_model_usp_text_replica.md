@@ -29,7 +29,12 @@ Firstly, the xDiT environment should be initialized at the beginning of the prog
 
 Secondly, in `diffusers`, the CogVideoX model is encapsulated within the `CogVideoXTransformer3DModel` class located at [diffusers/models/transformers/cogvideox_transformer_3d.py](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/cogvideox_transformer_3d.py), and it is reqired to split and merge seqeunces before and after the `forward` function of `CogVideoXTransformer3DModel`.
 
-Thirdly, the attention computation is managed by the `CogVideoXAttnProcessor2_0` class in [`diffusers/models/attention_processor.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py), and we also need to replace the attention computation into the USP version provided by xDiT.
+Thirdly, in `diffusers`, the attention computation is managed by the `CogVideoXAttnProcessor2_0` class in [`diffusers/models/attention_processor.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py). As shown at the top of the following figure, we need to replace the attention computation into the USP version provided by xDiT to achieve parallel computation. The bottom of the figure indicates that, the results obtained from both versions of attention computation are consistent.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/usp_2.png" 
+    alt="usp_2.png">
+</div>
 
 Finally, as each GPU own a distict sequence segment, the patch embedding layer in [diffusers/models/embeddings.py](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/embeddings.py) need to be adapted.
 

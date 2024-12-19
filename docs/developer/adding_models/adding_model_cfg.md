@@ -21,7 +21,7 @@ CFG parallelism, depicted in the following figure, leverages 2 GPUs to process t
 
 Note that, for DiT models with no CFG functionality, such as Flux and HunyuanVideo, CFG parallelism cannot be applied.
 
-To accelerate CogVideoX inference using CFG parallelism, specific modifications are required in the original process:
+To accelerate CogVideoX inference using CFG parallelism, two modifications to the original diffusion process are required. Firstly, the xDiT environment should be initialized at the beginning of the program. This requires several function such as `init_distributed_environment`, `initialize_model_parallel`, and `get_world_group` provided by xDiT. Secondly, in `diffusers`, the CogVideoX model is encapsulated within the `CogVideoXTransformer3DModel` class located at [diffusers/models/transformers/cogvideox_transformer_3d.py](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/cogvideox_transformer_3d.py), and it is reqired to split and merge seqeunces before and after the `forward` function of `CogVideoXTransformer3DModel`.
 
 ## 1. Initialization
 
@@ -58,20 +58,22 @@ pipe.to(device)
 
 ## 2. Splitting and Merging Sequences
 
-In `diffusers`, the CogVideoX model is encapsulated within the `CogVideoXTransformer3DModel` class located at `diffusers/models/transformers/cogvideox_transformer_3d.py`. The `forward` function within this class orchestrates the inference process for a single step iteration, outlined below:
+The `forward` function of `CogVideoXTransformer3DModel` orchestrates the inference process for a single step iteration, outlined below:
 
 ```python
-def forward(
-    self,
-    hidden_states: torch.Tensor,
-    encoder_hidden_states: torch.Tensor,
-    timestep: Union[int, float, torch.LongTensor],
-    timestep_cond: Optional[torch.Tensor] = None,
-    ofs: Optional[Union[int, float, torch.LongTensor]] = None,
-    image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    attention_kwargs: Optional[Dict[str, Any]] = None,
-    return_dict: bool = True,
-)
+class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
+    ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        timestep: Union[int, float, torch.LongTensor],
+        timestep_cond: Optional[torch.Tensor] = None,
+        ofs: Optional[Union[int, float, torch.LongTensor]] = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        return_dict: bool = True,
+    )
 ```
 
 To parallelize the inference process, we utilize `parallelize_transformer` on `pipe`. Within this function, a `new_forward` function is introduced with identical input and output parameters as the original function. The `new_forward` function performs the following steps:

@@ -9,10 +9,10 @@ The diffusion process involves receiving Gaussian noise as input, iteratively pr
     alt="single-gpu.png">
 </div>
 
-The Transformer's input comprises a text sequence, an image sequence, and an image rotary embedding. USP segments the input tensor along the sequence length dimension and assigns each segment to a GPU. Notably, the image sequence and the image rotary embedding contains much more elements than the text sequence. Thus, two design choices emerge: 
+The Transformer's input comprises a text sequence, an image sequence, and an image rotary position embedding (RoPE). USP segments the input tensor along the sequence length dimension and assigns each segment to a GPU. Notably, the image sequence and the RoPE contains much more elements than the text sequence. Thus, two design choices emerge: 
 
-- Split the text sequence, image sequence, and image rotary embedding; or
-- Split solely the image sequence and image rotary embedding while each GPU retains a complete text sequence. 
+- Split the text sequence, image sequence, and RoPE; or
+- Split solely the image sequence and RoPE while each GPU retains a complete text sequence. 
 
 The former choice is easy to implement and incur no unnecessary computation, but requires both text and image sequence length being divisible by the number of GPUs. Conversely, the latter choice, although more complex to implement, and involving redundant computation, is useful when the text sequence length is not divisible by the number of GPUs.
 
@@ -24,6 +24,16 @@ As depicted in the subsequent diagram, USP harnesses multiple GPUs (2 in this in
     <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/developer/multiple-gpus-usp.png" 
     alt="multiple-gpus.png">
 </div>
+
+To accelerate CogVideoX inference using USP, four modifications to the original diffusion process are required. 
+
+Firstly, the xDiT environment should be initialized at the beginning of the program. This requires several function such as `init_distributed_environment`, `initialize_model_parallel`, and `get_world_group` provided by xDiT. 
+
+Secondly, in `diffusers`, the CogVideoX model is encapsulated within the `CogVideoXTransformer3DModel` class located at [diffusers/models/transformers/cogvideox_transformer_3d.py](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/cogvideox_transformer_3d.py), and it is reqired to split and merge seqeunces before and after the `forward` function of `CogVideoXTransformer3DModel`.
+
+Thirdly, the attention computation is managed by the `CogVideoXAttnProcessor2_0` class in [`diffusers/models/attention_processor.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py), and we also need to replace the attention computation into the USP version provided by xDiT.
+
+Finally, as each GPU own a distict sequence segment, the patch embedding layer in [diffusers/models/embeddings.py](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/embeddings.py) need to be adapted.
 
 ## 1. Initialization
 
@@ -62,25 +72,27 @@ pipe.to(device)
 
 ## 2. Splitting and Merging Sequences
 
-In `diffusers`, the CogVideoX model is encapsulated within the `CogVideoXTransformer3DModel` class located at `diffusers/models/transformers/cogvideox_transformer_3d.py`. The `forward` function within this class orchestrates the inference process for a single step iteration, outlined below:
+The `forward` function of `CogVideoXTransformer3DModel` orchestrates the inference process for a single step iteration, outlined below:
 
 ```python
-def forward(
-    self,
-    hidden_states: torch.Tensor,
-    encoder_hidden_states: torch.Tensor,
-    timestep: Union[int, float, torch.LongTensor],
-    timestep_cond: Optional[torch.Tensor] = None,
-    ofs: Optional[Union[int, float, torch.LongTensor]] = None,
-    image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    attention_kwargs: Optional[Dict[str, Any]] = None,
-    return_dict: bool = True,
-)
+class CogVideoXTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
+    ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        timestep: Union[int, float, torch.LongTensor],
+        timestep_cond: Optional[torch.Tensor] = None,
+        ofs: Optional[Union[int, float, torch.LongTensor]] = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        return_dict: bool = True,
+    )
 ```
 
 To parallelize the inference process, we utilize `parallelize_transformer` on `pipe`. Within this function, a `new_forward` function is introduced with identical input and output parameters as the original function. The `new_forward` function performs the following steps:
 
-- Splits the text sequence, the image sequence, and the image retary embedding based on the sequence length dimension, allocating each batch to a GPU.
+- Splits the text sequence, the image sequence, and the RoPE based on the sequence length dimension, allocating each batch to a GPU.
 - Executes the original forward process on all GPUs.
 - Merges the predicted noise using all_gather.
 
@@ -102,13 +114,13 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 parallelize_transformer(pipe)
 ```
 
-In the input parameters, hidden_state, encoder_hidden_states, and image_rotary_emb represent the image sequence, text sequence, and the image rotary embedding, which are added to hidden_state respectively. These three tensors require splitting. The shapes of these tensors are outlined in the table below:
+In the input parameters, hidden_state, encoder_hidden_states, and image_rotary_emb represent the image sequence, text sequence, and the RoPE, which are added to hidden_state respectively. These three tensors require splitting. The shapes of these tensors are outlined in the table below:
 
 - `hidden_state` (batch_size, temporal_length, channels, height, width)
-- `encoder_hidden_states` (batch_size, text_length, hidden_state)
-- `image_rotary_emb` (batch_size, rope_temporal_length, rope_height, rope_width, hidden_state)
+- `encoder_hidden_states` (batch_size, text_length, hidden_dim)
+- `image_rotary_emb` (batch_size, rope_temporal_length, rope_height, rope_width, hidden_dim)
 
-In CogVideoX, `rope_height` and `rope_width` are half of `height` and `width` respectively. xDiT provides helper functions for USP, offering functionalities such as `get_sequence_parallel_rank()` and `get_sequence_parallel_world_size()` to access the number of GPUs and their respective ranks. The `get_sp_group()` function facilitates USP, incorporating an `all_gather()` operation to merge sequences after `forward`. When partitioning the text sequence by the text_length dimension and the image sequence and image embedding by the height dimension, the new forward function can be defined as follows:
+`temporal_length`, `height`, and `width` denote the size on the temporal, height, and width dimensions of `hidden_state`. `rope_temporal_length`, `rope_height`, and `rope_width` denote the size on the temporal, height, and width dimensions of `image_rotary_emb`. In CogVideoX, `rope_height` and `rope_width` are half of `height` and `width` respectively. xDiT provides helper functions for USP, offering functionalities such as `get_sequence_parallel_rank()` and `get_sequence_parallel_world_size()` to access the number of GPUs and their respective ranks. The `get_sp_group()` function facilitates USP, incorporating an `all_gather()` operation to merge sequences after `forward`. When partitioning the text sequence by the text_length dimension and the image sequence and RoPE by the height dimension, the new forward function can be defined as follows:
 
 ```python
 @functools.wraps(transformer.__class__.forward)
@@ -166,7 +178,7 @@ def new_forward(
 
 ## 3. Attention with USP
 
-The original attention calculation is managed by the `CogVideoXAttnProcessor2_0` class in `diffusers/models/attention_processor.py`. With in the class, the `__call__` function concatenates the text and image sequences into a unified sequence. Subsequently, the function extracts `Q`, `K`, and `V` from this sequence and conducts the attention computation.
+Within `CogVideoXAttnProcessor2_0`, the `__call__` function concatenates the text and image sequences into a unified sequence. Subsequently, the function extracts `Q`, `K`, and `V` from this sequence and conducts the attention computation.
 
 As we distribute the text and image sequences to multiple GPUs, we need to adapt the attention mechanism to ensure correctness. Each GPU derives `Q`, `K`, and `V` from its text and image seqeunce segments, with the subsequent attention computation transitioning to the USP version provided by xDiT. We use a new class `xDiTCogVideoAttentionProcessor`. The significant modification in its `__call__` function, in contrast to the original approach, lies in the attention computation step, where the conventional `F.scaled_dot_product_attention` is replaced with `xFuserLongContextAttention()` from xDiT, which computes attention based on the Ulysses degree and ring degree.
 
@@ -203,7 +215,7 @@ for block in transformer.transformer_blocks:
 
 ## 4. Adapting Positional Embeddings for Parallelism in CogVideoX
 
-In most DiT models, the previously discussed modifications suffice. However, CogVideoX introduces an extra layer of complexity by incorporating positional embeddings into the video sequence before it enters the initial transformer block. This functionality is implemented within the transformer.patch_embed object. Each GPU's subsequence requires a distinct positional embedding. To streamline this process, within the new forward function of transformer.patch_embed, performing the following steps:
+In most DiT models, the previously discussed modifications suffice. However, CogVideoX introduces an extra layer of complexity by incorporating positional embeddings into the video sequence before it enters the initial transformer block. Each GPU's subsequence requires a distinct positional embedding. To streamline this process, within the new forward function of transformer.patch_embed, performing the following steps:
 
 - Merge the text and image sequence by the `all_gather` operation to ensure every GPU obtains the complete text and image sequences;
 - Apply the original `transformer.patch_embed` operation to the entire sequence on each GPU; and

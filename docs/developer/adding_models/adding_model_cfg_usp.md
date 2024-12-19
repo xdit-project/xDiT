@@ -2,9 +2,11 @@
 
 The following two tutorials provide detailed instructions on how to implement CFG parallelism and USP (Unified Sequence Parallelism) supported by xDiT for a new DiT model:
 
+[Parallelize new models with CFG parallelism provided by xDiT](adding_model_cfg.md)
+
 [Parallelize new models with USP provided by xDiT](adding_model_usp.md)
 
-[Parallelize new models with CFG parallelism provided by xDiT](adding_model_cfg.md)
+[Parallelize new models with USP provided by xDiT (text replica)](adding_model_usp_text_replica.md)
 
 Both parallelization techniques can be concurrently employed. To achieve this, specify the level of parallelization for both CFG parallelism and USP as demonstrated below. The number of GPUs should be twice the product of the degrees of ulysses attention and ring attention:
 

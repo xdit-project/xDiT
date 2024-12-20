@@ -6,7 +6,7 @@
     <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/XDiTlogo.png" width="50%">
 
   </p>
-  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
+  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multiple computing devices</h3>
   <a href="#cite-us">📝 Papers</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
   <p></p>
 
@@ -233,75 +233,8 @@ You can easily modify the model type, model directory, and parallel options in t
 bash examples/run.sh
 ```
 
----
-
-<details>
-<summary>Click to see available options for the PixArt-alpha example</summary>
-
-```bash
-python ./examples/pixartalpha_example.py -h
-
-...
-
-xFuser Arguments
-
-options:
-  -h, --help            show this help message and exit
-
-Model Options:
-  --model MODEL         Name or path of the huggingface model to use.
-  --download-dir DOWNLOAD_DIR
-                        Directory to download and load the weights, default to the default cache dir of huggingface.
-  --trust-remote-code   Trust remote code from huggingface.
-
-Runtime Options:
-  --warmup_steps WARMUP_STEPS
-                        Warmup steps in generation.
-  --use_parallel_vae
-  --use_torch_compile   Enable torch.compile to accelerate inference in a single card
-  --seed SEED           Random seed for operations.
-  --output_type OUTPUT_TYPE
-                        Output type of the pipeline.
-  --enable_sequential_cpu_offload
-                        Offloading the weights to the CPU.
-
-Parallel Processing Options:
-  --use_cfg_parallel    Use split batch in classifier_free_guidance. cfg_degree will be 2 if set
-  --data_parallel_degree DATA_PARALLEL_DEGREE
-                        Data parallel degree.
-  --ulysses_degree ULYSSES_DEGREE
-                        Ulysses sequence parallel degree. Used in attention layer.
-  --ring_degree RING_DEGREE
-                        Ring sequence parallel degree. Used in attention layer.
-  --pipefusion_parallel_degree PIPEFUSION_PARALLEL_DEGREE
-                        Pipefusion parallel degree. Indicates the number of pipeline stages.
-  --num_pipeline_patch NUM_PIPELINE_PATCH
-                        Number of patches the feature map should be segmented in pipefusion parallel.
-  --attn_layer_num_for_pp [ATTN_LAYER_NUM_FOR_PP ...]
-                        List representing the number of layers per stage of the pipeline in pipefusion parallel
-  --tensor_parallel_degree TENSOR_PARALLEL_DEGREE
-                        Tensor parallel degree.
-  --split_scheme SPLIT_SCHEME
-                        Split scheme for tensor parallel.
-
-Input Options:
-  --height HEIGHT       The height of image
-  --width WIDTH         The width of image
-  --prompt [PROMPT ...]
-                        Prompt for the model.
-  --no_use_resolution_binning
-  --negative_prompt [NEGATIVE_PROMPT ...]
-                        Negative prompt for the model.
-  --num_inference_steps NUM_INFERENCE_STEPS
-                        Number of inference steps.
-```
-
-</details>
-
----
-
 Hybriding multiple parallelism techniques togather is essential for efficiently scaling. 
-It's important that the product of all parallel degrees matches the number of devices. 
+It's important that **the product of all parallel degrees matches the number of devices**. 
 Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
 Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
 
@@ -314,7 +247,7 @@ examples/pixartalpha_example.py \
 --ulysses_degree 2 \
 --num_inference_steps 20 \
 --warmup_steps 0 \
---prompt "A small dog" \
+--prompt "A cute dog" \
 --use_cfg_parallel
 ```
 
@@ -328,6 +261,16 @@ Users can tune this value according to their specific tasks.
 You can also launch an http service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
+
+<h2 id="dev-guide">📚  Develop Guide</h2>
+
+We provide different difficulty levels for adding new models, please refer to the following tutorial.
+
+[Manual for adding new models](./docs/developer/adding_models/readme.md)
+
+A high-level design of xDiT framework is provided below, which may help you understand the xDiT framework.
+
+[The implement and design of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
 
 <h2 id="secrets">✨ The xDiT's Arsenal</h2>
 
@@ -413,19 +356,13 @@ xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce comput
 
 [DiTFastAttn: Attention Compression for Diffusion Transformer Models](./docs/methods/ditfastattn.md)
 
-<h2 id="dev-guide">📚  Develop Guide</h2>
-
-[The implement and design of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
-
-[Manual for adding new models](./docs/developer/Manual_for_Adding_New_Models.md)
-
 <h2 id="history">🚧  History and Looking for Contributions</h2>
 
 We conducted a major upgrade of this project in August 2024, introducing a new set of APIs that are now the preferred choice for all users.
 
-The latest APIs, located in the [xfuser/](./xfuser/) directory, support hybrid parallelism and offer a clearer, more structured codebase. These APIs are designed to be the standard for all future development and should be the go-to choice for anyone looking to leverage the full potential of our project.
+The legacy APIs are applied in early stage of xDiT to explore and compare different parallelization methods.
+They are located in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, are now considered outdated and do not support hybrid parallelism. Despite this limitation, they offer a broader range of individual parallelization methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel.
 
-The legacy APIs, located in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, are now considered outdated and do not support hybrid parallelism. Despite this limitation, they offer a broader range of individual parallelization methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel.
 For users working with Pixart models, you can still run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under the `legacy` branch. However, for all other models, we strongly recommend adopting the formal APIs to ensure optimal performance and compatibility.
 
 We also warmly welcome developers to join us in enhancing the project. If you have ideas for new features or models, please share them in our [issues](https://github.com/xdit-project/xDiT/issues). Your contributions are invaluable in driving the project forward and ensuring it meets the needs of the community.

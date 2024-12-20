@@ -6,7 +6,7 @@ import os
 from abc import ABC
 from typing import Any, Dict
 
-from xfuser.worker.utils import update_environment_variables, resolve_obj_by_qualname
+from xfuser.ray.worker.utils import update_environment_variables, resolve_obj_by_qualname
 from xfuser.config.config import EngineConfig
 
 class BaseWorkerWrapper(ABC):

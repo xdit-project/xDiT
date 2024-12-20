@@ -7,12 +7,11 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from itertools import islice, repeat
 from typing import Any, Dict, List, Optional, Tuple
 
-from xfuser.executor.base_executor import BaseExecutor
-from xfuser.executor.ray_utils import initialize_ray_cluster
+from xfuser.ray.pipeline.base_executor import BaseExecutor
+from xfuser.ray.pipeline.ray_utils import initialize_ray_cluster
 from xfuser.logger import init_logger
-from xfuser.worker.worker_wrappers import RayWorkerWrapper
+from xfuser.ray.worker.worker_wrappers import RayWorkerWrapper
 from xfuser.config.config import InputConfig, EngineConfig
-from xfuser.model_executor.pipelines.base_pipeline import xFuserPipelineBaseWrapper
 logger = init_logger(__name__)
 
 

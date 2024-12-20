@@ -163,7 +163,7 @@ class xFuserArgs:
             "--ray_world_size",
             type=int,
             default=1,
-            help="World size.",
+            help="The number of ray workers (world_size for ray)",
         )
         parallel_group.add_argument(
             "--use_cfg_parallel",

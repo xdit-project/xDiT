@@ -3,10 +3,9 @@ import os
 import torch
 import torch.distributed
 from transformers import T5EncoderModel
-from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
-from xfuser.executor.gpu_executor import RayDiffusionPipeline
+from xfuser import xFuserArgs
+from xfuser.ray.pipeline.pipeline_utils import RayDiffusionPipeline
 from xfuser.config import FlexibleArgumentParser
-from xfuser.executor.gpu_executor import RayDiffusionPipeline
 from xfuser.model_executor.pipelines import xFuserPixArtAlphaPipeline, xFuserPixArtSigmaPipeline, xFuserStableDiffusion3Pipeline, xFuserHunyuanDiTPipeline, xFuserFluxPipeline
 
 def main():
@@ -16,29 +15,21 @@ def main():
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
-    pipeline_map = {
-            "PixArt-XL-2-1024-MS": xFuserPixArtAlphaPipeline,
-            "PixArt-Sigma-XL-2-2K-MS": xFuserPixArtSigmaPipeline,
-            "stable-diffusion-3-medium-diffusers": xFuserStableDiffusion3Pipeline,
-            "HunyuanDiT-v1.2-Diffusers": xFuserHunyuanDiTPipeline,
-            "FLUX.1-schnell": xFuserFluxPipeline,
-        }
+    engine_config.runtime_config.dtype = torch.bfloat16
     model_name = engine_config.model_config.model.split("/")[-1]
-    PipelineClass = pipeline_map.get(model_name)    
-    if PipelineClass is None:
-        raise NotImplementedError(f"{model_name} is currently not supported!")
-    text_encoder_3 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_3", torch_dtype=torch.float16)
+    PipelineClass = xFuserFluxPipeline
+    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=torch.bfloat16)
     if args.use_fp8_t5_encoder:
         from optimum.quanto import freeze, qfloat8, quantize
-        quantize(text_encoder_3, weights=qfloat8)
-        freeze(text_encoder_3)
+        quantize(text_encoder_2, weights=qfloat8)
+        freeze(text_encoder_2)
 
     pipe = RayDiffusionPipeline.from_pretrained(
         PipelineClass=PipelineClass,
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
-        torch_dtype=torch.float16,
-        text_encoder_3=text_encoder_3,
+        torch_dtype=torch.bfloat16,
+        text_encoder_2=text_encoder_2,
     )
     pipe.prepare_run(input_config)
 
@@ -49,6 +40,8 @@ def main():
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
+        max_sequence_length=256,
+        guidance_scale=0.0,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     )
     end_time = time.time()
@@ -60,10 +53,10 @@ def main():
     # output is a list of results from each worker, we take the last one
     for i, image in enumerate(output[-1].images):
         image.save(
-            f"/data/results/stable_diffusion_3_result_{i}.png"
+            f"/data/results/{model_name}_result_{i}.png"
         )
         print(
-            f"image {i} saved to /data/results/stable_diffusion_3_result_{i}.png"
+            f"image {i} saved to /data/results/{model_name}_result_{i}.png"
         )
 
 

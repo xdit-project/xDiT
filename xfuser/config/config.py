@@ -194,7 +194,7 @@ class ParallelConfig:
     tp_config: TensorParallelConfig
     distributed_executor_backend: Optional[str] = None
     world_size: int = 1 # FIXME: remove this
-    worker_cls: str = "xfuser.worker.worker.Worker"
+    worker_cls: str = "xfuser.ray.worker.worker.Worker"
 
     def __post_init__(self):
         assert self.tp_config is not None, "tp_config must be set"

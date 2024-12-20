@@ -292,5 +292,5 @@ def _verify_bundles(
                 len(bundles),
                 device_str,
                 node_id,
-                parallel_config.tensor_parallel_size,
+                parallel_config.tp_degree,
             )

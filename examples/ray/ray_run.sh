@@ -1,4 +1,8 @@
 set -x
+# If using a Ray cluster across multiple machines, you need to manually start a Ray cluster like this:
+# ray start --head --port=6379 for master node
+# ray start --address='192.168.1.1:6379' for worker node
+# otherwise, it is not necessary. (for single node)
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 

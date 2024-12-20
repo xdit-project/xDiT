@@ -192,7 +192,6 @@ class ParallelConfig:
     sp_config: SequenceParallelConfig
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
-    distributed_executor_backend: Optional[str] = None
     world_size: int = 1 # FIXME: remove this
     worker_cls: str = "xfuser.ray.worker.worker.Worker"
 

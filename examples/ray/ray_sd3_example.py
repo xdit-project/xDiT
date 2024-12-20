@@ -66,10 +66,10 @@ def main():
     # output is a list of results from each worker, we take the last one
     for i, image in enumerate(output[-1].images):
         image.save(
-            f"/data/results/{model_name}_result_{i}.png"
+            f"./results/{model_name}_result_{i}.png"
         )
         print(
-            f"image {i} saved to /data/results/{model_name}_result_{i}.png"
+            f"image {i} saved to ./results/{model_name}_result_{i}.png"
         )
 
 

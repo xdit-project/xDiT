@@ -1,5 +1,5 @@
-# Manual for Adding New Models
-[Chinese Version](./Manual_for_Adding_New_Models_zh.md)
+# Parallelize new model with PipeFusion, USP, and CFG parallelism provided by xDiT
+[Chinese Version](./adding_model_pipefusion_zh.md)
 
 💡 Taking pixart-alpha as an example, the parallel version model supports the following full process
 

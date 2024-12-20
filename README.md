@@ -6,7 +6,7 @@
     <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/XDiTlogo.png" width="50%">
 
   </p>
-  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multiple computing devices</h3>
+  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices</h3>
   <a href="#cite-us">📝 Papers</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
   <p></p>
 
@@ -256,9 +256,9 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-### 5. Launch an Http Service
+### 5. Launch an HTTP Service
 
-You can also launch an http service to generate images with xDiT.
+You can also launch an HTTP service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
 

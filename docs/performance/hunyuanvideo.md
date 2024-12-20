@@ -10,6 +10,7 @@ xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo?tab=readme-ov-fil
 |----------|--------|---------|---------|---------|
 | H100 | 1,904.08 | 925.04 | 514.08 | 337.58 |
 | H20 | 6,639.17 | 3,400.55 | 1,762.86 | 940.97 |
+| L20 | 6,043.88 | | | |
 
 </center>
 

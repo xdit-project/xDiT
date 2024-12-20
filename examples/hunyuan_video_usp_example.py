@@ -232,12 +232,12 @@ def main():
     if args.enable_tiling:
         pipe.vae.enable_tiling(
             # Make it runnable on GPUs with 48GB memory
-            tile_sample_min_height=128,
-            tile_sample_stride_height=96,
-            tile_sample_min_width=128,
-            tile_sample_stride_width=96,
-            tile_sample_min_num_frames=32,
-            tile_sample_stride_num_frames=24,
+            # tile_sample_min_height=128,
+            # tile_sample_stride_height=96,
+            # tile_sample_min_width=128,
+            # tile_sample_stride_width=96,
+            # tile_sample_min_num_frames=32,
+            # tile_sample_stride_num_frames=24,
         )
 
     if args.enable_slicing:
@@ -298,7 +298,7 @@ def main():
     get_runtime_state().destory_distributed_env()
 
 
-# mkdir -p results && torchrun --nproc_per_node=2 examples/hunyuan_video_usp_example.py --model tencent/HunyuanVideo --ulysses_degree 2 --num_inference_steps 30 --warmup_steps 0 --prompt "A cat walks on the grass, realistic" --height 320 --width 512 --num_frames 61 --enable_tiling
+# mkdir -p results && torchrun --nproc_per_node=2 examples/hunyuan_video_usp_example.py --model tencent/HunyuanVideo --ulysses_degree 2 --num_inference_steps 30 --warmup_steps 0 --prompt "A cat walks on the grass, realistic" --height 320 --width 512 --num_frames 61 --enable_tiling --enable_model_cpu_offload
 # mkdir -p results && torchrun --nproc_per_node=2 examples/hunyuan_video_usp_example.py --model tencent/HunyuanVideo --ulysses_degree 2 --num_inference_steps 30 --warmup_steps 0 --prompt "A cat walks on the grass, realistic" --height 544 --width 960 --num_frames 129 --enable_tiling --enable_model_cpu_offload
 if __name__ == "__main__":
     main()

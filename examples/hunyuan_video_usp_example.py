@@ -207,6 +207,18 @@ def main():
         revision="refs/pr/18",
     )
 
+    initialize_runtime_state(pipe, engine_config)
+    get_runtime_state().set_video_input_parameters(
+        height=input_config.height,
+        width=input_config.width,
+        num_frames=input_config.num_frames,
+        batch_size=1,
+        num_inference_steps=input_config.num_inference_steps,
+        split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+    )
+
+    parallelize_transformer(pipe)
+
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
         logging.info(f"rank {local_rank} sequential CPU offload enabled")
@@ -233,18 +245,6 @@ def main():
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(
         device=f"cuda:{local_rank}")
-
-    initialize_runtime_state(pipe, engine_config)
-    get_runtime_state().set_video_input_parameters(
-        height=input_config.height,
-        width=input_config.width,
-        num_frames=input_config.num_frames,
-        batch_size=1,
-        num_inference_steps=input_config.num_inference_steps,
-        split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
-    )
-
-    parallelize_transformer(pipe)
 
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
@@ -299,5 +299,6 @@ def main():
 
 
 # mkdir -p results && torchrun --nproc_per_node=2 examples/hunyuan_video_usp_example.py --model tencent/HunyuanVideo --ulysses_degree 2 --num_inference_steps 30 --warmup_steps 0 --prompt "A cat walks on the grass, realistic" --height 320 --width 512 --num_frames 61 --enable_tiling
+# mkdir -p results && torchrun --nproc_per_node=2 examples/hunyuan_video_usp_example.py --model tencent/HunyuanVideo --ulysses_degree 2 --num_inference_steps 30 --warmup_steps 0 --prompt "A cat walks on the grass, realistic" --height 544 --width 960 --num_frames 129 --enable_tiling --enable_model_cpu_offload
 if __name__ == "__main__":
     main()

@@ -67,6 +67,15 @@ def parallelize_transformer(pipe: DiffusionPipeline):
                                                       timestep,
                                                       encoder_attention_mask)
 
+        hidden_states = hidden_states.reshape(batch_size, post_patch_num_frames, post_patch_height, post_patch_width, -1)
+        hidden_states = torch.chunk(hidden_states,
+                                    get_classifier_free_guidance_world_size(),
+                                    dim=0)[get_classifier_free_guidance_rank()]
+        hidden_states = torch.chunk(hidden_states,
+                                    get_sequence_parallel_world_size(),
+                                    dim=2)[get_sequence_parallel_rank()]
+        hidden_states = hidden_states.flatten(1, 3)
+
         encoder_attention_mask = encoder_attention_mask[0].to(torch.bool)
         encoder_hidden_states_indices = torch.arange(
             encoder_hidden_states.shape[1],
@@ -81,12 +90,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         else:
             get_runtime_state().split_text_embed_in_sp = True
 
-        hidden_states = torch.chunk(hidden_states,
-                                    get_classifier_free_guidance_world_size(),
-                                    dim=0)[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(hidden_states,
-                                    get_sequence_parallel_world_size(),
-                                    dim=-2)[get_sequence_parallel_rank()]
         encoder_hidden_states = torch.chunk(
             encoder_hidden_states,
             get_classifier_free_guidance_world_size(),
@@ -100,9 +103,11 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         freqs_cos, freqs_sin = image_rotary_emb
 
         def get_rotary_emb_chunk(freqs):
-            freqs = torch.chunk(freqs,
-                                get_sequence_parallel_world_size(),
-                                dim=0)[get_sequence_parallel_rank()]
+            dim_thw = freqs.shape[-1]
+            freqs = freqs.reshape(num_frames, -1, dim_thw)
+            freqs = freqs.chunk(get_sequence_parallel_world_size(), dim=-2)[
+                get_sequence_parallel_rank()]
+            freqs = freqs.reshape(-1, dim_thw)
             return freqs
 
         freqs_cos = get_rotary_emb_chunk(freqs_cos)
@@ -161,13 +166,14 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
-        hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
+        hidden_states = hidden_states.reshape(batch_size // get_classifier_free_guidance_world_size(),
+                                              post_patch_num_frames,
+                                              post_patch_height // get_sequence_parallel_world_size(),
+                                              post_patch_width, -1, p_t, p, p)
+
+        hidden_states = get_sp_group().all_gather(hidden_states, dim=2)
         hidden_states = get_cfg_group().all_gather(hidden_states, dim=0)
 
-        hidden_states = hidden_states.reshape(batch_size,
-                                              post_patch_num_frames,
-                                              post_patch_height,
-                                              post_patch_width, -1, p_t, p, p)
         hidden_states = hidden_states.permute(0, 4, 1, 5, 2, 6, 3, 7)
         hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
 

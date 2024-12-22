@@ -207,11 +207,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             [`~pipelines.consisid.pipeline_output.ConsisIDPipelineOutput`] if `return_dict` is True, otherwise a
             `tuple`. When returning a tuple, the first element is a list with the generated images.
         """
-        if num_frames > 49:
-            raise ValueError(
-                "The number of frames must be less than 49 for now due to static positional embeddings. This will be updated in the future to remove this limitation."
-            )
-
+        
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
@@ -246,6 +242,16 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
+
+
+        get_runtime_state().set_video_input_parameters(
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            batch_size=batch_size,
+            num_inference_steps=num_inference_steps,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+        )
 
         # 3. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
@@ -348,7 +354,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                if not isinstance(self.scheduler, CogVideoXDPMScheduler):
+                if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
                 else:
                     latents, old_pred_original_sample = self.scheduler.step(

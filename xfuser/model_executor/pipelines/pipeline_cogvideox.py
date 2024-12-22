@@ -43,7 +43,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         pipeline = CogVideoXPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
-
         return cls(pipeline, engine_config)
 
     @torch.no_grad()

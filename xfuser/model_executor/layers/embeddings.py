@@ -1,4 +1,3 @@
-
 # adapted from https://github.com/huggingface/diffusers/blob/v0.29.0/src/diffusers/models/embeddings.py
 import torch
 
@@ -194,91 +193,6 @@ class xFuserCogVideoXPatchEmbedWrapper(xFuserLayerBaseWrapper):
             ]
             pos_embedding = torch.cat(pos_embed_list, dim=1)
 
-            embeds[:, self.max_text_seq_length :] += pos_embedding
-
-        return embeds
-
-
-
-
-@xFuserLayerWrappersRegister.register(CogVideoXPatchEmbed)
-class xFuserConsisIDPatchEmbedWrapper(xFuserLayerBaseWrapper):
-    def __init__(
-        self,
-        patch_embedding: CogVideoXPatchEmbed,
-    ):
-        super().__init__(
-            module=patch_embedding,
-        )
-        self.module: CogVideoXPatchEmbed
-
-    def forward(self, text_embeds: torch.Tensor, image_embeds: torch.Tensor):
-        r"""
-        Args:
-            text_embeds (`torch.Tensor`):
-                Input text embeddings. Expected shape: (batch_size, seq_length, embedding_dim).
-            image_embeds (`torch.Tensor`):
-                Input image embeddings. Expected shape: (batch_size, num_frames, channels, height, width).
-        """
-        # height is the height of a batch on a GPU, sum_height is the total height of the video
-        sum_height = (
-            get_runtime_state().input_config.height
-            // get_runtime_state().vae_scale_factor_spatial
-        )
-        text_embeds = self.text_proj(text_embeds)
-
-        batch, num_frames, channels, height, width = image_embeds.shape
-
-        image_embeds = image_embeds.reshape(-1, channels, height, width)
-        image_embeds = self.proj(image_embeds)
-
-        image_embeds = image_embeds.view(batch, num_frames, *image_embeds.shape[1:])
-        image_embeds = image_embeds.flatten(3).transpose(2, 3)  # [batch, num_frames, height x width, channels]
-        image_embeds = image_embeds.flatten(1, 2)  # [batch, num_frames x height x width, channels]
-           
-        if self.use_positional_embeddings or self.use_learned_positional_embeddings:
-            if self.use_learned_positional_embeddings and (self.sample_width != width or self.sample_height != sum_height):
-                raise ValueError(
-                    "It is currently not possible to generate videos at a different resolution that the defaults. This should only be the case with 'THUDM/CogVideoX-5b-I2V'."
-                    "If you think this is incorrect, please open an issue at https://github.com/huggingface/diffusers/issues."
-                )
-
-            pre_time_compression_frames = (num_frames - 1) * self.temporal_compression_ratio + 1
-
-            if (
-                self.sample_height != sum_height
-                or self.sample_width != width
-                or self.sample_frames != pre_time_compression_frames
-            ):
-                pos_embedding = self._get_positional_embeddings(sum_height, width, pre_time_compression_frames)
-                pos_embedding = pos_embedding.to(image_embeds.device, dtype=image_embeds.dtype)
-            else:
-                pos_embedding = self.pos_embedding
-
-            # extract the image part of the positional embedding
-            pos_embedding = pos_embedding[:, self.max_text_seq_length :]
-
-            # slice the positional embedding
-            post_patch_height = sum_height // self.patch_size
-            post_patch_width = width // self.patch_size
-            post_time_compression_frames = (pre_time_compression_frames - 1) // self.temporal_compression_ratio + 1
-
-            pos_embed_list = [
-                pos_embedding[
-                    :,
-                    post_patch_height * post_patch_width * i + get_runtime_state().pp_patches_token_start_end_idx_global[0][0]: 
-                    post_patch_height * post_patch_width * i + get_runtime_state().pp_patches_token_start_end_idx_global[0][1],
-                    :,
-                ]
-                for i in range(post_time_compression_frames)
-            ]
-            pos_embedding = torch.cat(pos_embed_list, dim=1)
-
-            image_embeds = image_embeds + pos_embedding
-
-
-        embeds = torch.cat(
-            [text_embeds, image_embeds], dim=1
-        ).contiguous()  # [batch, seq_length + num_frames x height x width, channels]
+            embeds[:, text_embeds.shape[1] :] += pos_embedding
 
         return embeds

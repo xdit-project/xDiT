@@ -35,8 +35,8 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
 --prompt "A woman adorned with a delicate flower crown, is standing amidst a field of gently swaying wildflowers. Her eyes sparkle with a serene gaze, and a faint smile graces her lips, suggesting a moment of peaceful contentment. The shot is framed from the waist up, highlighting the gentle breeze lightly tousling her hair. The background reveals an expansive meadow under a bright blue sky, capturing the tranquility of a sunny afternoon." \
-$INPUT_IMAGE\
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $ENABLE_TILING \
 $COMPILE_FLAG
+# $INPUT_IMAGE\

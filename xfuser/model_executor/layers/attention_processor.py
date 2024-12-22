@@ -12,8 +12,7 @@ from diffusers.models.attention_processor import (
     JointAttnProcessor2_0,
     FluxAttnProcessor2_0,
     HunyuanAttnProcessor2_0,
-    CogVideoXAttnProcessor2_0,
-    # ConsisIDAttnProcessor2_0,
+    CogVideoXAttnProcessor2_0
 )
 
 from diffusers.models.embeddings import apply_rotary_emb
@@ -1144,7 +1143,6 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
             [text_seq_length, latent_seq_length], dim=1
         )
         return hidden_states, encoder_hidden_states
-    
 
 
 @xFuserAttentionProcessorRegister.register(CogVideoXAttnProcessor2_0)

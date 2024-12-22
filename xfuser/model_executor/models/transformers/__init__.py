@@ -16,6 +16,6 @@ __all__ = [
     "xFuserFluxTransformer2DWrapper",
     "xFuserLatteTransformer3DWrapper",
     "xFuserCogVideoXTransformer3DWrapper",
-    "xFuserConsisIDTransformer3DWrapper",
     "xFuserHunyuanDiT2DWrapper",
+    "xFuserConsisIDTransformer3DWrapper"
 ]

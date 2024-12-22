@@ -104,6 +104,10 @@ class DiTRuntimeState(RuntimeState):
         )
         self.cogvideox = False
         if isinstance(pipeline, CogVideoXPipeline) or isinstance(pipeline, ConsisIDPipeline):
+
+            # import pdb; pdb.set_trace()
+            print("consisid get in this set_cogvideox_parameters")
+
             self._set_cogvideox_parameters(
                 vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
                 vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
@@ -112,6 +116,9 @@ class DiTRuntimeState(RuntimeState):
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
                 * pipeline.transformer.config.attention_head_dim,
             )
+
+            print(f"self.cogvideox:{self.cogvideox}")
+
         else:
             self._set_model_parameters(
                 vae_scale_factor=pipeline.vae_scale_factor,
@@ -257,8 +264,9 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.width = width or self.input_config.width
         self.input_config.num_frames = num_frames or self.input_config.num_frames
         self.input_config.batch_size = batch_size or self.input_config.batch_size
-        if self.cogvideox:
+        if self.cogvideox :
             self._calc_cogvideox_patches_metadata()
+
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()
@@ -468,6 +476,7 @@ class DiTRuntimeState(RuntimeState):
         pp_patches_token_start_idx_local = [
             sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
         ]
+
         self.num_pipeline_patch = num_pipeline_patch
         self.pp_patches_height = pp_patches_height
         self.pp_patches_start_idx_local = pp_patches_start_idx_local

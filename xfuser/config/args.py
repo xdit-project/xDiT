@@ -79,6 +79,9 @@ class xFuserArgs:
     # tensor parallel
     tensor_parallel_degree: int = 1
     split_scheme: Optional[str] = "row"
+    # ray arguments
+    use_ray: bool = False
+    ray_world_size: int = 1
     # pipefusion parallel
     pipefusion_parallel_degree: int = 1
     num_pipeline_patch: Optional[int] = None
@@ -89,7 +92,6 @@ class xFuserArgs:
     num_frames: int = 49
     num_inference_steps: int = 20
     max_sequence_length: int = 256
-    image_path: Union[str, List[str]] = ""
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     no_use_resolution_binning: bool = False
@@ -152,6 +154,17 @@ class xFuserArgs:
 
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
+        runtime_group.add_argument(
+            "--use_ray",
+            action="store_true",
+            help="Enable ray to run inference in multi-card",
+        )
+        parallel_group.add_argument(
+            "--ray_world_size",
+            type=int,
+            default=1,
+            help="The number of ray workers (world_size for ray)",
+        )
         parallel_group.add_argument(
             "--use_cfg_parallel",
             action="store_true",
@@ -217,9 +230,6 @@ class xFuserArgs:
         )
         input_group.add_argument(
             "--prompt", type=str, nargs="*", default="", help="Prompt for the model."
-        )
-        input_group.add_argument(
-            "--image_path", type=str, nargs="*", default="", help="The path of condition image"
         )
         input_group.add_argument("--no_use_resolution_binning", action="store_true")
         input_group.add_argument(
@@ -326,11 +336,15 @@ class xFuserArgs:
     def create_config(
         self,
     ) -> Tuple[EngineConfig, InputConfig]:
-        if not torch.distributed.is_initialized():
+        if not self.use_ray and not torch.distributed.is_initialized():
             logger.warning(
                 "Distributed environment is not initialized. " "Initializing..."
             )
             init_distributed_environment()
+        if self.use_ray:
+            self.world_size = self.ray_world_size
+        else:
+            self.world_size = torch.distributed.get_world_size()
 
         model_config = ModelConfig(
             model=self.model,
@@ -352,20 +366,25 @@ class xFuserArgs:
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,
                 use_cfg_parallel=self.use_cfg_parallel,
+                world_size=self.world_size,
             ),
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
+                world_size=self.world_size,
             ),
             tp_config=TensorParallelConfig(
                 tp_degree=self.tensor_parallel_degree,
                 split_scheme=self.split_scheme,
+                world_size=self.world_size,
             ),
             pp_config=PipeFusionParallelConfig(
                 pp_degree=self.pipefusion_parallel_degree,
                 num_pipeline_patch=self.num_pipeline_patch,
                 attn_layer_num_for_pp=self.attn_layer_num_for_pp,
+                world_size=self.world_size,
             ),
+            world_size=self.world_size,
         )
 
         fast_attn_config = FastAttnConfig(
@@ -392,7 +411,6 @@ class xFuserArgs:
             use_resolution_binning=not self.no_use_resolution_binning,
             batch_size=len(self.prompt) if isinstance(self.prompt, list) else 1,
             prompt=self.prompt,
-            image_path=self.image_path,
             negative_prompt=self.negative_prompt,
             num_inference_steps=self.num_inference_steps,
             max_sequence_length=self.max_sequence_length,

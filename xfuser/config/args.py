@@ -89,6 +89,7 @@ class xFuserArgs:
     num_frames: int = 49
     num_inference_steps: int = 20
     max_sequence_length: int = 256
+    image_path: Union[str, List[str]] = ""
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     no_use_resolution_binning: bool = False
@@ -216,6 +217,9 @@ class xFuserArgs:
         )
         input_group.add_argument(
             "--prompt", type=str, nargs="*", default="", help="Prompt for the model."
+        )
+        input_group.add_argument(
+            "--image_path", type=str, nargs="*", default="", help="The path of condition image"
         )
         input_group.add_argument("--no_use_resolution_binning", action="store_true")
         input_group.add_argument(
@@ -388,6 +392,7 @@ class xFuserArgs:
             use_resolution_binning=not self.no_use_resolution_binning,
             batch_size=len(self.prompt) if isinstance(self.prompt, list) else 1,
             prompt=self.prompt,
+            image_path=self.image_path,
             negative_prompt=self.negative_prompt,
             num_inference_steps=self.num_inference_steps,
             max_sequence_length=self.max_sequence_length,

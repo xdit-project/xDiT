@@ -4,8 +4,8 @@ set -x
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # CogVideoX configuration
-SCRIPT="cogvideox_example.py"
-MODEL_ID="/storage/ysh/Ckpts/CogVideoX-5b"
+SCRIPT="consisid_example.py"
+MODEL_ID="/storage/hxy/cvpr2025/weight/ConsisID-preview"
 INFERENCE_STEP=50
 
 mkdir -p ./results
@@ -24,6 +24,7 @@ PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 3"
 # PARALLLEL_VAE="--use_parallel_vae"
 ENABLE_TILING="--enable_tiling"
 # COMPILE_FLAG="--use_torch_compile"
+INPUT_IMAGE='--image_path /storage/hxy/cvpr2025/ConsisID/asserts/example_images/4.png'
 
 torchrun --master_port=1234 --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
@@ -33,7 +34,8 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
---prompt "A little girl is riding a bicycle at high speed. Focused, detailed, realistic." \
+--prompt "A woman adorned with a delicate flower crown, is standing amidst a field of gently swaying wildflowers. Her eyes sparkle with a serene gaze, and a faint smile graces her lips, suggesting a moment of peaceful contentment. The shot is framed from the waist up, highlighting the gentle breeze lightly tousling her hair. The background reveals an expansive meadow under a bright blue sky, capturing the tranquility of a sunny afternoon." \
+$INPUT_IMAGE\
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $ENABLE_TILING \

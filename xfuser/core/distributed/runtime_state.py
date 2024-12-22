@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-from diffusers import DiffusionPipeline, CogVideoXPipeline
+from diffusers import DiffusionPipeline, CogVideoXPipeline, ConsisIDPipeline
 import torch.distributed
 
 from xfuser.config.config import (
@@ -103,7 +103,7 @@ class DiTRuntimeState(RuntimeState):
             pipeline=pipeline, parallel_config=config.parallel_config
         )
         self.cogvideox = False
-        if isinstance(pipeline, CogVideoXPipeline):
+        if isinstance(pipeline, CogVideoXPipeline) or isinstance(pipeline, ConsisIDPipeline):
             self._set_cogvideox_parameters(
                 vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
                 vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,

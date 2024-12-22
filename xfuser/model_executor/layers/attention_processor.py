@@ -13,7 +13,7 @@ from diffusers.models.attention_processor import (
     FluxAttnProcessor2_0,
     HunyuanAttnProcessor2_0,
     CogVideoXAttnProcessor2_0,
-    ConsisIDAttnProcessor2_0,
+    # ConsisIDAttnProcessor2_0,
 )
 
 from diffusers.models.embeddings import apply_rotary_emb
@@ -1147,8 +1147,8 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
     
 
 
-@xFuserAttentionProcessorRegister.register(ConsisIDAttnProcessor2_0)
-class xFuserConsisIDAttnProcessor2_0(ConsisIDAttnProcessor2_0):
+@xFuserAttentionProcessorRegister.register(CogVideoXAttnProcessor2_0)
+class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
     r"""
     Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
     query and key vectors, but does not include spatial normalization.

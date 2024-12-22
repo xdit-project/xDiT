@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from diffusers.models.embeddings import PatchEmbed, CogVideoXPatchEmbed
 
-from diffusers.models import CogVideoXTransformer3DModel
+from diffusers.models import ConsisIDTransformer3DModel
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
 # from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
@@ -34,11 +34,11 @@ from xfuser.model_executor.models.transformers.base_transformer import xFuserTra
 logger = init_logger(__name__)
 
 
-@xFuserTransformerWrappersRegister.register(CogVideoXTransformer3DModel)
-class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
+@xFuserTransformerWrappersRegister.register(ConsisIDTransformer3DModel)
+class xFuserConsisIDTransformer3DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
         self,
-        transformer: CogVideoXTransformer3DModel,
+        transformer: ConsisIDTransformer3DModel,
     ):
         super().__init__(
             transformer=transformer,
@@ -53,11 +53,33 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         encoder_hidden_states: torch.Tensor,
         timestep: Union[int, float, torch.LongTensor],
         timestep_cond: Optional[torch.Tensor] = None,
-        # ofs: Optional[Union[int, float, torch.LongTensor]] = None,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        # attention_kwargs: Optional[Dict[str, Any]] = None,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        id_cond: Optional[torch.Tensor] = None,
+        id_vit_hidden: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ):
+
+        if self.is_train_face:
+            assert id_cond is not None and id_vit_hidden is not None
+            valid_face_emb = self.local_facial_extractor(
+                id_cond, id_vit_hidden
+            )  # torch.Size([1, 1280]), list[5](torch.Size([1, 577, 1024]))  ->  torch.Size([1, 32, 2048])
+
+        if attention_kwargs is not None:
+            attention_kwargs = attention_kwargs.copy()
+            lora_scale = attention_kwargs.pop("scale", 1.0)
+        else:
+            lora_scale = 1.0
+
+        if USE_PEFT_BACKEND:
+            # weight the lora layers by setting `lora_scale` for each PEFT layer
+            scale_lora_layers(self, lora_scale)
+        else:
+            if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
+                logger.warning(
+                    "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
+                )
 
 
         batch_size, num_frames, channels, height, width = hidden_states.shape
@@ -72,8 +94,6 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         t_emb = t_emb.to(dtype=hidden_states.dtype)
         emb = self.time_embedding(t_emb, timestep_cond)
 
-
-
         # 2. Patch embedding
         hidden_states = self.patch_embed(encoder_hidden_states, hidden_states)
         hidden_states = self.embedding_dropout(hidden_states)
@@ -83,6 +103,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         hidden_states = hidden_states[:, text_seq_length:]
 
         # 3. Transformer blocks
+        ca_idx=0
         for i, block in enumerate(self.transformer_blocks):
             if self.training and self.gradient_checkpointing:
 
@@ -109,14 +130,17 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
                     image_rotary_emb=image_rotary_emb,
                 )
 
-        if not self.config.use_rotary_positional_embeddings:
-            # CogVideoX-2B
-            hidden_states = self.norm_final(hidden_states)
-        else:
-            # CogVideoX-5B
-            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-            hidden_states = self.norm_final(hidden_states)
-            hidden_states = hidden_states[:, text_seq_length:]
+
+            if self.is_train_face:
+                if i % self.cross_attn_interval == 0 and valid_face_emb is not None:
+                    hidden_states = hidden_states + self.local_face_scale * self.perceiver_cross_attention[ca_idx](
+                        valid_face_emb, hidden_states
+                    )  # torch.Size([2, 32, 2048])  torch.Size([2, 17550, 3072])
+                    ca_idx += 1
+
+        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+        hidden_states = self.norm_final(hidden_states)
+        hidden_states = hidden_states[:, text_seq_length:]
 
         # 4. Final block
         hidden_states = self.norm_out(hidden_states, temb=emb)
@@ -124,7 +148,7 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
 
         # 5. Unpatchify
         p = self.config.patch_size
-        output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, channels, p, p)
+        output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, -1, p, p)
         output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
 
 

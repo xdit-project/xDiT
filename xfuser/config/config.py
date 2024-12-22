@@ -258,6 +258,7 @@ class InputConfig:
     max_sequence_length: int = 256
     seed: int = 42
     output_type: str = "pil"
+    image_path: str = ""
 
     def __post_init__(self):
         if isinstance(self.prompt, list):

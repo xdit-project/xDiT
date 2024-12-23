@@ -5,7 +5,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # ConsisID configuration
 SCRIPT="consisid_usp_example.py"
-MODEL_ID="/cfs/dit/CogVideoX1.5-5B"
+MODEL_ID="/cfs/dit/ConsisID-preview"
 INFERENCE_STEP=50
 
 mkdir -p ./results
@@ -16,7 +16,7 @@ TASK_ARGS="--height 480 --width 720 --num_frames 49"
 # ConsisID parallel configuration
 N_GPUS=4
 PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 2"
-# CFG_ARGS="--use_cfg_parallel"
+CFG_ARGS="--use_cfg_parallel"
 
 # Uncomment and modify these as needed
 # PIPEFUSION_ARGS="--num_pipeline_patch 8"

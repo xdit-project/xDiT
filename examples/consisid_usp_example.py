@@ -108,7 +108,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         image_embeds = get_sp_group().all_gather(image_embeds.contiguous(), dim=-2)
         batch, num_frames, channels, height, width = image_embeds.shape
         text_len = text_embeds.shape[-2]
-        
+
         output = original_patch_embed_forward(text_embeds, image_embeds)
 
         text_embeds = output[:,:text_len,:]

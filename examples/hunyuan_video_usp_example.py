@@ -1,6 +1,6 @@
 # from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_hunyuan_video.py
 import functools
-from typing import Any, Dict, Union
+from typing import Any, Dict, Union, Optional
 import logging
 import time
 
@@ -8,6 +8,7 @@ import torch
 
 from diffusers import DiffusionPipeline, HunyuanVideoPipeline, HunyuanVideoTransformer3DModel
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.utils import scale_lora_layers, unscale_lora_layers, USE_PEFT_BACKEND
 from diffusers.utils import export_to_video
 
 from xfuser import xFuserArgs
@@ -45,8 +46,22 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         encoder_attention_mask: torch.Tensor,
         pooled_projections: torch.Tensor,
         guidance: torch.Tensor = None,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        if attention_kwargs is not None:
+            attention_kwargs = attention_kwargs.copy()
+            lora_scale = attention_kwargs.pop("scale", 1.0)
+        else:
+            lora_scale = 1.0
+
+        if USE_PEFT_BACKEND:
+            # weight the lora layers by setting `lora_scale` for each PEFT layer
+            scale_lora_layers(self, lora_scale)
+        else:
+            if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
+                logging.warning("Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective.")
+
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
 
         assert batch_size % get_classifier_free_guidance_world_size(
@@ -68,13 +83,14 @@ def parallelize_transformer(pipe: DiffusionPipeline):
                                                       encoder_attention_mask)
 
         hidden_states = hidden_states.reshape(batch_size, post_patch_num_frames, post_patch_height, post_patch_width, -1)
+        hidden_states = hidden_states.flatten(1, 3)
+
         hidden_states = torch.chunk(hidden_states,
                                     get_classifier_free_guidance_world_size(),
                                     dim=0)[get_classifier_free_guidance_rank()]
         hidden_states = torch.chunk(hidden_states,
                                     get_sequence_parallel_world_size(),
-                                    dim=2)[get_sequence_parallel_rank()]
-        hidden_states = hidden_states.flatten(1, 3)
+                                    dim=-2)[get_sequence_parallel_rank()]
 
         encoder_attention_mask = encoder_attention_mask[0].to(torch.bool)
         encoder_hidden_states_indices = torch.arange(
@@ -103,11 +119,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         freqs_cos, freqs_sin = image_rotary_emb
 
         def get_rotary_emb_chunk(freqs):
-            dim_thw = freqs.shape[-1]
-            freqs = freqs.reshape(num_frames, -1, dim_thw)
-            freqs = freqs.chunk(get_sequence_parallel_world_size(), dim=-2)[
-                get_sequence_parallel_rank()]
-            freqs = freqs.reshape(-1, dim_thw)
+            freqs = torch.chunk(freqs, get_sequence_parallel_world_size(), dim=0)[get_sequence_parallel_rank()]
             return freqs
 
         freqs_cos = get_rotary_emb_chunk(freqs_cos)
@@ -166,16 +178,20 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
-        hidden_states = hidden_states.reshape(batch_size // get_classifier_free_guidance_world_size(),
-                                              post_patch_num_frames,
-                                              post_patch_height // get_sequence_parallel_world_size(),
-                                              post_patch_width, -1, p_t, p, p)
-
-        hidden_states = get_sp_group().all_gather(hidden_states, dim=2)
+        hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
         hidden_states = get_cfg_group().all_gather(hidden_states, dim=0)
+
+        hidden_states = hidden_states.reshape(batch_size,
+                                              post_patch_num_frames,
+                                              post_patch_height,
+                                              post_patch_width, -1, p_t, p, p)
 
         hidden_states = hidden_states.permute(0, 4, 1, 5, 2, 6, 3, 7)
         hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+
+        if USE_PEFT_BACKEND:
+            # remove `lora_scale` from each PEFT layer
+            unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (hidden_states, )

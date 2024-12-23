@@ -103,7 +103,12 @@ class DiTRuntimeState(RuntimeState):
             pipeline=pipeline, parallel_config=config.parallel_config
         )
         self.cogvideox = False
+        self.hunyuan_video = False
         if pipeline.__class__.__name__.startswith(("CogVideoX", "HunyuanVideo")):
+            if pipeline.__class__.__name__.startswith("CogVideoX"):
+                self.cogvideox = True
+            else:
+                self.hunyuan_video = True
             self._set_cogvideox_parameters(
                 vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
                 vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
@@ -194,7 +199,6 @@ class DiTRuntimeState(RuntimeState):
         self.backbone_patch_size = backbone_patch_size
         self.backbone_inner_dim = backbone_inner_dim
         self.backbone_in_channel = backbone_in_channel
-        self.cogvideox = True
 
     def set_patched_mode(self, patch_mode: bool):
         self.patch_mode = patch_mode
@@ -259,6 +263,9 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.batch_size = batch_size or self.input_config.batch_size
         if self.cogvideox:
             self._calc_cogvideox_patches_metadata()
+        elif self.hunyuan_video:
+            # TODO: implement the hunyuan video patches metadata
+            pass
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()

@@ -5,6 +5,7 @@ from .pipeline_stable_diffusion_3 import xFuserStableDiffusion3Pipeline
 from .pipeline_flux import xFuserFluxPipeline
 from .pipeline_latte import xFuserLattePipeline
 from .pipeline_cogvideox import xFuserCogVideoXPipeline
+from .pipeline_consisid import xFuserConsisIDPipeline
 from .pipeline_hunyuandit import xFuserHunyuanDiTPipeline
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "xFuserLattePipeline",
     "xFuserHunyuanDiTPipeline",
     "xFuserCogVideoXPipeline",
+    "xFuserConsisIDPipeline",
 ]

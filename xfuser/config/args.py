@@ -92,6 +92,7 @@ class xFuserArgs:
     num_frames: int = 49
     num_inference_steps: int = 20
     max_sequence_length: int = 256
+    img_file_path: Optional[str] = None
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     no_use_resolution_binning: bool = False
@@ -227,6 +228,9 @@ class xFuserArgs:
         )
         input_group.add_argument(
             "--num_frames", type=int, default=49, help="The frames of video"
+        )
+        input_group.add_argument(
+            "--img_file_path", type=str, default=None, help="Path for the input image."
         )
         input_group.add_argument(
             "--prompt", type=str, nargs="*", default="", help="Prompt for the model."
@@ -410,6 +414,7 @@ class xFuserArgs:
             num_frames=self.num_frames,
             use_resolution_binning=not self.no_use_resolution_binning,
             batch_size=len(self.prompt) if isinstance(self.prompt, list) else 1,
+            img_file_path=self.img_file_path,
             prompt=self.prompt,
             negative_prompt=self.negative_prompt,
             num_inference_steps=self.num_inference_steps,

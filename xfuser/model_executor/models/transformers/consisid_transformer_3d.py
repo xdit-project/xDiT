@@ -1,16 +1,14 @@
-from typing import Optional, Dict, Any, Union, List, Optional, Tuple, Type
+from typing import Optional, Dict, Any, Union, Optional, Tuple
 import torch
 import torch.distributed
 import torch.nn as nn
 
-from diffusers.models.embeddings import PatchEmbed, CogVideoXPatchEmbed
+from diffusers.models.embeddings import CogVideoXPatchEmbed
 
 from diffusers.models import ConsisIDTransformer3DModel
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.utils import is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
-# from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, scale_lora_layers, USE_PEFT_BACKEND, unscale_lora_layers
+from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, scale_lora_layers, unscale_lora_layers
 
-from xfuser.model_executor.models import xFuserModelBaseWrapper
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 from xfuser.core.distributed import (
@@ -81,7 +79,6 @@ class xFuserConsisIDTransformer3DWrapper(xFuserTransformerBaseWrapper):
                     "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
                 )
 
-
         batch_size, num_frames, channels, height, width = hidden_states.shape
 
         # 1. Time embedding
@@ -151,6 +148,9 @@ class xFuserConsisIDTransformer3DWrapper(xFuserTransformerBaseWrapper):
         output = hidden_states.reshape(batch_size, num_frames, height // p, width // p, -1, p, p)
         output = output.permute(0, 1, 4, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
 
+        if USE_PEFT_BACKEND:
+            # remove `lora_scale` from each PEFT layer
+            unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)

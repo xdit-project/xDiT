@@ -1,21 +1,16 @@
 import os
-from typing import List, Tuple, Callable, Optional, Union, Dict
-# from typing import Any, List, Tuple, Callable, Optional, Union, Dict
+from typing import Any, List, Tuple, Callable, Optional, Union, Dict
 
 import torch
 import torch.distributed
-
-from diffusers import CogVideoXPipeline
-from diffusers.pipelines.cogvideo.pipeline_cogvideox import (
-    CogVideoXPipelineOutput,
+from diffusers import ConsisIDPipeline
+from diffusers.pipelines.consisid.pipeline_consisid import (
+    ConsisIDPipelineOutput,
     retrieve_timesteps,
 )
-from diffusers import ConsisIDPipeline
 from diffusers.schedulers import CogVideoXDPMScheduler
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-from diffusers.pipelines.consisid.pipeline_output import ConsisIDPipelineOutput
 from diffusers.image_processor import PipelineImageInput
-
 
 import math
 import cv2
@@ -110,7 +105,6 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         width: int = 720,
         num_frames: int = 49,
         num_inference_steps: int = 50,
-        timesteps: Optional[List[int]] = None,
         guidance_scale: float = 6,
         use_dynamic_cfg: bool = False,
         num_videos_per_prompt: int = 1,
@@ -121,6 +115,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: str = "pil",
         return_dict: bool = True,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
         callback_on_step_end: Optional[
             Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
         ] = None,
@@ -199,6 +194,19 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length (`int`, defaults to `226`):
                 Maximum sequence length in encoded prompt. Must be consistent with
                 `self.transformer.config.max_text_seq_length` otherwise may lead to poor results.
+            id_vit_hidden (`Optional[torch.Tensor]`, *optional*):
+                The tensor representing the hidden features extracted from the face model, which are used to condition
+                the local facial extractor. This is crucial for the model to obtain high-frequency information of the
+                face. If not provided, the local facial extractor will not run normally.
+            id_cond (`Optional[torch.Tensor]`, *optional*):
+                The tensor representing the hidden features extracted from the clip model, which are used to condition
+                the local facial extractor. This is crucial for the model to edit facial features If not provided, the
+                local facial extractor will not run normally.
+            kps_cond (`Optional[torch.Tensor]`, *optional*):
+                A tensor that determines whether the global facial extractor use keypoint information for conditioning.
+                If provided, this tensor controls whether facial keypoints such as eyes, nose, and mouth landmarks are
+                used during the generation process. This helps ensure the model retains more facial low-frequency
+                information.
 
         Examples:
 
@@ -210,6 +218,10 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
+
+        height = height or self.transformer.config.sample_height * self.vae_scale_factor_spatial
+        width = width or self.transformer.config.sample_width * self.vae_scale_factor_spatial
+        num_frames = num_frames or self.transformer.config.sample_frames
 
         num_videos_per_prompt = 1
 
@@ -226,6 +238,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             negative_prompt_embeds=negative_prompt_embeds,
         )
         self._guidance_scale = guidance_scale
+        self._attention_kwargs = attention_kwargs
         self._interrupt = False
 
         # 2. Default call parameters
@@ -242,7 +255,6 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
-
 
         get_runtime_state().set_video_input_parameters(
             height=height,
@@ -264,11 +276,12 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        if do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        prompt_embeds = self._process_cfg_split_batch(
+            negative_prompt_embeds, prompt_embeds
+        )
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device)
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents
@@ -299,9 +312,9 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             kps_cond,
         )
 
-        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-
+        # 6. Prepare extra step kwargs.
+        extra_step_kwargs = {"generator": generator, "eta": eta}
+        
         # 7. Create rotary embeds if required
         image_rotary_emb = (
             self._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
@@ -319,14 +332,25 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # for DPM-solver++
             old_pred_original_sample = None
+            timesteps_cpu = timesteps.cpu()
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
 
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                if do_classifier_free_guidance:
+                    latent_model_input = torch.cat(
+                        [latents] * (2 // get_classifier_free_guidance_world_size())
+                    )
+                else:
+                    latent_model_input = latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                latent_image_input = torch.cat([image_latents] * 2) if do_classifier_free_guidance else image_latents
+                if do_classifier_free_guidance:
+                    latent_image_input = torch.cat(
+                        [image_latents] * (2 // get_classifier_free_guidance_world_size())
+                    )
+                else:
+                    latent_image_input = image_latents
                 latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=2)
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
@@ -338,6 +362,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                     encoder_hidden_states=prompt_embeds,
                     timestep=timestep,
                     image_rotary_emb=image_rotary_emb,
+                    attention_kwargs=attention_kwargs,
                     return_dict=False,
                     id_vit_hidden=id_vit_hidden,
                     id_cond=id_cond,
@@ -347,11 +372,25 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                 # perform guidance
                 if use_dynamic_cfg:
                     self._guidance_scale = 1 + guidance_scale * (
-                        (1 - math.cos(math.pi * ((num_inference_steps - t.item()) / num_inference_steps) ** 5.0)) / 2
+                        (
+                            1
+                            - math.cos(
+                                math.pi
+                                * ((num_inference_steps - timesteps_cpu[i].item()) / num_inference_steps) ** 5.0
+                            )
+                        )
+                        / 2
                     )
                 if do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    if get_classifier_free_guidance_world_size() == 1:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    elif get_classifier_free_guidance_world_size() == 2:
+                        noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
+                            noise_pred, separate_tensors=True
+                        )
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
@@ -384,13 +423,15 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
         if get_sequence_parallel_world_size() > 1:
             latents = get_sp_group().all_gather(latents, dim=-2)
-
-
-        if not output_type == "latent":
-            video = self.decode_latents(latents)
-            video = self.video_processor.postprocess_video(video=video, output_type=output_type)
+        
+        if is_dp_last_group():
+            if not output_type == "latent":
+                video = self.decode_latents(latents)
+                video = self.video_processor.postprocess_video(video=video, output_type=output_type)
+            else:
+                video = latents
         else:
-            video = latents
+            video = [None for _ in range(batch_size)]
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -399,7 +440,6 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             return (video,)
 
         return ConsisIDPipelineOutput(frames=video)
-
 
     def _init_sync_pipeline(
         self,
@@ -447,7 +487,6 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             )
         return latents, image_latents, prompt_embeds, image_rotary_emb
     
-
     @property
     def interrupt(self):
         return self._interrupt

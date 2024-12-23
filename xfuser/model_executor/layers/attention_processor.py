@@ -1,5 +1,5 @@
 import inspect
-from typing import Optional, Union, Tuple
+from typing import Optional
 
 import torch
 from torch import nn
@@ -1148,7 +1148,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
 @xFuserAttentionProcessorRegister.register(CogVideoXAttnProcessor2_0)
 class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
     r"""
-    Processor for implementing scaled dot-product attention for the CogVideoX model. It applies a rotary embedding on
+    Processor for implementing scaled dot-product attention for the ConsisID model. It applies a rotary embedding on
     query and key vectors, but does not include spatial normalization.
     """
 
@@ -1315,4 +1315,3 @@ class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
             [text_seq_length, latent_seq_length], dim=1
         )
         return hidden_states, encoder_hidden_states
-   

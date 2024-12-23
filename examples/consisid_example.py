@@ -3,9 +3,11 @@ import os
 import time
 import torch
 import torch.distributed
+
 from diffusers.pipelines.consisid.consisid_utils import prepare_face_models, process_face_embeddings_infer
 from diffusers.utils import export_to_video
 from huggingface_hub import snapshot_download
+
 from xfuser import xFuserConsisIDPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -32,7 +34,7 @@ def main():
     else:
         print(f"Base Model already exists in {engine_config.model_config.model}, skipping download.")
 
-    # 2. Load Pipeline.
+    # 2. Load Pipeline
     device = torch.device(f"cuda:{local_rank}")
     pipe = xFuserConsisIDPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,

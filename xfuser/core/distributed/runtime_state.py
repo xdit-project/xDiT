@@ -4,7 +4,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
-from diffusers import DiffusionPipeline, CogVideoXPipeline, ConsisIDPipeline
+from diffusers import DiffusionPipeline
 import torch.distributed
 
 from xfuser.config.config import (
@@ -104,17 +104,15 @@ class DiTRuntimeState(RuntimeState):
         )
         self.cogvideox = False
         self.consisid = False
-        if isinstance(pipeline, CogVideoXPipeline):
+        self.hunyuan_video = False
+        if pipeline.__class__.__name__.startswith(("CogVideoX", "ConsisID", "HunyuanVideo")):
+            if pipeline.__class__.__name__.startswith("CogVideoX"):
+                self.cogvideox = True
+            elif pipeline.__class__.__name__.startswith("ConsisID"):
+                self.consisid = True
+            else:
+                self.hunyuan_video = True
             self._set_cogvideox_parameters(
-                vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
-                vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
-                backbone_patch_size=pipeline.transformer.config.patch_size,
-                backbone_in_channel=pipeline.transformer.config.in_channels,
-                backbone_inner_dim=pipeline.transformer.config.num_attention_heads
-                * pipeline.transformer.config.attention_head_dim,
-            )
-        elif isinstance(pipeline, ConsisIDPipeline):
-            self._set_consisid_parameters(
                 vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
                 vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
                 backbone_patch_size=pipeline.transformer.config.patch_size,
@@ -204,22 +202,6 @@ class DiTRuntimeState(RuntimeState):
         self.backbone_patch_size = backbone_patch_size
         self.backbone_inner_dim = backbone_inner_dim
         self.backbone_in_channel = backbone_in_channel
-        self.cogvideox = True
-
-    def _set_consisid_parameters(
-        self,
-        vae_scale_factor_spatial: int,
-        vae_scale_factor_temporal: int,
-        backbone_patch_size: int,
-        backbone_inner_dim: int,
-        backbone_in_channel: int,
-    ):
-        self.vae_scale_factor_spatial = vae_scale_factor_spatial
-        self.vae_scale_factor_temporal = vae_scale_factor_temporal
-        self.backbone_patch_size = backbone_patch_size
-        self.backbone_inner_dim = backbone_inner_dim
-        self.backbone_in_channel = backbone_in_channel
-        self.consisid = True
 
     def set_patched_mode(self, patch_mode: bool):
         self.patch_mode = patch_mode
@@ -286,6 +268,9 @@ class DiTRuntimeState(RuntimeState):
             self._calc_cogvideox_patches_metadata()
         elif self.consisid:
             self._calc_consisid_patches_metadata()
+        elif self.hunyuan_video:
+            # TODO: implement the hunyuan video patches metadata
+            pass
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()

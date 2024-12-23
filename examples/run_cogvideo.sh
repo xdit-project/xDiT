@@ -5,7 +5,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # CogVideoX configuration
 SCRIPT="cogvideox_example.py"
-MODEL_ID="/storage/ysh/Ckpts/CogVideoX1.5-5B"
+MODEL_ID="/cfs/dit/CogVideoX1.5-5B"
 INFERENCE_STEP=50
 
 mkdir -p ./results

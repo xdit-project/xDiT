@@ -5,7 +5,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # ConsisID configuration
 SCRIPT="consisid_example.py"
-MODEL_ID="/storage/ysh/Code/ID_Consistency/Code/2_offen_codes/0_temp_hf/ConsisID/BestWishYsh/ConsisID-preview"
+MODEL_ID="/cfs/dit/ConsisID-preview"
 INFERENCE_STEP=50
 
 mkdir -p ./results
@@ -22,7 +22,7 @@ PARALLEL_ARGS="--ulysses_degree 2 --ring_degree 3"
 # PIPEFUSION_ARGS="--num_pipeline_patch 8"
 # OUTPUT_ARGS="--output_type latent"
 # PARALLLEL_VAE="--use_parallel_vae"
-ENABLE_TILING="--enable_tiling"
+# ENABLE_TILING="--enable_tiling"
 # COMPILE_FLAG="--use_torch_compile"
 
 torchrun --master_port=1234 --nproc_per_node=$N_GPUS ./examples/$SCRIPT \

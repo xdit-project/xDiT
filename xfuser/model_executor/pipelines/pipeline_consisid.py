@@ -313,7 +313,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         )
 
         # 6. Prepare extra step kwargs.
-        extra_step_kwargs = {"generator": generator, "eta": eta}
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
         
         # 7. Create rotary embeds if required
         image_rotary_emb = (

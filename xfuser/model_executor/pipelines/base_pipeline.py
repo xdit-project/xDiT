@@ -457,7 +457,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         
         # ---------gather latents from dp last group-----------
         rank = get_world_group().rank
-        device = f"cuda:{rank}"
+        device = f"cuda:{get_world_group().local_rank}"
 
         # all gather dp last group rank list
         dp_rank_list = [torch.zeros(1, dtype=int, device=device) for _ in range(get_world_group().world_size)]

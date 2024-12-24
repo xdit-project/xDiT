@@ -49,6 +49,7 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1
 # Use this flag to quantize the T5 text encoder, which could reduce the memory usage and have no effect on the result quality.
 # QUANTIZE_FLAG="--use_fp8_t5_encoder"
 
+# It is necessary to set CUDA_VISIBLE_DEVICES for the ray driver and workers.
 export CUDA_VISIBLE_DEVICES=0,1
 
 python ./examples/ray/$SCRIPT \
@@ -66,3 +67,4 @@ $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
+--use_parallel_vae \

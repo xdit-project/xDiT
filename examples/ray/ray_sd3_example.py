@@ -6,21 +6,7 @@ from transformers import T5EncoderModel
 from xfuser import xFuserArgs
 from xfuser.ray.pipeline.pipeline_utils import RayDiffusionPipeline
 from xfuser.config import FlexibleArgumentParser
-from xfuser.model_executor.pipelines import xFuserPixArtAlphaPipeline, xFuserPixArtSigmaPipeline, xFuserStableDiffusion3Pipeline, xFuserHunyuanDiTPipeline, xFuserFluxPipeline
-import time
-import os
-import torch
-import torch.distributed
-from transformers import T5EncoderModel
-from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
-from xfuser.config import FlexibleArgumentParser
-from xfuser.core.distributed import (
-    get_world_group,
-    is_dp_last_group,
-    get_data_parallel_rank,
-    get_runtime_state,
-)
-from xfuser.core.distributed.parallel_state import get_data_parallel_world_size
+from xfuser.model_executor.pipelines import xFuserStableDiffusion3Pipeline
 
 
 def main():
@@ -63,14 +49,16 @@ def main():
     print(f"elapsed time:{elapsed_time}")
     if not os.path.exists("results"):
         os.mkdir("results")
-    # output is a list of results from each worker, we take the last one
-    for i, image in enumerate(output[-1].images):
-        image.save(
-            f"./results/{model_name}_result_{i}.png"
-        )
-        print(
-            f"image {i} saved to ./results/{model_name}_result_{i}.png"
-        )
+    for i, result in enumerate(output):
+        if result is not None:
+            image = result.images[0]
+            image.save(
+                f"./results/{model_name}_result_{i}.png"
+            )
+            print(
+                f"image {i} saved to ./results/{model_name}_result_{i}.png"
+            )
+            break
 
 
 if __name__ == "__main__":

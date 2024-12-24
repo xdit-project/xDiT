@@ -21,3 +21,10 @@
 |   2    |       2        |      1      |      1       |   76.56s  |
 |   2    |       1        |      1      |      2       |   59.72s  |
 |   1    |       1        |      1      |      1       |  114.87s  |
+
+## Resources
+
+通过以下资源了解有关 ConsisID 的更多信息：
+
+- 一段 [视频](https://www.youtube.com/watch?v=PhlgC-bI5SQ) 演示了 ConsisID 的主要功能；
+- 有关更多详细信息，请参阅研究论文 [Identity-Preserving Text-to-Video Generation by Frequency Decomposition](https://hf.co/papers/2411.17440)。

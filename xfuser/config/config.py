@@ -258,6 +258,7 @@ class InputConfig:
     num_frames: int = 49
     use_resolution_binning: bool = (True,)
     batch_size: Optional[int] = None
+    img_file_path: Optional[str] = None
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     num_inference_steps: int = 20

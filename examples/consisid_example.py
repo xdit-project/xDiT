@@ -1,18 +1,20 @@
 import logging
+import os
 import time
 import torch
 import torch.distributed
-from diffusers import AutoencoderKLTemporalDecoder
-from xfuser import xFuserCogVideoXPipeline, xFuserArgs
+
+from diffusers.pipelines.consisid.consisid_utils import prepare_face_models, process_face_embeddings_infer
+from diffusers.utils import export_to_video
+from huggingface_hub import snapshot_download
+
+from xfuser import xFuserConsisIDPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_world_group,
-    get_data_parallel_rank,
-    get_data_parallel_world_size,
     get_runtime_state,
     is_dp_last_group,
 )
-from diffusers.utils import export_to_video
 
 
 def main():
@@ -24,9 +26,18 @@ def main():
     local_rank = get_world_group().local_rank
 
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
-    assert engine_args.use_parallel_vae is False, "parallel VAE not implemented for CogVideo"
+    assert engine_args.use_parallel_vae is False, "parallel VAE not implemented for ConsisID"
 
-    pipe = xFuserCogVideoXPipeline.from_pretrained(
+    # 1. Prepare all the Checkpoints
+    if not os.path.exists(engine_config.model_config.model):
+        print("Base Model not found, downloading from Hugging Face...")
+        snapshot_download(repo_id="BestWishYsh/ConsisID-preview", local_dir=engine_config.model_config.model)
+    else:
+        print(f"Base Model already exists in {engine_config.model_config.model}, skipping download.")
+
+    # 2. Load Pipeline
+    device = torch.device(f"cuda:{local_rank}")
+    pipe = xFuserConsisIDPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.bfloat16,
@@ -38,35 +49,49 @@ def main():
         pipe.enable_model_cpu_offload(gpu_id=local_rank)
         logging.info(f"rank {local_rank} model CPU offload enabled")
     else:
-        device = torch.device(f"cuda:{local_rank}")
         pipe = pipe.to(device)
+
+    face_helper_1, face_helper_2, face_clip_model, face_main_model, eva_transform_mean, eva_transform_std = (
+        prepare_face_models(engine_config.model_config.model, device=device, dtype=torch.bfloat16)
+    )
 
     if args.enable_tiling:
         pipe.vae.enable_tiling()
 
     if args.enable_slicing:
         pipe.vae.enable_slicing()
+    
+    # 3. Prepare Model Input
+    id_cond, id_vit_hidden, image, face_kps = process_face_embeddings_infer(
+                 face_helper_1,
+                 face_clip_model,
+                 face_helper_2,
+                 eva_transform_mean,
+                 eva_transform_std,
+                 face_main_model,
+                 device,
+                 torch.bfloat16,
+                 input_config.img_file_path,
+                 is_align_face=True,
+             )
 
-    # warmup
-    output = pipe(
-        height=input_config.height,
-        width=input_config.width,
-        num_frames=input_config.num_frames,
-        prompt=input_config.prompt,
-        num_inference_steps=1,
-        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-    ).frames[0]
-
+    # 4. Generate Identity-Preserving Video
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 
     output = pipe(
+        image=image,
+        prompt=input_config.prompt[0],
+        id_vit_hidden=id_vit_hidden,
+        id_cond=id_cond,
+        kps_cond=face_kps,
         height=input_config.height,
         width=input_config.width,
         num_frames=input_config.num_frames,
-        prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+        guidance_scale=6.0,
+        use_dynamic_cfg=False,
     ).frames[0]
 
     end_time = time.time()
@@ -81,7 +106,7 @@ def main():
     )
     if is_dp_last_group():
         resolution = f"{input_config.width}x{input_config.height}"
-        output_filename = f"results/cogvideox_{parallel_info}_{resolution}.mp4"
+        output_filename = f"results/consisid_{parallel_info}_{resolution}.mp4"
         export_to_video(output, output_filename, fps=8)
         print(f"output saved to {output_filename}")
 

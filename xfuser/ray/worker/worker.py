@@ -49,6 +49,12 @@ class Worker(WorkerBase):
 
     def from_pretrained(self,PipelineClass, pretrained_model_name_or_path: str, engine_config: EngineConfig,**kwargs,):
         local_rank = get_world_group().local_rank
+        for key, value in dict(kwargs).items():
+            if isinstance(value, dict) and 'model_class' in value:
+                encoder_config = kwargs.pop(key)
+                encoder_class = encoder_config.pop('model_class') 
+                encoder_instance = encoder_class.from_pretrained(**encoder_config)
+                kwargs[key] = encoder_instance
         pipe = PipelineClass.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             engine_config=engine_config,
@@ -62,4 +68,7 @@ class Worker(WorkerBase):
 
     def execute(self, **kwargs):
         output = self.pipe(**kwargs)
-        return output
+        if output is not None:
+            return output.images # FIXME: can't serialize output, so return images only
+        else:
+            return None

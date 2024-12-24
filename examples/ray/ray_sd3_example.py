@@ -18,7 +18,19 @@ def main():
     engine_config, input_config = engine_args.create_config()
     model_name = engine_config.model_config.model.split("/")[-1]
     PipelineClass = xFuserStableDiffusion3Pipeline
-    text_encoder_3 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_3", torch_dtype=torch.float16)
+    
+    # equal to
+    # text_encoder_3 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_3", torch_dtype=torch.float16)
+    # but load encoder in worker
+    encoder_kwargs = {
+        'text_encoder_3': {
+            'model_class': T5EncoderModel,
+            'pretrained_model_name_or_path': engine_config.model_config.model,
+            'subfolder': 'text_encoder_3',
+            'torch_dtype': torch.float16
+        },
+    }
+    
     if args.use_fp8_t5_encoder:
         from optimum.quanto import freeze, qfloat8, quantize
         print(f"rank {local_rank} quantizing text encoder 2")
@@ -30,7 +42,7 @@ def main():
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.float16,
-        text_encoder_3=text_encoder_3,
+        **encoder_kwargs
     )
     pipe.prepare_run(input_config)
 
@@ -49,9 +61,9 @@ def main():
     print(f"elapsed time:{elapsed_time}")
     if not os.path.exists("results"):
         os.mkdir("results")
-    for i, result in enumerate(output):
-        if result is not None:
-            image = result.images[0]
+    for i, images in enumerate(output):
+        if images is not None:
+            image = images[0]
             image.save(
                 f"./results/{model_name}_result_{i}.png"
             )

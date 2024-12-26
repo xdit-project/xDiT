@@ -4,6 +4,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+import diffusers
 from diffusers import DiffusionPipeline
 import torch.distributed
 
@@ -121,8 +122,11 @@ class DiTRuntimeState(RuntimeState):
                 * pipeline.transformer.config.attention_head_dim,
             )
         else:
+            vae_scale_factor = pipeline.vae_scale_factor
+            if pipeline.__class__.__name__.startswith("Flux") and diffusers.__version__ >= '0.32':
+                vae_scale_factor *= 2
             self._set_model_parameters(
-                vae_scale_factor=pipeline.vae_scale_factor,
+                vae_scale_factor=vae_scale_factor,
                 backbone_patch_size=pipeline.transformer.config.patch_size,
                 backbone_in_channel=pipeline.transformer.config.in_channels,
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads

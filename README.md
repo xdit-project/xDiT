@@ -203,13 +203,20 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 
 ### 1. Install from pip
 
-We set diffusers as an optional installation requirement.
-First, if you only use the USP interface, you don't need to install diffusers. Second, different models have different requirements for diffusers - for example, the latest models may need to be installed from the diffusers main branch.
+We set `diffusers` and `flash_attn` as two optional installation requirements.
+
+About `diffusers` version: 
+- If you only use the USP interface, `diffusers` is not required. 模型也通常以nn.Module形式被released，随后才被集成到diffusers里。
+- Different models may require different diffusers versions. Model implementations can vary between diffusers versions (e.g., Flux), which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
+- While we specify a diffusers version in `setup.py`, newer models may require later versions or even installation from main branch.
+
+About `flash_attn` version:
+- Without `flash_attn` installed, xDiT falls back to a PyTorch implementation of ring attention, which helps NPU users with compatibility
+- However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we recommend installing `flash_attn`.
 
 ```
-pip install xfuser
-# Or optionally, with diffusers
-pip install "xfuser[diffusers]"
+pip install xfuser  # Basic installation
+pip install "xfuser[diffusers,flash]"  # With both diffusers and flash attention
 ```
 
 ### 2. Install from source 

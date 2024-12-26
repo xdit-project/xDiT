@@ -224,7 +224,7 @@ pip install "xfuser[diffusers,flash]"  # With both diffusers and flash attention
 ```
 pip install -e .
 # Or optionally, with diffusers
-pip install -e ".[diffusers]"
+pip install -e ".[diffusers,flash-attn]"
 ```
 
 Note that we use two self-maintained packages:

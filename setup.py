@@ -45,7 +45,7 @@ if __name__ == "__main__":
             "diffusers": [
                 "diffusers==0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
             ],
-            "flash": [
+            "flash-attn": [
                 "flash-attn>=2.6.0",
             ]
         },

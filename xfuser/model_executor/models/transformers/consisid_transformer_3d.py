@@ -5,7 +5,11 @@ import torch.nn as nn
 
 from diffusers.models.embeddings import CogVideoXPatchEmbed
 
-from diffusers.models import ConsisIDTransformer3DModel
+try:
+    from diffusers.models import ConsisIDTransformer3DModel
+except ImportError:
+    ConsisIDTransformer3DModel = None
+
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, scale_lora_layers, unscale_lora_layers
 

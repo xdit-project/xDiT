@@ -3,14 +3,20 @@ from typing import Any, List, Tuple, Callable, Optional, Union, Dict
 
 import torch
 import torch.distributed
-from diffusers import ConsisIDPipeline
-from diffusers.pipelines.consisid.pipeline_consisid import (
-    ConsisIDPipelineOutput,
-    retrieve_timesteps,
-)
+
 from diffusers.schedulers import CogVideoXDPMScheduler
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput
+
+try:
+    from diffusers import ConsisIDPipeline
+
+    from diffusers.pipelines.consisid.pipeline_consisid import (
+        ConsisIDPipelineOutput,
+        retrieve_timesteps,
+    )
+except ImportError:
+    ConsisIDPipeline = None
 
 import math
 import cv2
@@ -124,7 +130,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         id_vit_hidden: Optional[torch.Tensor] = None,
         id_cond: Optional[torch.Tensor] = None,
         kps_cond: Optional[torch.Tensor] = None,
-    ) -> Union[ConsisIDPipelineOutput, Tuple]:
+    ) -> Union['ConsisIDPipelineOutput', Tuple]:
         """
         Function invoked when calling the pipeline for generation.
 

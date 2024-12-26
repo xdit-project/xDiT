@@ -207,7 +207,7 @@ We set `diffusers` and `flash_attn` as two optional installation requirements.
 
 About `diffusers` version: 
 - If you only use the USP interface, `diffusers` is not required. Models are typically released as `nn.Module`
- first, before being integrated into diffusers.
+ first, before being integrated into diffusers. xDiT sometimes is applied as an USP plugin to existing projects.
 - Different models may require different diffusers versions. Model implementations can vary between diffusers versions (e.g., Flux), which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
 - While we specify a diffusers version in `setup.py`, newer models may require later versions or even installation from main branch.
 

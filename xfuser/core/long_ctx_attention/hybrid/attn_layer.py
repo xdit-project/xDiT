@@ -3,6 +3,7 @@ from torch import Tensor
 
 import torch.distributed
 from yunchang import LongContextAttention
+from yunchang.kernels import FlashAttentionImpl
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
 from xfuser.logger import init_logger
@@ -21,6 +22,7 @@ class xFuserLongContextAttention(LongContextAttention):
         ring_impl_type: str = "basic",
         use_pack_qkv: bool = False,
         use_kv_cache: bool = False,
+        attn_type: FlashAttentionImpl = FlashAttentionImpl.FA,
     ) -> None:
         """
         Arguments:
@@ -35,6 +37,7 @@ class xFuserLongContextAttention(LongContextAttention):
             gather_idx=gather_idx,
             ring_impl_type=ring_impl_type,
             use_pack_qkv=use_pack_qkv,
+            attn_type = attn_type,
         )
         self.use_kv_cache = use_kv_cache
         if (

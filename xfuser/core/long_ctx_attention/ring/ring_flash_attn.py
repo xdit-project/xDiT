@@ -11,7 +11,10 @@ try:
 except ImportError:
     flash_attn = None
     _flash_attn_forward = None
+<<<<<<< HEAD
     from yunchang.kernels.attention import pytorch_attn_forward
+=======
+>>>>>>> main
 
 def xdit_ring_flash_attn_forward(
     process_group,

@@ -1,11 +1,16 @@
 import torch
-import flash_attn
-from flash_attn.flash_attn_interface import _flash_attn_forward
+
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
+try:
+    import flash_attn
+    from flash_attn.flash_attn_interface import _flash_attn_forward
+except ImportError:
+    flash_attn = None
+    _flash_attn_forward = None
 
 def xdit_ring_flash_attn_forward(
     process_group,
@@ -80,6 +85,7 @@ def xdit_ring_flash_attn_forward(
             key, value = k, v
 
         if not causal or step <= comm.rank:
+            assert flash_attn is not None, f"FlashAttention is not available, please install flash_attn"
             if flash_attn.__version__ <= "2.6.3":
                 block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
                     q,

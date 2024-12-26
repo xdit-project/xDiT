@@ -29,8 +29,8 @@ TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-N_GPUS=8
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2"
+N_GPUS=4
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 2 --ring_degree 2"
 
 # CFG_ARGS="--use_cfg_parallel"
 

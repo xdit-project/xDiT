@@ -195,10 +195,11 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import FlashAttentionImpl
+                from yunchang.kernels import AttnType
+                assert yunchang.__version__ >= "0.6.0"
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=FlashAttentionImpl.TORCH,
+                    attn_type=AttnType.TORCH,
                 )
         else:
             self.hybrid_seq_parallel_attn = None
@@ -402,10 +403,10 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import FlashAttentionImpl
+                from yunchang.kernels import AttnType
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=FlashAttentionImpl.TORCH,
+                    attn_type=AttnType.TORCH,
                 )
 
         if get_fast_attn_enable():
@@ -595,10 +596,10 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import FlashAttentionImpl
+                from yunchang.kernels import AttnType
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=FlashAttentionImpl.TORCH,
+                    attn_type=AttnType.TORCH,
                 )
 
     def __call__(
@@ -796,10 +797,10 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import FlashAttentionImpl
+                from yunchang.kernels import AttnType
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=FlashAttentionImpl.TORCH,
+                    attn_type=AttnType.TORCH,
                 )
         else:
             self.hybrid_seq_parallel_attn = None
@@ -998,10 +999,10 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import FlashAttentionImpl
+                from yunchang.kernels import AttnType
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=FlashAttentionImpl.TORCH,
+                    attn_type=AttnType.TORCH,
                 )
         else:
             self.hybrid_seq_parallel_attn = None
@@ -1175,10 +1176,10 @@ class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import FlashAttentionImpl
+                from yunchang.kernels import AttnType
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=FlashAttentionImpl.TORCH,
+                    attn_type=AttnType.TORCH,
                 )
         else:
             self.hybrid_seq_parallel_attn = None
@@ -1347,10 +1348,10 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
-                    from yunchang.kernels import FlashAttentionImpl
+                    from yunchang.kernels import AttnType
                     self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache,
-                        attn_type=FlashAttentionImpl.TORCH,
+                        attn_type=AttnType.TORCH,
                     )
             else:
                 self.hybrid_seq_parallel_attn = None

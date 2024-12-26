@@ -217,7 +217,7 @@ About `flash_attn` version:
 
 ```
 pip install xfuser  # Basic installation
-pip install "xfuser[diffusers,flash]"  # With both diffusers and flash attention
+pip install "xfuser[diffusers,flash-attn]"  # With both diffusers and flash attention
 ```
 
 ### 2. Install from source 

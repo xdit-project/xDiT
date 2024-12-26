@@ -206,7 +206,8 @@ Currently, if you need the parallel version of ComfyUI, please fill in this [app
 We set `diffusers` and `flash_attn` as two optional installation requirements.
 
 About `diffusers` version: 
-- If you only use the USP interface, `diffusers` is not required. 模型也通常以nn.Module形式被released，随后才被集成到diffusers里。
+- If you only use the USP interface, `diffusers` is not required. Models are typically released as `nn.Module`
+ first, before being integrated into diffusers.
 - Different models may require different diffusers versions. Model implementations can vary between diffusers versions (e.g., Flux), which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
 - While we specify a diffusers version in `setup.py`, newer models may require later versions or even installation from main branch.
 

@@ -43,14 +43,14 @@ if __name__ == "__main__":
         ],
         extras_require={
             "diffusers": [
-                "diffusers==0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
+                "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
             ],
             "flash-attn": [
                 "flash-attn>=2.6.0",
             ]
         },
         url="https://github.com/xdit-project/xDiT.",
-        description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",
+        description="A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices",
         long_description=long_description,
         long_description_content_type="text/markdown",
         version=version,

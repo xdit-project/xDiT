@@ -215,7 +215,7 @@ class xFuserArgs:
             "--vae_parallel_size",
             type=int,
             default=0,
-            help="VAE parallel size.",
+            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
         )
         parallel_group.add_argument(
             "--split_scheme",

@@ -193,7 +193,7 @@ class ParallelConfig:
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
     world_size: int = 1 # FIXME: remove this
-    dit_world_size: int = 1 # FIXME: remove this
+    dit_world_size: int = 1
     vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
 
     def __post_init__(self):

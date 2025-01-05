@@ -260,37 +260,42 @@ def _verify_bundles(
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
     # bundle_idx -> bundle (e.g., {"GPU": 1})
     bundles = pg_data["bundles"]
-    # node_id -> List of bundle (e.g., {"GPU": 1})
-    node_id_to_bundle: Dict[str, List[Dict[str, float]]] = defaultdict(list)
-
+    # Create a mapping of node_id to (bundle_idx, bundle) pairs
+    node_id_to_bundles: Dict[str, List[tuple[int, Dict[str, float]]]] = defaultdict(list)
     for bundle_idx, node_id in bundle_to_node_ids.items():
-        node_id_to_bundle[node_id].append(bundles[bundle_idx])
-    driver_node_id = ray.get_runtime_context().get_node_id()
+        node_id_to_bundles[node_id].append((bundle_idx, bundles[bundle_idx]))
 
-    if driver_node_id not in node_id_to_bundle:
+    driver_node_id = ray.get_runtime_context().get_node_id()
+    if driver_node_id not in node_id_to_bundles:
         raise RuntimeError(
             f"driver node id {driver_node_id} is not included in a placement "
             f"group {placement_group.id}. Node id -> bundles "
-            f"{node_id_to_bundle}. "
+            f"{node_id_to_bundles}. "
             "You don't have enough GPUs available in a current node. Check "
             "`ray status` to see if you have available GPUs in a node "
             f"{driver_node_id} before starting an vLLM engine."
         )
 
-    for node_id, bundles in node_id_to_bundle.items():
-        if len(bundles) < parallel_config.sp_degree:
+    for node_id, bundle_pairs in node_id_to_bundles.items():
+        # Filter bundles that are for VAE workers
+        vae_bundles = [(idx, bundle) for idx, bundle in bundle_pairs 
+                      if idx < parallel_config.vae_parallel_size]
+        
+        if vae_bundles and len(bundle_pairs) < parallel_config.sp_degree:
             logger.warning(
-                "sequence parallel degree=%d "
+                "For node with VAE workers: sequence parallel degree=%d "
                 "is bigger than a reserved number of %ss (%d "
-                "%ss) in a node %s. Sequence parallel workers can be "
-                "spread out to 2+ nodes which can degrade the performance "
-                "unless you have fast interconnect across nodes, like "
-                "Infiniband. To resolve this issue, make sure you have more "
-                "than %d GPUs available at each node.",
+                "%ss) in node %s. VAE bundle indices: %s. "
+                "Sequence parallel workers can be spread out to 2+ nodes "
+                "which can degrade the performance unless you have fast "
+                "interconnect across nodes, like Infiniband. To resolve "
+                "this issue, make sure you have more than %d GPUs "
+                "available at each node.",
                 parallel_config.sp_degree,
                 device_str,
-                len(bundles),
+                len(bundle_pairs),
                 device_str,
                 node_id,
+                [idx for idx, _ in vae_bundles],
                 parallel_config.tp_degree,
             )

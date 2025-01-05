@@ -7,7 +7,7 @@ from abc import ABC
 from typing import Any, Dict
 
 from xfuser.ray.worker.utils import update_environment_variables, resolve_obj_by_qualname
-from xfuser.config.config import EngineConfig
+from xfuser.config.config import ParallelConfig
 
 class BaseWorkerWrapper(ABC):
     def __init__(self, worker_cls: str):
@@ -36,6 +36,6 @@ class BaseWorkerWrapper(ABC):
 
 
 class RayWorkerWrapper(BaseWorkerWrapper):
-    def __init__(self, engine_config: EngineConfig, rank: int) -> None:
-        super().__init__(engine_config.parallel_config.worker_cls)
-        self.init_worker(engine_config.parallel_config, rank)
+    def __init__(self, parallel_config: ParallelConfig, worker_cls: str, rank: int) -> None:
+        super().__init__(worker_cls)
+        self.init_worker(parallel_config, rank)

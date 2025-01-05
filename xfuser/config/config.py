@@ -193,7 +193,8 @@ class ParallelConfig:
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
     world_size: int = 1 # FIXME: remove this
-    worker_cls: str = "xfuser.ray.worker.worker.Worker"
+    dit_world_size: int = 1 # FIXME: remove this
+    vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
 
     def __post_init__(self):
         assert self.tp_config is not None, "tp_config must be set"
@@ -207,7 +208,7 @@ class ParallelConfig:
             * self.tp_config.tp_degree
             * self.pp_config.pp_degree
         )
-        world_size = self.world_size
+        world_size = self.dit_world_size
         assert parallel_world_size == world_size, (
             f"parallel_world_size {parallel_world_size} "
             f"must be equal to world_size {self.world_size}"

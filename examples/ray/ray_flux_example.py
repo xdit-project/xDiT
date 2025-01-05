@@ -51,9 +51,9 @@ def main():
     if not os.path.exists("results"):
         os.mkdir("results")
         
-    for i, result in enumerate(output):
-        if result is not None:
-            image = result.images[0]
+    for i, images in enumerate(output):
+        if images is not None:
+            image = images[0]
             image.save(
                 f"./results/{model_name}_result_{i}.png"
             )

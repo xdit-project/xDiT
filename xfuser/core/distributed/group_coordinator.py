@@ -135,11 +135,6 @@ class GroupCoordinator:
             self.device = torch.device("cpu")
 
     @property
-    def size(self):
-        """Return the size of the process group (alias for world_size)"""
-        return self.world_size
-
-    @property
     def first_rank(self):
         """Return the global rank of the first process in the group"""
         return self.ranks[0]

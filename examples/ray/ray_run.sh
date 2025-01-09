@@ -32,6 +32,7 @@ TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 N_GPUS=3 # world size
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1"
 VAE_PARALLEL_SIZE=1
+DIT_PARALLEL_SIZE=2
 # CFG_ARGS="--use_cfg_parallel"
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
@@ -68,4 +69,5 @@ $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
 --use_parallel_vae \
+--dit_parallel_size $DIT_PARALLEL_SIZE \
 --vae_parallel_size $VAE_PARALLEL_SIZE

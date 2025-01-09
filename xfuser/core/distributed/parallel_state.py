@@ -282,12 +282,12 @@ def init_model_parallel_group(
         )
  
 def init_dit_group(
-    dit_world_size: int,
+    dit_parallel_size: int,
     backend: str,
 ):
     global _DIT
     _DIT = torch.distributed.new_group(
-                ranks=list(range(dit_world_size)), backend=backend
+                ranks=list(range(dit_parallel_size)), backend=backend
             )
     
 def get_dit_group():
@@ -295,14 +295,14 @@ def get_dit_group():
     return _DIT
 
 def init_vae_group(
-    dit_world_size: int,
+    dit_parallel_size: int,
     vae_parallel_size: int,
     backend: str,
 ):
     # Initialize VAE group first
     global _VAE
     assert _VAE is None, "VAE parallel group is already initialized"
-    vae_ranks = list(range(dit_world_size, dit_world_size + vae_parallel_size))
+    vae_ranks = list(range(dit_parallel_size, dit_parallel_size + vae_parallel_size))
     _VAE = torch.distributed.new_group(
                 ranks=vae_ranks, backend=backend
             )
@@ -361,13 +361,13 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
-    dit_world_size = (data_parallel_degree *
+    dit_parallel_size = (data_parallel_degree *
                      classifier_free_guidance_degree *
                      sequence_parallel_degree *
                      pipeline_parallel_degree *
                      tensor_parallel_degree)
 
-    if world_size < dit_world_size:
+    if world_size < dit_parallel_size:
         raise RuntimeError(
             f"world_size ({world_size}) is less than "
             f"tensor_parallel_degree ({tensor_parallel_degree}) x "
@@ -425,7 +425,7 @@ def initialize_model_parallel(
             sp_ulysses_degree=ulysses_degree,
             sp_ring_degree=ring_degree,
             rank=get_world_group().rank_in_group,
-            world_size=dit_world_size
+            world_size=dit_parallel_size
         )
 
         _SP = init_model_parallel_group(
@@ -454,8 +454,8 @@ def initialize_model_parallel(
     )
 
     if vae_parallel_size > 0:
-        init_vae_group(dit_world_size, vae_parallel_size, backend)
-    init_dit_group(dit_world_size, backend)
+        init_vae_group(dit_parallel_size, vae_parallel_size, backend)
+    init_dit_group(dit_parallel_size, backend)
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""

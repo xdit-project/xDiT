@@ -362,10 +362,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
 
         if not output_type == "latent":
             if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: # VAE is loaded in another worker
-                latents = self.gather_latents(latents)
+                latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
                     latents = process_latents(latents)
-                image = self.vae_decode(latents) 
+                self.send_to_vae_decode(latents) 
             else:
                 if get_runtime_state().runtime_config.use_parallel_vae:
                     latents = self.gather_broadcast_latents(latents)

@@ -75,7 +75,7 @@ class xFuserVAEWrapper:
         self.dtype = engine_config.runtime_config.dtype
         self.is_parallel = use_parallel
         self.dit_parallel_config = dit_parallel_config
-        self.dit_world_size = (dit_parallel_config.pp_degree * 
+        self.dit_parallel_size = (dit_parallel_config.pp_degree * 
                               dit_parallel_config.sp_degree * 
                               dit_parallel_config.cfg_degree * 
                               dit_parallel_config.dp_degree * 
@@ -106,12 +106,12 @@ class xFuserVAEWrapper:
         if self.vae is not None:
             device = f"cuda:{get_world_group().local_rank}"
             rank = get_world_group().rank
-            dit_world_size = self.dit_world_size
+            dit_parallel_size = self.dit_parallel_size
             dtype = self.dtype
             # Check if this is the first VAE rank
-            if rank == dit_world_size:  # First VAE rank
+            if rank == dit_parallel_size:  # First VAE rank
                 # Get the rank of the DiT worker that will send the data
-                dit_rank = dit_world_size - 1  # Last DiT rank
+                dit_rank = dit_parallel_size - 1  # Last DiT rank
                 # Receive data from DiT
                 shape_len = torch.zeros(1, dtype=torch.int, device=device)
                 torch.distributed.recv(shape_len, src=dit_rank)
@@ -126,11 +126,11 @@ class xFuserVAEWrapper:
             else:
                 # Other VAE ranks receive broadcast
                 shape_len = torch.zeros(1, dtype=torch.int, device=device)
-                torch.distributed.broadcast(shape_len, src=dit_world_size, group=get_vae_parallel_group())
+                torch.distributed.broadcast(shape_len, src=dit_parallel_size, group=get_vae_parallel_group())
                 shape_tensor = torch.zeros(shape_len[0], dtype=torch.int, device=device)
-                torch.distributed.broadcast(shape_tensor, src=dit_world_size, group=get_vae_parallel_group())
+                torch.distributed.broadcast(shape_tensor, src=dit_parallel_size, group=get_vae_parallel_group())
                 latents = torch.zeros(torch.Size(shape_tensor), dtype=dtype, device=device)
-                torch.distributed.broadcast(latents, src=dit_world_size, group=get_vae_parallel_group())
+                torch.distributed.broadcast(latents, src=dit_parallel_size, group=get_vae_parallel_group())
           
             image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
@@ -527,14 +527,16 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             return get_world_group().rank == 0
         else:
             return is_dp_last_group()
-    def gather_latents(self, latents:torch.Tensor):
+    def gather_latents_for_vae(self, latents:torch.Tensor):
+        """gather latents from dp last group
+        """
         # Only gather if we're using parallel VAE and not using naive forward
         if not (get_runtime_state().runtime_config.use_parallel_vae and not self.use_naive_forward()):
             return latents
 
         rank = get_world_group().rank
         device = f"cuda:{get_world_group().local_rank}"
-        dit_world_size = get_dit_world_size()
+        dit_parallel_size = get_dit_world_size()
 
         # Gather only from DP last groups to the first VAE worker
         if is_dp_last_group():
@@ -545,7 +547,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             rank_tensor = torch.tensor([-1], dtype=torch.int64, device=device)
 
         # All processes participate in all_gather
-        gathered_ranks = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(dit_world_size)]
+        gathered_ranks = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(dit_parallel_size)]
         torch.distributed.all_gather(gathered_ranks, rank_tensor,group=get_dit_group())
         # Filter out valid ranks (non -1)
         dp_rank_list = [int(r.item()) for r in gathered_ranks if r.item() != -1]
@@ -617,7 +619,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
 
         return latents
 
-    def vae_decode(self, latents):
+    def send_to_vae_decode(self, latents):
         """
         This function is used to send the latents to the VAE in another worker.
         """

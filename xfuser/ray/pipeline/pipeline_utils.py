@@ -45,7 +45,7 @@ class RayDiffusionPipeline(GPUExecutor):
                 placement_group_capture_child_tasks=True,
             )
 
-            if bundle_id < self.engine_config.parallel_config.dit_world_size:
+            if bundle_id < self.engine_config.parallel_config.dit_parallel_size:
                 # DiT workers
                 worker = ray.remote(
                     num_cpus=0,

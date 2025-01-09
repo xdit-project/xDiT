@@ -108,7 +108,7 @@ class VAEWorker(WorkerBase):
             rank=self.rank,
             world_size=self.parallel_config.world_size,
         )
-        init_vae_group(self.parallel_config.dit_world_size, self.parallel_config.vae_parallel_size, torch.distributed.Backend.NCCL)
+        init_vae_group(self.parallel_config.dit_parallel_size, self.parallel_config.vae_parallel_size, torch.distributed.Backend.NCCL)
         
     def from_pretrained(
         self,

@@ -39,11 +39,14 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = PixArtSigmaPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     @torch.no_grad()
@@ -333,12 +336,19 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
             return image
         
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = self.gather_broadcast_latents(latents)
-                image = vae_decode(latents)
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
+                latents = self.gather_latents_for_vae(latents)
+                if latents is not None:
+                    latents = latents / self.vae.config.scaling_factor
+                self.send_to_vae_decode(latents) 
             else:
-                if is_dp_last_group():
+                if get_runtime_state().runtime_config.use_parallel_vae:
+                    latents = self.gather_broadcast_latents(latents)
                     image = vae_decode(latents)
+                else:
+                    if is_dp_last_group():
+                        image = vae_decode(latents)
             
         if self.is_dp_last_group():
             if not output_type == "latent":
@@ -349,7 +359,7 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
             else:
                 image = latents
 
-            if not output_type == "latent":
+            if not output_type == "latent" and image is not None:
                 image = self.image_processor.postprocess(image, output_type=output_type)
 
             # Offload all models

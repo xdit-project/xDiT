@@ -7,12 +7,15 @@ set -x
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # Select the model type
-export MODEL_TYPE="Flux"
+export MODEL_TYPE="Pixart-sigma"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
     ["Sd3"]="ray_sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="ray_flux_example.py /cfs/dit/FLUX.1-dev 28"
+    ["Pixart-alpha"]="ray_pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
+    ["Pixart-sigma"]="ray_pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
+    ["HunyuanDiT"]="ray_hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
 )
 
 if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then

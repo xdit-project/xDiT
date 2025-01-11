@@ -125,7 +125,7 @@ class GroupCoordinator:
                 self.rank_in_group = ranks.index(self.rank)
                 self.device_group = device_group
                 self.cpu_group = cpu_group
-
+  
         assert self.cpu_group is not None
         assert self.device_group is not None
 

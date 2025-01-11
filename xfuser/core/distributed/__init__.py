@@ -23,6 +23,13 @@ from .parallel_state import (
     initialize_model_parallel,
     model_parallel_is_initialized,
     get_tensor_model_parallel_world_size,
+    get_vae_parallel_group,
+    get_vae_parallel_rank,
+    get_vae_parallel_world_size,
+    get_dit_world_size,
+    init_vae_group,
+    init_dit_group,
+    get_dit_group,
 )
 from .runtime_state import (
     get_runtime_state,
@@ -58,4 +65,11 @@ __all__ = [
     "get_runtime_state",
     "runtime_state_is_initialized",
     "initialize_runtime_state",
+    "get_dit_world_size",
+    "get_vae_parallel_group",
+    "get_vae_parallel_rank",
+    "get_vae_parallel_world_size",
+    "init_vae_group",
+    "init_dit_group",
+    "get_dit_group",
 ]

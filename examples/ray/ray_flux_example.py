@@ -6,7 +6,7 @@ from transformers import T5EncoderModel
 from xfuser import xFuserArgs
 from xfuser.ray.pipeline.pipeline_utils import RayDiffusionPipeline
 from xfuser.config import FlexibleArgumentParser
-from xfuser.model_executor.pipelines import xFuserPixArtAlphaPipeline, xFuserPixArtSigmaPipeline, xFuserStableDiffusion3Pipeline, xFuserHunyuanDiTPipeline, xFuserFluxPipeline
+from xfuser.model_executor.pipelines import xFuserFluxPipeline
 
 def main():
     os.environ["MASTER_ADDR"] = "localhost"
@@ -50,14 +50,17 @@ def main():
     print(f"elapsed time:{elapsed_time}")
     if not os.path.exists("results"):
         os.mkdir("results")
-    # output is a list of results from each worker, we take the last one
-    for i, image in enumerate(output[-1].images):
-        image.save(
-            f"./results/{model_name}_result_{i}.png"
-        )
-        print(
-            f"image {i} saved to ./results/{model_name}_result_{i}.png"
-        )
+        
+    for i, images in enumerate(output):
+        if images is not None:
+            image = images[0]
+            image.save(
+                f"./results/{model_name}_result_{i}.png"
+            )
+            print(
+                f"image {i} saved to ./results/{model_name}_result_{i}.png"
+            )
+            break
 
 
 if __name__ == "__main__":

@@ -7,7 +7,12 @@ import torch
 from diffusers.models.attention_processor import Attention
 from typing import Optional
 import torch.nn.functional as F
-import flash_attn
+
+try:
+    import flash_attn
+except ImportError:
+    flash_attn = None
+
 from enum import Flag, auto
 from .fast_attn_state import get_fast_attn_window_size
 
@@ -165,6 +170,7 @@ class xFuserFastAttention:
                     is_causal=False,
                 ).transpose(1, 2)
             elif method.has(FastAttnMethod.FULL_ATTN):
+                assert flash_attn is not None, f"FlashAttention is not available, please install flash_attn"
                 all_hidden_states = flash_attn.flash_attn_func(query, key, value)
                 if need_compute_residual:
                     # Compute the full-window attention residual

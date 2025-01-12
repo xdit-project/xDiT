@@ -1,11 +1,17 @@
 import torch
-import flash_attn
-from flash_attn.flash_attn_interface import _flash_attn_forward
+
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
+try:
+    import flash_attn
+    from flash_attn.flash_attn_interface import _flash_attn_forward
+except ImportError:
+    flash_attn = None
+    _flash_attn_forward = None
+    from yunchang.kernels.attention import pytorch_attn_forward
 
 def xdit_ring_flash_attn_forward(
     process_group,
@@ -80,33 +86,43 @@ def xdit_ring_flash_attn_forward(
             key, value = k, v
 
         if not causal or step <= comm.rank:
-            if flash_attn.__version__ <= "2.6.3":
-                block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
+            if flash_attn is None:
+                block_out, block_lse = pytorch_attn_forward(
                     q,
                     key,
                     value,
                     dropout_p,
                     softmax_scale,
                     causal=causal and step == 0,
-                    window_size=window_size,
-                    softcap=0.0,
-                    alibi_slopes=alibi_slopes,
-                    return_softmax=True and dropout_p > 0,
                 )
             else:
-                block_out, block_lse, _, _ = _flash_attn_forward(
-                    q,
-                    key,
-                    value,
-                    dropout_p,
-                    softmax_scale,
-                    causal=causal and step == 0,
-                    window_size_left=window_size[0],
-                    window_size_right=window_size[1],
-                    softcap=0.0,
-                    alibi_slopes=alibi_slopes,
-                    return_softmax=True and dropout_p > 0,
-                )
+                if flash_attn.__version__ <= "2.6.3":
+                    block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
+                        q,
+                        key,
+                        value,
+                        dropout_p,
+                        softmax_scale,
+                        causal=causal and step == 0,
+                        window_size=window_size,
+                        softcap=0.0,
+                        alibi_slopes=alibi_slopes,
+                        return_softmax=True and dropout_p > 0,
+                    )
+                else:
+                    block_out, block_lse, _, _ = _flash_attn_forward(
+                        q,
+                        key,
+                        value,
+                        dropout_p,
+                        softmax_scale,
+                        causal=causal and step == 0,
+                        window_size_left=window_size[0],
+                        window_size_right=window_size[1],
+                        softcap=0.0,
+                        alibi_slopes=alibi_slopes,
+                        return_softmax=True and dropout_p > 0,
+                    )
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:

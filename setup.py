@@ -32,23 +32,25 @@ if __name__ == "__main__":
             "sentencepiece>=0.1.99",
             "beautifulsoup4>=4.12.3",
             "distvae",
-            "yunchang>=0.3.0",
+            "yunchang>=0.6.0",
             "pytest",
             "flask",
             "opencv-python",
             "imageio",
             "imageio-ffmpeg",
             "optimum-quanto",
-            "flash_attn>=2.6.3",
             "ray"
         ],
         extras_require={
             "diffusers": [
                 "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
+            ],
+            "flash-attn": [
+                "flash-attn>=2.6.0",
             ]
         },
         url="https://github.com/xdit-project/xDiT.",
-        description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",
+        description="A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices",
         long_description=long_description,
         long_description_content_type="text/markdown",
         version=version,

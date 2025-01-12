@@ -3,6 +3,11 @@ from torch import Tensor
 
 import torch.distributed
 from yunchang import LongContextAttention
+try:
+    from yunchang.kernels import AttnType
+except ImportError:
+    raise ImportError("Please install yunchang 0.6.0 or later")
+
 from yunchang.comm.all_to_all import SeqAllToAll4D
 
 from xfuser.logger import init_logger
@@ -21,6 +26,7 @@ class xFuserLongContextAttention(LongContextAttention):
         ring_impl_type: str = "basic",
         use_pack_qkv: bool = False,
         use_kv_cache: bool = False,
+        attn_type: AttnType = AttnType.FA,
     ) -> None:
         """
         Arguments:
@@ -35,6 +41,7 @@ class xFuserLongContextAttention(LongContextAttention):
             gather_idx=gather_idx,
             ring_impl_type=ring_impl_type,
             use_pack_qkv=use_pack_qkv,
+            attn_type = attn_type,
         )
         self.use_kv_cache = use_kv_cache
         if (

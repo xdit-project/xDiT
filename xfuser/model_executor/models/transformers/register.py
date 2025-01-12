@@ -40,6 +40,8 @@ class xFuserTransformerWrappersRegister:
             origin_transformer_class,
             wrapper_class,
         ) in cls._XFUSER_TRANSFORMER_MAPPING.items():
+            if origin_transformer_class is None:
+                continue
             if isinstance(transformer, origin_transformer_class):
                 if (
                     candidate is None

@@ -130,10 +130,6 @@ class SequenceParallelConfig:
                 f"sp_degree is {self.sp_degree}, please set it "
                 f"to 1 or install 'yunchang' to use it"
             )
-        if not HAS_FLASH_ATTN and self.ring_degree > 1:
-            raise ValueError(
-                f"Flash attention not found. Ring attention not available. Please set ring_degree to 1"
-            )
 
 
 @dataclass
@@ -258,6 +254,7 @@ class InputConfig:
     num_frames: int = 49
     use_resolution_binning: bool = (True,)
     batch_size: Optional[int] = None
+    img_file_path: Optional[str] = None
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     num_inference_steps: int = 20

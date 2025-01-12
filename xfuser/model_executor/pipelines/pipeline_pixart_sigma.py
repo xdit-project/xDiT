@@ -334,7 +334,7 @@ class xFuserPixArtSigmaPipeline(xFuserPipelineBaseWrapper):
                 latents / self.vae.config.scaling_factor, return_dict=False
             )[0]
             return image
-        
+        image = None
         if not output_type == "latent":
             if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
                 # VAE is loaded in another worker

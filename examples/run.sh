@@ -3,7 +3,7 @@ set -x
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # Select the model type
-export MODEL_TYPE="HunyuanDiT"
+export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(

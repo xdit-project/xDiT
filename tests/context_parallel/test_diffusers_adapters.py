@@ -2,7 +2,7 @@ import functools
 import logging
 import os
 import time
-from typing import List, Optional
+from typing import Tuple, Optional
 
 import pytest
 import torch
@@ -109,7 +109,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
     new_forward = new_forward.__get__(transformer)
     transformer.forward = new_forward
 
-@pytest.mark.timeout(900, method="thread")
+@pytest.mark.timeout(900)
 class DiffusionPipelineTest(DTensorTestBase):
     @property
     def world_size(self):
@@ -128,6 +128,9 @@ class DiffusionPipelineTest(DTensorTestBase):
 
     def call_pipe(self, pipe, *args, **kwargs):
         raise NotImplementedError
+    
+    def create_config(self, compile, dtype) -> Tuple[EngineConfig, InputConfig]:
+        raise NotImplementedError
 
     @property
     def enable_vae_parallel(self):
@@ -137,52 +140,7 @@ class DiffusionPipelineTest(DTensorTestBase):
         torch.manual_seed(0)
     
         init_distributed_environment()
-
-        model_config = ModelConfig(
-            model="black-forest-labs/FLUX.1-dev",
-        )
-
-        runtime_config = RuntimeConfig(
-            warmup_steps=3,
-            # use_cuda_graph=False,
-            use_parallel_vae=False,
-            use_torch_compile=compile,
-            use_onediff=not compile,
-            # use_profiler=False,
-            use_fp8_t5_encoder=False,
-        )
-
-        parallel_config = ParallelConfig(
-            dp_config=DataParallelConfig(),
-            sp_config=SequenceParallelConfig(
-                ulysses_degree=self.world_size,
-                ring_degree=1,
-                world_size=self.world_size,
-            ),
-            tp_config=TensorParallelConfig(),
-            pp_config=PipeFusionParallelConfig(),
-            world_size=self.world_size,
-        )
-
-        fast_attn_config = FastAttnConfig()
-
-        engine_config = EngineConfig(
-            model_config=model_config,
-            runtime_config=runtime_config,
-            parallel_config=parallel_config,
-            fast_attn_config=fast_attn_config,
-        )
-
-        input_config = InputConfig(
-            height=1024,
-            width=1024,
-            batch_size=1,
-            prompt="A dark tree.",
-            num_inference_steps=28,
-            max_sequence_length=512,
-            output_type="pil",
-        )
-        engine_config.runtime_config.dtype = dtype
+        engine_config, input_config = self.create_config(compile, dtype)
 
         pipe = self.new_pipe(dtype, device)
 
@@ -232,6 +190,58 @@ class FluxPipelineTest(DiffusionPipelineTest):
             num_inference_steps=28,
             output_type="pil" if self.rank == 0 else "pt",
         )
+    
+    def create_config(self, compile, dtype) -> Tuple[EngineConfig, InputConfig]:
+        model_config = ModelConfig(
+            model="black-forest-labs/FLUX.1-dev",
+        )
+
+        runtime_config = RuntimeConfig(
+            warmup_steps=3,
+            # use_cuda_graph=False,
+            use_parallel_vae=False,
+            use_torch_compile=compile,
+            use_onediff=not compile,
+            # use_profiler=False,
+            use_fp8_t5_encoder=False,
+        )
+
+        parallel_config = ParallelConfig(
+            dp_config=DataParallelConfig(dit_parallel_size=self.world_size),
+            sp_config=SequenceParallelConfig(
+                ulysses_degree=self.world_size,
+                ring_degree=1,
+                dit_parallel_size=self.world_size,
+            ),
+            tp_config=TensorParallelConfig(dit_parallel_size=self.world_size),
+            pp_config=PipeFusionParallelConfig(dit_parallel_size=self.world_size),
+            world_size=self.world_size,
+            dit_parallel_size=self.world_size,
+            vae_parallel_size=0,
+        )
+
+        fast_attn_config = FastAttnConfig()
+
+        engine_config = EngineConfig(
+            model_config=model_config,
+            runtime_config=runtime_config,
+            parallel_config=parallel_config,
+            fast_attn_config=fast_attn_config,
+        )
+
+        input_config = InputConfig(
+            height=1024,
+            width=1024,
+            batch_size=1,
+            prompt="A dark tree.",
+            num_inference_steps=28,
+            max_sequence_length=512,
+            output_type="pil",
+        )
+        engine_config.runtime_config.dtype = dtype
+
+        return engine_config, input_config
+
 
     @property
     def enable_vae_parallel(self):

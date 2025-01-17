@@ -96,6 +96,7 @@ def initialize():
         "stable-diffusion-3-medium-diffusers": xFuserStableDiffusion3Pipeline,
         "HunyuanDiT-v1.2-Diffusers": xFuserHunyuanDiTPipeline,
         "FLUX.1-schnell": xFuserFluxPipeline,
+        "FLUX.1-dev": xFuserFluxPipeline,
     }
 
     PipelineClass = pipeline_map.get(model_name)

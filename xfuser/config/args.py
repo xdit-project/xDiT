@@ -82,6 +82,8 @@ class xFuserArgs:
     # ray arguments
     use_ray: bool = False
     ray_world_size: int = 1
+    vae_parallel_size: int = 0
+    dit_parallel_size: int = 1
     # pipefusion parallel
     pipefusion_parallel_degree: int = 1
     num_pipeline_patch: Optional[int] = None
@@ -167,6 +169,12 @@ class xFuserArgs:
             help="The number of ray workers (world_size for ray)",
         )
         parallel_group.add_argument(
+            "--dit_parallel_size",
+            type=int,
+            default=0,
+            help="The number of processes for DIT parallelization.",
+        )
+        parallel_group.add_argument(
             "--use_cfg_parallel",
             action="store_true",
             help="Use split batch in classifier_free_guidance. cfg_degree will be 2 if set",
@@ -210,6 +218,12 @@ class xFuserArgs:
             type=int,
             default=1,
             help="Tensor parallel degree.",
+        )
+        parallel_group.add_argument(
+            "--vae_parallel_size",
+            type=int,
+            default=0,
+            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
         )
         parallel_group.add_argument(
             "--split_scheme",
@@ -349,7 +363,10 @@ class xFuserArgs:
             self.world_size = self.ray_world_size
         else:
             self.world_size = torch.distributed.get_world_size()
-
+        
+        if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
+            self.dit_parallel_size = self.world_size
+        assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
         model_config = ModelConfig(
             model=self.model,
             download_dir=self.download_dir,
@@ -370,25 +387,27 @@ class xFuserArgs:
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,
                 use_cfg_parallel=self.use_cfg_parallel,
-                world_size=self.world_size,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
-                world_size=self.world_size,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             tp_config=TensorParallelConfig(
                 tp_degree=self.tensor_parallel_degree,
                 split_scheme=self.split_scheme,
-                world_size=self.world_size,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             pp_config=PipeFusionParallelConfig(
                 pp_degree=self.pipefusion_parallel_degree,
                 num_pipeline_patch=self.num_pipeline_patch,
                 attn_layer_num_for_pp=self.attn_layer_num_for_pp,
-                world_size=self.world_size,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             world_size=self.world_size,
+            dit_parallel_size=self.dit_parallel_size,
+            vae_parallel_size=self.vae_parallel_size,
         )
 
         fast_attn_config = FastAttnConfig(

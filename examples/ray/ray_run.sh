@@ -29,9 +29,10 @@ mkdir -p ./results
 TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
 
-N_GPUS=2
+N_GPUS=3 # world size
 PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1"
-
+VAE_PARALLEL_SIZE=1
+DIT_PARALLEL_SIZE=2
 # CFG_ARGS="--use_cfg_parallel"
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
@@ -49,7 +50,8 @@ PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 1 --ring_degree 1
 # Use this flag to quantize the T5 text encoder, which could reduce the memory usage and have no effect on the result quality.
 # QUANTIZE_FLAG="--use_fp8_t5_encoder"
 
-export CUDA_VISIBLE_DEVICES=0,1
+# It is necessary to set CUDA_VISIBLE_DEVICES for the ray driver and workers.
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 python ./examples/ray/$SCRIPT \
 --model $MODEL_ID \
@@ -66,3 +68,6 @@ $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
+--use_parallel_vae \
+--dit_parallel_size $DIT_PARALLEL_SIZE \
+--vae_parallel_size $VAE_PARALLEL_SIZE

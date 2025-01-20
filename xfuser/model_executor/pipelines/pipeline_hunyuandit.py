@@ -44,11 +44,14 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = HunyuanDiTPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     @property
@@ -461,13 +464,21 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
             )[0]
             return image
         
+        image = None
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = self.gather_broadcast_latents(latents)
-                image = vae_decode(latents)
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
+                latents = self.gather_latents_for_vae(latents)
+                if latents is not None:
+                    latents = latents / self.vae.config.scaling_factor
+                self.send_to_vae_decode(latents)
             else:
-                if is_dp_last_group():
+                if get_runtime_state().runtime_config.use_parallel_vae:
+                    latents = self.gather_broadcast_latents(latents)
                     image = vae_decode(latents)
+                else:
+                    if is_dp_last_group():
+                        image = vae_decode(latents)
         if self.is_dp_last_group():
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
@@ -478,14 +489,15 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 image = latents
                 has_nsfw_concept = None
 
-            if has_nsfw_concept is None:
+            if has_nsfw_concept is None and image is not None:
                 do_denormalize = [True] * image.shape[0]
-            else:
+            elif has_nsfw_concept is not None:
                 do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-            image = self.image_processor.postprocess(
-                image, output_type=output_type, do_denormalize=do_denormalize
-            )
+            if image is not None:   
+                image = self.image_processor.postprocess(
+                    image, output_type=output_type, do_denormalize=do_denormalize
+                )
 
             # Offload all models
             self.maybe_free_model_hooks()

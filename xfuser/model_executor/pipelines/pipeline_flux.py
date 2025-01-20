@@ -57,9 +57,12 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = FluxPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     def prepare_run(
@@ -361,7 +364,8 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return latents
 
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: # VAE is loaded in another worker
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
                 latents = self.gather_latents_for_vae(latents)
                 if latents is not None:
                     latents = process_latents(latents)

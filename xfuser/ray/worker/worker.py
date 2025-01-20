@@ -125,8 +125,12 @@ class VAEWorker(WorkerBase):
                 encoder_instance = encoder_class.from_pretrained(**encoder_config)
                 kwargs[key] = encoder_instance
         
-        pipe = FluxPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        
+        pipe = PipelineClass.from_pretrained(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            engine_config=engine_config,
+            return_org_pipeline=True,
+            **kwargs
+        ).to("cpu")
         vae = getattr(pipe, "vae", None).to(f"cuda:{local_rank}")
         
         self.vae = xFuserVAEWrapper(

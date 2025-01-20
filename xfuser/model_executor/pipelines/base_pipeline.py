@@ -167,8 +167,11 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if scheduler is not None:
             pipeline.scheduler = self._convert_scheduler(scheduler)
 
-        if vae is not None and engine_config.runtime_config.use_parallel_vae and engine_config.parallel_config.vae_parallel_size == 0 and not self.use_naive_forward():
-            pipeline.vae = self._convert_vae(vae)
+        if vae is not None and engine_config.runtime_config.use_parallel_vae:
+            if engine_config.parallel_config.vae_parallel_size > 0:
+                pipeline.vae.to("cpu")  # VAE is not executed in the current worker
+            elif not self.use_naive_forward():
+                pipeline.vae = self._convert_vae(vae)
 
         super().__init__(module=pipeline)
 

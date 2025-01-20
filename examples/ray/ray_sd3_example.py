@@ -8,7 +8,6 @@ from xfuser.ray.pipeline.pipeline_utils import RayDiffusionPipeline
 from xfuser.config import FlexibleArgumentParser
 from xfuser.model_executor.pipelines import xFuserStableDiffusion3Pipeline
 
-
 def main():
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
@@ -31,11 +30,11 @@ def main():
         },
     }
     
-    if args.use_fp8_t5_encoder:
-        from optimum.quanto import freeze, qfloat8, quantize
-        print(f"rank {local_rank} quantizing text encoder 2")
-        quantize(text_encoder_3, weights=qfloat8)
-        freeze(text_encoder_3)
+    # if args.use_fp8_t5_encoder:
+    #     from optimum.quanto import freeze, qfloat8, quantize
+    #     print(f"rank {local_rank} quantizing text encoder 2")
+    #     quantize(text_encoder_3, weights=qfloat8)
+    #     freeze(text_encoder_3)
 
     pipe = RayDiffusionPipeline.from_pretrained(
         PipelineClass=PipelineClass,
@@ -61,14 +60,14 @@ def main():
     print(f"elapsed time:{elapsed_time}")
     if not os.path.exists("results"):
         os.mkdir("results")
-    for i, images in enumerate(output):
+        
+    for _, images in enumerate(output):
         if images is not None:
             image = images[0]
-            image.save(
-                f"./results/{model_name}_result_{i}.png"
-            )
+            path = f"./results/{model_name}_ray_result.png"
+            image.save(path)
             print(
-                f"image {i} saved to ./results/{model_name}_result_{i}.png"
+                f"image saved to {path}"
             )
             break
 

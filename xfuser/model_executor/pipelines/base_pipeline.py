@@ -144,6 +144,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         engine_config: EngineConfig,
     ):
         self.module: DiffusionPipeline
+        self.engine_config = engine_config
         self._init_runtime_state(pipeline=pipeline, engine_config=engine_config)
         self._init_fast_attn_state(pipeline=pipeline, engine_config=engine_config)
 
@@ -256,6 +257,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 and get_sequence_parallel_world_size() == 1
                 and get_tensor_model_parallel_world_size() == 1
                 and get_fast_attn_enable() == False
+                and get_runtime_state().parallel_config.vae_parallel_size == 0
             )
         
     @staticmethod

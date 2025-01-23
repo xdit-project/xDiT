@@ -784,8 +784,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         if self.engine_config.parallel_config.dit_parallel_size > 1:
             noise_pred, encoder_hidden_states = ret
         else:
-            noise_pred = ret
-            encoder_hidden_states = None
+            noise_pred, encoder_hidden_states = ret, None
 
         # classifier free guidance
         if is_pipeline_last_stage():

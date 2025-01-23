@@ -786,8 +786,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         if self.engine_config.parallel_config.dit_parallel_size > 1:
             noise_pred, encoder_hidden_states = ret
         else:
-            noise_pred = ret
-            encoder_hidden_states = None
+            noise_pred, encoder_hidden_states = ret, None
         return noise_pred, encoder_hidden_states
 
     def _scheduler_step(

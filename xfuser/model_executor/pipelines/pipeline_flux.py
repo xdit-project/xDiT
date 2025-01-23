@@ -196,8 +196,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the generated
             images.
         """
+
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
+
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,

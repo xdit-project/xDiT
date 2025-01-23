@@ -269,7 +269,13 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
-### 5. Launch an HTTP Service
+### 5. Launch parallel inference example with ray
+
+We also provide a ray example to launch parallel inference. With ray, we can disaggregate the VAE module and DiT backbone, and allocate different GPU parallelism for them.
+
+[Launch parallel inference example with ray](./examples/ray/README.md)
+
+### 6. Launch an HTTP Service
 
 You can also launch an HTTP service to generate images with xDiT.
 

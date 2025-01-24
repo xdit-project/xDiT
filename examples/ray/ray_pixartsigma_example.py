@@ -41,7 +41,6 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     output = pipe(
-        PipelineClass=xFuserPixArtSigmaPipeline,
         height=input_config.height,
         width=input_config.width,
         prompt=input_config.prompt,

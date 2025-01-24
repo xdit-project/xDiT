@@ -773,7 +773,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0])
 
-        noise_pred, encoder_hidden_states = self.transformer(
+        ret = self.transformer(
             hidden_states=latents,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
@@ -781,6 +781,10 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             joint_attention_kwargs=self.joint_attention_kwargs,
             return_dict=False,
         )[0]
+        if self.engine_config.parallel_config.dit_parallel_size > 1:
+            noise_pred, encoder_hidden_states = ret
+        else:
+            noise_pred, encoder_hidden_states = ret, None
 
         # classifier free guidance
         if is_pipeline_last_stage():

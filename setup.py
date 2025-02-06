@@ -34,19 +34,25 @@ if __name__ == "__main__":
             "distvae",
             "yunchang>=0.6.0",
             "pytest",
-            "flask",
             "opencv-python",
             "imageio",
             "imageio-ffmpeg",
-            "optimum-quanto",
-            "ray"
         ],
         extras_require={
             "diffusers": [
                 "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
             ],
             "flash-attn": [
-                "flash-attn>=2.6.0",
+                "flash-attn>=2.6.0",  # NOTE: flash-attn is necessary if ring_degree > 1
+            ],
+            "optimum-quanto": [
+                "optimum-quanto",  # NOTE: optimum-quanto is necessary if use_fp8_t5_encoder is enabled
+            ],
+            "flask": [
+                "flask",  # NOTE: flask is necessary to run xDiT as an http service
+            ],
+            "ray": [
+                "ray",  # NOTE: ray is necessary if RayDiffusionPipeline is used
             ]
         },
         url="https://github.com/xdit-project/xDiT.",

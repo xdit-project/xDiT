@@ -28,12 +28,16 @@ from xfuser.core.distributed import (
     get_runtime_state,
     get_pp_group,
     get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
     get_sp_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     is_dp_last_group,
     get_world_group,
+    get_vae_parallel_group,
+    get_dit_world_size,
 )
+from xfuser.core.distributed.group_coordinator import GroupCoordinator
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 
@@ -53,9 +57,12 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = FluxPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     def prepare_run(
@@ -226,6 +233,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
             max_condition_sequence_length=max_sequence_length,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
         )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
@@ -344,32 +352,39 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                     sync_only=True,
                 )
 
-        def vae_decode(latents):
+        image = None
+        def process_latents(latents):
             latents = self._unpack_latents(
                 latents, height, width, self.vae_scale_factor
             )
+
             latents = (
                 latents / self.vae.config.scaling_factor
             ) + self.vae.config.shift_factor
-
-            image = self.vae.decode(latents, return_dict=False)[0]
-            return image
+            return latents
 
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = self.gather_broadcast_latents(latents)
-                image = vae_decode(latents)
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
+                latents = self.gather_latents_for_vae(latents)
+                if latents is not None:
+                    latents = process_latents(latents)
+                self.send_to_vae_decode(latents) 
             else:
-                if is_dp_last_group():
-                    image = vae_decode(latents)
+                if get_runtime_state().runtime_config.use_parallel_vae:
+                    latents = self.gather_broadcast_latents(latents)
+                    latents = process_latents(latents)
+                    image = self.vae.decode(latents, return_dict=False)[0]
+                else:
+                    if is_dp_last_group():
+                        latents = process_latents(latents)
+                        image = self.vae.decode(latents, return_dict=False)[0]
 
         if self.is_dp_last_group():
             if output_type == "latent":
                 image = latents
-
-            else:
+            elif image is not None:
                 image = self.image_processor.postprocess(image, output_type=output_type)
-
             # Offload all models
             self.maybe_free_model_hooks()
 
@@ -381,7 +396,8 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             return None
 
     def _init_sync_pipeline(
-        self, latents: torch.Tensor, latent_image_ids: torch.Tensor
+        self, latents: torch.Tensor, latent_image_ids: torch.Tensor, 
+        prompt_embeds: torch.Tensor, text_ids: torch.Tensor
     ):
         get_runtime_state().set_patched_mode(patch_mode=False)
 
@@ -395,7 +411,20 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             for start_idx, end_idx in get_runtime_state().pp_patches_token_start_end_idx_global
         ]
         latent_image_ids = torch.cat(latent_image_ids_list, dim=-2)
-        return latents, latent_image_ids
+
+        if get_runtime_state().split_text_embed_in_sp:
+            if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+            else:
+                get_runtime_state().split_text_embed_in_sp = False                
+
+        if get_runtime_state().split_text_embed_in_sp:
+            if text_ids.shape[-2] % get_sequence_parallel_world_size() == 0:
+                text_ids = torch.chunk(text_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+            else:
+                get_runtime_state().split_text_embed_in_sp = False                
+
+        return latents, latent_image_ids, prompt_embeds, text_ids
 
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
@@ -413,7 +442,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents, latent_image_ids = self._init_sync_pipeline(latents, latent_image_ids)
+        latents, latent_image_ids, prompt_embeds, text_ids = self._init_sync_pipeline(latents, latent_image_ids, prompt_embeds, text_ids)
         for i, t in enumerate(timesteps):
             if self.interrupt:
                 continue
@@ -743,7 +772,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-        noise_pred, encoder_hidden_states = self.transformer(
+        ret = self.transformer(
             hidden_states=latents,
             timestep=timestep / 1000,
             guidance=guidance,
@@ -754,7 +783,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             joint_attention_kwargs=self.joint_attention_kwargs,
             return_dict=False,
         )[0]
-
+        if self.engine_config.parallel_config.dit_parallel_size > 1:
+            noise_pred, encoder_hidden_states = ret
+        else:
+            noise_pred, encoder_hidden_states = ret, None
         return noise_pred, encoder_hidden_states
 
     def _scheduler_step(

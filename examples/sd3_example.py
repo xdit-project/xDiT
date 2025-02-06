@@ -2,6 +2,7 @@ import time
 import os
 import torch
 import torch.distributed
+from transformers import T5EncoderModel
 from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -19,10 +20,18 @@ def main():
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
+    text_encoder_3 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_3", torch_dtype=torch.float16)
+    if args.use_fp8_t5_encoder:
+        from optimum.quanto import freeze, qfloat8, quantize
+        print(f"rank {local_rank} quantizing text encoder 2")
+        quantize(text_encoder_3, weights=qfloat8)
+        freeze(text_encoder_3)
+
     pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         torch_dtype=torch.float16,
+        text_encoder_3=text_encoder_3,
     ).to(f"cuda:{local_rank}")
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
@@ -66,8 +75,9 @@ def main():
 
     if get_world_group().rank == get_world_group().world_size - 1:
         print(
-            f"{parallel_info} epoch time: {elapsed_time:.2f} sec, parameter memory: {parameter_peak_memory/1e9:.2f} GB, peak memory: {peak_memory/1e9:.2f} GB"
+            f"epoch time: {elapsed_time:.2f} sec, parameter memory: {parameter_peak_memory/1e9:.2f} GB, peak memory: {peak_memory/1e9:.2f} GB"
         )
+
     get_runtime_state().destory_distributed_env()
 
 

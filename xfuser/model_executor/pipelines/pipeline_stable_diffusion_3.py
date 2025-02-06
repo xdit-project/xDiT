@@ -33,12 +33,11 @@ from xfuser.core.distributed import (
     get_runtime_state,
     get_cfg_group,
     get_classifier_free_guidance_world_size,
-    get_pipeline_parallel_rank,
     get_pp_group,
     get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
     get_sp_group,
     is_dp_last_group,
-    get_world_group,
 )
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -59,11 +58,14 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = StableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     def prepare_run(
@@ -273,6 +275,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             width=width,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
         )
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
@@ -388,18 +391,28 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             image = self.vae.decode(latents, return_dict=False)[0]
             return image
 
+        image = None
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = self.gather_broadcast_latents(latents)
-                image = vae_decode(latents)
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
+                latents = self.gather_latents_for_vae(latents)
+                if latents is not None:
+                    latents = (
+                        latents / self.vae.config.scaling_factor
+                    ) + self.vae.config.shift_factor
+                self.send_to_vae_decode(latents) 
             else:
-                if is_dp_last_group():
+                if get_runtime_state().runtime_config.use_parallel_vae:
+                    latents = self.gather_broadcast_latents(latents)
                     image = vae_decode(latents)
+                else:
+                    if is_dp_last_group():
+                        image = vae_decode(latents)
 
         if self.is_dp_last_group():
             if output_type == "latent":
                 image = latents
-            else:
+            elif image is not None:
                 image = self.image_processor.postprocess(image, output_type=output_type)
 
             # Offload all models
@@ -411,6 +424,23 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             return StableDiffusion3PipelineOutput(images=image)
         else:
             return None
+
+    def _init_sync_pipeline(self, latents: torch.Tensor, prompt_embeds: torch.Tensor):
+        get_runtime_state().set_patched_mode(patch_mode=False)
+
+        latents_list = [
+            latents[:, :, start_idx:end_idx, :]
+            for start_idx, end_idx in get_runtime_state().pp_patches_start_end_idx_global
+        ]
+        latents = torch.cat(latents_list, dim=-2)
+
+        if get_runtime_state().split_text_embed_in_sp:
+            if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+            else:
+                get_runtime_state().split_text_embed_in_sp = False                
+
+        return latents, prompt_embeds
 
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(
@@ -425,7 +455,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         sync_only: bool = False,
     ):
-        latents = self._init_sync_pipeline(latents)
+        latents, prompt_embeds = self._init_sync_pipeline(latents, prompt_embeds)
         for i, t in enumerate(timesteps):
             if self.interrupt:
                 continue
@@ -743,7 +773,7 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0])
 
-        noise_pred, encoder_hidden_states = self.transformer(
+        ret = self.transformer(
             hidden_states=latents,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
@@ -751,6 +781,10 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
             joint_attention_kwargs=self.joint_attention_kwargs,
             return_dict=False,
         )[0]
+        if self.engine_config.parallel_config.dit_parallel_size > 1:
+            noise_pred, encoder_hidden_states = ret
+        else:
+            noise_pred, encoder_hidden_states = ret, None
 
         # classifier free guidance
         if is_pipeline_last_stage():

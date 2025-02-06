@@ -20,15 +20,11 @@ def main():
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
 
-    # Check if ulysses_degree is valid
-    num_heads = 30
-    if engine_args.ulysses_degree > 0 and num_heads % engine_args.ulysses_degree != 0:
-        raise ValueError(
-            f"ulysses_degree ({engine_args.ulysses_degree}) must be a divisor of the number of heads ({num_heads})"
-        )
-
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
+
+    assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
+    assert engine_args.use_parallel_vae is False, "parallel VAE not implemented for CogVideo"
 
     pipe = xFuserCogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
@@ -51,6 +47,16 @@ def main():
     if args.enable_slicing:
         pipe.vae.enable_slicing()
 
+    # warmup
+    output = pipe(
+        height=input_config.height,
+        width=input_config.width,
+        num_frames=input_config.num_frames,
+        prompt=input_config.prompt,
+        num_inference_steps=1,
+        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+    ).frames[0]
+
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 
@@ -61,7 +67,6 @@ def main():
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-        guidance_scale=6,
     ).frames[0]
 
     end_time = time.time()
@@ -75,7 +80,6 @@ def main():
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
     if is_dp_last_group():
-        world_size = get_data_parallel_world_size()
         resolution = f"{input_config.width}x{input_config.height}"
         output_filename = f"results/cogvideox_{parallel_info}_{resolution}.mp4"
         export_to_video(output, output_filename, fps=8)

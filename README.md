@@ -1,13 +1,13 @@
 <div align="center">
   <!-- <h1>KTransformers</h1> -->
   <p align="center">
-  
+
   <picture>
     <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/XDiTlogo.png" width="50%">
 
   </p>
-  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters</h3>
-  <strong><a href="https://arxiv.org/abs/2405.14430">📃 Paper</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
+  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices</h3>
+  <a href="#cite-us">📝 Papers</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
   <p></p>
 
 [![](https://dcbadge.limes.pink/api/server/https://discord.gg/YEWzWfCF9S)](https://discord.gg/YEWzWfCF9S)
@@ -20,6 +20,9 @@
 - [📢 Updates](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
+  - [HunyuanVideo](#perf_hunyuanvideo)
+  - [ConsisID](#perf_consisid)
+  - [Mochi-1](#perf_mochi1)
   - [CogVideoX](#perf_cogvideox)
   - [Flux.1](#perf_flux)
   - [HunyuanDiT](#perf_hunyuandit)
@@ -53,7 +56,7 @@ Consequently, multi-GPU and multi-machine deployments are essential to meet the 
 <h3 id="meet-xdit-parallel">Parallel Inference</h3>
 
 To meet real-time demand for DiTs applications, parallel inference is a must.
-xDiT is an inference engine designed for the parallel deployment of DiTs on large scale. 
+xDiT is an inference engine designed for the parallel deployment of DiTs on a large scale. 
 xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as computation accelerations.
 
 The overview of xDiT is shown as follows.
@@ -63,7 +66,7 @@ The overview of xDiT is shown as follows.
 </picture>
 
 
-1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach combining DeepSpeed-Ulysses, Ring-Attention proposed by use3.
+1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach proposed by us combining DeepSpeed-Ulysses, Ring-Attention.
 
 2. [PipeFusion](https://arxiv.org/abs/2405.14430), a sequence-level pipeline parallelism, similar to [TeraPipe](https://arxiv.org/abs/2102.07988) but takes advantage of the input temporal redundancy characteristics of diffusion models.
 
@@ -74,9 +77,9 @@ The overview of xDiT is shown as follows.
 The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
 
 As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
-If the model you require is not available in the model zoo, developing it yourself is straightforward; please refer to our [Dev Guide](#dev-guide).
+If the model you require is not available in the model zoo, developing it by yourself is not so difficult; please refer to our [Dev Guide](#dev-guide).
 
-We also have implemented the following parallel stategies for reference:
+We also have implemented the following parallel strategies for reference:
 
 1. Tensor Parallelism
 2. [DistriFusion](https://arxiv.org/abs/2402.19481)
@@ -84,7 +87,7 @@ We also have implemented the following parallel stategies for reference:
 
 <h3 id="meet-xdit-perf">Computing Acceleration</h3>
 
-Optimization orthogonal to parallel focuses on accelerating single GPU performance.
+Optimization is orthogonal to parallel and focuses on accelerating performance on a single GPU.
 
 First, xDiT employs a series of kernel acceleration methods. In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
 
@@ -92,6 +95,11 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 <h2 id="updates">📢 Updates</h2>
 
+* 🎉**December 24, 2024**: xDiT supports [ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) and achieved 3.21x speedup compare to the official implementation! The inference scripts are [examples/consisid_example.py](examples/consisid_example.py) and [examples/consisid_usp_example.py](examples/consisid_usp_example.py).
+* 🎉**December 7, 2024**: xDiT is the official parallel inference engine for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo), reducing the 5-sec video generation latency from 31 minutes to 5 minutes on 8xH100!
+* 🎉**November 28, 2024**: xDiT achieves 1.6 sec end-to-end latency for 28-step [Flux.1-Dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) inference on 4xH100!
+* 🎉**November 20, 2024**: xDiT supports [CogVideoX-1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) and achieved 6.12x speedup compare to the implementation in diffusers!
+* 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
 * 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
 * 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
 * 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
@@ -111,8 +119,12 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 | Model Name | CFG | SP | PipeFusion |
 | --- | --- | --- | --- |
-| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | 
-| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | 
+| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ |
+| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ |
+| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ |
+| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ |
+| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ |
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ |
 | [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ |
@@ -121,56 +133,97 @@ Furthermore, xDiT incorporates optimization techniques from [DiTFastAttn](https:
 
 </div>
 
-### Supported by legacy version only, including DistriFusion and Tensor Parallel as the standalong parallel strategies:
+### Supported by legacy version only, including DistriFusion and Tensor Parallel as the standalone parallel strategies:
 
 <div align="center">
 
 [🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256)
 </div>
 
+
+<h2 id="comfyui">🖼️ TACO-DiT: ComfyUI with xDiT</h2>
+
+ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
+It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. 
+
+Using our commercial project **TACO-DiT**, a close-sourced ComfyUI variant built with xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges. Below is an example of using TACO-DiT to accelerate a Flux workflow with LoRA:
+
+![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
+
+By using TACO-DiT, you could significantly reduce your ComfyUI workflow inference latency, and  boosting the throughput with Multi-GPUs. Now it is compatible with multiple Plug-ins, including ControlNet and LoRAs.
+
+More features and details can be found in our Intro Video: 
++ [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) 
++ [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
+
+The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
+
 <h2 id="perf">📈 Performance</h2>
+
+<h3 id="perf_hunyuanvideo">HunyuanVideo</h3>
+
+1. [HunyuanVideo Performance Report](./docs/performance/hunyuanvideo.md)
+
+<h3 id="perf_consisid">ConsisID-Preview</h3>
+
+2. [ConsisID Performance Report](./docs/performance/consisid.md)
+
+<h3 id="perf_cogvideox">Mochi1</h3>
+
+3. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
 
 <h3 id="perf_cogvideox">CogVideo</h3>
 
-1. [CogVideo Performance Report](./docs/performance/cogvideo.md)
+4. [CogVideo Performance Report](./docs/performance/cogvideo.md)
 
 <h3 id="perf_flux">Flux.1</h3>
 
-2. [Flux Performance Report](./docs/performance/flux.md)
+5. [Flux Performance Report](./docs/performance/flux.md)
 
 <h3 id="perf_latte">Latte</h3>
 
-3. [Latte Performance Report](./docs/performance/latte.md)
+6. [Latte Performance Report](./docs/performance/latte.md)
 
 <h3 id="perf_hunyuandit">HunyuanDiT</h3>
 
-4. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
+7. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
 
 <h3 id="perf_sd3">SD3</h3>
 
-5. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
+8. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
 
 <h3 id="perf_pixart">Pixart</h3>
 
-6. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+9. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
 ### 1. Install from pip
 
+We set `diffusers` and `flash_attn` as two optional installation requirements.
+
+About `diffusers` version: 
+- If you only use the USP interface, `diffusers` is not required. Models are typically released as `nn.Module`
+ first, before being integrated into diffusers. xDiT sometimes is applied as an USP plugin to existing projects.
+- Different models may require different diffusers versions. Model implementations can vary between diffusers versions (e.g., Flux), which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
+- While we specify a diffusers version in `setup.py`, newer models may require later versions or even installation from main branch.
+
+About `flash_attn` version:
+- Without `flash_attn` installed, xDiT falls back to a PyTorch implementation of ring attention, which helps NPU users with compatibility
+- However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we recommend installing `flash_attn`.
+
 ```
-pip install xfuser
-# Or optionally, with flash_attn
-pip install "xfuser[flash_attn]"
+pip install xfuser  # Basic installation
+pip install "xfuser[diffusers,flash-attn]"  # With both diffusers and flash attention
 ```
 
 ### 2. Install from source 
 
 ```
 pip install -e .
-# Or optionally, with flash_attn
-pip install -e ".[flash_attn]"
+# Or optionally, with diffusers
+pip install -e ".[diffusers,flash-attn]"
 ```
 
 Note that we use two self-maintained packages:
@@ -180,7 +233,11 @@ Note that we use two self-maintained packages:
 
 The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.6.0
 
-### 3. Usage
+### 3. Docker
+
+We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev).
+
+### 4. Usage
 
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
@@ -189,75 +246,8 @@ You can easily modify the model type, model directory, and parallel options in t
 bash examples/run.sh
 ```
 
----
-
-<details>
-<summary>Click to see available options for the PixArt-alpha example</summary>
-
-```bash
-python ./examples/pixartalpha_example.py -h
-
-...
-
-xFuser Arguments
-
-options:
-  -h, --help            show this help message and exit
-
-Model Options:
-  --model MODEL         Name or path of the huggingface model to use.
-  --download-dir DOWNLOAD_DIR
-                        Directory to download and load the weights, default to the default cache dir of huggingface.
-  --trust-remote-code   Trust remote code from huggingface.
-
-Runtime Options:
-  --warmup_steps WARMUP_STEPS
-                        Warmup steps in generation.
-  --use_parallel_vae
-  --use_torch_compile   Enable torch.compile to accelerate inference in a single card
-  --seed SEED           Random seed for operations.
-  --output_type OUTPUT_TYPE
-                        Output type of the pipeline.
-  --enable_sequential_cpu_offload
-                        Offloading the weights to the CPU.
-
-Parallel Processing Options:
-  --use_cfg_parallel    Use split batch in classifier_free_guidance. cfg_degree will be 2 if set
-  --data_parallel_degree DATA_PARALLEL_DEGREE
-                        Data parallel degree.
-  --ulysses_degree ULYSSES_DEGREE
-                        Ulysses sequence parallel degree. Used in attention layer.
-  --ring_degree RING_DEGREE
-                        Ring sequence parallel degree. Used in attention layer.
-  --pipefusion_parallel_degree PIPEFUSION_PARALLEL_DEGREE
-                        Pipefusion parallel degree. Indicates the number of pipeline stages.
-  --num_pipeline_patch NUM_PIPELINE_PATCH
-                        Number of patches the feature map should be segmented in pipefusion parallel.
-  --attn_layer_num_for_pp [ATTN_LAYER_NUM_FOR_PP ...]
-                        List representing the number of layers per stage of the pipeline in pipefusion parallel
-  --tensor_parallel_degree TENSOR_PARALLEL_DEGREE
-                        Tensor parallel degree.
-  --split_scheme SPLIT_SCHEME
-                        Split scheme for tensor parallel.
-
-Input Options:
-  --height HEIGHT       The height of image
-  --width WIDTH         The width of image
-  --prompt [PROMPT ...]
-                        Prompt for the model.
-  --no_use_resolution_binning
-  --negative_prompt [NEGATIVE_PROMPT ...]
-                        Negative prompt for the model.
-  --num_inference_steps NUM_INFERENCE_STEPS
-                        Number of inference steps.
-```
-
-</details>
-
----
-
-Hybriding multiple parallelism techniques togather is essential for efficiently scaling. 
-It's important that the product of all parallel degrees matches the number of devices. 
+Hybridizing multiple parallelism techniques together is essential for efficiently scaling. 
+It's important that **the product of all parallel degrees matches the number of devices**. 
 Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
 Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
 
@@ -270,7 +260,7 @@ examples/pixartalpha_example.py \
 --ulysses_degree 2 \
 --num_inference_steps 20 \
 --warmup_steps 0 \
---prompt "A small dog" \
+--prompt "A cute dog" \
 --use_cfg_parallel
 ```
 
@@ -279,28 +269,27 @@ The warmup step impacts the efficiency of PipeFusion as it cannot be executed in
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
+### 5. Launch parallel inference example with ray
 
-<h2 id="comfyui">🖼️ ComfyUI with xDiT</h2>
+We also provide a ray example to launch parallel inference. With ray, we can disaggregate the VAE module and DiT backbone, and allocate different GPU parallelism for them.
 
-### 1. Launch ComfyUI
+[Launch parallel inference example with ray](./examples/ray/README.md)
 
-ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor.
-Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. Leveraging the power of xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges.
-Below is an example of using xDiT to accelerate a Flux workflow with LoRA:
+### 6. Launch an HTTP Service
 
-![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
-
-More details can be found in our Medium article: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
-
-Currently, if you need the parallel version of ComfyUI applying xDiT, please contact us via email [jiaruifang@tencent.com](jiaruifang@tencent.com).
-
-### 2. Launch a Http Service
-
-You can also launch a http service to generate images with xDiT.
+You can also launch an HTTP service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
 
+<h2 id="dev-guide">📚  Develop Guide</h2>
+
+We provide different difficulty levels for adding new models, please refer to the following tutorial.
+
+[Manual for adding new models](./docs/developer/adding_models/readme.md)
+
+A high-level design of xDiT framework is provided below, which may help you understand the xDiT framework.
+
+[The implement and design of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
 
 <h2 id="secrets">✨ The xDiT's Arsenal</h2>
 
@@ -321,7 +310,7 @@ The (<span style="color: red;">xDiT</span>) highlights the methods first propose
 
 The communication and memory costs associated with the aforementioned intra-image parallelism, except for the CFG and DP (they are inter-image parallel), in DiTs are detailed in the table below. (* denotes that communication can be overlapped with computation.)
 
-As we can see, PipeFusion and Sequence Parallel achieve lowest communication cost on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
+As we can see, PipeFusion and Sequence Parallel achieve the lowest communication cost on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
 
 𝒑: Number of pixels;\
 𝒉𝒔: Model hidden size;\
@@ -382,45 +371,69 @@ For usage instructions, refer to the [example/run.sh](./examples/run.sh). Simply
 
 <h4 id="dittfastattn">DiTFastAttn</h4>
 
-xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce computation cost of attention layer by leveraging redundancies between different steps of the Diffusion Model.
+xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce the computation cost of attention layers by leveraging redundancies between different steps of the Diffusion Model.
 
 [DiTFastAttn: Attention Compression for Diffusion Transformer Models](./docs/methods/ditfastattn.md)
 
-<h2 id="dev-guide">📚  Develop Guide</h2>
-
-[The implement and design of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
-
-[Manual for adding new models](./docs/developer/Manual_for_Adding_New_Models.md)
-
 <h2 id="history">🚧  History and Looking for Contributions</h2>
 
-We conducted a major upgrade of this project in August 2024.
+We conducted a major upgrade of this project in August 2024, introducing a new set of APIs that are now the preferred choice for all users.
 
-The latest APIs is located in the [xfuser/](./xfuser/) directory, supports hybrid parallelism. It offers clearer and more structured code but currently supports fewer models.
+The legacy APIs are applied in early stage of xDiT to explore and compare different parallelization methods.
+They are located in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, are now considered outdated and do not support hybrid parallelism. Despite this limitation, they offer a broader range of individual parallelization methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel.
 
-The legacy APIs is in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, limited to single parallelism. It supports a richer of parallel methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel. CFG Parallel can be hybrid with PipeFusion but not with other parallel methods.
+For users working with Pixart models, you can still run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under the `legacy` branch. However, for all other models, we strongly recommend adopting the formal APIs to ensure optimal performance and compatibility.
 
-For models not yet supported by the latest APIs, you can run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under branch `legacy`. If you wish to develop new features on a model or require hybrid parallelism, stay tuned for further project updates. 
-
-We also welcome developers to join and contribute more features and models to the project. Tell us which model you need in xDiT in [discussions](https://github.com/xdit-project/xDiT/discussions).
+We also warmly welcome developers to join us in enhancing the project. If you have ideas for new features or models, please share them in our [issues](https://github.com/xdit-project/xDiT/issues). Your contributions are invaluable in driving the project forward and ensuring it meets the needs of the community.
 
 <h2 id="cite-us">📝 Cite Us</h2>
 
+
+[xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism](https://arxiv.org/abs/2411.01738)
+
 ```
-@article{wang2024pipefusion,
-      title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
-      author={Jiannan Wang and Jiarui Fang and Jinzhe Pan and Aoyu Li and PengCheng Yang},
-      year={2024},
-      eprint={2405.07719},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
+@article{fang2024xdit,
+  title={xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism},
+  author={Fang, Jiarui and Pan, Jinzhe and Sun, Xibo and Li, Aoyu and Wang, Jiannan},
+  journal={arXiv preprint arXiv:2411.01738},
+  year={2024}
 }
 
+```
+
+[PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://arxiv.org/abs/2405.14430)
+
+```
+@article{fang2024pipefusion,
+  title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference},
+  author={Jiarui Fang and Jinzhe Pan and Jiannan Wang and Aoyu Li and Xibo Sun},
+  journal={arXiv preprint arXiv:2405.14430},
+  year={2024}
+}
+
+```
+
+[USP: A Unified Sequence Parallelism Approach for Long Context Generative AI](https://arxiv.org/abs/2405.07719)
+
+
+```
 @article{fang2024unified,
-      title={USP: a Unified Sequence Parallelism Approach for Long Context Generative AI},
-      author={Fang, Jiarui and Zhao, Shangchun},
-      journal={arXiv preprint arXiv:2405.07719},
-      year={2024}
+  title={A Unified Sequence Parallelism Approach for Long Context Generative AI},
+  author={Fang, Jiarui and Zhao, Shangchun},
+  journal={arXiv preprint arXiv:2405.07719},
+  year={2024}
 }
+
 ```
 
+[Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study](https://arxiv.org/abs/2411.13588)
+
+```
+@article{sun2024unveiling,
+  title={Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study},
+  author={Sun, Xibo and Fang, Jiarui and Li, Aoyu and Pan, Jinzhe},
+  journal={arXiv preprint arXiv:2411.13588},
+  year={2024}
+}
+
+```

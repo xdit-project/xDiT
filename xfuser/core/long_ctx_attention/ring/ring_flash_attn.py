@@ -1,11 +1,19 @@
 import torch
-from flash_attn.flash_attn_interface import _flash_attn_forward
+
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
 
+try:
+    import flash_attn
+    from flash_attn.flash_attn_interface import _flash_attn_forward
+except ImportError:
+    flash_attn = None
+    _flash_attn_forward = None
+    from yunchang.kernels.attention import pytorch_attn_forward
 
-def ring_flash_attn_forward(
+def xdit_ring_flash_attn_forward(
     process_group,
     q: torch.Tensor,
     k: torch.Tensor,
@@ -21,16 +29,22 @@ def ring_flash_attn_forward(
     joint_tensor_value=None,
     joint_strategy="none",
 ):
-    supported_joint_strategy = ["none", "front", "rear"]
-    if joint_strategy not in supported_joint_strategy:
+    is_joint = False
+    if (joint_tensor_key is not None and 
+        joint_tensor_value is not None):
+        supported_joint_strategy = ["front", "rear"]
+        if joint_strategy not in supported_joint_strategy:
+            raise ValueError(
+                f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
+            )
+        else:
+            is_joint = True
+    elif (joint_tensor_key is None and 
+        joint_tensor_value is None):
+        pass
+    else:
         raise ValueError(
-            f"joint_strategy: {joint_strategy} not supprted. supported joint strategy: {supported_joint_strategy}"
-        )
-    elif joint_strategy != "none" and (
-        joint_tensor_key is None or joint_tensor_value is None
-    ):
-        raise ValueError(
-            f"joint_tensor_key & joint_tensor_value must not be None when joint_strategy is not None"
+            f"joint_tensor_key and joint_tensor_value should be None or not None simultaneously."
         )
 
     comm = RingComm(process_group)
@@ -56,34 +70,59 @@ def ring_flash_attn_forward(
             next_v: torch.Tensor = comm.send_recv(v)
             comm.commit()
 
-        if joint_strategy == "rear":
+        if is_joint and joint_strategy == "rear":
             if step + 1 == comm.world_size:
                 key = torch.cat([k, joint_tensor_key], dim=1)
                 value = torch.cat([v, joint_tensor_value], dim=1)
             else:
                 key, value = k, v
-        elif joint_strategy == "front":
+        elif is_joint and joint_strategy == "front":
             if step == 0:
                 key = torch.cat([joint_tensor_key, k], dim=1)
                 value = torch.cat([joint_tensor_value, v], dim=1)
             else:
                 key, value = k, v
-        elif joint_strategy == "none":
+        else:
             key, value = k, v
 
         if not causal or step <= comm.rank:
-            block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
-                q,
-                key,
-                value,
-                dropout_p,
-                softmax_scale,
-                causal=causal and step == 0,
-                window_size=window_size,
-                softcap=0.0,
-                alibi_slopes=alibi_slopes,
-                return_softmax=True and dropout_p > 0,
-            )
+            if flash_attn is None:
+                block_out, block_lse = pytorch_attn_forward(
+                    q,
+                    key,
+                    value,
+                    dropout_p,
+                    softmax_scale,
+                    causal=causal and step == 0,
+                )
+            else:
+                if flash_attn.__version__ <= "2.6.3":
+                    block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
+                        q,
+                        key,
+                        value,
+                        dropout_p,
+                        softmax_scale,
+                        causal=causal and step == 0,
+                        window_size=window_size,
+                        softcap=0.0,
+                        alibi_slopes=alibi_slopes,
+                        return_softmax=True and dropout_p > 0,
+                    )
+                else:
+                    block_out, block_lse, _, _ = _flash_attn_forward(
+                        q,
+                        key,
+                        value,
+                        dropout_p,
+                        softmax_scale,
+                        causal=causal and step == 0,
+                        window_size_left=window_size[0],
+                        window_size_right=window_size[1],
+                        softcap=0.0,
+                        alibi_slopes=alibi_slopes,
+                        return_softmax=True and dropout_p > 0,
+                    )
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -123,7 +162,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         if attn_layer is None:
             k = k.contiguous()
             v = v.contiguous()
-        out, softmax_lse = ring_flash_attn_forward(
+        out, softmax_lse = xdit_ring_flash_attn_forward(
             group,
             q,
             k,
@@ -151,7 +190,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         return out if not return_softmax else (out, softmax_lse, None)
 
 
-def ring_flash_attn_func(
+def xdit_ring_flash_attn_func(
     q,
     k,
     v,

@@ -1,10 +1,11 @@
 from abc import ABCMeta
 import random
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
-from diffusers import DiffusionPipeline, CogVideoXPipeline
+import diffusers
+from diffusers import DiffusionPipeline
 import torch.distributed
 
 from xfuser.config.config import (
@@ -71,6 +72,7 @@ class RuntimeState(metaclass=ABCMeta):
                 ring_degree=parallel_config.ring_degree,
                 tensor_parallel_degree=parallel_config.tp_degree,
                 pipeline_parallel_degree=parallel_config.pp_degree,
+                vae_parallel_size=parallel_config.vae_parallel_size,
             )
 
     def destory_distributed_env(self):
@@ -93,6 +95,7 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_token_start_end_idx_global: Optional[List[List[int]]]
     pp_patches_token_num: Optional[List[int]]
     max_condition_sequence_length: int
+    split_text_embed_in_sp: bool
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
@@ -102,7 +105,15 @@ class DiTRuntimeState(RuntimeState):
             pipeline=pipeline, parallel_config=config.parallel_config
         )
         self.cogvideox = False
-        if isinstance(pipeline, CogVideoXPipeline):
+        self.consisid = False
+        self.hunyuan_video = False
+        if pipeline.__class__.__name__.startswith(("CogVideoX", "ConsisID", "HunyuanVideo")):
+            if pipeline.__class__.__name__.startswith("CogVideoX"):
+                self.cogvideox = True
+            elif pipeline.__class__.__name__.startswith("ConsisID"):
+                self.consisid = True
+            else:
+                self.hunyuan_video = True
             self._set_cogvideox_parameters(
                 vae_scale_factor_spatial=pipeline.vae_scale_factor_spatial,
                 vae_scale_factor_temporal=pipeline.vae_scale_factor_temporal,
@@ -112,8 +123,11 @@ class DiTRuntimeState(RuntimeState):
                 * pipeline.transformer.config.attention_head_dim,
             )
         else:
+            vae_scale_factor = pipeline.vae_scale_factor
+            if pipeline.__class__.__name__.startswith("Flux") and diffusers.__version__ >= '0.32':
+                vae_scale_factor *= 2
             self._set_model_parameters(
-                vae_scale_factor=pipeline.vae_scale_factor,
+                vae_scale_factor=vae_scale_factor,
                 backbone_patch_size=pipeline.transformer.config.patch_size,
                 backbone_in_channel=pipeline.transformer.config.in_channels,
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
@@ -128,11 +142,13 @@ class DiTRuntimeState(RuntimeState):
         num_inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
         max_condition_sequence_length: Optional[int] = None,
+        split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = (
             num_inference_steps or self.input_config.num_inference_steps
         )
         self.max_condition_sequence_length = max_condition_sequence_length
+        self.split_text_embed_in_sp = split_text_embed_in_sp
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:
@@ -156,12 +172,14 @@ class DiTRuntimeState(RuntimeState):
         batch_size: Optional[int] = None,
         num_inference_steps: Optional[int] = None,
         seed: Optional[int] = None,
+        split_text_embed_in_sp: bool = True,
     ):
         self.input_config.num_inference_steps = (
             num_inference_steps or self.input_config.num_inference_steps
         )
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
+        self.split_text_embed_in_sp = split_text_embed_in_sp
         if seed is not None and seed != self.input_config.seed:
             self.input_config.seed = seed
             set_random_seed(seed)
@@ -189,7 +207,6 @@ class DiTRuntimeState(RuntimeState):
         self.backbone_patch_size = backbone_patch_size
         self.backbone_inner_dim = backbone_inner_dim
         self.backbone_in_channel = backbone_in_channel
-        self.cogvideox = True
 
     def set_patched_mode(self, patch_mode: bool):
         self.patch_mode = patch_mode
@@ -254,6 +271,11 @@ class DiTRuntimeState(RuntimeState):
         self.input_config.batch_size = batch_size or self.input_config.batch_size
         if self.cogvideox:
             self._calc_cogvideox_patches_metadata()
+        elif self.consisid:
+            self._calc_consisid_patches_metadata()
+        elif self.hunyuan_video:
+            # TODO: implement the hunyuan video patches metadata
+            pass
         else:
             self._calc_patches_metadata()
         self._reset_recv_buffer()
@@ -365,6 +387,115 @@ class DiTRuntimeState(RuntimeState):
         self.pp_patches_token_num = pp_patches_token_num
 
     def _calc_cogvideox_patches_metadata(self):
+        num_sp_patches = get_sequence_parallel_world_size()
+        sp_patch_idx = get_sequence_parallel_rank()
+        patch_size = self.backbone_patch_size
+        vae_scale_factor_spatial = self.vae_scale_factor_spatial
+        latents_height = self.input_config.height // vae_scale_factor_spatial
+        latents_width = self.input_config.width // vae_scale_factor_spatial
+        latents_frames = (
+            self.input_config.num_frames - 1
+        ) // self.vae_scale_factor_temporal + 1
+
+        if latents_height % num_sp_patches != 0:
+            raise ValueError(
+                "The height of the input is not divisible by the number of sequence parallel devices"
+            )
+
+        self.num_pipeline_patch = self.parallel_config.pp_config.num_pipeline_patch
+        # Pipeline patches
+        pipeline_patches_height = (
+            latents_height + self.num_pipeline_patch - 1
+        ) // self.num_pipeline_patch
+        # make sure pipeline_patches_height is a multiple of (num_sp_patches * patch_size)
+        pipeline_patches_height = (
+            (pipeline_patches_height + (num_sp_patches * patch_size) - 1)
+            // (patch_size * num_sp_patches)
+        ) * (patch_size * num_sp_patches)
+        # get the number of pipeline that matches patch height requirements
+        num_pipeline_patch = (
+            latents_height + pipeline_patches_height - 1
+        ) // pipeline_patches_height
+        if num_pipeline_patch != self.num_pipeline_patch:
+            logger.warning(
+                f"Pipeline patches num changed from "
+                f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
+                f"to input size and parallelisation requirements"
+            )
+        pipeline_patches_height_list = [
+            pipeline_patches_height for _ in range(num_pipeline_patch - 1)
+        ]
+        the_last_pp_patch_height = latents_height - pipeline_patches_height * (
+            num_pipeline_patch - 1
+        )
+        if the_last_pp_patch_height % (patch_size * num_sp_patches) != 0:
+            raise ValueError(
+                f"The height of the last pipeline patch is {the_last_pp_patch_height}, "
+                f"which is not a multiple of (patch_size * num_sp_patches): "
+                f"{patch_size} * {num_sp_patches}. Please try to adjust 'num_pipeline_patches "
+                f"or sp_degree argument so that the condition are met "
+            )
+        pipeline_patches_height_list.append(the_last_pp_patch_height)
+
+        # Sequence parallel patches
+        # len: sp_degree * num_pipeline_patches
+        flatten_patches_height = [
+            pp_patch_height // num_sp_patches
+            for _ in range(num_sp_patches)
+            for pp_patch_height in pipeline_patches_height_list
+        ]
+        flatten_patches_start_idx = [0] + [
+            sum(flatten_patches_height[:i])
+            for i in range(1, len(flatten_patches_height) + 1)
+        ]
+        pp_sp_patches_height = [
+            flatten_patches_height[
+                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches
+            ]
+            for pp_patch_idx in range(num_pipeline_patch)
+        ]
+        pp_sp_patches_start_idx = [
+            flatten_patches_start_idx[
+                pp_patch_idx * num_sp_patches : (pp_patch_idx + 1) * num_sp_patches + 1
+            ]
+            for pp_patch_idx in range(num_pipeline_patch)
+        ]
+
+        pp_patches_height = [
+            sp_patches_height[sp_patch_idx]
+            for sp_patches_height in pp_sp_patches_height
+        ]
+        pp_patches_start_idx_local = [0] + [
+            sum(pp_patches_height[:i]) for i in range(1, len(pp_patches_height) + 1)
+        ]
+        pp_patches_start_end_idx_global = [
+            sp_patches_start_idx[sp_patch_idx : sp_patch_idx + 2]
+            for sp_patches_start_idx in pp_sp_patches_start_idx
+        ]
+        pp_patches_token_start_end_idx_global = [
+            [
+                (latents_width // patch_size) * (start_idx // patch_size),
+                (latents_width // patch_size) * (end_idx // patch_size),
+            ]
+            for start_idx, end_idx in pp_patches_start_end_idx_global
+        ]
+        pp_patches_token_num = [
+            end - start for start, end in pp_patches_token_start_end_idx_global
+        ]
+        pp_patches_token_start_idx_local = [
+            sum(pp_patches_token_num[:i]) for i in range(len(pp_patches_token_num) + 1)
+        ]
+        self.num_pipeline_patch = num_pipeline_patch
+        self.pp_patches_height = pp_patches_height
+        self.pp_patches_start_idx_local = pp_patches_start_idx_local
+        self.pp_patches_start_end_idx_global = pp_patches_start_end_idx_global
+        self.pp_patches_token_start_idx_local = pp_patches_token_start_idx_local
+        self.pp_patches_token_start_end_idx_global = (
+            pp_patches_token_start_end_idx_global
+        )
+        self.pp_patches_token_num = pp_patches_token_num
+
+    def _calc_consisid_patches_metadata(self):
         num_sp_patches = get_sequence_parallel_world_size()
         sp_patch_idx = get_sequence_parallel_rank()
         patch_size = self.backbone_patch_size

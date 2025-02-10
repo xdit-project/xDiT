@@ -1,10 +1,10 @@
 # This file implements USP with torch version >= '2.5.0'
 import torch
 from torch.nn import functional as F
-from torch.distributed.tensor.experimental._attention import _templated_ring_attention
-aten = torch.ops.aten
 
 import torch.distributed._functional_collectives as ft_c
+
+from torch.distributed.tensor.experimental._attention import _templated_ring_attention
 
 from yunchang.globals import PROCESS_GROUP
 
@@ -14,17 +14,74 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
 )
 
+from xfuser.envs import PACKAGES_CHECKER
+env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_FLASH_ATTN = env_info["has_flash_attn"]
+
+aten = torch.ops.aten
+
     
 def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
-    out, *_ = _templated_ring_attention(
-        PROCESS_GROUP.RING_PG,
-        aten._scaled_dot_product_flash_attention,
-        query,
-        key,
-        value,
-        dropout_p=dropout_p,
-        is_causal=is_causal
-    )
+    if torch.__version__ >= "2.6.0":
+        from torch.distributed.tensor.experimental._attention import _cp_options
+        _cp_options.enable_load_balance = False
+        kwargs = {
+            "dropout_p": dropout_p,
+            "is_causal": is_causal,
+        }
+        if HAS_FLASH_ATTN:
+            out, *_ = _templated_ring_attention(
+                PROCESS_GROUP.RING_PG,
+                1,
+                aten._scaled_dot_product_flash_attention,
+                query,
+                key,
+                value,
+                **kwargs,
+            )
+        else:
+            kwargs = {
+                **kwargs,
+                "attn_bias": None,
+                "compute_log_sumexp": True,
+            }
+            out, *_ = _templated_ring_attention(
+                PROCESS_GROUP.RING_PG,
+                1,
+                aten._scaled_dot_product_efficient_attention,
+                query,
+                key,
+                value,
+                **kwargs,
+            )
+    else:
+        kwargs = {
+            "dropout_p": dropout_p,
+            "is_causal": is_causal,
+        }
+        if HAS_FLASH_ATTN:
+            out, *_ = _templated_ring_attention(
+                PROCESS_GROUP.RING_PG,
+                aten._scaled_dot_product_flash_attention,
+                query,
+                key,
+                value,
+                **kwargs
+            )
+        else:
+            kwargs = {
+                **kwargs,
+                "attn_bias": None,
+                "compute_log_sumexp": True,
+            }
+            out, *_ = _templated_ring_attention(
+                PROCESS_GROUP.RING_PG,
+                aten._scaled_dot_product_efficient_attention,
+                query,
+                key,
+                value,
+                **kwargs,
+            )
     return out
 
 

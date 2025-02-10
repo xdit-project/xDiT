@@ -6,6 +6,7 @@ import torch.distributed._functional_collectives as ft_c
 
 from yunchang.globals import PROCESS_GROUP
 from yunchang.ring.ring_flash_attn import ring_flash_attn_forward
+from yunchang.ring.ring_pytorch_attn import ring_pytorch_attn_func
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -13,20 +14,35 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
 )
 
+from xfuser.envs import PACKAGES_CHECKER
+env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_FLASH_ATTN = env_info["has_flash_attn"]
+
 
 def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
     query = query.transpose(1,2).contiguous()
     key = key.transpose(1,2).contiguous()
     value = value.transpose(1,2).contiguous()
-    out, *_ = ring_flash_attn_forward(
-        PROCESS_GROUP.RING_PG,
-        query,
-        key,
-        value,
-        softmax_scale=query.shape[-1] ** (-0.5),
-        dropout_p=dropout_p,
-        causal=is_causal,
-    )
+    if HAS_FLASH_ATTN:
+        out, *_ = ring_flash_attn_forward(
+            PROCESS_GROUP.RING_PG,
+            query,
+            key,
+            value,
+            softmax_scale=query.shape[-1] ** (-0.5),
+            dropout_p=dropout_p,
+            causal=is_causal,
+        )
+    else:
+        out = ring_pytorch_attn_func(
+            query,
+            key,
+            value,
+            dropout_p=dropout_p,
+            softmax_scale=query.shape[-1] ** (-0.5),
+            causal=is_causal,
+            group=PROCESS_GROUP.RING_PG,
+        )
     out = out.transpose(1,2).contiguous()
     return out
 

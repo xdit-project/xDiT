@@ -79,6 +79,11 @@ class xFuserArgs:
     # tensor parallel
     tensor_parallel_degree: int = 1
     split_scheme: Optional[str] = "row"
+    # ray arguments
+    use_ray: bool = False
+    ray_world_size: int = 1
+    vae_parallel_size: int = 0
+    dit_parallel_size: int = 1
     # pipefusion parallel
     pipefusion_parallel_degree: int = 1
     num_pipeline_patch: Optional[int] = None
@@ -89,6 +94,7 @@ class xFuserArgs:
     num_frames: int = 49
     num_inference_steps: int = 20
     max_sequence_length: int = 256
+    img_file_path: Optional[str] = None
     prompt: Union[str, List[str]] = ""
     negative_prompt: Union[str, List[str]] = ""
     no_use_resolution_binning: bool = False
@@ -151,6 +157,23 @@ class xFuserArgs:
 
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
+        runtime_group.add_argument(
+            "--use_ray",
+            action="store_true",
+            help="Enable ray to run inference in multi-card",
+        )
+        parallel_group.add_argument(
+            "--ray_world_size",
+            type=int,
+            default=1,
+            help="The number of ray workers (world_size for ray)",
+        )
+        parallel_group.add_argument(
+            "--dit_parallel_size",
+            type=int,
+            default=0,
+            help="The number of processes for DIT parallelization.",
+        )
         parallel_group.add_argument(
             "--use_cfg_parallel",
             action="store_true",
@@ -197,6 +220,12 @@ class xFuserArgs:
             help="Tensor parallel degree.",
         )
         parallel_group.add_argument(
+            "--vae_parallel_size",
+            type=int,
+            default=0,
+            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
+        )
+        parallel_group.add_argument(
             "--split_scheme",
             type=str,
             default="row",
@@ -213,6 +242,9 @@ class xFuserArgs:
         )
         input_group.add_argument(
             "--num_frames", type=int, default=49, help="The frames of video"
+        )
+        input_group.add_argument(
+            "--img_file_path", type=str, default=None, help="Path for the input image."
         )
         input_group.add_argument(
             "--prompt", type=str, nargs="*", default="", help="Prompt for the model."
@@ -322,12 +354,19 @@ class xFuserArgs:
     def create_config(
         self,
     ) -> Tuple[EngineConfig, InputConfig]:
-        if not torch.distributed.is_initialized():
+        if not self.use_ray and not torch.distributed.is_initialized():
             logger.warning(
                 "Distributed environment is not initialized. " "Initializing..."
             )
             init_distributed_environment()
-
+        if self.use_ray:
+            self.world_size = self.ray_world_size
+        else:
+            self.world_size = torch.distributed.get_world_size()
+        
+        if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
+            self.dit_parallel_size = self.world_size
+        assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
         model_config = ModelConfig(
             model=self.model,
             download_dir=self.download_dir,
@@ -348,20 +387,27 @@ class xFuserArgs:
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,
                 use_cfg_parallel=self.use_cfg_parallel,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             tp_config=TensorParallelConfig(
                 tp_degree=self.tensor_parallel_degree,
                 split_scheme=self.split_scheme,
+                dit_parallel_size=self.dit_parallel_size,
             ),
             pp_config=PipeFusionParallelConfig(
                 pp_degree=self.pipefusion_parallel_degree,
                 num_pipeline_patch=self.num_pipeline_patch,
                 attn_layer_num_for_pp=self.attn_layer_num_for_pp,
+                dit_parallel_size=self.dit_parallel_size,
             ),
+            world_size=self.world_size,
+            dit_parallel_size=self.dit_parallel_size,
+            vae_parallel_size=self.vae_parallel_size,
         )
 
         fast_attn_config = FastAttnConfig(
@@ -387,6 +433,7 @@ class xFuserArgs:
             num_frames=self.num_frames,
             use_resolution_binning=not self.no_use_resolution_binning,
             batch_size=len(self.prompt) if isinstance(self.prompt, list) else 1,
+            img_file_path=self.img_file_path,
             prompt=self.prompt,
             negative_prompt=self.negative_prompt,
             num_inference_steps=self.num_inference_steps,

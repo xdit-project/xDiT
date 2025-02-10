@@ -2,6 +2,9 @@
 
 xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo?tab=readme-ov-file#-parallel-inference-on-multiple-gpus-by-xdit)'s official parallel inference engine. On H100 and H20 GPUs, xDiT reduces the generation time of 1028x720 videos from 31 minutes to 5 minutes, and 960x960 videos from 28 minutes to 6 minutes.
 
+The H100 and H20 performance benchmarks are done with the official HunyuanVideo repository. The L20 performance benchmarks are done with the `diffusers` implementation.
+The L20 performance benchmarks are measured using this [script](examples/hunyuan_video_usp_example.py), along with `flash-attn==2.7.2.post1` and CUDA 12.4.
+
 ### 1280x720 Resolution (129 frames, 50 steps) - Ulysses Latency (seconds)
 
 <center>
@@ -10,6 +13,7 @@ xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo?tab=readme-ov-fil
 |----------|--------|---------|---------|---------|
 | H100 | 1,904.08 | 925.04 | 514.08 | 337.58 |
 | H20 | 6,639.17 | 3,400.55 | 1,762.86 | 940.97 |
+| L20 | 6,043.88 | 3,271.44 | 2,080.05 | |
 
 </center>
 
@@ -21,5 +25,6 @@ xDiT is [HunyuanVideo](https://github.com/Tencent/HunyuanVideo?tab=readme-ov-fil
 |----------|--------|---------|---------|---------|
 | H100 | 1,735.01 | 934.09 | 645.45 | 367.02 |
 | H20 | 6,621.46 | 3,400.55 | 2,310.48 | 1,214.67 |
+| L20 | 6,039.08 | 3,260.62 | 2,284.74 | |
 
 </center>

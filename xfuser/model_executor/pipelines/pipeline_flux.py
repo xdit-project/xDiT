@@ -33,7 +33,11 @@ from xfuser.core.distributed import (
     is_pipeline_first_stage,
     is_pipeline_last_stage,
     is_dp_last_group,
+    get_world_group,
+    get_vae_parallel_group,
+    get_dit_world_size,
 )
+from xfuser.core.distributed.group_coordinator import GroupCoordinator
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 
@@ -53,9 +57,12 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = FluxPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     def prepare_run(
@@ -345,32 +352,39 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                     sync_only=True,
                 )
 
-        def vae_decode(latents):
+        image = None
+        def process_latents(latents):
             latents = self._unpack_latents(
                 latents, height, width, self.vae_scale_factor
             )
+
             latents = (
                 latents / self.vae.config.scaling_factor
             ) + self.vae.config.shift_factor
-
-            image = self.vae.decode(latents, return_dict=False)[0]
-            return image
+            return latents
 
         if not output_type == "latent":
-            if get_runtime_state().runtime_config.use_parallel_vae:
-                latents = self.gather_broadcast_latents(latents)
-                image = vae_decode(latents)
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
+                latents = self.gather_latents_for_vae(latents)
+                if latents is not None:
+                    latents = process_latents(latents)
+                self.send_to_vae_decode(latents) 
             else:
-                if is_dp_last_group():
-                    image = vae_decode(latents)
+                if get_runtime_state().runtime_config.use_parallel_vae:
+                    latents = self.gather_broadcast_latents(latents)
+                    latents = process_latents(latents)
+                    image = self.vae.decode(latents, return_dict=False)[0]
+                else:
+                    if is_dp_last_group():
+                        latents = process_latents(latents)
+                        image = self.vae.decode(latents, return_dict=False)[0]
 
         if self.is_dp_last_group():
             if output_type == "latent":
                 image = latents
-
-            else:
+            elif image is not None:
                 image = self.image_processor.postprocess(image, output_type=output_type)
-
             # Offload all models
             self.maybe_free_model_hooks()
 
@@ -758,7 +772,7 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-        noise_pred, encoder_hidden_states = self.transformer(
+        ret = self.transformer(
             hidden_states=latents,
             timestep=timestep / 1000,
             guidance=guidance,
@@ -769,7 +783,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             joint_attention_kwargs=self.joint_attention_kwargs,
             return_dict=False,
         )[0]
-
+        if self.engine_config.parallel_config.dit_parallel_size > 1:
+            noise_pred, encoder_hidden_states = ret
+        else:
+            noise_pred, encoder_hidden_states = ret, None
         return noise_pred, encoder_hidden_states
 
     def _scheduler_step(

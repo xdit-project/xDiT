@@ -111,6 +111,8 @@ class xFuserArgs:
     window_size: int = 64
     coco_path: Optional[str] = None
     use_cache: bool = False
+    use_teacache: bool = False
+    use_fbcache: bool = False
     use_fp8_t5_encoder: bool = False
 
     @staticmethod
@@ -153,6 +155,16 @@ class xFuserArgs:
             "--use_onediff",
             action="store_true",
             help="Enable onediff to accelerate inference in a single card",
+        )
+        runtime_group.add_argument(
+            "--use_teacache",
+            action="store_true",
+            help="Enable teacache to accelerate inference in a single card",
+        )
+        runtime_group.add_argument(
+            "--use_fbcache",
+            action="store_true",
+            help="Enable teacache to accelerate inference in a single card",
         )
 
         # Parallel arguments

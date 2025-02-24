@@ -57,13 +57,14 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        cache_args: Dict={},
         return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = FluxPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         if return_org_pipeline:
             return pipeline
-        return cls(pipeline, engine_config)
+        return cls(pipeline, engine_config, cache_args)
 
     def prepare_run(
         self,

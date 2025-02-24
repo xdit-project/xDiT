@@ -4,7 +4,7 @@ adapted from https://github.com/chengzeyi/ParaAttention.git
 """
 import importlib
 from typing import Type, Dict, TypeVar
-from xfuser.model_executor.plugins.cache_.diffusers_adapters.registry import TRANSFORMER_ADAPTER_REGISTRY
+from xfuser.model_executor.cache.diffusers_adapters.registry import TRANSFORMER_ADAPTER_REGISTRY
 
 
 def apply_cache_on_transformer(transformer, *args, **kwargs):

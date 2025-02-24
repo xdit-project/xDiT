@@ -1,4 +1,4 @@
-# Parallelize New Models with xDiT
+# Apply xDiT to new models
 
 xDiT was initially developed to accelerate the inference process of Diffusion Transformers (DiTs) within Huggingface `diffusers`. However, with the rapid emergence of various DiT models, you may find yourself needing to support new models that xDiT hasn't yet accommodated or models that are not officially supported by `diffusers` at all.
 

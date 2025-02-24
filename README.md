@@ -84,6 +84,20 @@ We also have implemented the following parallel strategies for reference:
 1. Tensor Parallelism
 2. [DistriFusion](https://arxiv.org/abs/2402.19481)
 
+<h3 id="meet-xdit-cache">Cache Acceleration</h3>
+
+Cache method is inspired by work from TeaCache(https://github.com/ali-vilab/TeaCache.git) and ParaAttn(https://github.com/chengzeyi/ParaAttention.git); We adapted the TeaCache and First-Block-Cache in xDiT.
+
+This method is not orthogonal to parallel in xDiT. Only when SP or no parrallelism can activate the cache function.
+
+To use this functionality, you can activate it by `--use_teacache` or `--use_fbcache`, which activate TeaCache and First-Block-Cache respectively. Right now, this repo only supports FLUX model.
+
+The Performance shown as below, tested on 4 H20 with SP=4:
+| 方法           | 性能   |
+|----------------|--------|
+| 原始           | 2.02s  |
+| use_teacache   | 1.58s  |
+| use_fbcache    | 0.93s  |
 
 <h3 id="meet-xdit-perf">Computing Acceleration</h3>
 

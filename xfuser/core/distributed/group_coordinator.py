@@ -196,7 +196,7 @@ class GroupCoordinator:
         world_size = self.world_size
         return (world_size - rank_in_group - 1) % world_size
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor, op=torch._C._distributed_c10d.ReduceOp.SUM) -> torch.Tensor:
         """
         NOTE: This operation will be applied in-place or out-of-place.
         Always assume this function modifies its input, but use the return
@@ -206,7 +206,7 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+            torch.distributed.all_reduce(input_, op=op, group=self.device_group)
         return input_
 
     def all_gather(

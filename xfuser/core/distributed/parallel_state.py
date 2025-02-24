@@ -217,6 +217,7 @@ def init_distributed_environment(
             world_size=world_size,
             rank=rank,
         )
+        torch.cuda.set_device(torch.distributed.get_rank() % torch.cuda.device_count())
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816

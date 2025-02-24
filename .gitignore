@@ -9,5 +9,4 @@ profile/
 .vscode/
 xfuser.egg-info/
 dist/*
-latte_output.mp4
-cache/
+*.mp4

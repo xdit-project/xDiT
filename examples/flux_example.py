@@ -16,7 +16,7 @@ from xfuser.core.distributed import (
     get_tensor_model_parallel_world_size,
     get_data_parallel_world_size,
 )
-
+from xfuser.model_executor.cache.diffusers_adapters import apply_cache_on_transformer
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
@@ -49,7 +49,7 @@ def main():
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
     pipe.prepare_run(input_config, steps=1)
-    from xfuser.model_executor.plugins.cache_.diffusers_adapters import apply_cache_on_transformer
+    
     use_cache = engine_args.use_teacache or engine_args.use_fbcache
     if (use_cache
         and get_pipeline_parallel_world_size() == 1

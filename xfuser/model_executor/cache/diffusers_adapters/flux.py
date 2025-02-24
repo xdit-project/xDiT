@@ -8,9 +8,9 @@ import unittest
 import torch
 from torch import nn
 from diffusers import DiffusionPipeline, FluxTransformer2DModel
-from xfuser.model_executor.plugins.cache_.diffusers_adapters.registry import TRANSFORMER_ADAPTER_REGISTRY
+from xfuser.model_executor.cache.diffusers_adapters.registry import TRANSFORMER_ADAPTER_REGISTRY
 
-from xfuser.model_executor.plugins.cache_ import utils
+from xfuser.model_executor.cache import utils
 
 def create_cached_transformer_blocks(use_cache, transformer, rel_l1_thresh, return_hidden_states_first, num_steps):
     cached_transformer_class = {

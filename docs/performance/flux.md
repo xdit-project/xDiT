@@ -105,7 +105,7 @@ This is due to the increased memory requirements for activations, along with mem
 
 By leveraging Parallel VAE, xDiT is able to demonstrate its capability for generating images at higher resolutions, enabling us to produce images with even greater detail and clarity. Applying `--use_parallel_vae` in the [runing script](../../examples/run.sh).
 
-prompt is "A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He’s wearing a faded blue captain’s hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
+prompt is "A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He's wearing a faded blue captain's hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
 
 The quality of image generation at 2048px, 3072px, and 4096px resolutions is as follows. It is evident that the quality of the 4096px generated images is significantly lower.
 
@@ -114,3 +114,18 @@ The quality of image generation at 2048px, 3072px, and 4096px resolutions is as 
     alt="latency-flux_l40">
 </div>
 
+
+## Cache Methods
+
+We tested the performance of TeaCache and First-Block-Cache on 4xH20 with SP=4.
+The Performance shown as below:
+
+<div align="center">
+
+| Method          | Latency (s) |
+|----------------|--------|
+| Baseline       | 2.02s  |
+| use_teacache   | 1.58s  |
+| use_fbcache    | 0.93s  |
+
+</div>

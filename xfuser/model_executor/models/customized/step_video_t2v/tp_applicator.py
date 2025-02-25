@@ -1,6 +1,6 @@
 import torch
-from xfuser.model_executor.models.models_adapters.step_video_t2v.blocks import SelfAttention, CrossAttention, FeedForward
-from xfuser.model_executor.models.models_adapters.step_video_t2v.linear import ColumnParallelLinear, RowParallelLinear
+from xfuser.model_executor.models.customized.step_video_t2v.blocks import SelfAttention, CrossAttention, FeedForward
+from xfuser.model_executor.models.customized.step_video_t2v.linear import ColumnParallelLinear, RowParallelLinear
 from xfuser.core.distributed.parallel_state import get_tp_group
 
 

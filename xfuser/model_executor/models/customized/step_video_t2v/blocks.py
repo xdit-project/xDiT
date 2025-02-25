@@ -15,9 +15,9 @@ import torch.nn as nn
 from typing import Optional
 from einops import rearrange
 
-from xfuser.model_executor.models.models_adapters.step_video_t2v.attentions import Attention
-from xfuser.model_executor.models.models_adapters.step_video_t2v.normalization import RMSNorm
-from xfuser.model_executor.models.models_adapters.step_video_t2v.rope import RoPE3D
+from xfuser.model_executor.models.customized.step_video_t2v.attentions import Attention
+from xfuser.model_executor.models.models_adapters import RMSNorm
+from xfuser.model_executor.models.customized.step_video_t2v.rope import RoPE3D
 
 
 class SelfAttention(Attention):

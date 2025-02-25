@@ -37,6 +37,7 @@ if __name__ == "__main__":
             "opencv-python",
             "imageio",
             "imageio-ffmpeg",
+            "einops",
         ],
         extras_require={
             "diffusers": [

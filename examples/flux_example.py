@@ -33,9 +33,18 @@ def main():
         quantize(text_encoder_2, weights=qfloat8)
         freeze(text_encoder_2)
 
+    cache_args = {
+            "use_teacache": engine_args.use_teacache,
+            "use_fbcache": engine_args.use_fbcache,
+            "rel_l1_thresh": 0.6,
+            "return_hidden_states_first": False,
+            "num_steps": input_config.num_inference_steps,
+        }
+
     pipe = xFuserFluxPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
+        cache_args=cache_args,
         torch_dtype=torch.bfloat16,
         text_encoder_2=text_encoder_2,
     )
@@ -48,28 +57,8 @@ def main():
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
-    pipe.prepare_run(input_config, steps=1)
-    
-    use_cache = engine_args.use_teacache or engine_args.use_fbcache
-    if (use_cache
-        and get_pipeline_parallel_world_size() == 1
-        and get_classifier_free_guidance_world_size() == 1
-        and get_tensor_model_parallel_world_size() == 1
-    ):
-        cache_args = {
-            "rel_l1_thresh": 0.6,
-            "return_hidden_states_first": False,
-            "num_steps": input_config.num_inference_steps,
-        }
+    pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
 
-        if engine_args.use_fbcache and engine_args.use_teacache:
-            cache_args["use_cache"] = "Fb"
-        elif engine_args.use_teacache:
-            cache_args["use_cache"] = "Tea"
-        elif engine_args.use_fbcache:
-            cache_args["use_cache"] = "Fb"
-
-        pipe.transformer = apply_cache_on_transformer(pipe.transformer, **cache_args)
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
     output = pipe(

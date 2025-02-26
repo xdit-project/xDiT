@@ -48,6 +48,7 @@ PACKAGES_CHECKER.check_diffusers_version()
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
 from xfuser.model_executor.layers.attention_processor import *
+from xfuser.model_executor.cache.diffusers_adapters import apply_cache_on_transformer
 from xfuser.config.config import ParallelConfig
 try:
     import os
@@ -142,6 +143,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         self,
         pipeline: DiffusionPipeline,
         engine_config: EngineConfig,
+        cache_args: Optional[Dict] = None,
     ):
         self.module: DiffusionPipeline
         self.engine_config = engine_config
@@ -161,6 +163,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 transformer,
                 enable_torch_compile=engine_config.runtime_config.use_torch_compile,
                 enable_onediff=engine_config.runtime_config.use_onediff,
+                cache_args=cache_args,
             )
         elif unet is not None:
             pipeline.unet = self._convert_unet_backbone(unet)
@@ -357,7 +360,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         initialize_fast_attn_state(pipeline=pipeline, single_config=engine_config.fast_attn_config)
 
     def _convert_transformer_backbone(
-        self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool
+        self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool, cache_args: Optional[Dict] = None,
     ):
         if (
             get_pipeline_parallel_world_size() == 1
@@ -379,7 +382,29 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             logger.warning(
                 f"apply --use_torch_compile and --use_onediff togather. we use torch compile only"
             )
+        if cache_args:
+            use_teacache = cache_args["use_teacache"]
+            use_fbcache = cache_args["use_fbcache"]
+            cache_args.pop("use_teacache")
+            cache_args.pop("use_fbcache")
+            use_cache = use_teacache or use_fbcache
+            use_cache = (
+                use_cache
+                and get_pipeline_parallel_world_size() == 1
+                and get_classifier_free_guidance_world_size() == 1
+                and get_tensor_model_parallel_world_size() == 1
+            )
+            if use_cache:
+                if use_teacache and use_fbcache:
+                    logger.warning(f"apply --use_teacache and --use_fbcache togather. we use FBCache")
+                    cache_args["use_cache"] = "Fb"
+                elif use_teacache:
+                    cache_args["use_cache"] = "Tea"
+                elif use_fbcache:
+                    cache_args["use_cache"] = "Fb"
 
+                transformer = apply_cache_on_transformer(transformer, **cache_args)
+        self.original_transformer = transformer
         if enable_torch_compile or enable_onediff:
             if getattr(transformer, "forward") is not None:
                 if enable_torch_compile:

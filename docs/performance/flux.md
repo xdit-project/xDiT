@@ -117,15 +117,48 @@ The quality of image generation at 2048px, 3072px, and 4096px resolutions is as 
 
 ## Cache Methods
 
-We tested the performance of TeaCache and First-Block-Cache on 4xH20 with SP=4.
+We tested the performance of TeaCache and First-Block-Cache on 4xH20 with SP=4 and 1xH20 respectively.
 The Performance shown as below:
 
 <div align="center">
 
-| Method          | Latency (s) |
-|----------------|--------|
-| Baseline       | 2.02s  |
-| use_teacache   | 1.58s  |
-| use_fbcache    | 0.93s  |
+<table>
+  <tr>
+    <th rowspan="2">Method</th>
+    <th colspan="4">Latency (s)</th>
+  </tr>
+  <tr>
+    <th colspan="2">without torch.compile</th>
+    <th colspan="2">with torch.compile</th>
+  </tr>
+  <tr>
+    <th></th>
+    <th>4xH20</th>
+    <th>1xH20</th>
+    <th>4xH20</th>
+    <th>1xH20</th>
+  </tr>
+  <tr>
+    <td>Baseline</td>
+    <td>2.02s</td>
+    <td>6.10s</td>
+    <td>1.81s</td>
+    <td>5.02s</td>
+  </tr>
+  <tr>
+    <td>use_teacache</td>
+    <td>1.60s</td>
+    <td>4.67s</td>
+    <td>1.50s</td>
+    <td>3.92s</td>
+  </tr>
+  <tr>
+    <td>use_fbcache</td>
+    <td>0.93s</td>
+    <td>2.51s</td>
+    <td>0.85s</td>
+    <td>2.09s</td>
+  </tr>
+</table>
 
 </div>

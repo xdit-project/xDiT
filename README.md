@@ -17,18 +17,9 @@
 <h2 id="agenda">Table of Contents</h2>
 
 - [🔥 Meet xDiT](#meet-xdit)
-- [📢 Updates](#updates)
+- [📢 Open-source Community](#updates)
 - [🎯 Supported DiTs](#support-dits)
 - [📈 Performance](#perf)
-  - [HunyuanVideo](#perf_hunyuanvideo)
-  - [ConsisID](#perf_consisid)
-  - [Mochi-1](#perf_mochi1)
-  - [CogVideoX](#perf_cogvideox)
-  - [Flux.1](#perf_flux)
-  - [HunyuanDiT](#perf_hunyuandit)
-  - [SD3](#perf_sd3)
-  - [Pixart](#perf_pixart)
-  - [Latte](#perf_latte)
 - [🚀 QuickStart](#QuickStart)
 - [🖼️ ComfyUI with xDiT](#comfyui)
 - [✨ xDiT's Arsenal](#secrets)
@@ -95,43 +86,38 @@ Optimization is orthogonal to parallel and focuses on accelerating performance o
 First, xDiT employs a series of kernel acceleration methods. In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
 
 
-<h2 id="updates">📢 Updates</h2>
+<h2 id="updates">📢 Open-source Community </h2>
 
-* 🎉**December 24, 2024**: xDiT supports [ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) and achieved 3.21x speedup compare to the official implementation! The inference scripts are [examples/consisid_example.py](examples/consisid_example.py) and [examples/consisid_usp_example.py](examples/consisid_usp_example.py).
-* 🎉**December 7, 2024**: xDiT is the official parallel inference engine for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo), reducing the 5-sec video generation latency from 31 minutes to 5 minutes on 8xH100!
-* 🎉**November 28, 2024**: xDiT achieves 1.6 sec end-to-end latency for 28-step [Flux.1-Dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) inference on 4xH100!
-* 🎉**November 20, 2024**: xDiT supports [CogVideoX-1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) and achieved 6.12x speedup compare to the implementation in diffusers!
-* 🎉**November 11, 2024**: xDiT has been applied to [mochi-1](https://github.com/xdit-project/mochi-xdit) and achieved 3.54x speedup compare to the official open source implementation!
-* 🎉**October 10, 2024**: xDiT applied DiTFastAttn to accelerate single GPU inference for Pixart Models!
-* 🎉**September 26, 2024**: xDiT has been officially used by [THUDM/CogVideo](https://github.com/THUDM/CogVideo)! The inference scripts are placed in [parallel_inference/](https://github.com/THUDM/CogVideo/blob/main/tools/parallel_inference) at their repository.
-* 🎉**September 23, 2024**: Support CogVideoX. The inference scripts are [examples/cogvideox_example.py](examples/cogvideox_example.py).
-* 🎉**August 26, 2024**: We apply torch.compile and [onediff](https://github.com/siliconflow/onediff) nexfort backend to accelerate GPU kernels speed.
-* 🎉**August 15, 2024**: Support Hunyuan-DiT hybrid parallel version. The inference scripts are [examples/hunyuandit_example.py](examples/hunyuandit_example.py).
-* 🎉**August 9, 2024**: Support Latte sequence parallel version. The inference scripts are [examples/latte_example.py](examples/latte_example.py).
-* 🎉**August 8, 2024**: Support Flux sequence parallel version. The inference scripts are [examples/flux_example.py](examples/flux_example.py).
-* 🎉**August 2, 2024**: Support Stable Diffusion 3 hybrid parallel version. The inference scripts are [examples/sd3_example.py](examples/sd3_example.py).
-* 🎉**July 18, 2024**: Support PixArt-Sigma and PixArt-Alpha. The inference scripts are [examples/pixartsigma_example.py](examples/pixartsigma_example.py), [examples/pixartalpha_example.py](examples/pixartalpha_example.py).
-* 🎉**July 17, 2024**: Rename the project to xDiT. The project has evolved from a collection of parallel methods into a unified inference framework and supported the hybrid parallel for DiTs.
-* 🎉**May 24, 2024**: PipeFusion is public released. It supports PixArt-alpha [scripts/pixart_example.py](./scripts/pixart_example.py), DiT [scripts/ditxl_example.py](./scripts/ditxl_example.py) and SDXL [scripts/sdxl_example.py](./scripts/sdxl_example.py). This version is currently in the `legacy` branch.
+The following open-sourced DiT Models are released with xDiT in day 1.
+
+[HunyuanVideo](https://github.com/Tencent/HunyuanVideo) ![GitHub Repo stars](https://img.shields.io/github/stars/Tencent/HunyuanVideo?style=social)
+
+[StepVideo](https://github.com/stepfun-ai/Step-Video-T2V) ![GitHub Repo stars](https://img.shields.io/github/stars/stepfun-ai/Step-Video-T2V?style=social)
+
+[SkyReels-V1](https://github.com/SkyworkAI/SkyReels-V1) ![GitHub Repo stars](https://img.shields.io/github/stars/SkyworkAI/SkyReels-V1?style=social)
+
+[Wan2.1](https://github.com/Wan-Video/Wan2.1) ![GitHub Repo stars](https://img.shields.io/github/stars/Wan-Video/Wan2.1?style=social)
+
 
 
 <h2 id="support-dits">🎯 Supported DiTs</h2>
 
 <div align="center">
 
-| Model Name | CFG | SP | PipeFusion |
-| --- | --- | --- | --- |
-| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ |
-| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ |
-| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ |
-| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ |
-| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ |
-| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ |
-| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ |
-| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ |
-| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ |
-| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ |
-| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ |
+| Model Name | CFG | SP | PipeFusion | TP |
+| --- | --- | --- | --- | --- |
+| [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ |
+| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | ❎ | 
+| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ |
+| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ |
+| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ |
+| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ |
+| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ |
+| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ |
+| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ |
+| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ |
+| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ |
 
 </div>
 
@@ -143,9 +129,9 @@ First, xDiT employs a series of kernel acceleration methods. In addition to util
 <h2 id="comfyui">🖼️ TACO-DiT: ComfyUI with xDiT</h2>
 
 ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today’s large DiTs, resulting in unacceptably high latency for users like Flux.1. 
+It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today's large DiTs, resulting in unacceptably high latency for users like Flux.1. 
 
-Using our commercial project **TACO-DiT**, a close-sourced ComfyUI variant built with xDiT, we’ve successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1’s performance challenges. Below is an example of using TACO-DiT to accelerate a Flux workflow with LoRA:
+Using our commercial project **TACO-DiT**, a close-sourced ComfyUI variant built with xDiT, we've successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1's performance challenges. Below is an example of using TACO-DiT to accelerate a Flux workflow with LoRA:
 
 ![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
 
@@ -157,43 +143,24 @@ More features and details can be found in our Intro Video:
 
 The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
 
-<h2 id="perf">📈 Performance</h2>
+<h2 id="perf">📈 Performance Reports</h2>
 
-<h3 id="perf_hunyuanvideo">HunyuanVideo</h3>
+<div align="center">
 
-1. [HunyuanVideo Performance Report](./docs/performance/hunyuanvideo.md)
+| Model | Performance Report |
+|:---:|:---|
+| 🎬 StepVideo | [Performance Report](./docs/performance/stepvideo.md) |
+| 🎬 HunyuanVideo | [Performance Report](./docs/performance/hunyuanvideo.md) |
+| 🎬 ConsisID-Preview | [Performance Report](./docs/performance/consisid.md) |
+| 🎬 Mochi-1 | [Performance Report](https://github.com/xdit-project/mochi-xdit) |
+| 🎬 CogVideo | [Performance Report](./docs/performance/cogvideo.md) |
+| 🟠 Flux.1 | [Performance Report](./docs/performance/flux.md) |
+| 🎬 Latte | [Performance Report](./docs/performance/latte.md) |
+| 🔵 HunyuanDiT | [Performance Report](./docs/performance/hunyuandit.md) |
+| 🟠 SD3 | [Performance Report](./docs/performance/sd3.md) |
+| 🔴 PixArt | [Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md) |
 
-<h3 id="perf_consisid">ConsisID-Preview</h3>
-
-2. [ConsisID Performance Report](./docs/performance/consisid.md)
-
-<h3 id="perf_cogvideox">Mochi1</h3>
-
-3. [mochi1-xdit: Reducing the Inference Latency by 3.54x Compare to the Official Open Souce Implementation!](https://github.com/xdit-project/mochi-xdit)
-
-<h3 id="perf_cogvideox">CogVideo</h3>
-
-4. [CogVideo Performance Report](./docs/performance/cogvideo.md)
-
-<h3 id="perf_flux">Flux.1</h3>
-
-5. [Flux Performance Report](./docs/performance/flux.md)
-
-<h3 id="perf_latte">Latte</h3>
-
-6. [Latte Performance Report](./docs/performance/latte.md)
-
-<h3 id="perf_hunyuandit">HunyuanDiT</h3>
-
-7. [HunyuanDiT Performance Report](./docs/performance/hunyuandit.md)
-
-<h3 id="perf_sd3">SD3</h3>
-
-8. [Stable Diffusion 3 Performance Report](./docs/performance/sd3.md)
-
-<h3 id="perf_pixart">Pixart</h3>
-
-9. [Pixart-Alpha Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md)
+</div>
 
 
 <h2 id="QuickStart">🚀 QuickStart</h2>

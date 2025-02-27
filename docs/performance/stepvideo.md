@@ -1,7 +1,7 @@
 ## Step-Video-T2V 30B Performance
 
 ### Evaluation Protocol
-The benchmark was conducted using the open-source Step-Video-T2V 30B model to evaluate SP (Sequence Parallelism) and TP (Tensor Parallelism) performance.
+The benchmark was conducted using the open-source Step-Video-T2V 30B model to evaluate SP (Sequence Parallelism) and TP (Tensor Parallelism) performance. We applied ulysses_degree as sp_degree.
 
 Implementation reference:  
 `https://github.com/stepfun-ai/Step-Video-T2V/tree/main#multi-gpu-parallel-deployment`

@@ -2,7 +2,7 @@
 
 ### 评测说明
 
-我们是用开源版本的Step-Video-T2V 30B模型对SP并行与TP并行进行性能评测。
+我们是用开源版本的Step-Video-T2V 30B模型对SP（序列）并行与TP（张量）并行进行性能评测。我们使用ulysses_degree作为sp_degree。
 
 测试启动脚本参考:https://github.com/stepfun-ai/Step-Video-T2V/tree/main#multi-gpu-parallel-deployment
 

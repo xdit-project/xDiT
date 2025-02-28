@@ -83,7 +83,7 @@ class xFuserArgs:
     use_ray: bool = False
     ray_world_size: int = 1
     vae_parallel_size: int = 0
-    dit_parallel_size: int = 1
+    dit_parallel_size: int = 0
     # pipefusion parallel
     pipefusion_parallel_degree: int = 1
     num_pipeline_patch: Optional[int] = None

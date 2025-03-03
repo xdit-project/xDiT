@@ -1,9 +1,11 @@
 ## Launch a Text-to-Image Http Service
 
-Launch an HTTP-based text-to-image service that generates images from textual descriptions (prompts) using the DiT model. The generated images can either be returned directly to users or saved to a specified disk location.
+Launch an HTTP-based text-to-image service that generates images from textual descriptions (prompts) using the DiT model. 
+The generated images can either be returned directly to users or saved to a specified disk location.
+For example, the following command launches a HTTP service with 4 GPUs, 2 Ulysses parallel degree, 2 PipeFusion parallel degree, and the model path is `./models/FLUX.1-schnell`.
 
 ```bash
-python ./entrypoints/launch.py --world_size 4 --ulysses_parallel_degree 2 --pipefusion_parallel_degree 2 --model_path /your_model_path
+python ./entrypoints/launch.py --world_size 4 --ulysses_parallel_degree 2 --pipefusion_parallel_degree 2 --model_path /your_model_path/FLUX.1-schnell
 ```
 
 

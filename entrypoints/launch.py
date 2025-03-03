@@ -183,7 +183,7 @@ async def generate_image(request: GenerateRequest):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='xDiT HTTP Service')
-    parser.add_argument('--model_path', type=str, default="/demo-huabei2/models/dit/FLUX.1-schnell", help='Path to the model')
+    parser.add_argument('--model_path', type=str, help='Path to the model', required=True)
     parser.add_argument('--world_size', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--pipefusion_parallel_degree', type=int, default=1, help='Degree of pipeline fusion parallelism')
     parser.add_argument('--ulysses_parallel_degree', type=int, default=1, help='Degree of Ulysses parallelism')

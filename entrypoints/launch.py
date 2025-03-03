@@ -2,16 +2,12 @@ import os
 import time
 import torch
 import ray
-import pickle
 import io
 import logging
 import base64
-from PIL import Image
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from asyncio import Semaphore
-import asyncio
 import argparse
 
 from xfuser import (
@@ -22,7 +18,6 @@ from xfuser import (
     xFuserHunyuanDiTPipeline,
     xFuserArgs,
 )
-from xfuser.config import FlexibleArgumentParser
 # Define request model
 class GenerateRequest(BaseModel):
     prompt: str

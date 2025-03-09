@@ -104,20 +104,20 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 
 <div align="center">
 
-| Model Name | CFG | SP | PipeFusion | TP |
-| --- | --- | --- | --- | --- |
-| [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ |
-| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | ❎ | 
-| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ |
-| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ |
-| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ |
-| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ |
-| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ |
-| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ |
-| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ |
-| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ |
-| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ |
-| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ |
+| Model Name | CFG | SP | PipeFusion | TP | Performance Report Link |
+| --- | --- | --- | --- | --- | --- |
+| [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ | [Report](./docs/performance/stepvideo.md) |
+| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuanvideo.md) |
+| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/consisid.md) |
+| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ | [Report](https://github.com/xdit-project/mochi-xdit) |
+| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
+| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
+| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/hunyuandit.md) |
+| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | [Report](./docs/performance/flux.md) |
+| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
+| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
+| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/sd3.md) |
 
 </div>
 
@@ -143,26 +143,6 @@ More features and details can be found in our Intro Video:
 
 The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
 
-<h2 id="perf">📈 Performance Reports</h2>
-
-<div align="center">
-
-| Model | Performance Report |
-|:---:|:---|
-| 🎬 StepVideo | [Performance Report](./docs/performance/stepvideo.md) |
-| 🎬 HunyuanVideo | [Performance Report](./docs/performance/hunyuanvideo.md) |
-| 🎬 ConsisID-Preview | [Performance Report](./docs/performance/consisid.md) |
-| 🎬 Mochi-1 | [Performance Report](https://github.com/xdit-project/mochi-xdit) |
-| 🎬 CogVideo | [Performance Report](./docs/performance/cogvideo.md) |
-| 🟠 Flux.1 | [Performance Report](./docs/performance/flux.md) |
-| 🎬 Latte | [Performance Report](./docs/performance/latte.md) |
-| 🔵 HunyuanDiT | [Performance Report](./docs/performance/hunyuandit.md) |
-| 🟠 SD3 | [Performance Report](./docs/performance/sd3.md) |
-| 🔴 PixArt | [Performance Report (legacy)](./docs/performance/pixart_alpha_legacy.md) |
-
-</div>
-
-
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
 ### 1. Install from pip
@@ -172,12 +152,12 @@ We set `diffusers` and `flash_attn` as two optional installation requirements.
 About `diffusers` version: 
 - If you only use the USP interface, `diffusers` is not required. Models are typically released as `nn.Module`
  first, before being integrated into diffusers. xDiT sometimes is applied as an USP plugin to existing projects.
-- Different models may require different diffusers versions. Model implementations can vary between diffusers versions (e.g., Flux), which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
-- While we specify a diffusers version in `setup.py`, newer models may require later versions or even installation from main branch.
+- Different models may require different diffusers versions. Model implementations can vary between diffusers versions, especially for latest models, which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
+- While we specify a diffusers version in `setup.py`, newer models may require later versions or even need to be installed from main branch.
 
 About `flash_attn` version:
 - Without `flash_attn` installed, xDiT falls back to a PyTorch implementation of ring attention, which helps NPU users with compatibility
-- However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we recommend installing `flash_attn`.
+- However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we strongly recommend installing `flash_attn`.
 
 ```
 pip install xfuser  # Basic installation

@@ -81,6 +81,17 @@ class RuntimeState(metaclass=ABCMeta):
         destroy_distributed_environment()
 
 
+class UnetRuntimeState(RuntimeState):
+    def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
+        super().__init__(config)
+        self.sanity_check()
+    
+    def sanity_check(self):
+        if self.parallel_config.world_size > 1:
+            if not(self.parallel_config.cfg_degree == 2 and self.parallel_config.world_size == 2):
+                raise RuntimeError("UnetRuntimeState only supports 2 GPUs with CFG Parallel")
+
+
 class DiTRuntimeState(RuntimeState):
     patch_mode: bool
     pipeline_patch_idx: int
@@ -654,3 +665,6 @@ def initialize_runtime_state(pipeline: DiffusionPipeline, engine_config: EngineC
         )
     if hasattr(pipeline, "transformer"):
         _RUNTIME = DiTRuntimeState(pipeline=pipeline, config=engine_config)
+    elif hasattr(pipeline, "unet"):
+        _RUNTIME = UnetRuntimeState(pipeline=pipeline, config=engine_config)
+

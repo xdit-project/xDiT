@@ -439,18 +439,26 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def _convert_unet_backbone(
         self,
         unet: nn.Module,
+        enable_torch_compile: bool = False, 
+        enable_onediff: bool = False,
     ):
-        logger.info("UNet Backbone found")
-        raise NotImplementedError("UNet parallelisation is not supported yet")
+        # TODO() add support for torch.compile and onediff
+        return unet
 
     def _convert_scheduler(
         self,
         scheduler: nn.Module,
     ):
-        logger.info("Scheduler found, paralleling scheduler...")
+        logger.info("Scheduler found, trying to parallel scheduler...")
         wrapper = xFuserSchedulerWrappersRegister.get_wrapper(scheduler)
-        scheduler = wrapper(scheduler)
-        return scheduler
+
+        if wrapper is None:
+            logger.warning(f"Scheduler class {scheduler.__class__.__name__} "
+                         f"is not supported by xFuser, may not applied for PipeFusion Parallel")
+            return scheduler
+        else:
+            scheduler = wrapper(scheduler)
+            return scheduler
 
     def _convert_vae(
         self,

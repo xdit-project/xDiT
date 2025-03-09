@@ -28,7 +28,7 @@ def main():
     pipe = xFuserStableDiffusionXLPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
-        torch_dtype=torch.float,
+        torch_dtype=torch.float16,
     )
 
     # Handle device placement

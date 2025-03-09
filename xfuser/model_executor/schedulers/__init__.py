@@ -10,7 +10,6 @@ from .scheduling_ddim import xFuserDDIMSchedulerWrapper
 from .scheduling_ddpm import xFuserDDPMSchedulerWrapper
 from .scheduling_ddim_cogvideox import xFuserCogVideoXDDIMSchedulerWrapper
 from .scheduling_dpm_cogvideox import xFuserCogVideoXDPMSchedulerWrapper
-
 __all__ = [
     "xFuserSchedulerWrappersRegister",
     "xFuserSchedulerBaseWrapper",

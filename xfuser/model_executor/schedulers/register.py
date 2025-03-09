@@ -44,7 +44,8 @@ class xFuserSchedulerWrappersRegister:
                     candidate = wrapper_class
 
         if candidate is None:
-            raise ValueError(f"Scheduler class {scheduler.__class__.__name__} "
+            logger.info(f"Scheduler class {scheduler.__class__.__name__} "
                          f"is not supported by xFuser")
+            return None
         else:
             return candidate

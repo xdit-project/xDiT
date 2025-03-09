@@ -403,7 +403,6 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="classifier_free_guidance",
     )
-
     global _PP
     assert _PP is None, "pipeline model parallel group is already initialized"
     _PP = init_model_parallel_group(

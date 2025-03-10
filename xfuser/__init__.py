@@ -7,6 +7,7 @@ from xfuser.model_executor.pipelines import (
     xFuserHunyuanDiTPipeline,
     xFuserCogVideoXPipeline,
     xFuserConsisIDPipeline,
+    xFuserStableDiffusionXLPipeline
 )
 from xfuser.config import xFuserArgs, EngineConfig
 from xfuser.parallel import xDiTParallel

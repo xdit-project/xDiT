@@ -39,10 +39,28 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "XDIT_LOGGING_LEVEL": lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
 }
 
+def _is_hip():
+    has_rocm = torch.version.hip is not None
+    return has_rocm
+
+def _is_cuda():
+    has_cuda = torch.version.cuda is not None
+    return has_cuda
+
+def get_device_version():
+    if _is_hip():
+        hip_version =  torch.version.hip
+        hip_version = hip_version.split('-')[0]
+        return hip_version
+    if _is_cuda():
+        return torch.version.cuda
+
+    raise Exception("No Accelerators(AMD/NV GPU, AMD MI instinct accelerators) available")
+
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
     # used in version checking
-    "CUDA_VERSION": lambda: version.parse(torch.version.cuda),
+    "CUDA_VERSION": lambda: version.parse(get_device_version()),
     "TORCH_VERSION": lambda: version.parse(
         version.parse(torch.__version__).base_version
     ),

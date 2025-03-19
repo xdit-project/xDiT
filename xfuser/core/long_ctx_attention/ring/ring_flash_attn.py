@@ -4,6 +4,7 @@ from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from yunchang.ring.utils import RingComm, update_out_and_lse
 from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
+from yunchang.kernels import select_flash_attn_impl, AttnType
 
 try:
     import flash_attn
@@ -24,6 +25,7 @@ def xdit_ring_flash_attn_forward(
     window_size=(-1, -1),
     alibi_slopes=None,
     deterministic=False,
+    attn_type=AttnType.FA,
     attn_layer=None,
     joint_tensor_key=None,
     joint_tensor_value=None,
@@ -86,43 +88,57 @@ def xdit_ring_flash_attn_forward(
             key, value = k, v
 
         if not causal or step <= comm.rank:
-            if flash_attn is None:
-                block_out, block_lse = pytorch_attn_forward(
-                    q,
-                    key,
-                    value,
-                    dropout_p,
-                    softmax_scale,
-                    causal=causal and step == 0,
-                )
-            else:
-                if flash_attn.__version__ <= "2.6.3":
-                    block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
-                        q,
-                        key,
-                        value,
-                        dropout_p,
-                        softmax_scale,
-                        causal=causal and step == 0,
-                        window_size=window_size,
-                        softcap=0.0,
-                        alibi_slopes=alibi_slopes,
-                        return_softmax=True and dropout_p > 0,
-                    )
-                else:
-                    block_out, block_lse, _, _ = _flash_attn_forward(
-                        q,
-                        key,
-                        value,
-                        dropout_p,
-                        softmax_scale,
-                        causal=causal and step == 0,
-                        window_size_left=window_size[0],
-                        window_size_right=window_size[1],
-                        softcap=0.0,
-                        alibi_slopes=alibi_slopes,
-                        return_softmax=True and dropout_p > 0,
-                    )
+            # if flash_attn is None:
+            #     block_out, block_lse = pytorch_attn_forward(
+            #         q,
+            #         key,
+            #         value,
+            #         dropout_p,
+            #         softmax_scale,
+            #         causal=causal and step == 0,
+            #     )
+            # else:
+            #     if flash_attn.__version__ <= "2.6.3":
+            #         block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
+            #             q,
+            #             key,
+            #             value,
+            #             dropout_p,
+            #             softmax_scale,
+            #             causal=causal and step == 0,
+            #             window_size=window_size,
+            #             softcap=0.0,
+            #             alibi_slopes=alibi_slopes,
+            #             return_softmax=True and dropout_p > 0,
+            #         )
+            #     else:
+            #         block_out, block_lse, _, _ = _flash_attn_forward(
+            #             q,
+            #             key,
+            #             value,
+            #             dropout_p,
+            #             softmax_scale,
+            #             causal=causal and step == 0,
+            #             window_size_left=window_size[0],
+            #             window_size_right=window_size[1],
+            #             softcap=0.0,
+            #             alibi_slopes=alibi_slopes,
+            #             return_softmax=True and dropout_p > 0,
+            #         )
+            fn = select_flash_attn_impl(attn_type, stage="fwd-only")
+            block_out, block_lse = fn(
+                q,
+                k,
+                v,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal and step == 0,
+                window_size=window_size,
+                softcap=0.0,
+                alibi_slopes=alibi_slopes,
+                return_softmax=True and dropout_p > 0,
+            )
+
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
@@ -150,6 +166,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         deterministic,
         return_softmax,
         group,
+        attn_type,
         attn_layer,
         joint_tensor_key,
         joint_tensor_value,
@@ -173,6 +190,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             deterministic=False,
+            attn_type=attn_type,
             attn_layer=attn_layer,
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,
@@ -187,6 +205,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
         ctx.group = group
+        ctx.attn_type = attn_type
         return out if not return_softmax else (out, softmax_lse, None)
 
 
@@ -202,6 +221,7 @@ def xdit_ring_flash_attn_func(
     deterministic=False,
     return_attn_probs=False,
     group=None,
+    attn_type=AttnType.FA,
     attn_layer=None,
     joint_tensor_key=None,
     joint_tensor_value=None,
@@ -219,6 +239,7 @@ def xdit_ring_flash_attn_func(
         deterministic,
         return_attn_probs,
         group,
+        attn_type,
         attn_layer,
         joint_tensor_key,
         joint_tensor_value,

@@ -172,6 +172,7 @@ class xFuserLongContextAttention(LongContextAttention):
             deterministic=deterministic,
             return_attn_probs=return_attn_probs,
             group=self.ring_pg,
+            attn_type=self.attn_type,
             attn_layer=attn if self.use_kv_cache else None,
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,

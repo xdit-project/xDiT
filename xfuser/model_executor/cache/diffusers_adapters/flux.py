@@ -35,7 +35,7 @@ def create_cached_transformer_blocks(use_cache, transformer, rel_l1_thresh, retu
 def apply_cache_on_transformer(
     transformer: FluxTransformer2DModel,
     *,
-    rel_l1_thresh=0.6,
+    rel_l1_thresh=0.12,
     return_hidden_states_first=False,
     num_steps=8,
     use_cache="Fb",

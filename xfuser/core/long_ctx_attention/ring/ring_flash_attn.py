@@ -91,8 +91,8 @@ def xdit_ring_flash_attn_forward(
             fn = select_flash_attn_impl(attn_type, stage="fwd-only")
             block_out, block_lse = fn(
                 q,
-                k,
-                v,
+                key,
+                value,
                 dropout_p=dropout_p,
                 softmax_scale=softmax_scale,
                 causal=causal and step == 0,

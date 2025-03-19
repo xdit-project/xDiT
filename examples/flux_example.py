@@ -36,7 +36,7 @@ def main():
     cache_args = {
             "use_teacache": engine_args.use_teacache,
             "use_fbcache": engine_args.use_fbcache,
-            "rel_l1_thresh": 0.6,
+            "rel_l1_thresh": 0.12,
             "return_hidden_states_first": False,
             "num_steps": input_config.num_inference_steps,
         }

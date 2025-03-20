@@ -21,6 +21,7 @@ __all__ = [
     "xFuserHunyuanDiTPipeline",
     "xFuserCogVideoXPipeline",
     "xFuserConsisIDPipeline",
+    "xFuserStableDiffusionXLPipeline",
     "xFuserArgs",
     "EngineConfig",
     "xDiTParallel",

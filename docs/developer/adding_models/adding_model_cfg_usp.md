@@ -13,7 +13,6 @@ Both parallelization techniques can be concurrently employed. To achieve this, s
 ```python
 from xfuser.core.distributed import initialize_model_parallel
 initialize_model_parallel(
-    sequence_parallel_degree=<ring_degree x ulysses_degree>,
     ring_degree=<ring_degree>,
     ulysses_degree=<ulysses_degree>,
     classifier_free_guidance_degree=2,

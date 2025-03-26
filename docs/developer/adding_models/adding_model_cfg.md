@@ -108,6 +108,12 @@ The input parameters, timestep, hidden_state, and encoder_hidden_states, represe
 where the batch size is 2. xDiT provides helper functions for CFG parallelism, offering functionalities such as `get_classifier_free_guidance_rank()` and `get_classifier_free_guidance_world_size()` to access the number of GPUs and their respective ranks. The `get_cfg_group()` function facilitates CFG parallelism, incorporating an `all_gather()` operation to merge sequences after `forward`. The new forward function is outlined as follows:
 
 ```python
+from xfuser.core.distributed import (
+    get_classifier_free_guidance_world_size,
+    get_classifier_free_guidance_rank,
+    get_cfg_group,
+)
+
 @functools.wraps(transformer.__class__.forward)
 def new_forward(
     self,

@@ -58,7 +58,6 @@ Subsequently, define the level of sequential parallelization. The count of GPUs 
 ```python
 from xfuser.core.distributed import initialize_model_parallel
 initialize_model_parallel(
-    sequence_parallel_degree=dist.get_world_size(),
     ring_degree=<ring_degree>,
     ulysses_degree=<ulysses_degree>,
 )

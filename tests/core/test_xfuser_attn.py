@@ -42,7 +42,6 @@ def init_dist(backend="nccl"):
         ulysses_degree = 1
 
     initialize_model_parallel(
-        sequence_parallel_degree=world_size,
         ring_degree=ring_degree,
         ulysses_degree=ulysses_degree,
     )

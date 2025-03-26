@@ -1,5 +1,5 @@
 # Example for parallelize new models with USP
-# run with 
+# run with
 #     torchrun --nproc_per_node=<ulysses_degree x ring-degree> \
 #          adding_cogvideox.py <cogvideox-checkpoint-path> \
 #          <ulysses_degree> <ring-degree>
@@ -29,11 +29,10 @@ from xfuser.core.distributed import (
 from diffusers.utils import export_to_video
 
 from diffusers.models.attention import Attention
-from diffusers.models.attention_processor import (
-    CogVideoXAttnProcessor2_0
-)
+from diffusers.models.attention_processor import CogVideoXAttnProcessor2_0
 from diffusers.models.embeddings import apply_rotary_emb
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+
 
 class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
     r"""
@@ -112,7 +111,7 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
-        
+
         hidden_states = self.hybrid_seq_parallel_attn(
             None,
             query,
@@ -126,15 +125,12 @@ class xDiTCogVideoXAttnProcessor(CogVideoXAttnProcessor2_0):
             joint_strategy="front",
         )
 
-        hidden_states = hidden_states.reshape(
-            batch_size, -1, attn.heads * head_dim
-        )
+        hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
         assert text_seq_length + latent_seq_length == hidden_states.shape[1]
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
-
 
         encoder_hidden_states, hidden_states = hidden_states.split(
             [text_seq_length, latent_seq_length], dim=1
@@ -158,24 +154,30 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         **kwargs,
     ):
         rope_h, rope_w = hidden_states.shape[-2] // 2, hidden_states.shape[-1] // 2
-        
-        hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
+
+        hidden_states = torch.chunk(
+            hidden_states, get_sequence_parallel_world_size(), dim=-2
+        )[get_sequence_parallel_rank()]
         if image_rotary_emb is not None:
             freqs_cos, freqs_sin = image_rotary_emb
             dim_thw = freqs_cos.shape[-1]
             freqs_cos = freqs_cos.reshape(-1, rope_h, rope_w, dim_thw)
-            freqs_cos = torch.chunk(freqs_cos, get_sequence_parallel_world_size(), dim=-3)[get_sequence_parallel_rank()]
+            freqs_cos = torch.chunk(
+                freqs_cos, get_sequence_parallel_world_size(), dim=-3
+            )[get_sequence_parallel_rank()]
             freqs_cos = freqs_cos.reshape(-1, dim_thw)
-            
+
             freqs_sin = freqs_sin.reshape(-1, rope_h, rope_w, dim_thw)
-            freqs_sin = torch.chunk(freqs_sin, get_sequence_parallel_world_size(), dim=-3)[get_sequence_parallel_rank()]
+            freqs_sin = torch.chunk(
+                freqs_sin, get_sequence_parallel_world_size(), dim=-3
+            )[get_sequence_parallel_rank()]
             freqs_sin = freqs_sin.reshape(-1, dim_thw)
-            
+
             image_rotary_emb = (freqs_cos, freqs_sin)
-        
+
         for block in transformer.transformer_blocks:
             block.attn1.processor = xDiTCogVideoXAttnProcessor()
-        
+
         output = original_forward(
             hidden_states,
             encoder_hidden_states,
@@ -195,23 +197,29 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 
     new_forward = new_forward.__get__(transformer)
     transformer.forward = new_forward
-    
+
     original_patch_embed_forward = transformer.patch_embed.forward
 
     @functools.wraps(transformer.patch_embed.__class__.forward)
-    def new_patch_embed(
-        self, text_embeds: torch.Tensor, image_embeds: torch.Tensor
-    ):
+    def new_patch_embed(self, text_embeds: torch.Tensor, image_embeds: torch.Tensor):
         image_embeds = get_sp_group().all_gather(image_embeds.contiguous(), dim=-2)
-        batch, embed_height, embed_width = image_embeds.shape[0], image_embeds.shape[-2] // 2, image_embeds.shape[-1] // 2
+        batch, embed_height, embed_width = (
+            image_embeds.shape[0],
+            image_embeds.shape[-2] // 2,
+            image_embeds.shape[-1] // 2,
+        )
         text_len = text_embeds.shape[-2]
-        
+
         output = original_patch_embed_forward(text_embeds, image_embeds)
 
-        text_embeds = output[:,:text_len,:]
-        image_embeds = output[:,text_len:,:].reshape(batch, -1, embed_height, embed_width, output.shape[-1])
+        text_embeds = output[:, :text_len, :]
+        image_embeds = output[:, text_len:, :].reshape(
+            batch, -1, embed_height, embed_width, output.shape[-1]
+        )
 
-        image_embeds = torch.chunk(image_embeds, get_sequence_parallel_world_size(),dim=-3)[get_sequence_parallel_rank()]
+        image_embeds = torch.chunk(
+            image_embeds, get_sequence_parallel_world_size(), dim=-3
+        )[get_sequence_parallel_rank()]
         image_embeds = image_embeds.reshape(batch, -1, image_embeds.shape[-1])
         return torch.cat([text_embeds, image_embeds], dim=1)
 
@@ -221,12 +229,8 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 
 if __name__ == "__main__":
     dist.init_process_group("nccl")
-    init_distributed_environment(
-        rank=dist.get_rank(), 
-        world_size=dist.get_world_size()
-    )
+    init_distributed_environment(rank=dist.get_rank(), world_size=dist.get_world_size())
     initialize_model_parallel(
-        sequence_parallel_degree=dist.get_world_size(),
         ring_degree=int(sys.argv[2]),
         ulysses_degree=int(sys.argv[3]),
     )
@@ -241,7 +245,7 @@ if __name__ == "__main__":
     pipe.vae.enable_tiling()
 
     parallelize_transformer(pipe)
-    
+
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 

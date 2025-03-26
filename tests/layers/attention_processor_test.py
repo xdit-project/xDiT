@@ -34,9 +34,7 @@ def init_process(rank, world_size, fn, run_attn_test):
     os.environ["LOCAL_RANK"] = str(rank)
 
     init_distributed_environment(rank=rank, world_size=world_size)
-    initialize_model_parallel(
-        sequence_parallel_degree=world_size, ring_degree=1, ulysses_degree=world_size
-    )
+    initialize_model_parallel(ring_degree=1, ulysses_degree=world_size)
 
     fn(rank, world_size, run_attn_test)
 

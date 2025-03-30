@@ -87,7 +87,7 @@ def main():
 
     if get_world_group().rank == get_world_group().world_size - 1:
         print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
-    get_runtime_state().destory_distributed_env()
+    get_runtime_state().destroy_distributed_env()
 
 
 if __name__ == "__main__":

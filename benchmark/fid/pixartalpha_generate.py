@@ -72,7 +72,7 @@ def main():
         print(f'{j}-{j+num_prompt_one_step-1} generation finished!')
         flush()
 
-    get_runtime_state().destory_distributed_env()
+    get_runtime_state().destroy_distributed_env()
 
 
 if __name__ == '__main__':

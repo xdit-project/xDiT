@@ -75,7 +75,7 @@ def main():
         print(
             f"epoch time: {elapsed_time:.2f} sec, model memory: {model_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB"
         )
-    get_runtime_state().destory_distributed_env()
+    get_runtime_state().destroy_distributed_env()
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ class RuntimeState(metaclass=ABCMeta):
                 vae_parallel_size=parallel_config.vae_parallel_size,
             )
 
-    def destory_distributed_env(self):
+    def destroy_distributed_env(self):
         if model_parallel_is_initialized():
             destroy_model_parallel()
         destroy_distributed_environment()

@@ -86,7 +86,7 @@ def main():
         )
     
     # Cleanup
-    get_runtime_state().destory_distributed_env()
+    get_runtime_state().destroy_distributed_env()
 
 if __name__ == "__main__":
     main() 

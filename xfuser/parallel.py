@@ -51,4 +51,4 @@ class xDiTParallel:
                 print(f"{str(path)}_image{i}.png")
 
     def __del__(self):
-        get_runtime_state().destory_distributed_env()
+        get_runtime_state().destroy_distributed_env()

@@ -19,7 +19,6 @@ except ImportError:
     ConsisIDPipeline = None
 
 import math
-import cv2
 import PIL
 import numpy as np
 
@@ -40,7 +39,11 @@ from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 
 
-def draw_kps(image_pil, kps, color_list=[(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]):
+def draw_kps(
+    image_pil,
+    kps,
+    color_list=[(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)],
+):
     """
     This function draws keypoints and the limbs connecting them on an image.
 
@@ -53,6 +56,12 @@ def draw_kps(image_pil, kps, color_list=[(255, 0, 0), (0, 255, 0), (0, 0, 255), 
     Returns:
     - PIL.Image: Image with the keypoints and limbs drawn.
     """
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "cv2 is not installed. Please install it using `apt install libgl1-mesa-glx libglib2.0-0`."
+        )
 
     stickwidth = 4
     limbSeq = np.array([[0, 2], [1, 2], [3, 2], [4, 2]])
@@ -70,7 +79,12 @@ def draw_kps(image_pil, kps, color_list=[(255, 0, 0), (0, 255, 0), (0, 0, 255), 
         length = ((x[0] - x[1]) ** 2 + (y[0] - y[1]) ** 2) ** 0.5
         angle = math.degrees(math.atan2(y[0] - y[1], x[0] - x[1]))
         polygon = cv2.ellipse2Poly(
-            (int(np.mean(x)), int(np.mean(y))), (int(length / 2), stickwidth), int(angle), 0, 360, 1
+            (int(np.mean(x)), int(np.mean(y))),
+            (int(length / 2), stickwidth),
+            int(angle),
+            0,
+            360,
+            1,
         )
         out_img = cv2.fillConvexPoly(out_img.copy(), polygon, color)
     out_img = (out_img * 0.6).astype(np.uint8)
@@ -123,14 +137,18 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 226,
         id_vit_hidden: Optional[torch.Tensor] = None,
         id_cond: Optional[torch.Tensor] = None,
         kps_cond: Optional[torch.Tensor] = None,
-    ) -> Union['ConsisIDPipelineOutput', Tuple]:
+    ) -> Union["ConsisIDPipelineOutput", Tuple]:
         """
         Function invoked when calling the pipeline for generation.
 
@@ -221,12 +239,18 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
             [`~pipelines.consisid.pipeline_output.ConsisIDPipelineOutput`] if `return_dict` is True, otherwise a
             `tuple`. When returning a tuple, the first element is a list with the generated images.
         """
-        
+
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
-        height = height or self.transformer.config.sample_height * self.vae_scale_factor_spatial
-        width = width or self.transformer.config.sample_width * self.vae_scale_factor_spatial
+        height = (
+            height
+            or self.transformer.config.sample_height * self.vae_scale_factor_spatial
+        )
+        width = (
+            width
+            or self.transformer.config.sample_width * self.vae_scale_factor_spatial
+        )
         num_frames = num_frames or self.transformer.config.sample_frames
 
         num_videos_per_prompt = 1
@@ -287,7 +311,9 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         )
 
         # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device
+        )
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latents
@@ -295,9 +321,9 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
         kps_cond = kps_cond if is_kps else None
         if kps_cond is not None:
             kps_cond = draw_kps(image, kps_cond)
-            kps_cond = self.video_processor.preprocess(kps_cond, height=height, width=width).to(
-                device, dtype=prompt_embeds.dtype
-            )
+            kps_cond = self.video_processor.preprocess(
+                kps_cond, height=height, width=width
+            ).to(device, dtype=prompt_embeds.dtype)
 
         image = self.video_processor.preprocess(image, height=height, width=width).to(
             device, dtype=prompt_embeds.dtype
@@ -320,19 +346,25 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
         # 6. Prepare extra step kwargs.
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-        
+
         # 7. Create rotary embeds if required
         image_rotary_emb = (
-            self._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
+            self._prepare_rotary_positional_embeddings(
+                height, width, latents.size(1), device
+            )
             if self.transformer.config.use_rotary_positional_embeddings
             else None
         )
 
         # 8. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        num_warmup_steps = max(
+            len(timesteps) - num_inference_steps * self.scheduler.order, 0
+        )
 
-        latents, image_latents, prompt_embeds, image_rotary_emb = self._init_sync_pipeline(
-            latents, image_latents, prompt_embeds, image_rotary_emb, latents.size(1)
+        latents, image_latents, prompt_embeds, image_rotary_emb = (
+            self._init_sync_pipeline(
+                latents, image_latents, prompt_embeds, image_rotary_emb, latents.size(1)
+            )
         )
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -349,15 +381,20 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                     )
                 else:
                     latent_model_input = latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
 
                 if do_classifier_free_guidance:
                     latent_image_input = torch.cat(
-                        [image_latents] * (2 // get_classifier_free_guidance_world_size())
+                        [image_latents]
+                        * (2 // get_classifier_free_guidance_world_size())
                     )
                 else:
                     latent_image_input = image_latents
-                latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=2)
+                latent_model_input = torch.cat(
+                    [latent_model_input, latent_image_input], dim=2
+                )
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
@@ -382,7 +419,11 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                             1
                             - math.cos(
                                 math.pi
-                                * ((num_inference_steps - timesteps_cpu[i].item()) / num_inference_steps) ** 5.0
+                                * (
+                                    (num_inference_steps - timesteps_cpu[i].item())
+                                    / num_inference_steps
+                                )
+                                ** 5.0
                             )
                         )
                         / 2
@@ -400,7 +441,9 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
-                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                    latents = self.scheduler.step(
+                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                    )[0]
                 else:
                     latents, old_pred_original_sample = self.scheduler.step(
                         noise_pred,
@@ -422,18 +465,24 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop(
+                        "negative_prompt_embeds", negative_prompt_embeds
+                    )
 
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:
             latents = get_sp_group().all_gather(latents, dim=-2)
-        
+
         if is_dp_last_group():
             if not output_type == "latent":
                 video = self.decode_latents(latents)
-                video = self.video_processor.postprocess_video(video=video, output_type=output_type)
+                video = self.video_processor.postprocess_video(
+                    video=video, output_type=output_type
+                )
             else:
                 video = latents
         else:
@@ -460,9 +509,11 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
 
         if get_runtime_state().split_text_embed_in_sp:
             if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+                prompt_embeds = torch.chunk(
+                    prompt_embeds, get_sequence_parallel_world_size(), dim=-2
+                )[get_sequence_parallel_rank()]
             else:
-                get_runtime_state().split_text_embed_in_sp = False    
+                get_runtime_state().split_text_embed_in_sp = False
 
         if image_rotary_emb is not None:
             assert latents_frames is not None
@@ -492,7 +543,7 @@ class xFuserConsisIDPipeline(xFuserPipelineBaseWrapper):
                 ),
             )
         return latents, image_latents, prompt_embeds, image_rotary_emb
-    
+
     @property
     def interrupt(self):
         return self._interrupt

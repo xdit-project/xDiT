@@ -26,6 +26,7 @@ def xdit_ring_flash_attn_forward(
     alibi_slopes=None,
     deterministic=False,
     attn_type=AttnType.FA,
+    attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
     joint_tensor_value=None,
@@ -88,7 +89,7 @@ def xdit_ring_flash_attn_forward(
             key, value = k, v
 
         if not causal or step <= comm.rank:
-            fn = select_flash_attn_impl(attn_type, stage="fwd-only")
+            fn = select_flash_attn_impl(attn_type, stage="fwd-only", attn_processor=attn_processor)
             block_out, block_lse = fn(
                 q,
                 key,
@@ -101,7 +102,10 @@ def xdit_ring_flash_attn_forward(
                 alibi_slopes=alibi_slopes,
                 return_softmax=True and dropout_p > 0,
             )
-            out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+            if attn_type == AttnType.SPARSE_SAGE:
+                out, lse = block_out, block_lse
+            else:
+                out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
             comm.wait()
@@ -109,7 +113,8 @@ def xdit_ring_flash_attn_forward(
             v = next_v
 
     out = out.to(q.dtype)
-    lse = lse.squeeze(dim=-1).transpose(1, 2)
+    if attn_type != AttnType.SPARSE_SAGE:
+        lse = lse.squeeze(dim=-1).transpose(1, 2)
     return out, lse
 
 
@@ -129,6 +134,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         return_softmax,
         group,
         attn_type,
+        attn_processor,
         attn_layer,
         joint_tensor_key,
         joint_tensor_value,
@@ -153,6 +159,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
             alibi_slopes=alibi_slopes,
             deterministic=False,
             attn_type=attn_type,
+            attn_processor=attn_processor,
             attn_layer=attn_layer,
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,
@@ -169,6 +176,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         ctx.deterministic = deterministic
         ctx.group = group
         ctx.attn_type = attn_type
+        ctx.attn_processor = attn_processor
         return out if not return_softmax else (out, softmax_lse, None)
 
 
@@ -185,6 +193,7 @@ def xdit_ring_flash_attn_func(
     return_attn_probs=False,
     group=None,
     attn_type=AttnType.FA,
+    attn_processor=None,
     attn_layer=None,
     joint_tensor_key=None,
     joint_tensor_value=None,
@@ -203,6 +212,7 @@ def xdit_ring_flash_attn_func(
         return_attn_probs,
         group,
         attn_type,
+        attn_processor,
         attn_layer,
         joint_tensor_key,
         joint_tensor_value,

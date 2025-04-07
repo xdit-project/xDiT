@@ -9,9 +9,12 @@ except ImportError:
     raise ImportError("Please install yunchang 0.6.0 or later")
 
 from yunchang.comm.all_to_all import SeqAllToAll4D
+from yunchang.globals import HAS_SPARSE_SAGE_ATTENTION
+
 
 from xfuser.logger import init_logger
 
+    
 
 logger = init_logger(__name__)
 
@@ -27,6 +30,7 @@ class xFuserLongContextAttention(LongContextAttention):
         use_pack_qkv: bool = False,
         use_kv_cache: bool = False,
         attn_type: AttnType = AttnType.FA,
+        attn_processor: torch.nn.Module = None,
     ) -> None:
         """
         Arguments:
@@ -35,6 +39,8 @@ class xFuserLongContextAttention(LongContextAttention):
             ring_impl_type: str = "basic", the ring implementation type, currently only support "basic"
             use_pack_qkv: bool = False, whether to use pack qkv in the input
             use_kv_cache: bool = False, whether to use kv cache in the attention layer, which is applied in PipeFusion.
+            attn_type: AttnType = AttnType.FA, the attention type supported inside long context attention, including "TORCH", "FA", "FA3", "SAGE_FP16", "SAGE_FP8"
+            attn_processor: nn.Module = None, the attention processor can be passed in to replace the attention processor if attn_type is do not support it.
         """
         super().__init__(
             scatter_idx=scatter_idx,
@@ -51,7 +57,13 @@ class xFuserLongContextAttention(LongContextAttention):
             raise RuntimeError(
                 f"ring_impl_type: {ring_impl_type} do not support SP kv cache."
             )
-        
+
+        if HAS_SPARSE_SAGE_ATTENTION:
+            from spas_sage_attn.autotune import SparseAttentionMeansim
+            if isinstance(attn_processor, SparseAttentionMeansim) and torch.distributed.get_world_size(self.ring_pg) > 1:
+                raise RuntimeError("Sparse Sage attention does not support ring degree > 1.")
+
+        self.attn_processor = attn_processor
         from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
         self.ring_attn_fn = xdit_ring_flash_attn_func
 
@@ -173,6 +185,7 @@ class xFuserLongContextAttention(LongContextAttention):
             return_attn_probs=return_attn_probs,
             group=self.ring_pg,
             attn_type=self.attn_type,
+            attn_processor=self.attn_processor,
             attn_layer=attn if self.use_kv_cache else None,
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,

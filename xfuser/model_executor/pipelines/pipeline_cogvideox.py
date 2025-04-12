@@ -1,39 +1,36 @@
+import inspect
+import math
 import os
-from typing import Any, List, Tuple, Callable, Optional, Union, Dict
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed
-import inspect
 from diffusers import CogVideoXPipeline
+from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.pipelines.cogvideo.pipeline_cogvideox import (
     CogVideoXPipelineOutput,
     retrieve_timesteps,
 )
 from diffusers.schedulers import CogVideoXDPMScheduler
-from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-
-import math
 
 from xfuser.config import EngineConfig
-
 from xfuser.core.distributed import (
-    get_pipeline_parallel_world_size,
-    get_sequence_parallel_world_size,
-    get_sequence_parallel_rank,
-    get_classifier_free_guidance_world_size,
     get_cfg_group,
-    get_sp_group,
+    get_classifier_free_guidance_world_size,
+    get_pipeline_parallel_world_size,
     get_runtime_state,
+    get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
+    get_sp_group,
     is_dp_last_group,
 )
-
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
+
 from .register import xFuserPipelineWrapperRegister
 
 
 @xFuserPipelineWrapperRegister.register(CogVideoXPipeline)
 class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
-
     @classmethod
     def from_pretrained(
         cls,
@@ -41,9 +38,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         engine_config: EngineConfig,
         **kwargs,
     ):
-        pipeline = CogVideoXPipeline.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
+        pipeline = CogVideoXPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         return cls(pipeline, engine_config)
 
     @torch.no_grad()
@@ -74,6 +69,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 226,
+        **kwargs,
     ) -> Union[CogVideoXPipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
@@ -213,9 +209,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             max_sequence_length=max_sequence_length,
             device=device,
         )
-        prompt_embeds = self._process_cfg_split_batch(
-            negative_prompt_embeds, prompt_embeds
-        )
+        prompt_embeds = self._process_cfg_split_batch(negative_prompt_embeds, prompt_embeds)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
@@ -249,9 +243,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
         # 7. Create rotary embeds if required
         image_rotary_emb = (
-            self._prepare_rotary_positional_embeddings(
-                height, width, latents.size(1), device
-            )
+            self._prepare_rotary_positional_embeddings(height, width, latents.size(1), device)
             if self.transformer.config.use_rotary_positional_embeddings
             else None
         )
@@ -261,8 +253,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
 
         p_t = self.transformer.config.patch_size_t or 1
         latents, prompt_embeds, image_rotary_emb = self._init_sync_pipeline(
-            latents, prompt_embeds, image_rotary_emb, 
-            (latents.size(1) + p_t - 1) // p_t
+            latents, prompt_embeds, image_rotary_emb, (latents.size(1) + p_t - 1) // p_t
         )
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             # for DPM-solver++
@@ -272,9 +263,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     continue
 
                 if do_classifier_free_guidance:
-                    latent_model_input = torch.cat(
-                        [latents] * (2 // get_classifier_free_guidance_world_size())
-                    )
+                    latent_model_input = torch.cat([latents] * (2 // get_classifier_free_guidance_world_size()))
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
@@ -289,6 +278,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     image_rotary_emb=image_rotary_emb,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
+                    **kwargs,
                 )[0]
                 noise_pred = noise_pred.float()
 
@@ -304,9 +294,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                         noise_pred_uncond, noise_pred_text = get_cfg_group().all_gather(
                             noise_pred, separate_tensors=True
                         )
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (
-                        noise_pred_text - noise_pred_uncond
-                    )
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler.module, CogVideoXDPMScheduler):
@@ -334,9 +322,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
                     negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
-                if i == len(timesteps) - 1 or (
-                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-                ):
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
         if get_sequence_parallel_world_size() > 1:
@@ -369,12 +355,14 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
         latents_frames: Optional[int] = None,
     ):
         latents = super()._init_video_sync_pipeline(latents)
-        
+
         if get_runtime_state().split_text_embed_in_sp:
             if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[
+                    get_sequence_parallel_rank()
+                ]
             else:
-                get_runtime_state().split_text_embed_in_sp = False                
+                get_runtime_state().split_text_embed_in_sp = False
 
         if image_rotary_emb is not None:
             assert latents_frames is not None
@@ -383,9 +371,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 torch.cat(
                     [
                         image_rotary_emb[0]
-                        .reshape(latents_frames, -1, d)[
-                            :, start_token_idx:end_token_idx
-                        ]
+                        .reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx]
                         .reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
@@ -394,9 +380,7 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 torch.cat(
                     [
                         image_rotary_emb[1]
-                        .reshape(latents_frames, -1, d)[
-                            :, start_token_idx:end_token_idx
-                        ]
+                        .reshape(latents_frames, -1, d)[:, start_token_idx:end_token_idx]
                         .reshape(-1, d)
                         for start_token_idx, end_token_idx in get_runtime_state().pp_patches_token_start_end_idx_global
                     ],
@@ -404,7 +388,6 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
                 ),
             )
         return latents, prompt_embeds, image_rotary_emb
-
 
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature

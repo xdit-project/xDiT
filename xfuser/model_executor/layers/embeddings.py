@@ -71,9 +71,10 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
                     grid_size=(height, width),
                     base_size=self.module.base_size,
                     interpolation_scale=self.module.interpolation_scale,
+                    device=latent.device,  # Place tensor on the correct device directly
+                    output_type="pt",  # Return a PyTorch tensor instead of NumPy array
                 )
-                pos_embed = torch.from_numpy(pos_embed)
-                self.module.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+                self.module.pos_embed = pos_embed.unsqueeze(0)  # Shape adjustment
                 self.module.height = height
                 self.module.width = width
                 pos_embed = self.module.pos_embed

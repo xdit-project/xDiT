@@ -29,6 +29,7 @@ class xFuserLongContextAttention(LongContextAttention):
         ring_impl_type: str = "basic",
         use_pack_qkv: bool = False,
         use_kv_cache: bool = False,
+        use_sync: bool = False,
         attn_type: AttnType = AttnType.FA,
         attn_processor: torch.nn.Module = None,
     ) -> None:
@@ -47,6 +48,7 @@ class xFuserLongContextAttention(LongContextAttention):
             gather_idx=gather_idx,
             ring_impl_type=ring_impl_type,
             use_pack_qkv=use_pack_qkv,
+            use_sync=use_sync,
             attn_type = attn_type,
         )
         self.use_kv_cache = use_kv_cache

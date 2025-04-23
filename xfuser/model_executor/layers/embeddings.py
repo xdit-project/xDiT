@@ -1,5 +1,6 @@
 # adapted from https://github.com/huggingface/diffusers/blob/v0.29.0/src/diffusers/models/embeddings.py
 import torch
+import inspect
 
 from diffusers.models.embeddings import PatchEmbed, get_2d_sincos_pos_embed, CogVideoXPatchEmbed
 import torch.distributed
@@ -66,14 +67,30 @@ class xFuserPatchEmbedWrapper(xFuserLayerBaseWrapper):
             pos_embed = self.module.cropped_pos_embed(height, width)
         else:
             if self.module.height != height or self.module.width != width:
-                pos_embed = get_2d_sincos_pos_embed(
-                    embed_dim=self.module.pos_embed.shape[-1],
-                    grid_size=(height, width),
-                    base_size=self.module.base_size,
-                    interpolation_scale=self.module.interpolation_scale,
-                )
-                pos_embed = torch.from_numpy(pos_embed)
-                self.module.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+                sig = inspect.signature(get_2d_sincos_pos_embed)
+
+                if "device" in sig.parameters and "output_type" in sig.parameters:
+                    # diffusers >= 0.33.0
+                    pos_embed = get_2d_sincos_pos_embed(
+                        embed_dim=self.module.pos_embed.shape[-1],
+                        grid_size=(height, width),
+                        base_size=self.module.base_size,
+                        interpolation_scale=self.module.interpolation_scale,
+                        device=latent.device,
+                        output_type="pt",
+                    )
+                    self.module.pos_embed = pos_embed.unsqueeze(0)
+                else:
+                    # diffusers < 0.33.0 fallback
+                    pos_embed = get_2d_sincos_pos_embed(
+                        embed_dim=self.module.pos_embed.shape[-1],
+                        grid_size=(height, width),
+                        base_size=self.module.base_size,
+                        interpolation_scale=self.module.interpolation_scale,
+                    )
+                    pos_embed = torch.from_numpy(pos_embed)
+                    self.module.pos_embed = pos_embed.float().unsqueeze(0).to(latent.device)
+
                 self.module.height = height
                 self.module.width = width
                 pos_embed = self.module.pos_embed

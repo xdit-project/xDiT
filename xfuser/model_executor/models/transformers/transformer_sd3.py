@@ -32,7 +32,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         super().__init__(
             transformer=transformer,
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
-            submodule_name_to_wrap=["attn"],
+            submodule_name_to_wrap=["attn", "attn2"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))

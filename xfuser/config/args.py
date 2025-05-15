@@ -100,6 +100,7 @@ class xFuserArgs:
     no_use_resolution_binning: bool = False
     seed: int = 42
     output_type: str = "pil"
+    guidance_scale: float = 3.5
     enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
@@ -290,6 +291,12 @@ class xFuserArgs:
             default="pil",
             help="Output type of the pipeline.",
         )
+        input_group.add_argument(
+            "--guidance_scale",
+            type=float,
+            default=3.5,
+            help="Guidance scale for classifier free guidance.",
+        )
         runtime_group.add_argument(
             "--enable_sequential_cpu_offload",
             action="store_true",
@@ -452,6 +459,7 @@ class xFuserArgs:
             max_sequence_length=self.max_sequence_length,
             seed=self.seed,
             output_type=self.output_type,
+            guidance_scale=self.guidance_scale,
         )
 
         return engine_config, input_config

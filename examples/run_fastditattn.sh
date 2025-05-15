@@ -38,7 +38,7 @@ fi
 
 mkdir -p ./results
 
-TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
+TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning --guidance_scale 4.5"
 FAST_ATTN_ARGS="--use_fast_attn --window_size 512 --n_calib 4 --threshold 0.15 --use_cache --coco_path $COCO_PATH"
 
 

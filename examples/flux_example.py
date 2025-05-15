@@ -68,7 +68,7 @@ def main():
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
         max_sequence_length=256,
-        guidance_scale=0.0,
+        guidance_scale=input_config.guidance_scale,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     )
     end_time = time.time()

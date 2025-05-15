@@ -31,8 +31,9 @@ MODEL_ID="/cfs/dit/PixArt-XL-2-1024-MS/"
 INFERENCE_STEP=20
 
 SIZE=1024
+GUIDANCE_SCALE=4.5
 PARALLEL_ARGS="--ulysses_degree=1 --ring_degree=1 --pipefusion_parallel_degree=8"
-TASK_ARGS="--height=${SIZE} --width=${SIZE} --no_use_resolution_binning"
+TASK_ARGS="--height=${SIZE} --width=${SIZE} --no_use_resolution_binning --guidance_scale=${GUIDANCE_SCALE}"
 OUTPUT_ARGS="--output_type=latent"
 CFG_ARGS="--use_cfg_parallel"
 

@@ -12,7 +12,7 @@ INFERENCE_STEP=50
 mkdir -p ./results
 
 # CogVideoX specific task args
-TASK_ARGS="--height 720 --width 1280 --num_frames 129"
+TASK_ARGS="--height 720 --width 1280 --num_frames 129 --guidance_scale 5.0"
 
 # CogVideoX parallel configuration
 N_GPUS=8

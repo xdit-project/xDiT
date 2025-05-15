@@ -193,6 +193,7 @@ def main():
         num_frames=input_config.num_frames,
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
+        guidance_scale=input_config.guidance_scale,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     ).frames[0]
 

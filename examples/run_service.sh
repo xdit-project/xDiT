@@ -41,7 +41,7 @@ do
 for N_GPUS in 1;
 do 
 
-TASK_ARGS="--height $HEIGHT --width $HEIGHT --no_use_resolution_binning"
+TASK_ARGS="--height $HEIGHT --width $HEIGHT --no_use_resolution_binning --guidance_scale 3.5"
 
 PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 1"
 

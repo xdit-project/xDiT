@@ -100,7 +100,7 @@ class xFuserArgs:
     no_use_resolution_binning: bool = False
     seed: int = 42
     output_type: str = "pil"
-    guidance_scale: float = 0.0
+    guidance_scale: float = 3.5
     enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
@@ -294,7 +294,7 @@ class xFuserArgs:
         input_group.add_argument(
             "--guidance_scale",
             type=float,
-            default=0.0,
+            default=3.5,
             help="Guidance scale for classifier free guidance.",
         )
         runtime_group.add_argument(

@@ -46,6 +46,7 @@ def main():
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
+        guidance_scale=input_config.guidance_scale,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     )
     end_time = time.time()

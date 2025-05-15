@@ -208,8 +208,8 @@ def main():
             width=input_config.width,
             num_frames=input_config.num_frames,
             num_inference_steps=1,
+            guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-            guidance_scale=6.0,
             use_dynamic_cfg=False,
         ).frames[0]
 
@@ -226,8 +226,8 @@ def main():
         width=input_config.width,
         num_frames=input_config.num_frames,
         num_inference_steps=input_config.num_inference_steps,
+        guidance_scale=input_config.guidance_scale,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-        guidance_scale=6.0,
         use_dynamic_cfg=False,
     ).frames[0]
 

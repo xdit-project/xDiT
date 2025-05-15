@@ -11,7 +11,7 @@ INFERENCE_STEP=50
 mkdir -p ./results
 
 # ConsisID specific task args
-TASK_ARGS="--height 480 --width 720 --num_frames 49"
+TASK_ARGS="--height 480 --width 720 --num_frames 49 --guidance_scale 6.0"
 
 # ConsisID parallel configuration
 N_GPUS=4

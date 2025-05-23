@@ -33,10 +33,6 @@ if __name__ == "__main__":
             "beautifulsoup4>=4.12.3",
             "distvae",
             "yunchang>=0.6.0",
-            "pytest",
-            "opencv-python",
-            "imageio",
-            "imageio-ffmpeg",
             "einops",
         ],
         extras_require={
@@ -54,6 +50,14 @@ if __name__ == "__main__":
             ],
             "ray": [
                 "ray",  # NOTE: ray is necessary if RayDiffusionPipeline is used
+            ],
+            "opencv-python": [
+                "opencv-python-headless", # NOTE: opencv-python is necessary if ConsisIDPipeline is used
+            ],
+            "test": [
+                "pytest",
+                "imageio",
+                "imageio-ffmpeg"
             ]
         },
         url="https://github.com/xdit-project/xDiT.",

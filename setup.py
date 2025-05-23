@@ -1,6 +1,6 @@
+from setuptools import find_packages, setup
 import subprocess
 
-from setuptools import find_packages, setup
 
 
 def get_cuda_version():
@@ -55,7 +55,7 @@ if __name__ == "__main__":
             ],
             "ray": [
                 "ray",  # NOTE: ray is necessary if RayDiffusionPipeline is used
-            ],
+            ]
         },
         url="https://github.com/xdit-project/xDiT.",
         description="A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices",

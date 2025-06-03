@@ -105,6 +105,9 @@ def xdit_ring_flash_attn_forward(
                     softcap=0.0,
                     alibi_slopes=alibi_slopes,
                     return_softmax=True and dropout_p > 0,
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale
                 )
             else:
                 block_out, block_lse = fn(

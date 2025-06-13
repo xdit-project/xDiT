@@ -31,6 +31,9 @@ def xdit_ring_flash_attn_forward(
     joint_tensor_key=None,
     joint_tensor_value=None,
     joint_strategy="none",
+    q_descale=None,
+    k_descale=None,
+    v_descale=None
 ):
     is_joint = False
     if (joint_tensor_key is not None and 
@@ -90,18 +93,35 @@ def xdit_ring_flash_attn_forward(
 
         if not causal or step <= comm.rank:
             fn = select_flash_attn_impl(attn_type, stage="fwd-only", attn_processor=attn_processor)
-            block_out, block_lse = fn(
-                q,
-                key,
-                value,
-                dropout_p=dropout_p,
-                softmax_scale=softmax_scale,
-                causal=causal and step == 0,
-                window_size=window_size,
-                softcap=0.0,
-                alibi_slopes=alibi_slopes,
-                return_softmax=True and dropout_p > 0,
-            )
+            if attn_type == AttnType.FA3: 
+                block_out, block_lse = fn(
+                    q,
+                    key,
+                    value,
+                    dropout_p=dropout_p,
+                    softmax_scale=softmax_scale,
+                    causal=causal and step == 0,
+                    window_size=window_size,
+                    softcap=0.0,
+                    alibi_slopes=alibi_slopes,
+                    return_softmax=True and dropout_p > 0,
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale
+                )
+            else:
+                block_out, block_lse = fn(
+                    q,
+                    key,
+                    value,
+                    dropout_p=dropout_p,
+                    softmax_scale=softmax_scale,
+                    causal=causal and step == 0,
+                    window_size=window_size,
+                    softcap=0.0,
+                    alibi_slopes=alibi_slopes,
+                    return_softmax=True and dropout_p > 0,
+                )
             if attn_type == AttnType.SPARSE_SAGE:
                 out, lse = block_out, block_lse
             else:
@@ -198,23 +218,50 @@ def xdit_ring_flash_attn_func(
     joint_tensor_key=None,
     joint_tensor_value=None,
     joint_strategy="none",
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
 ):
-    return xFuserRingFlashAttnFunc.apply(
-        q,
-        k,
-        v,
-        dropout_p,
-        softmax_scale,
-        causal,
-        window_size,
-        alibi_slopes,
-        deterministic,
-        return_attn_probs,
-        group,
-        attn_type,
-        attn_processor,
-        attn_layer,
-        joint_tensor_key,
-        joint_tensor_value,
-        joint_strategy,
-    )
+    if attn_type == AttnType.FA3:
+        return xFuserRingFlashAttnFunc.apply(
+            q,
+            k,
+            v,
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size,
+            alibi_slopes,
+            deterministic,
+            return_attn_probs,
+            group,
+            attn_type,
+            attn_processor,
+            attn_layer,
+            joint_tensor_key,
+            joint_tensor_value,
+            joint_strategy,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale
+        )
+    else:
+        return xFuserRingFlashAttnFunc.apply(
+            q,
+            k,
+            v,
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size,
+            alibi_slopes,
+            deterministic,
+            return_attn_probs,
+            group,
+            attn_type,
+            attn_processor,
+            attn_layer,
+            joint_tensor_key,
+            joint_tensor_value,
+            joint_strategy,
+        )

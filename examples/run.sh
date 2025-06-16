@@ -11,6 +11,7 @@ declare -A MODEL_CONFIGS=(
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
     ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev/ 28"
+    ["FluxControl"]="flux_control_example.py /cfs/dit/FLUX.1-Depth-dev/ 28"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
     ["SDXL"]="sdxl_example.py /cfs/dit/stable-diffusion-xl-base-1.0 30"
 )

@@ -35,6 +35,9 @@ class xFuserLongContextAttention(LongContextAttention):
         use_sync: bool = False,
         attn_type: AttnType = AttnType.FA,
         attn_processor: torch.nn.Module = None,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
     ) -> None:
         """
         Arguments:
@@ -55,6 +58,9 @@ class xFuserLongContextAttention(LongContextAttention):
             attn_type = attn_type,
         )
         self.use_kv_cache = use_kv_cache
+        self.q_descale = q_descale
+        self.k_descale = k_descale
+        self.v_descale = v_descale
         if (
             use_kv_cache
             and ring_impl_type not in self.ring_impl_type_supported_kv_cache
@@ -195,6 +201,9 @@ class xFuserLongContextAttention(LongContextAttention):
             joint_tensor_key=joint_tensor_key,
             joint_tensor_value=joint_tensor_value,
             joint_strategy=joint_strategy,
+            q_descale=self.q_descale,
+            k_descale=self.k_descale,
+            v_descale=self.v_descale,
         )
 
         if type(out) == tuple:

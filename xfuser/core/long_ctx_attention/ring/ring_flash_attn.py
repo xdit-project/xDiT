@@ -261,11 +261,10 @@ def xdit_sana_ring_flash_attn_forward(
 
         key, value = k, v
 
-        if step <= comm.rank:
-            # b x n_heads x len_seq x d
-            q, key, value = q.float(), key.float(), value.float()
-            block_out = value @ key @ q
-            out = block_out.float() if out is None else out + block_out.float()
+        # b x n_heads x len_seq x d
+        q, key, value = q.float(), key.float(), value.float()
+        block_out = value @ key @ q
+        out = block_out.float() if out is None else out + block_out.float()
 
         if step + 1 != comm.world_size:
             comm.wait()

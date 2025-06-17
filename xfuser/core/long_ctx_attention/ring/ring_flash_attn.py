@@ -1,4 +1,8 @@
+from typing import List
+import math
 import torch
+import torch.nn.functional as F
+from torch.nn.attention.flex_attention import flex_attention
 
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
@@ -31,9 +35,6 @@ def xdit_ring_flash_attn_forward(
     joint_tensor_key=None,
     joint_tensor_value=None,
     joint_strategy="none",
-    q_descale=None,
-    k_descale=None,
-    v_descale=None
 ):
     is_joint = False
     if (joint_tensor_key is not None and 
@@ -93,35 +94,18 @@ def xdit_ring_flash_attn_forward(
 
         if not causal or step <= comm.rank:
             fn = select_flash_attn_impl(attn_type, stage="fwd-only", attn_processor=attn_processor)
-            if attn_type == AttnType.FA3: 
-                block_out, block_lse = fn(
-                    q,
-                    key,
-                    value,
-                    dropout_p=dropout_p,
-                    softmax_scale=softmax_scale,
-                    causal=causal and step == 0,
-                    window_size=window_size,
-                    softcap=0.0,
-                    alibi_slopes=alibi_slopes,
-                    return_softmax=True and dropout_p > 0,
-                    q_descale=q_descale,
-                    k_descale=k_descale,
-                    v_descale=v_descale
-                )
-            else:
-                block_out, block_lse = fn(
-                    q,
-                    key,
-                    value,
-                    dropout_p=dropout_p,
-                    softmax_scale=softmax_scale,
-                    causal=causal and step == 0,
-                    window_size=window_size,
-                    softcap=0.0,
-                    alibi_slopes=alibi_slopes,
-                    return_softmax=True and dropout_p > 0,
-                )
+            block_out, block_lse = fn(
+                q,
+                key,
+                value,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal and step == 0,
+                window_size=window_size,
+                softcap=0.0,
+                alibi_slopes=alibi_slopes,
+                return_softmax=True and dropout_p > 0,
+            )
             if attn_type == AttnType.SPARSE_SAGE:
                 out, lse = block_out, block_lse
             else:
@@ -218,50 +202,118 @@ def xdit_ring_flash_attn_func(
     joint_tensor_key=None,
     joint_tensor_value=None,
     joint_strategy="none",
-    q_descale=None,
-    k_descale=None,
-    v_descale=None,
 ):
-    if attn_type == AttnType.FA3:
-        return xFuserRingFlashAttnFunc.apply(
+    return xFuserRingFlashAttnFunc.apply(
+        q,
+        k,
+        v,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size,
+        alibi_slopes,
+        deterministic,
+        return_attn_probs,
+        group,
+        attn_type,
+        attn_processor,
+        attn_layer,
+        joint_tensor_key,
+        joint_tensor_value,
+        joint_strategy,
+    )
+    
+
+def xdit_sana_ring_flash_attn_forward(
+    process_group,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_layer=None,
+):
+
+    comm = RingComm(process_group)
+
+    out = None
+
+    next_k, next_v = None, None
+
+    if attn_layer is not None:
+        k, v = get_cache_manager().update_and_get_kv_cache(
+            new_kv=[k, v],
+            layer=attn_layer,
+            slice_dim=1,
+            layer_type="attn",
+        )
+        k = k.contiguous()
+        v = v.contiguous()
+        
+    q = F.relu(q).permute(0, 2, 3, 1).contiguous()
+    k = F.relu(k).transpose(1, 2).contiguous()
+    v = v.permute(0, 2, 3, 1).contiguous()
+    v = F.pad(v, (0, 0, 0, 1), mode="constant", value=1.0)
+
+    for step in range(comm.world_size):
+        if step + 1 != comm.world_size:
+            next_k: torch.Tensor = comm.send_recv(k)
+            next_v: torch.Tensor = comm.send_recv(v)
+            comm.commit()
+
+        key, value = k, v
+
+        if step <= comm.rank:
+            # b x n_heads x len_seq x d
+            q, key, value = q.float(), key.float(), value.float()
+            block_out = value @ key @ q
+            out = block_out.float() if out is None else out + block_out.float()
+
+        if step + 1 != comm.world_size:
+            comm.wait()
+            k = next_k
+            v = next_v
+
+    out = out.to(q.dtype)
+    out = out[:, :, :-1] / (out[:, :, -1:] + torch.finfo(out.dtype).eps)
+    out = out.transpose(-2, -1)
+    return out
+
+class xFuserSanaRingFlashAttnFunc(RingFlashAttnFunc):
+    @staticmethod
+    def forward(
+        ctx,
+        q,
+        k,
+        v, 
+        attn_layer, 
+        group, 
+    ):
+
+        if attn_layer is None:
+            k = k.contiguous()
+            v = v.contiguous()
+        out = xdit_sana_ring_flash_attn_forward(
+            group,
             q,
             k,
             v,
-            dropout_p,
-            softmax_scale,
-            causal,
-            window_size,
-            alibi_slopes,
-            deterministic,
-            return_attn_probs,
-            group,
-            attn_type,
-            attn_processor,
-            attn_layer,
-            joint_tensor_key,
-            joint_tensor_value,
-            joint_strategy,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale
+            attn_layer=attn_layer,
         )
-    else:
-        return xFuserRingFlashAttnFunc.apply(
-            q,
-            k,
-            v,
-            dropout_p,
-            softmax_scale,
-            causal,
-            window_size,
-            alibi_slopes,
-            deterministic,
-            return_attn_probs,
-            group,
-            attn_type,
-            attn_processor,
-            attn_layer,
-            joint_tensor_key,
-            joint_tensor_value,
-            joint_strategy,
-        )
+        
+        ctx.group = group
+        return out
+
+def xdit_sana_ring_flash_attn_func(
+        q:torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        group=None,
+        attn_layer=None,
+    ) -> torch.Tensor:
+
+    return xFuserSanaRingFlashAttnFunc.apply(
+        q,
+        k,
+        v, 
+        attn_layer, 
+        group, 
+    )

@@ -7,12 +7,14 @@ import torch.distributed
 from torch.nn import functional as F
 from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
+from diffusers.models.transformers.sana_transformer import SanaAttnProcessor2_0
 from diffusers.models.attention_processor import (
     AttnProcessor2_0,
     JointAttnProcessor2_0,
     FluxAttnProcessor2_0,
     HunyuanAttnProcessor2_0,
     CogVideoXAttnProcessor2_0,
+    SanaLinearAttnProcessor2_0,
 )
 
 try:
@@ -27,6 +29,7 @@ from diffusers.models.embeddings import apply_rotary_emb
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
+    get_ulysses_parallel_world_size,
 )
 from xfuser.core.fast_attention import (
     xFuserFastAttention,
@@ -1585,3 +1588,193 @@ if HunyuanVideoAttnProcessor2_0 is not None:
 
 else:
     xFuserHunyuanVideoAttnProcessor2_0 = None
+
+
+@xFuserAttentionProcessorRegister.register(SanaAttnProcessor2_0)
+class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
+    def __init__(self):
+        super().__init__()
+    
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+
+        if attention_mask is not None:
+            sequence_length = sequence_length * get_sequence_parallel_world_size() \
+                if get_runtime_state().split_text_embed_in_sp else sequence_length
+
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+            # scaled_dot_product_attention expects attention_mask shape to be
+            # (batch, heads, source_length, target_length)
+            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+
+        query = query.view(batch_size, -1, attn.heads, head_dim)
+        key = key.view(batch_size, -1, attn.heads, head_dim)
+        value = value.view(batch_size, -1, attn.heads, head_dim)
+
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        # TODO: add support for attn.scale when we move to Torch 2.1 (diffuser todo)
+        # hidden_states = F.scaled_dot_product_attention(
+        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        # )
+        if get_runtime_state().split_text_embed_in_sp:
+            raise NotImplementedError(
+                "Currently SANA not support split_text_embed_in_sp!"
+            )
+        else:
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            hidden_states = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=attention_mask, dropout_p=0., is_causal=False
+            )
+            hidden_states = hidden_states.transpose(1, 2)
+
+        hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.to(query.dtype)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
+@xFuserAttentionProcessorRegister.register(SanaLinearAttnProcessor2_0)
+class xFuserSanaLinearAttnProcessor2_0(SanaLinearAttnProcessor2_0):
+    def __init__(self):
+        super().__init__()
+        use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            from xfuser.core.long_ctx_attention import (
+                xFuserSanaLinearLongContextAttention
+            )
+
+            if HAS_FLASH_ATTN:
+                self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                )
+            else:
+                from yunchang.kernels import AttnType
+
+                self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                    attn_type=AttnType.TORCH,
+                )
+
+        if get_fast_attn_enable():
+            self.fast_attn = xFuserFastAttention()
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        original_dtype = hidden_states.dtype
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+            
+        batch_size = encoder_hidden_states.size(0)
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+            
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+        if not self.use_long_ctx_attn_kvcache:
+            key, value = get_cache_manager().update_and_get_kv_cache(
+                new_kv=[key, value],
+                layer=attn,
+                slice_dim=1,
+                layer_type="attn",
+            )
+        #! ---------------------------------------- KV CACHE ----------------------------------------
+
+        query = query.view(batch_size, -1, attn.heads, head_dim)
+        key = key.view(batch_size, -1, attn.heads, head_dim)
+        value = value.view(batch_size, -1, attn.heads, head_dim)
+
+        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            hidden_states = self.hybrid_seq_parallel_attn(
+                    attn,
+                    query,
+                    key,
+                    value,
+                    attn_mask=attention_mask,
+                    dropout_p=0.0,
+                )
+
+        else:
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            query = F.relu(query)
+            key = F.relu(key)
+
+            query, key, value = query.float(), key.float(), value.float()
+
+            value = F.pad(value, (0, 1, 0, 0), mode="constant", value=1.0)
+            scores = key.transpose(-2, -1) @ value
+            hidden_states = query @ scores
+
+            hidden_states = hidden_states[..., :-1] / (hidden_states[..., -1:] + 1e-15)
+            hidden_states = hidden_states.transpose(1, 2)
+
+        hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.to(original_dtype)
+
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if original_dtype is not None and original_dtype == torch.float16:
+            hidden_states = hidden_states.clip(-65504, 65504)
+
+
+        return hidden_states

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 import torch.distributed
@@ -14,7 +15,9 @@ from yunchang.globals import HAS_SPARSE_SAGE_ATTENTION
 
 from xfuser.logger import init_logger
 
-    
+from xfuser.core.distributed import (
+    get_ring_parallel_world_size,
+    )
 
 logger = init_logger(__name__)
 
@@ -215,4 +218,102 @@ class xFuserLongContextAttention(LongContextAttention):
         )
 
         # out e.g., [s/p::h]
+        return output
+
+class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
+    def __init__(self, 
+                 scatter_idx: int = 2, 
+                 gather_idx: int = 1, 
+                 ring_impl_type: str = "basic", 
+                 use_pack_qkv: bool = False, 
+                 use_kv_cache: bool = False, 
+                 attn_type: AttnType = AttnType.FA,
+                 attn_processor: torch.nn.Module = None):
+        super().__init__(scatter_idx, gather_idx, ring_impl_type, use_pack_qkv, use_kv_cache, attn_type, attn_processor)
+        # TODO need to check the attn_type
+        from xfuser.core.long_ctx_attention.ring import xdit_sana_ring_flash_attn_func
+        self.ring_attn_fn = xdit_sana_ring_flash_attn_func
+        # self.ring_attn_fn = xdit_sana_linear_ring_flash_attn_func
+        self.ring_world_size = get_ring_parallel_world_size()
+    
+    def forward(
+        self,
+        attn,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        *,
+        attn_mask: Tensor = None,
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False,
+    ) -> Tensor:
+
+        """forward
+
+        Arguments:
+            attn (Attention): the attention module
+            query (Tensor): query input to the layer
+            key (Tensor): key input to the layer
+            value (Tensor): value input to the layer
+            args: other args,
+            joint_tensor_query: Tensor = None, a replicated tensor among processes appended to the front or rear of query, depends the joint_strategy  
+            joint_tensor_key: Tensor = None, a replicated tensor among processes appended to the front or rear of key, depends the joint_strategy
+            joint_tensor_value: Tensor = None, a replicated tensor among processes appended to the front or rear of value, depends the joint_strategy,
+            *args: the args same as flash_attn_interface
+            joint_strategy: str = "none", the joint strategy for joint attention, currently only support "front" and "rear"
+
+        Returns:
+            * output (Tensor): context output
+        """
+        # (bs, seq_len/N, head_cnt, head_size)
+
+        # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
+        # scatter 2, gather 1
+        if self.use_pack_qkv:
+            # (3*bs, seq_len/N, head_cnt, head_size)
+            qkv = torch.cat([query, key, value]).contiguous()
+            # (3*bs, seq_len, head_cnt/N, head_size)
+            qkv = SeqAllToAll4D.apply(
+                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
+            )
+            qkv = torch.chunk(qkv, 3, dim=0)
+            query_layer, key_layer, value_layer = qkv
+
+        else:
+            query_layer = SeqAllToAll4D.apply(
+                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
+            )
+            key_layer = SeqAllToAll4D.apply(
+                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
+            )
+            value_layer = SeqAllToAll4D.apply(
+                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
+            )
+        
+        out = self.ring_attn_fn(
+            query_layer,
+            key_layer,
+            value_layer,
+            group=self.ring_pg,
+            attn_layer=attn if self.use_kv_cache else None,
+        )
+        out = out.transpose(1, 2)
+        
+        if isinstance(out, tuple):
+            context_layer, _, _ = out
+        else:
+            context_layer = out
+
+        # scatter 1, gather 2
+        output: Tensor = SeqAllToAll4D.apply(
+            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
+        )
+        
+        output = output.flatten(2, 3)
+
         return output

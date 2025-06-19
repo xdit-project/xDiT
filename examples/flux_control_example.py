@@ -22,10 +22,9 @@ def main():
     engine_config, input_config = engine_args.create_config()
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
-    
+    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=torch.bfloat16)
 
     if args.use_fp8_t5_encoder:
-        text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=torch.bfloat16)
         from optimum.quanto import freeze, qfloat8, quantize
         logging.info(f"rank {local_rank} quantizing text encoder 2")
         quantize(text_encoder_2, weights=qfloat8)

@@ -376,7 +376,7 @@ class xFuserPipelineFluxControlPipeline(xFuserPipelineBaseWrapper):
                     callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
                 )
             else:
-                latents = self._sync_pipeline(
+                latents,control_image  = self._sync_pipeline(
                     latents=latents,
                     control_image=control_image,
                     prompt_embeds=prompt_embeds,

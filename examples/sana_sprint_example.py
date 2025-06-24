@@ -63,10 +63,10 @@ def main():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image.save(
-                    f"./results/sana_sprint_1.6B_result_{parallel_info}_{image_rank}.jpg"
+                    f"./results/sana_sprint_1.6B_result_{parallel_info}_{image_rank}.png"
                 )
                 print(
-                    f"image {i} saved to ./results/sana_sprint_1.6B_result_{parallel_info}_{image_rank}.jpg"
+                    f"image {i} saved to ./results/sana_sprint_1.6B_result_{parallel_info}_{image_rank}.png"
                 )
 
     if get_world_group().rank == get_world_group().world_size - 1:

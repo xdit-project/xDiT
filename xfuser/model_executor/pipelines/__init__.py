@@ -9,6 +9,7 @@ from .pipeline_consisid import xFuserConsisIDPipeline
 from .pipeline_hunyuandit import xFuserHunyuanDiTPipeline
 from .pipeline_stable_diffusion_xl import xFuserStableDiffusionXLPipeline
 from .pipeline_sana import xFuserSanaPipeline
+from .pipeline_sana_sprint import xFuserSanaSprintPipeline
 
 __all__ = [
     "xFuserPipelineBaseWrapper",
@@ -22,4 +23,5 @@ __all__ = [
     "xFuserConsisIDPipeline",
     "xFuserStableDiffusionXLPipeline",
     "xFuserSanaPipeline",
+    "xFuserSanaSprintPipeline",
 ]

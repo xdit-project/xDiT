@@ -1,9 +1,8 @@
 import time
 import os
 import torch
-import warnings
 import torch.distributed
-from xfuser import xFuserSanaPipeline, xFuserArgs
+from xfuser import xFuserSanaSprintPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_world_group,
@@ -13,20 +12,6 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.parallel_state import get_data_parallel_world_size
 
-data_type_dict = {
-    "Sana_1600M_1024px_diffusers": torch.float16,
-    "Sana_1600M_4Kpx_BF16_diffusers": torch.bfloat16,
-    "SANA1.5_4.8B_1024px_diffusers": torch.bfloat16,
-    "SANA1.5_1.6B_1024px_diffusers": torch.bfloat16,
-}
-
-def get_data_type(model_path):
-    for model_name, data_type in data_type_dict.items():
-        if model_name in model_path:
-            return data_type
-    warnings.warn(f"Unknown model path: {model_path}, using default data type: torch.float16")
-    return torch.float16
-
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
@@ -35,16 +20,13 @@ def main():
     engine_config, input_config = engine_args.create_config()
     local_rank = get_world_group().local_rank
 
-    data_type = get_data_type(engine_config.model_config.model)
-    engine_config.runtime_config.dtype = data_type
-    pipe = xFuserSanaPipeline.from_pretrained(
+    pipe = xFuserSanaSprintPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
-        torch_dtype=data_type,
+        torch_dtype=torch.bfloat16,
     ).to(f"cuda:{local_rank}")
     pipe.vae.to(torch.bfloat16)
     pipe.text_encoder.to(torch.bfloat16)
-    pipe.vae.enable_tiling(tile_sample_min_width=1024, tile_sample_min_height=1024)
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
@@ -58,6 +40,7 @@ def main():
         prompt=input_config.prompt,
         num_inference_steps=input_config.num_inference_steps,
         output_type=input_config.output_type,
+        use_resolution_binning=input_config.use_resolution_binning,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         guidance_scale=4.5
     )
@@ -80,10 +63,10 @@ def main():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image.save(
-                    f"./results/sana_result_{parallel_info}_{image_rank}.png"
+                    f"./results/sana_sprint_1.6B_result_{parallel_info}_{image_rank}.png"
                 )
                 print(
-                    f"image {i} saved to ./results/sana_result_{parallel_info}_{image_rank}.png"
+                    f"image {i} saved to ./results/sana_sprint_1.6B_result_{parallel_info}_{image_rank}.png"
                 )
 
     if get_world_group().rank == get_world_group().world_size - 1:

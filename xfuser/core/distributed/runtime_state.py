@@ -4,9 +4,18 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+from torch.cuda import manual_seed as device_manual_seed
+from torch.cuda import manual_seed_all as device_manual_seed_all
 import diffusers
 from diffusers import DiffusionPipeline
 import torch.distributed
+
+try:
+    import torch_musa
+    from torch_musa.core.random import manual_seed as device_manual_seed
+    from torch_musa.core.random import manual_seed_all as device_manual_seed_all
+except ModuleNotFoundError:
+    pass
 
 from xfuser.config.config import (
     ParallelConfig,
@@ -33,8 +42,8 @@ def set_random_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    device_manual_seed(seed)
+    device_manual_seed_all(seed)
 
 
 class RuntimeState(metaclass=ABCMeta):

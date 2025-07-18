@@ -1,16 +1,23 @@
 # https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention.py
 
-from diffusers.models.attention import FeedForward, GELU, GEGLU
+import torch
 from torch import nn
+from torch.cuda import empty_cache
+from diffusers.models.attention import FeedForward, GELU, GEGLU
+
+try:
+    import torch_musa
+    from torch_musa.core.memory import empty_cache
+except ModuleNotFoundError:
+    pass
+
 from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
-import torch
 from xfuser.model_executor.layers.base_layer import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers.register import xFuserLayerWrappersRegister
-
 
 @xFuserLayerWrappersRegister.register(FeedForward)
 class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
@@ -59,7 +66,7 @@ class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
             self.module.net[2].bias = None
             self.has_output_bias = True
 
-        torch.cuda.empty_cache()
+        empty_cache()
 
     def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         hidden_states = self.module(hidden_states, *args, **kwargs)

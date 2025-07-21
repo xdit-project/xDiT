@@ -4,6 +4,11 @@ import diffusers
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from packaging import version
 
+try:
+    import torch_musa
+except ModuleNotFoundError:
+    pass
+
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -47,6 +52,13 @@ def _is_cuda():
     has_cuda = torch.version.cuda is not None
     return has_cuda
 
+def _is_musa():
+    try:
+        if torch.musa.is_available():
+            return True
+    except ModuleNotFoundError:
+        return False
+
 def get_device_version():
     if _is_hip():
         hip_version =  torch.version.hip
@@ -54,8 +66,10 @@ def get_device_version():
         return hip_version
     if _is_cuda():
         return torch.version.cuda
+    if _is_musa():
+        return torch.version.musa
 
-    raise Exception("No Accelerators(AMD/NV GPU, AMD MI instinct accelerators) available")
+    raise Exception("No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available")
 
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
@@ -66,6 +80,13 @@ variables: Dict[str, Callable[[], Any]] = {
     ),
 }
 
+try:
+    if torch.musa.is_available():
+        environment_variables["MUSA_HOME"] = lambda: os.environ.get("MUSA_HOME", None)
+        environment_variables["MUSA_VISIBLE_DEVICES"] = lambda: os.environ.get("MUSA_VISIBLE_DEVICES", None)
+        variables["MUSA_VERSION"] = lambda: version.parse(torch.version.musa)
+except ModuleNotFoundError:
+    pass
 
 class PackagesEnvChecker:
     _instance = None
@@ -84,6 +105,14 @@ class PackagesEnvChecker:
         }
 
     def check_flash_attn(self):
+        try:
+            if torch.musa.is_available():
+                logger.info(
+                    "Flash Attention library is not supported on MUSA for the moment."
+                )
+                return False
+        except ModuleNotFoundError:
+            pass
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             gpu_name = torch.cuda.get_device_name(device)

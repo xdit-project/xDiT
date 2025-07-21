@@ -9,7 +9,14 @@ import pickle
 
 import torch
 import torch.distributed
+from torch.cuda import synchronize
 from torch.distributed import Backend, ProcessGroup
+
+try:
+    import torch_musa
+    from torch_musa.core.device import synchronize
+except ModuleNotFoundError:
+    pass
 
 import xfuser.envs as envs
 from xfuser.logger import init_logger
@@ -132,7 +139,11 @@ class GroupCoordinator:
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
-            self.device = torch.device("cpu")
+            try:
+                if torch.musa.is_available():
+                    self.device = torch.device(f"musa:{local_rank}")
+            except ModuleNotFoundError:
+                self.device = torch.device("cpu")
 
     @property
     def first_rank(self):
@@ -695,7 +706,11 @@ class PipelineGroupCoordinator(GroupCoordinator):
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
-            self.device = torch.device("cpu")
+            try:
+                if torch.musa.is_available():
+                    self.device = torch.device(f"musa:{local_rank}")
+            except ModuleNotFoundError:
+                self.device = torch.device("cpu")
 
         self.recv_buffer_set: bool = False
         self.recv_tasks_queue: List[Tuple[str, int]] = []
@@ -865,7 +880,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
 
         # To protect against race condition when using batch_isend_irecv().
         # should take this out once the bug with batch_isend_irecv is resolved.
-        torch.cuda.synchronize()
+        synchronize()
 
         ops = []
         recv_prev_shape_tensor = None
@@ -898,7 +913,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
             for req in reqs:
                 req.wait()
 
-        torch.cuda.synchronize()
+        synchronize()
 
         recv_prev_shape = [0, 0, 0]
         if recv_prev_shape_tensor is not None:

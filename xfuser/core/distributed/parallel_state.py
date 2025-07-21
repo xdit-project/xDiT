@@ -210,13 +210,8 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str = envs.get_torch_distributed_backend(),
 ):
-    try:
-        if torch.musa.is_available():
-            backend = "mccl"
-    except ModuleNotFoundError:
-        pass
     logger.debug(
         "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
         world_size,

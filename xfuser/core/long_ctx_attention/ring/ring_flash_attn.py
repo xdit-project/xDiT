@@ -2,7 +2,6 @@ from typing import List
 import math
 import torch
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention
 
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
@@ -165,7 +164,7 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         joint_strategy,
     ):
         if softmax_scale is None:
-            softmax_scale = q.shape[-1] ** (-0.5)
+            softmax_scale = 1.0 / math.sqrt(q.size(-1))
 
         assert alibi_slopes is None
         if attn_layer is None:

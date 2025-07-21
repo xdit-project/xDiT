@@ -136,14 +136,7 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{local_rank}")
-        else:
-            try:
-                if torch.musa.is_available():
-                    self.device = torch.device(f"musa:{local_rank}")
-            except ModuleNotFoundError:
-                self.device = torch.device("cpu")
+        self.device = envs.get_device(local_rank)
 
     @property
     def first_rank(self):
@@ -703,14 +696,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{local_rank}")
-        else:
-            try:
-                if torch.musa.is_available():
-                    self.device = torch.device(f"musa:{local_rank}")
-            except ModuleNotFoundError:
-                self.device = torch.device("cpu")
+        self.device = envs.get_device(local_rank)
 
         self.recv_buffer_set: bool = False
         self.recv_tasks_queue: List[Tuple[str, int]] = []

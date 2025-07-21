@@ -59,17 +59,41 @@ def _is_musa():
     except ModuleNotFoundError:
         return False
 
+def get_device(local_rank:int) -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda", local_rank)
+    elif _is_musa():
+        return torch.device("musa", local_rank)
+    else:
+        return torch.device("cpu")
+
+def get_device_name() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    elif _is_musa():
+        return "musa"
+    else:
+        return "cpu"
+
 def get_device_version():
     if _is_hip():
         hip_version =  torch.version.hip
         hip_version = hip_version.split('-')[0]
         return hip_version
-    if _is_cuda():
+    elif _is_cuda():
         return torch.version.cuda
-    if _is_musa():
+    elif _is_musa():
         return torch.version.musa
+    else:
+        raise NotImplementedError("No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available")
 
-    raise Exception("No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available")
+def get_torch_distributed_backend() -> str:
+    if torch.cuda.is_available():
+        return "nccl"
+    elif _is_musa():
+        return "mccl"
+    else:
+        raise NotImplementedError("No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available")
 
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
@@ -105,14 +129,11 @@ class PackagesEnvChecker:
         }
 
     def check_flash_attn(self):
-        try:
-            if torch.musa.is_available():
-                logger.info(
-                    "Flash Attention library is not supported on MUSA for the moment."
-                )
-                return False
-        except ModuleNotFoundError:
-            pass
+        if _is_musa():
+            logger.info(
+                "Flash Attention library is not supported on MUSA for the moment."
+            )
+            return False
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             gpu_name = torch.cuda.get_device_name(device)

@@ -133,14 +133,12 @@ def _setup_musa(environment_variables, variables):
             if musa_ver:
                 variables["MUSA_VERSION"] = lambda: version.parse(musa_ver)
     except Exception:
-        # 不要让初始化因为 MUSA 检测失败而中断
         pass
 
 
 try:
     _setup_musa(environment_variables, variables)
 except (AttributeError, ModuleNotFoundError):
-    # 兼容老逻辑，也防止 AttributeError
     pass
 
 

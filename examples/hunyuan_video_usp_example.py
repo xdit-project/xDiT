@@ -228,7 +228,7 @@ def main():
         height=input_config.height,
         width=input_config.width,
         num_frames=input_config.num_frames,
-        batch_size=1,
+        batch_size=input_config.batch_size,
         num_inference_steps=input_config.num_inference_steps,
         split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
     )

@@ -224,6 +224,15 @@ You can also launch an HTTP service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
 
+### 6. Limitations
+
+#### HunyuanVideo
+
+- Supports `diffusers<=0.32.2` (breaking commit diffusers @ [8907a70](https://github.com/huggingface/diffusers/commit/8907a70a366c96b2322656f57b24e442ea392c7b))
+  - For this constraint, supports `xfuser<=0.4.3post3` (breaking commit xDiT @ [0c20492](https://github.com/xdit-project/xDiT/commit/0c2049281d5f698622d006658fb99d1aa92a9d50))
+
+- Supports bs=1 only
+
 <h2 id="dev-guide">📚  Develop Guide</h2>
 
 We provide a step-by-step guide for adding new models, please refer to the following tutorial.

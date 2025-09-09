@@ -6,7 +6,10 @@ import torch.distributed._functional_collectives as ft_c
 
 from torch.distributed.tensor.experimental._attention import _templated_ring_attention
 
-from yunchang.globals import PROCESS_GROUP
+if torch.cuda.is_available():
+    from yunchang.globals import PROCESS_GROUP
+else:
+    PROCESS_GROUP = None
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,

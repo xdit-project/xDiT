@@ -10,7 +10,7 @@ def get_cuda_version():
         ]
         cuda_version = version_line.split(" ")[-2].replace(",", "")
         return "cu" + cuda_version.replace(".", "")
-    except Exception as e:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return "no_cuda"
 
 

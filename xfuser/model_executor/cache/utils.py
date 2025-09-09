@@ -8,6 +8,7 @@ from xfuser.core.distributed import (
     get_sp_group,
     get_sequence_parallel_world_size,
 )
+from xfuser.envs import get_device
 
 import torch
 from torch.nn import Module
@@ -18,8 +19,8 @@ from abc import ABC, abstractmethod
 class CacheContext(Module):
     def __init__(self):
         super().__init__()
-        self.register_buffer("default_coef", torch.tensor([1.0, 0.0]).cuda())
-        self.register_buffer("flux_coef", torch.tensor([498.651651, -283.781631, 55.8554382, -3.82021401, 0.264230861]).cuda())
+        self.register_buffer("default_coef", torch.tensor([1.0, 0.0]).to(get_device(0)))
+        self.register_buffer("flux_coef", torch.tensor([498.651651, -283.781631, 55.8554382, -3.82021401, 0.264230861]).to(get_device(0)))
         
         self.register_buffer("original_hidden_states", None, persistent=False)
         self.register_buffer("original_encoder_hidden_states", None, persistent=False)
@@ -90,14 +91,14 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         self.transformer_blocks = torch.nn.ModuleList(transformer_blocks)
         self.single_transformer_blocks = torch.nn.ModuleList(single_transformer_blocks) if single_transformer_blocks else None
         self.transformer = transformer
-        self.register_buffer("cnt", torch.tensor(0).cuda())
-        self.register_buffer("accumulated_rel_l1_distance", torch.tensor([0.0]).cuda())
-        self.register_buffer("use_cache", torch.tensor(False, dtype=torch.bool).cuda())
+        self.register_buffer("cnt", torch.tensor(0).to(get_device(0)))
+        self.register_buffer("accumulated_rel_l1_distance", torch.tensor([0.0]).to(get_device(0)))
+        self.register_buffer("use_cache", torch.tensor(False, dtype=torch.bool).to(get_device(0)))
 
         self.cache_context = CacheContext()
         self.callback_handler = CallbackHandler(callbacks)
 
-        self.rel_l1_thresh = torch.tensor(rel_l1_thresh).cuda()
+        self.rel_l1_thresh = torch.tensor(rel_l1_thresh).to(get_device(0))
         self.return_hidden_states_first = return_hidden_states_first
         self.num_steps = num_steps
         self.name = name

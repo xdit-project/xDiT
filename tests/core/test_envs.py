@@ -20,6 +20,9 @@ class TestEnvs(unittest.TestCase):
         self.assertEqual(device.type, 'mps')
         device_name = envs.get_device_name()
         self.assertEqual(device_name, 'mps')
+        # test that getting CUDA_VERSION does not raise an error
+        cuda_version = envs.CUDA_VERSION
+        self.assertIsNotNone(cuda_version)
 
     @patch('torch.cuda.is_available', return_value=False)
     @patch('xfuser.envs._is_mps', return_value=False)

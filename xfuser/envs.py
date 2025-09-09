@@ -122,7 +122,7 @@ def get_torch_distributed_backend() -> str:
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
     # used in version checking
-    "CUDA_VERSION": lambda: version.parse(get_device_version()),
+    "CUDA_VERSION": lambda: version.parse(get_device_version() or "0.0"),
     "TORCH_VERSION": lambda: version.parse(
         version.parse(torch.__version__).base_version
     ),

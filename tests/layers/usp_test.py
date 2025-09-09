@@ -72,10 +72,10 @@ class TestUSP(unittest.TestCase):
         # Disabling flash_attn and aiter to get SDPA results
         usp.HAS_FLASH_ATTN = False
         usp.HAS_AITER = False
-        fsdpa_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+        fsdpa_results = usp.ring_attn(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
 
         usp.HAS_FLASH_ATTN = True
-        flash_attn_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+        flash_attn_results = usp.ring_attn(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
 
         result_diff = (fsdpa_results - flash_attn_results).abs().max()
         self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output

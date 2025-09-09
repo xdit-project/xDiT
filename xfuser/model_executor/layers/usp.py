@@ -14,7 +14,7 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
 )
 
-from packaging.veresion import parse
+from packaging.version import parse
 from xfuser.envs import PACKAGES_CHECKER
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_FLASH_ATTN = env_info["has_flash_attn"]

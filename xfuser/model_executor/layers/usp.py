@@ -185,7 +185,7 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3])
     key = torch.permute(key, [0, 2, 1, 3])
     value = torch.permute(value, [0, 2, 1, 3])
-    output, softmax_lse = flash_attn.flash_attn_func(
+    output, softmax_lse, S_mask = flash_attn.flash_attn_func(
         query,
         key,
         value,
@@ -213,9 +213,7 @@ def _attention(query, key, value, dropout_p, is_causal):
 
 def USP(query, key, value, dropout_p=0.0, is_causal=False):
     if get_sequence_parallel_world_size() == 1:
-        out = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=dropout_p, is_causal=is_causal
-        )
+        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     elif get_ulysses_parallel_world_size() == 1:
         out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     elif get_ulysses_parallel_world_size() > 1:
@@ -224,9 +222,7 @@ def USP(query, key, value, dropout_p=0.0, is_causal=False):
         value = _ft_c_input_all_to_all(value)
 
         if get_ring_parallel_world_size() == 1:
-            out = F.scaled_dot_product_attention(
-                query, key, value, dropout_p=dropout_p, is_causal=is_causal
-            )
+            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         else:
             out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 

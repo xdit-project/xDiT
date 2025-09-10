@@ -63,8 +63,10 @@ class TestUSP(unittest.TestCase):
     def test_ring_attn_flash_attn(self):
         """
         Verifies ring_attn results with flash_attn are close to F.SDPA results
-        Calling ring_attn directly and not through USP due to not using real parallelization
-        which doesn't then call ring_attn at all
+
+        Ring_attn function is called through the USP function when using ring attention, but that requires
+        multi-GPU parallelization, which this test is not using. Therefore the function is called
+        directly to test its output.
         """
         if not self.HAS_FLASH_ATTN:
             self.skipTest("flash_attn library is not available in the environment.")
@@ -103,8 +105,10 @@ class TestUSP(unittest.TestCase):
     def test_ring_attn_aiter(self):
         """
         Verifies ring_attn results with aiter are close to F.SDPA results
-        Calling ring_attn directly and not through USP due to not using real parallelization,
-        which doesn't then call ring_attn at all
+
+        Ring_attn function is called through the USP function when using ring attention, but that requires
+        multi-GPU parallelization, which this test is not using. Therefore the function is called
+        directly to test its output.
         """
         if not self.HAS_AITER:
             self.skipTest("aiter library is not available in the environment.")

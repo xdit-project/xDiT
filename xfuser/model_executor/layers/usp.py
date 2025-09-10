@@ -18,7 +18,12 @@ from packaging.version import parse
 from xfuser.envs import PACKAGES_CHECKER
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
+if HAS_FLASH_ATTN:
+    import flash_attn
+
 HAS_AITER = env_info["has_aiter"]
+if HAS_AITER:
+    import aiter
 
 aten = torch.ops.aten
 
@@ -160,7 +165,6 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     Performs the necessary tensor permutes and
     then calls attention through AITER
     """
-    import aiter
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -181,7 +185,6 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal):
     Performs the necessary tensor permutes and
     then calls attention through flash_attn
     """
-    import flash_attn
     query = torch.permute(query, [0, 2, 1, 3])
     key = torch.permute(key, [0, 2, 1, 3])
     value = torch.permute(value, [0, 2, 1, 3])

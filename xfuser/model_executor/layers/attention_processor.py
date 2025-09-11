@@ -51,6 +51,7 @@ else:
 logger = init_logger(__name__)
 
 env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_AITER = env_info["has_aiter"]
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
@@ -1395,14 +1396,18 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                 from xfuser.core.long_ctx_attention import (
                     xFuserLongContextAttention,
                 )
-
-                if HAS_FLASH_ATTN:
+                from yunchang.kernels import AttnType
+                
+                if HAS_AITER and 'AITER' in AttnType.__members__:
+                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                        use_kv_cache=self.use_long_ctx_attn_kvcache,
+                        attn_type=AttnType.AITER,
+                    )
+                elif HAS_FLASH_ATTN:
                     self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
-                    from yunchang.kernels import AttnType
-
                     self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache,
                         attn_type=AttnType.TORCH,

@@ -153,10 +153,27 @@ class PackagesEnvChecker:
 
     def initialize(self):
         self.packages_info = {
+            "has_aiter": self.check_aiter(),
             "has_flash_attn": self.check_flash_attn(),
             "has_long_ctx_attn": self.check_long_ctx_attn(),
             "diffusers_version": self.check_diffusers_version(),
         }
+
+    def check_aiter(self):
+        """
+        Checks whether ROCm AITER library is installed
+        """
+        try:
+            import aiter
+            logger.info("Using AITER as the attention library")
+            return True
+        except:
+            if _is_hip():
+                logger.warning(
+                    f'Using AMD GPUs, but library "aiter" is not installed, '
+                    'defaulting to other attention mechanisms'
+                )
+            return False
 
     def check_flash_attn(self):
         if _is_musa():

@@ -210,8 +210,10 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
-    backend: str = envs.get_torch_distributed_backend(),
+    backend: Optional[str] = None,
 ):
+    if backend is None:
+        backend = envs.get_torch_distributed_backend()
     logger.debug(
         "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
         world_size,
@@ -337,6 +339,8 @@ def initialize_model_parallel(
     vae_parallel_size: int = 0,
     backend: Optional[str] = None,
 ) -> None:
+    if backend is None:
+        backend = envs.get_torch_distributed_backend()
     """
     Initialize model parallel groups.
 

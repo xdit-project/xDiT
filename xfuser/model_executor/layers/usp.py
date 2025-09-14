@@ -14,26 +14,43 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
 )
 
+from packaging.version import parse
 from xfuser.envs import PACKAGES_CHECKER
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
+if HAS_FLASH_ATTN:
+    import flash_attn
+
+HAS_AITER = env_info["has_aiter"]
+if HAS_AITER:
+    import aiter
 
 aten = torch.ops.aten
 
-    
+
 def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
-    if torch.__version__ >= "2.6.0":
+    if parse(torch.__version__).release >= parse("2.6.0").release:
         from torch.distributed.tensor.experimental._attention import _cp_options
         _cp_options.enable_load_balance = False
         kwargs = {
             "dropout_p": dropout_p,
             "is_causal": is_causal,
         }
-        if HAS_FLASH_ATTN:
+        if HAS_AITER:
             out, *_ = _templated_ring_attention(
                 PROCESS_GROUP.RING_PG,
                 1,
-                aten._scaled_dot_product_flash_attention,
+                _aiter_attn_call,
+                query,
+                key,
+                value,
+                **kwargs,
+            )
+        elif HAS_FLASH_ATTN:
+            out, *_ = _templated_ring_attention(
+                PROCESS_GROUP.RING_PG,
+                1,
+                _flash_attn_call,
                 query,
                 key,
                 value,
@@ -59,10 +76,20 @@ def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
             "dropout_p": dropout_p,
             "is_causal": is_causal,
         }
-        if HAS_FLASH_ATTN:
+        if HAS_AITER:
             out, *_ = _templated_ring_attention(
                 PROCESS_GROUP.RING_PG,
-                aten._scaled_dot_product_flash_attention,
+                1,
+                _aiter_attn_call,
+                query,
+                key,
+                value,
+                **kwargs,
+            )
+        elif HAS_FLASH_ATTN:
+            out, *_ = _templated_ring_attention(
+                PROCESS_GROUP.RING_PG,
+                _flash_attn_call,
                 query,
                 key,
                 value,
@@ -133,12 +160,63 @@ def _ft_c_output_all_to_all(x):
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
 
+def _aiter_attn_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs the necessary tensor permutes and
+    then calls attention through AITER
+    """
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output, softmax_lse = aiter.flash_attn_func(
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_attn_probs=False,
+        return_lse=True
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, softmax_lse
+
+def _flash_attn_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs the necessary tensor permutes and
+    then calls attention through flash_attn
+    """
+    query = torch.permute(query, [0, 2, 1, 3])
+    key = torch.permute(key, [0, 2, 1, 3])
+    value = torch.permute(value, [0, 2, 1, 3])
+    output, softmax_lse, S_mask = flash_attn.flash_attn_func(
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_attn_probs=True,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, softmax_lse
+
+def _attention(query, key, value, dropout_p, is_causal):
+    """
+    Calls the correct attention mechanism based on the available libraries
+    """
+    if HAS_AITER:
+        output, _ = _aiter_attn_call(query, key, value, dropout_p, is_causal)
+        return output
+    elif HAS_FLASH_ATTN:
+        output, _ = _flash_attn_call(query, key, value, dropout_p, is_causal)
+        return output
+    else:
+        return F.scaled_dot_product_attention(
+            query, key, value, dropout_p=dropout_p, is_causal=is_causal
+        )
 
 def USP(query, key, value, dropout_p=0.0, is_causal=False):
     if get_sequence_parallel_world_size() == 1:
-        out = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=dropout_p, is_causal=is_causal
-        )
+        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     elif get_ulysses_parallel_world_size() == 1:
         out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     elif get_ulysses_parallel_world_size() > 1:
@@ -147,12 +225,10 @@ def USP(query, key, value, dropout_p=0.0, is_causal=False):
         value = _ft_c_input_all_to_all(value)
 
         if get_ring_parallel_world_size() == 1:
-            out = F.scaled_dot_product_attention(
-                query, key, value, dropout_p=dropout_p, is_causal=is_causal
-            )
+            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         else:
             out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
         out = _ft_c_output_all_to_all(out)
-        
+
     return out

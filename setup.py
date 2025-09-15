@@ -26,7 +26,7 @@ if __name__ == "__main__":
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
-            "torch==2.4.1",
+            "torch>=2.4.1",
             "accelerate>=0.33.0",
             "transformers>=4.39.1",
             "sentencepiece>=0.1.99",
@@ -37,7 +37,7 @@ if __name__ == "__main__":
         ],
         extras_require={
             "diffusers": [
-                "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
+                "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux. HunyuanVideo depends on diffusers>=0.34.0
             ],
             "flash-attn": [
                 "flash-attn>=2.6.0",  # NOTE: flash-attn is necessary if ring_degree > 1

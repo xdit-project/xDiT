@@ -76,7 +76,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         image_rotary_emb = self.rope(hidden_states)
 
         # 2. Conditional embeddings
-        temb = self.time_text_embed(timestep, guidance, pooled_projections)
+        temb,_ = self.time_text_embed(timestep=timestep, pooled_projection=pooled_projections, guidance=guidance)
         hidden_states = self.x_embedder(hidden_states)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states,
                                                       timestep,

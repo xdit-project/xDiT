@@ -63,10 +63,6 @@ class xFuserLongContextAttention(LongContextAttention):
             use_sync=use_sync,
             attn_type = attn_type,
         )
-        if attn_type is None:
-            if torch.cuda.is_available():
-                from yunchang.kernels import AttnType
-                attn_type = AttnType.FA
         self.use_kv_cache = use_kv_cache
         self.q_descale = q_descale
         self.k_descale = k_descale
@@ -231,25 +227,21 @@ class xFuserLongContextAttention(LongContextAttention):
         return output
 
 class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
-    def __init__(self, 
-                 scatter_idx: int = 2, 
-                 gather_idx: int = 1, 
-                 ring_impl_type: str = "basic", 
-                 use_pack_qkv: bool = False, 
-                 use_kv_cache: bool = False, 
+    def __init__(self,
+                 scatter_idx: int = 2,
+                 gather_idx: int = 1,
+                 ring_impl_type: str = "basic",
+                 use_pack_qkv: bool = False,
+                 use_kv_cache: bool = False,
                  attn_type: AttnType = None,
                  attn_processor: torch.nn.Module = None):
-        if attn_type is None:
-            if torch.cuda.is_available():
-                from yunchang.kernels import AttnType
-                attn_type = AttnType.FA
         super().__init__(scatter_idx, gather_idx, ring_impl_type, use_pack_qkv, use_kv_cache, attn_type, attn_processor)
         # TODO need to check the attn_type
         from xfuser.core.long_ctx_attention.ring import xdit_sana_ring_flash_attn_func
         self.ring_attn_fn = xdit_sana_ring_flash_attn_func
         # self.ring_attn_fn = xdit_sana_linear_ring_flash_attn_func
         self.ring_world_size = get_ring_parallel_world_size()
-    
+
     def forward(
         self,
         attn,

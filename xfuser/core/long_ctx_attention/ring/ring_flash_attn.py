@@ -5,9 +5,15 @@ import torch.nn.functional as F
 
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from yunchang.ring.utils import RingComm, update_out_and_lse
-from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
-from yunchang.kernels import select_flash_attn_impl, AttnType
+if torch.cuda.is_available():
+    from yunchang.ring.utils import RingComm, update_out_and_lse
+    from yunchang.ring.ring_flash_attn import RingFlashAttnFunc
+    from yunchang.kernels import select_flash_attn_impl, AttnType
+else:
+    RingComm = object
+    RingFlashAttnFunc = object
+    AttnType = None
+    select_flash_attn_impl = None
 
 try:
     import flash_attn
@@ -15,7 +21,10 @@ try:
 except ImportError:
     flash_attn = None
     _flash_attn_forward = None
-    from yunchang.kernels.attention import pytorch_attn_forward
+    if torch.cuda.is_available():
+        from yunchang.kernels.attention import pytorch_attn_forward
+    else:
+        pytorch_attn_forward = None
 
 def xdit_ring_flash_attn_forward(
     process_group,

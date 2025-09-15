@@ -63,11 +63,17 @@ def _is_musa():
         return False
 
 
+def _is_mps():
+    return torch.backends.mps.is_available()
+
+
 def get_device(local_rank: int) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda", local_rank)
     elif _is_musa():
         return torch.device("musa", local_rank)
+    elif _is_mps():
+        return torch.device("mps")
     else:
         return torch.device("cpu")
 
@@ -77,6 +83,8 @@ def get_device_name() -> str:
         return "cuda"
     elif _is_musa():
         return "musa"
+    elif _is_mps():
+        return "mps"
     else:
         return "cpu"
 
@@ -90,6 +98,8 @@ def get_device_version():
         return torch.version.cuda
     elif _is_musa():
         return torch.version.musa
+    elif _is_mps():
+        return None
     else:
         raise NotImplementedError(
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
@@ -101,6 +111,8 @@ def get_torch_distributed_backend() -> str:
         return "nccl"
     elif _is_musa():
         return "mccl"
+    elif _is_mps():
+        return "gloo"
     else:
         raise NotImplementedError(
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
@@ -110,7 +122,7 @@ def get_torch_distributed_backend() -> str:
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
     # used in version checking
-    "CUDA_VERSION": lambda: version.parse(get_device_version()),
+    "CUDA_VERSION": lambda: version.parse(get_device_version() or "0.0"),
     "TORCH_VERSION": lambda: version.parse(
         version.parse(torch.__version__).base_version
     ),
@@ -175,7 +187,10 @@ class PackagesEnvChecker:
                 )
             return False
 
+
     def check_flash_attn(self):
+        if not torch.cuda.is_available():
+            return False
         if _is_musa():
             logger.info(
                 "Flash Attention library is not supported on MUSA for the moment."
@@ -201,6 +216,8 @@ class PackagesEnvChecker:
             return False
 
     def check_long_ctx_attn(self):
+        if not torch.cuda.is_available():
+            return False
         try:
             from yunchang import (
                 set_seq_parallel_pg,

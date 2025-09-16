@@ -13,7 +13,11 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
-from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_world_size
+from xfuser.core.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
+)
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.models.transformers.register import (
@@ -39,6 +43,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 [FeedForward] if get_tensor_model_parallel_world_size() > 1 else []
             ),
             submodule_name_to_wrap=["attn"],
+            transformer_blocks_name=["transformer_blocks", "single_transformer_blocks"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
@@ -99,7 +104,9 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 logger.warning(
                     "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
                 )
-        hidden_states = self.x_embedder(hidden_states)
+
+        if is_pipeline_first_stage():
+            hidden_states = self.x_embedder(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype) * 1000
         if guidance is not None:
@@ -111,10 +118,23 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             if guidance is None
             else self.time_text_embed(timestep, guidance, pooled_projections)
         )
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        if is_pipeline_first_stage():
+            encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-        # print(f"{txt_ids.shape=}, {img_ids.shape=}")
-        ids = torch.cat((txt_ids, img_ids), dim=1)
+        if txt_ids.ndim == 3:
+            logger.warning(
+                "Passing `txt_ids` 3d torch.Tensor is deprecated."
+                "Please remove the batch dimension and pass it as a 2d torch Tensor"
+            )
+            txt_ids = txt_ids[0]
+        if img_ids.ndim == 3:
+            logger.warning(
+                "Passing `img_ids` 3d torch.Tensor is deprecated."
+                "Please remove the batch dimension and pass it as a 2d torch Tensor"
+            )
+            img_ids = img_ids[0]
+
+        ids = torch.cat((txt_ids, img_ids), dim=0)
         image_rotary_emb = self.pos_embed(ids)
 
         for index_block, block in enumerate(self.transformer_blocks):
@@ -151,6 +171,13 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                     image_rotary_emb=image_rotary_emb,
                 )
 
+            # controlnet residual
+            # if controlnet_block_samples is not None:
+            #     interval_control = len(self.transformer_blocks) / len(controlnet_block_samples)
+            #     interval_control = int(np.ceil(interval_control))
+            #     hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
+
+        # if self.stage_info.after_flags["transformer_blocks"]:
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         for index_block, block in enumerate(self.single_transformer_blocks):
@@ -183,11 +210,23 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                     image_rotary_emb=image_rotary_emb,
                 )
 
+            # controlnet residual
+            # if controlnet_single_block_samples is not None:
+            #     interval_control = len(self.single_transformer_blocks) / len(controlnet_single_block_samples)
+            #     interval_control = int(np.ceil(interval_control))
+            #     hidden_states[:, encoder_hidden_states.shape[1] :, ...] = (
+            #         hidden_states[:, encoder_hidden_states.shape[1] :, ...]
+            #         + controlnet_single_block_samples[index_block // interval_control]
+            #     )
+
+        encoder_hidden_states = hidden_states[:, : encoder_hidden_states.shape[1], ...]
         hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...]
 
-        hidden_states = self.norm_out(hidden_states, temb)
-        output = self.proj_out(hidden_states)
-        output = output, None
+        if self.stage_info.after_flags["single_transformer_blocks"]:
+            hidden_states = self.norm_out(hidden_states, temb)
+            output = self.proj_out(hidden_states), None
+        else:
+            output = hidden_states, encoder_hidden_states
 
         if USE_PEFT_BACKEND:
             # remove `lora_scale` from each PEFT layer

@@ -8,7 +8,7 @@ To address this limitation, we developed [DistVAE](https://github.com/xdit-proje
 For the convolutional operator in VAE, we require the communication of the halo region data of the image as shown in the following figures.
 
 <div align="center">
-    <img src="../../assets/methods/patchvaeconv.png" alt="hybrid process group config" width="60%">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/patchvaeconv.png" alt="hybrid process group config" width="60%">
 </div>
 
 * Chunked Input Processing: Similar to [MIT-patch-conv](https://hanlab.mit.edu/blog/patch-conv), we split the input feature map into chunks and feed them into convolution operator sequentially. This approach minimizes temporary memory consumption.

@@ -35,6 +35,7 @@ from xfuser.core.distributed import (
     get_sp_group,
     get_runtime_state,
     initialize_runtime_state,
+    is_dp_last_group,
 )
 
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
@@ -90,6 +91,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         enable_temporal_attentions: bool = True,
         decode_chunk_size: Optional[int] = None,
         num_pipeline_warmup_steps: Optional[int] = 3,
+        **kwargs,
     ) -> Union[LattePipelineOutput, Tuple]:
         """
         Function invoked when calling the pipeline for generation.
@@ -170,8 +172,9 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
         # 0. Default
+        num_frames = video_length
         decode_chunk_size = (
-            decode_chunk_size if decode_chunk_size is not None else video_length
+            decode_chunk_size if decode_chunk_size is not None else num_frames
         )
 
         # 1. Check inputs. Raise error if not correct
@@ -208,7 +211,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         get_runtime_state().set_video_input_parameters(
             height=height,
             width=width,
-            video_length=video_length,
+            num_frames=num_frames,
             batch_size=batch_size,
             num_inference_steps=num_inference_steps,
         )
@@ -240,7 +243,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             latent_channels,
-            video_length,
+            num_frames,
             height,
             width,
             prompt_embeds.dtype,
@@ -258,7 +261,9 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
         )
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
+
             latents = self._init_video_sync_pipeline(latents)
+
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -344,6 +349,7 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                     sp_latents_list[sp_patch_idx][
                         :,
                         :,
+                        :,
                         get_runtime_state()
                         .pp_patches_start_idx_local[pp_patch_idx] : get_runtime_state()
                         .pp_patches_start_idx_local[pp_patch_idx + 1],
@@ -353,9 +359,9 @@ class xFuserLattePipeline(xFuserPipelineBaseWrapper):
                 ]
             latents = torch.cat(latents_list, dim=-2)
 
-        if get_data_parallel_rank() == get_data_parallel_world_size() - 1:
+        if is_dp_last_group():
             if not (output_type == "latents" or output_type == "latent"):
-                video = self.decode_latents(latents, video_length, decode_chunk_size=14)
+                video = self.decode_latents(latents, num_frames, decode_chunk_size=14)
                 video = self.video_processor.postprocess_video(
                     video=video, output_type=output_type
                 )

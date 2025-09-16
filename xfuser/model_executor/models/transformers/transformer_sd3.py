@@ -32,7 +32,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         super().__init__(
             transformer=transformer,
             submodule_classes_to_wrap=[nn.Conv2d, PatchEmbed],
-            submodule_name_to_wrap=["attn"],
+            submodule_name_to_wrap=["attn", "attn2"],
         )
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
@@ -80,7 +80,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         if USE_PEFT_BACKEND:
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
-        else:
+        elif joint_attention_kwargs and "scale" in joint_attention_kwargs:
             logger.warning(
                 "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
             )

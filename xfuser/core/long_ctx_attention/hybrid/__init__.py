@@ -1,11 +1,11 @@
 from .attn_layer import (
     xFuserLongContextAttention,
-    xFuserFluxLongContextAttention,
-    xFuserJointLongContextAttention,
+    xFuserSanaLinearLongContextAttention,
+    AttnType,
 )
 
 __all__ = [
     "xFuserLongContextAttention",
-    "xFuserFluxLongContextAttention",
-    "xFuserJointLongContextAttention",
+    "xFuserSanaLinearLongContextAttention",
+    "AttnType",
 ]

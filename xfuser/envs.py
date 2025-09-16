@@ -4,6 +4,11 @@ import diffusers
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from packaging import version
 
+try:
+    import torch_musa
+except ModuleNotFoundError:
+    pass
+
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -20,35 +25,23 @@ if TYPE_CHECKING:
 
 
 environment_variables: Dict[str, Callable[[], Any]] = {
-
     # ================== Runtime Env Vars ==================
-
     # used in distributed environment to determine the master address
-    'MASTER_ADDR':
-    lambda: os.getenv('MASTER_ADDR', ""),
-
+    "MASTER_ADDR": lambda: os.getenv("MASTER_ADDR", ""),
     # used in distributed environment to manually set the communication port
-    'MASTER_PORT':
-    lambda: int(os.getenv('MASTER_PORT', '0'))
-    if 'MASTER_PORT' in os.environ else None,
-
+    "MASTER_PORT": lambda: (
+        int(os.getenv("MASTER_PORT", "0")) if "MASTER_PORT" in os.environ else None
+    ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
-    "CUDA_HOME":
-    lambda: os.environ.get("CUDA_HOME", None),
-
+    "CUDA_HOME": lambda: os.environ.get("CUDA_HOME", None),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
-    "LOCAL_RANK":
-    lambda: int(os.environ.get("LOCAL_RANK", "0")),
-
+    "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
     # used to control the visible devices in the distributed setting
-    "CUDA_VISIBLE_DEVICES":
-    lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
-
+    "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
     # this is used for configuring the default logging level
-    "XDIT_LOGGING_LEVEL":
-    lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
+    "XDIT_LOGGING_LEVEL": lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
 }
 
 def _is_hip():
@@ -59,27 +52,103 @@ def _is_cuda():
     has_cuda = torch.version.cuda is not None
     return has_cuda
 
+def _is_musa():
+    try:
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            return True
+    except ModuleNotFoundError:
+        return False
+
+
+def _is_mps():
+    return torch.backends.mps.is_available()
+
+
+def get_device(local_rank: int) -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda", local_rank)
+    elif _is_musa():
+        return torch.device("musa", local_rank)
+    elif _is_mps():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+
+def get_device_name() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    elif _is_musa():
+        return "musa"
+    elif _is_mps():
+        return "mps"
+    else:
+        return "cpu"
+
+
 def get_device_version():
     if _is_hip():
-        hip_version =  torch.version.hip
-        hip_version = hip_version.split('-')[0]
+        hip_version = torch.version.hip
+        hip_version = hip_version.split("-")[0]
         return hip_version
-    if _is_cuda():
+    elif _is_cuda():
         return torch.version.cuda
+    elif _is_musa():
+        return torch.version.musa
+    elif _is_mps():
+        return None
+    else:
+        raise NotImplementedError(
+            "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
+        )
 
-    raise Exception("No Accelerators(AMD/NV GPU, AMD MI instinct accelerators) available")
+
+def get_torch_distributed_backend() -> str:
+    if torch.cuda.is_available():
+        return "nccl"
+    elif _is_musa():
+        return "mccl"
+    elif _is_mps():
+        return "gloo"
+    else:
+        raise NotImplementedError(
+            "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
+        )
 
 variables: Dict[str, Callable[[], Any]] = {
-
     # ================== Other Vars ==================
-
     # used in version checking
-    'CUDA_VERSION':
-    lambda: version.parse(get_device_version()),
-
-    'TORCH_VERSION':
-    lambda: version.parse(version.parse(torch.__version__).base_version),
+    "CUDA_VERSION": lambda: version.parse(get_device_version() or "0.0"),
+    "TORCH_VERSION": lambda: version.parse(
+        version.parse(torch.__version__).base_version
+    ),
 }
+
+
+def _setup_musa(environment_variables, variables):
+    musa = getattr(torch, "musa", None)
+    if musa is None:
+        return
+    try:
+        if musa.is_available():
+            environment_variables["MUSA_HOME"] = lambda: os.environ.get(
+                "MUSA_HOME", None
+            )
+            environment_variables["MUSA_VISIBLE_DEVICES"] = lambda: os.environ.get(
+                "MUSA_VISIBLE_DEVICES", None
+            )
+            musa_ver = getattr(getattr(torch, "version", None), "musa", None)
+            if musa_ver:
+                variables["MUSA_VERSION"] = lambda: version.parse(musa_ver)
+    except Exception:
+        pass
+
+
+try:
+    _setup_musa(environment_variables, variables)
+except (AttributeError, ModuleNotFoundError):
+    pass
+
 
 class PackagesEnvChecker:
     _instance = None
@@ -92,13 +161,37 @@ class PackagesEnvChecker:
 
     def initialize(self):
         self.packages_info = {
-            'has_flash_attn': self.check_flash_attn(),
-            'has_long_ctx_attn': self.check_long_ctx_attn(),
-            'diffusers_version': self.check_diffusers_version(),
-        } 
-        
+            "has_aiter": self.check_aiter(),
+            "has_flash_attn": self.check_flash_attn(),
+            "has_long_ctx_attn": self.check_long_ctx_attn(),
+            "diffusers_version": self.check_diffusers_version(),
+        }
+
+    def check_aiter(self):
+        """
+        Checks whether ROCm AITER library is installed
+        """
+        try:
+            import aiter
+            logger.info("Using AITER as the attention library")
+            return True
+        except:
+            if _is_hip():
+                logger.warning(
+                    f'Using AMD GPUs, but library "aiter" is not installed, '
+                    'defaulting to other attention mechanisms'
+                )
+            return False
+
 
     def check_flash_attn(self):
+        if not torch.cuda.is_available():
+            return False
+        if _is_musa():
+            logger.info(
+                "Flash Attention library is not supported on MUSA for the moment."
+            )
+            return False
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             gpu_name = torch.cuda.get_device_name(device)
@@ -106,13 +199,21 @@ class PackagesEnvChecker:
                 return False
             else:
                 from flash_attn import flash_attn_func
+                from flash_attn import __version__
+
+                if __version__ < "2.6.0":
+                    raise ImportError(f"install flash_attn >= 2.6.0")
                 return True
         except ImportError:
-            logger.warning(f'Flash Attention library "flash_attn" not found, '
-                           f'using pytorch attention implementation')
+            logger.warning(
+                f'Flash Attention library "flash_attn" not found, '
+                f"using pytorch attention implementation"
+            )
             return False
 
     def check_long_ctx_attn(self):
+        if not torch.cuda.is_available():
+            return False
         try:
             from yunchang import (
                 set_seq_parallel_pg,
@@ -121,20 +222,28 @@ class PackagesEnvChecker:
                 LongContextAttention,
                 LongContextAttentionQKVPacked,
             )
+
             return True
         except ImportError:
-            logger.warning(f'Ring Flash Attention library "yunchang" not found, '
-                           f'using pytorch attention implementation')
+            logger.warning(
+                f'Ring Flash Attention library "yunchang" not found, '
+                f"using pytorch attention implementation"
+            )
             return False
 
     def check_diffusers_version(self):
-        if version.parse(version.parse(diffusers.__version__).base_version) < version.parse("0.30.0"):
-            raise RuntimeError(f"Diffusers version: {version.parse(version.parse(diffusers.__version__).base_version)} is not supported,"
-                               f"please upgrade to version > 0.30.0")
+        if version.parse(
+            version.parse(diffusers.__version__).base_version
+        ) < version.parse("0.30.0"):
+            raise RuntimeError(
+                f"Diffusers version: {version.parse(version.parse(diffusers.__version__).base_version)} is not supported,"
+                f"please upgrade to version > 0.30.0"
+            )
         return version.parse(version.parse(diffusers.__version__).base_version)
 
     def get_packages_info(self):
         return self.packages_info
+
 
 PACKAGES_CHECKER = PackagesEnvChecker()
 

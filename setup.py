@@ -4,6 +4,17 @@ from setuptools import find_packages, setup
 import subprocess
 from typing import List
 
+def get_cuda_version():
+    try:
+        nvcc_version = subprocess.check_output(["nvcc", "--version"]).decode("utf-8")
+        version_line = [line for line in nvcc_version.split("\n") if "release" in line][
+            0
+        ]
+        cuda_version = version_line.split(" ")[-2].replace(",", "")
+        return "cu" + cuda_version.replace(".", "")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "no_cuda"
+
 try:
     import torch
     from torch.utils.cpp_extension import ROCM_HOME
@@ -87,10 +98,44 @@ def get_requirements() -> List[str]:
 
     if _is_hip():
         requirements = _read_requirements("requirements-rocm.txt")
+        extras_require = {}
     else:
-        raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm")
-    return requirements
+        requirements = [
+            "torch>=2.4.1",
+            "accelerate>=0.33.0",
+            "transformers>=4.39.1",
+            "sentencepiece>=0.1.99",
+            "beautifulsoup4>=4.12.3",
+            "distvae",
+            "yunchang>=0.6.0",
+            "einops",
+        ]
+        extras_require={
+            "diffusers": [
+                "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
+            ],
+            "flash-attn": [
+                "flash-attn>=2.6.0",  # NOTE: flash-attn is necessary if ring_degree > 1
+            ],
+            "optimum-quanto": [
+                "optimum-quanto",  # NOTE: optimum-quanto is necessary if use_fp8_t5_encoder is enabled
+            ],
+            "flask": [
+                "flask",  # NOTE: flask is necessary to run xDiT as an http service
+            ],
+            "ray": [
+                "ray",  # NOTE: ray is necessary if RayDiffusionPipeline is used
+            ],
+            "opencv-python": [
+                "opencv-python-headless", # NOTE: opencv-python is necessary if ConsisIDPipeline is used
+            ],
+            "test": [
+                "pytest",
+                "imageio",
+                "imageio-ffmpeg"
+            ]
+        }
+    return requirements, extras_require
 
 if __name__ == "__main__":
     with open("README.md", "r") as f:
@@ -98,14 +143,17 @@ if __name__ == "__main__":
     fp = open("xfuser/__version__.py", "r").read()
     version = eval(fp.strip().split()[-1])
 
+    requirements, extra_requirements = get_requirements()
+
     setup(
         name="xfuser",
         author="xDiT Team",
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
-        install_requires=get_requirements(),
+        install_requires=requirements,
+        extras_require=extra_requirements,
         url="https://github.com/xdit-project/xDiT.",
-        description="xDiT: A Scalable Inference Engine for Diffusion Transformers (DiTs) on multi-GPU Clusters",
+        description="A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices",
         long_description=long_description,
         long_description_content_type="text/markdown",
         version=version,

@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -24,6 +24,8 @@ from .base_transformer import xFuserTransformerBaseWrapper
 logger = init_logger(__name__)
 
 
+# adapted from
+# https://github.com/huggingface/diffusers/blob/b5f591fea843cb4bf1932bd94d1db5d5eebe3298/src/diffusers/models/transformers/hunyuan_transformer_2d.py#L203
 @xFuserTransformerWrappersRegister.register(HunyuanDiT2DModel)
 class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
@@ -39,6 +41,7 @@ class xFuserHunyuanDiT2DWrapper(xFuserTransformerBaseWrapper):
     def _split_transformer_blocks(
         self,
         transformer: nn.Module,
+        blocks_name: List[str] = [],
     ):
         if not hasattr(transformer, "blocks"):
             raise AttributeError(

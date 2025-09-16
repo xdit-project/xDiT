@@ -28,6 +28,7 @@ from xfuser.core.distributed import (
     is_dp_last_group,
     is_pipeline_last_stage,
     is_pipeline_first_stage,
+    get_world_group
 )
 from xfuser.model_executor.pipelines import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
@@ -43,11 +44,14 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        return_org_pipeline: bool = False,
         **kwargs,
     ):
         pipeline = HunyuanDiTPipeline.from_pretrained(
             pretrained_model_name_or_path, **kwargs
         )
+        if return_org_pipeline:
+            return pipeline
         return cls(pipeline, engine_config)
 
     @property
@@ -111,6 +115,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         target_size: Optional[Tuple[int, int]] = None,
         crops_coords_top_left: Tuple[int, int] = (0, 0),
         use_resolution_binning: bool = True,
+        **kwargs,
     ):
         r"""
         The call function to the pipeline for generation with HunyuanDiT.
@@ -453,12 +458,30 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
         # 8. Decode latents (only rank 0)
         #! ---------------------------------------- ADD BELOW ----------------------------------------
-        if is_dp_last_group():
+        def vae_decode(latents):
+            image = self.vae.decode(
+                latents / self.vae.config.scaling_factor, return_dict=False
+            )[0]
+            return image
+        
+        image = None
+        if not output_type == "latent":
+            if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0: 
+                # VAE is loaded in another worker
+                latents = self.gather_latents_for_vae(latents)
+                if latents is not None:
+                    latents = latents / self.vae.config.scaling_factor
+                self.send_to_vae_decode(latents)
+            else:
+                if get_runtime_state().runtime_config.use_parallel_vae:
+                    latents = self.gather_broadcast_latents(latents)
+                    image = vae_decode(latents)
+                else:
+                    if is_dp_last_group():
+                        image = vae_decode(latents)
+        if self.is_dp_last_group():
             #! ---------------------------------------- ADD ABOVE ----------------------------------------
             if not output_type == "latent":
-                image = self.vae.decode(
-                    latents / self.vae.config.scaling_factor, return_dict=False
-                )[0]
                 image, has_nsfw_concept = self.run_safety_checker(
                     image, device, prompt_embeds.dtype
                 )
@@ -466,14 +489,15 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 image = latents
                 has_nsfw_concept = None
 
-            if has_nsfw_concept is None:
+            if has_nsfw_concept is None and image is not None:
                 do_denormalize = [True] * image.shape[0]
-            else:
+            elif has_nsfw_concept is not None:
                 do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-            image = self.image_processor.postprocess(
-                image, output_type=output_type, do_denormalize=do_denormalize
-            )
+            if image is not None:   
+                image = self.image_processor.postprocess(
+                    image, output_type=output_type, do_denormalize=do_denormalize
+                )
 
             # Offload all models
             self.maybe_free_model_hooks()
@@ -492,7 +516,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
 
     def _init_sync_pipeline(self, latents: torch.Tensor, image_rotary_emb):
         latents = super()._init_sync_pipeline(latents)
-        image_rotary_emb = [
+        image_rotary_emb = (
             torch.cat(
                 [
                     image_rotary_emb[0][start_token_idx:end_token_idx, ...]
@@ -507,7 +531,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
                 ],
                 dim=0,
             ),
-        ]
+        )
         return latents, image_rotary_emb
 
     def _init_async_pipeline(
@@ -539,7 +563,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         prompt_attention_mask_2: torch.Tensor,
         add_time_ids: torch.Tensor,
         style: torch.Tensor,
-        image_rotary_emb: torch.FloatTensor,
+        image_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
         device: torch.device,
         guidance_scale: float,
         guidance_rescale: float,
@@ -676,7 +700,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         prompt_attention_mask_2: torch.Tensor,
         add_time_ids: torch.Tensor,
         style: torch.Tensor,
-        image_rotary_emb: torch.FloatTensor,
+        image_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
         device: torch.device,
         guidance_scale: float,
         guidance_rescale: float,
@@ -859,7 +883,7 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         prompt_attention_mask_2: torch.FloatTensor,
         add_time_ids: torch.Tensor,
         style: torch.Tensor,
-        image_rotary_emb: torch.FloatTensor,
+        image_rotary_emb: Tuple[torch.Tensor, torch.Tensor],
         t: Union[float, torch.Tensor],
         device: torch.device,
         guidance_scale: float,
@@ -879,19 +903,33 @@ class xFuserHunyuanDiTPipeline(xFuserPipelineBaseWrapper):
         )
 
         # predict the noise residual
-        noise_pred = self.transformer(
-            latents,
-            t_expand,
-            encoder_hidden_states=prompt_embeds,
-            text_embedding_mask=prompt_attention_mask,
-            encoder_hidden_states_t5=prompt_embeds_2,
-            text_embedding_mask_t5=prompt_attention_mask_2,
-            image_meta_size=add_time_ids,
-            style=style,
-            image_rotary_emb=image_rotary_emb,
-            skips=skips,
-            return_dict=False,
-        )[0]
+        if skips is not None:
+            noise_pred = self.transformer(
+                latents,
+                t_expand,
+                encoder_hidden_states=prompt_embeds,
+                text_embedding_mask=prompt_attention_mask,
+                encoder_hidden_states_t5=prompt_embeds_2,
+                text_embedding_mask_t5=prompt_attention_mask_2,
+                image_meta_size=add_time_ids,
+                style=style,
+                image_rotary_emb=image_rotary_emb,
+                skips=skips,
+                return_dict=False,
+            )[0]
+        else:
+            noise_pred = self.transformer(
+                latents,
+                t_expand,
+                encoder_hidden_states=prompt_embeds,
+                text_embedding_mask=prompt_attention_mask,
+                encoder_hidden_states_t5=prompt_embeds_2,
+                text_embedding_mask_t5=prompt_attention_mask_2,
+                image_meta_size=add_time_ids,
+                style=style,
+                image_rotary_emb=image_rotary_emb,
+                return_dict=False,
+            )[0]
 
         if is_pipeline_last_stage():
             noise_pred, _ = noise_pred.chunk(2, dim=1)

@@ -9,35 +9,94 @@ Deploying Flux.1 in real-time presents several challenges:
 
 2. VAE OOM: The VAE component experiences Out Of Memory (OOM) issues when attempting to generate images larger than 2048px on an A100 GPU with 80GB VRAM, despite the DiTs backbone's capability to handle higher resolutions.
 
-To address these challenges, xDiT employs a hybrid sequence parallel [USP](https://arxiv.org/abs/2405.07719) and [VAE Parallel](https://github.com/xdit-project/DistVAE) to scale Flux.1 inference across multiple GPUs.
+To address these challenges, xDiT employs a hybrid sequence parallel [USP](https://arxiv.org/abs/2405.07719), [PipeFusion](https://arxiv.org/abs/2405.14430) and [VAE Parallel](https://github.com/xdit-project/DistVAE) to scale Flux.1 inference across multiple GPUs.
+Since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatible with cfg parallel.
 
-Currently, xDiT does not support PipeFusion for the Flux.1 schnell variant due to its minimal sampling steps, as PipeFusion requires a warmup phase which is not suitable for this scenario. However, applying PipeFusion for the Pro and Dev versions is considered necessary and is still under development.
+### Scalability of Flux.1 Dev
 
-Additionally, since Flux.1 does not utilize Classifier-Free Guidance (CFG), it is not compatible with cfg parallel.
+We conducted performance benchmarking using FLUX.1 [dev] with 28 diffusion steps.
 
-### 扩展性展示
-
-On an 8xA100 (80GB) GPUs interconnected via NVLink, the optimal strategy for USP is to allocate all parallelism to Ulysses. 
-The latency of a 1024px image generation in just 0.93 seconds and a 2048px image in 2.63 seconds, achieving a 4.2x speedup compared to a single A100. 
-The speedup is even more pronounced for higher resolution images, such as 4096px, where a 7.4x speedup is achieved.
-
-
-<div align="center">
-    <img src="../../assets/performance/flux/flux_a100.jpg" 
-    alt="latency-flux_a100">
-</div>
-
-On an 8xL40 GPUs interconnected via PCIe Gen4, xDiT also demonstrates significant acceleration at a 4-GPU scale. 
-For a 1024px image, using a configuration with ulysses_degree=2 and ring_degree=2 results in lower latency compared to using Ulysses or ring alone, with an image generation time of 1.21 seconds. 
-However, using 8 GPUs can actually slow down the process due to communication traffic going through QPI. 
-For a 2048px image, an 8-GPU setup still achieves a 4x speedup.
- We anticipate that the integration of PipeFusion will enhance the scalability of the 8-GPU configuration.
+The table below shows the latency (in seconds) using different USP strategies on 4xH100. Due to H100's excellent NVLink bandwidth, using USP is more appropriate than using PipeFusion.
+torch.compile optimization is crucial for H100, achieving a 2.6x speedup on 4xH100.
+On 2xH100, Ring achieves the lowest latency, while on 4xH100, Ulysses performs best. The hybrid-SP strategy Ulysses-2 x Ring-2 performs slightly worse than Ulysses-4 on 4xH100.
+The speedup on 4xH100 compared to a single H100 is 2.63x.
 
 <div align="center">
-    <img src="../../assets/performance/flux/flux_l40.jpg" 
-    alt="latency-flux_l40">
+
+| Configuration | PyTorch (Sec) | torch.compile (Sec) |
+|--------------|---------|---------|
+| 1 GPU | 6.71 | 4.30 |
+| Ulysses-2 | 4.38 | 2.68 |
+| Ring-2 | 5.31 | 2.60 |
+| Ulysses-2 x Ring-2 | 5.19 | 1.80 |
+| Ulysses-4 | 4.24 | 1.63 |
+| Ring-4 | 5.11 | 1.98 |
+
 </div>
 
+The figure below shows the latency metrics of Flux.1-dev on 4xH100. xDiT successfully generates a 1024px image in 1.6 seconds!
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1K-H100.png" 
+    alt="scalability-flux_h100">
+</div>
+
+The following figure shows the scalability of Flux.1 on two 8xL40 Nodes, 16xL40 GPUs in total. 
+Althogh cfg parallel is not available, We can still achieve enhanced scalability by using PipeFusion as a method for parallel between nodes.
+For the 1024px task, hybrid parallel on 16xL40 is 1.16x lower than on 8xL40, where the best configuration is ulysses=4 and pipefusion=4.
+For the 4096px task, hybrid parallel still benefits on 16 L40s, 1.9x lower than 8 GPUs, where the configuration is ulysses=2, ring=2, and pipefusion=4.
+The performance improvement dose not achieved with 16 GPUs 2048px tasks.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-16L40-crop.png" 
+    alt="scalability-flux_l40">
+</div>
+
+The following figure demonstrates the scalability of Flux.1 on 8xA100 GPUs.
+For both the 1024px and the 2048px image generation tasks, SP-Ulysses exhibits the lowest latency among the single parallel methods. The optimal hybrid strategy also are SP-Ulysses in this case.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/scalability/Flux-A100-crop.png" 
+    alt="scalability-flux_l40">
+</div>
+
+Note that the latency shown in the above figure does not yet include the use of torch.compile, which would provide further performance improvements.
+
+### Scalability of Flux.1 Schnell
+
+We conducted performance benchmarking using FLUX.1 [schnell] with 4 steps.
+Since the step number is very small, we do not apply PipeFusion.
+
+On a machine with 8xA100 (80GB) GPUs interconnected via NVLink, generating a 1024px image, the optimal strategy with USP is to apply ulysses_degree=#gpu. After using `torch.compile`, the generation of a 1024px image takes only 0.82 seconds!
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1K-A100.png" 
+    alt="latency-flux_a100_1k">
+</div>
+
+On the same 8xA100 (80GB) NVLink-interconnected machine, generating a 2048px image, after using `torch.compile`, the generation of a 2048px image takes only 2.4 seconds!
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-2K-A100.png" 
+    alt="latency-flux_a100_2k">
+</div>
+
+On a machine with 8xL40 GPUs interconnected via PCIe Gen4, even with a 4-card setup using xDiT, there is significant acceleration. Generating a 1024px image with `ulysses_degree=2` and `ring_degree=2` results in lower latency compared to using Ulysses or ring alone, with a generation time of 1.41 seconds. Using 8xL40 actually slows down due to the need for QPI communication. 
+We anticipate that using PipeFusion will enhance the scalability of 8-card setups.
+
+We compared the performance of `torch.compile` and `onediff` on 1024px image generation tasks. On 1 and 8 GPUs, `torch.compile` performs slightly better, while on 2 and 4 GPUs, onediff performs slightly better.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-1k-L40.png" 
+    alt="latency-flux_l40_1k">
+</div>
+
+The performance of generating a 2048px image on 8xL40 GPUs is shown below. Due to the increased ratio of computation to communication, unlike the 1024px image generation tasks, using 8 GPUs results in lower latency compared to 4 cards, with the fastest image generation time reaching 3.67 seconds.
+
+<div align="center">
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/Flux-2k-L40.png" 
+    alt="latency-flux_l40_2k">
+</div>
 
 ### Effect of VAE Parallel
 
@@ -46,11 +105,60 @@ This is due to the increased memory requirements for activations, along with mem
 
 By leveraging Parallel VAE, xDiT is able to demonstrate its capability for generating images at higher resolutions, enabling us to produce images with even greater detail and clarity. Applying `--use_parallel_vae` in the [runing script](../../examples/run.sh).
 
-prompt是"A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He’s wearing a faded blue captain’s hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
+prompt is "A hyperrealistic portrait of a weathered sailor in his 60s, with deep-set blue eyes, a salt-and-pepper beard, and sun-weathered skin. He's wearing a faded blue captain's hat and a thick wool sweater. The background shows a misty harbor at dawn, with fishing boats barely visible in the distance."
 
 The quality of image generation at 2048px, 3072px, and 4096px resolutions is as follows. It is evident that the quality of the 4096px generated images is significantly lower.
 
 <div align="center">
-    <img src="../../assets/performance/flux/flux_image.png" 
+    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/performance/flux/flux_image.png" 
     alt="latency-flux_l40">
+</div>
+
+
+## Cache Methods
+
+We tested the performance of TeaCache and First-Block-Cache on 4xH20 with SP=4 and 1xH20 respectively.
+The Performance shown as below:
+
+<div align="center">
+
+<table>
+  <tr>
+    <th rowspan="2">Method</th>
+    <th colspan="4">Latency (s)</th>
+  </tr>
+  <tr>
+    <th colspan="2">without torch.compile</th>
+    <th colspan="2">with torch.compile</th>
+  </tr>
+  <tr>
+    <th></th>
+    <th>4xH20</th>
+    <th>1xH20</th>
+    <th>4xH20</th>
+    <th>1xH20</th>
+  </tr>
+  <tr>
+    <td>Baseline</td>
+    <td>2.02s</td>
+    <td>6.10s</td>
+    <td>1.81s</td>
+    <td>5.02s</td>
+  </tr>
+  <tr>
+    <td>use_teacache</td>
+    <td>1.60s</td>
+    <td>4.67s</td>
+    <td>1.50s</td>
+    <td>3.92s</td>
+  </tr>
+  <tr>
+    <td>use_fbcache</td>
+    <td>0.93s</td>
+    <td>2.51s</td>
+    <td>0.85s</td>
+    <td>2.09s</td>
+  </tr>
+</table>
+
 </div>

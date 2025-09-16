@@ -1,80 +1,43 @@
 set -x
 
-# export NCCL_PXN_DISABLE=1
-# # export NCCL_DEBUG=INFO
-# export NCCL_SOCKET_IFNAME=eth0
-# export NCCL_IB_GID_INDEX=3
-# export NCCL_IB_DISABLE=0
-# export NCCL_NET_GDR_LEVEL=2
-# export NCCL_IB_QPS_PER_CONNECTION=4
-# export NCCL_IB_TC=160
-# export NCCL_IB_TIMEOUT=22
-# export NCCL_P2P=0
-# export CUDA_DEVICE_MAX_CONNECTIONS=1
-
-
-# Select the model type from Pixart-alpha, Pixart-sigma, Sd3, or Flux
-# The model is downloaded to a specified location on disk, 
-# or you can simply use the model's ID on Hugging Face, 
-# which will then be downloaded to the default cache path on Hugging Face.
-
 export PYTHONPATH=$PWD:$PYTHONPATH
 
+# Select the model type
 export MODEL_TYPE="Flux"
+# Configuration for different model types
+# script, model_id, inference_step
+declare -A MODEL_CONFIGS=(
+    ["Pixart-alpha"]="pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
+    ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
+    ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
+    ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev/ 28"
+    ["FluxControl"]="flux_control_example.py /cfs/dit/FLUX.1-Depth-dev/ 28"
+    ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
+    ["SDXL"]="sdxl_example.py /cfs/dit/stable-diffusion-xl-base-1.0 30"
+)
 
-CFG_ARGS="--use_cfg_parallel"
-
-if [ "$MODEL_TYPE" = "Pixart-alpha" ]; then
-    export SCRIPT=pixartalpha_example.py
-    export MODEL_ID="/mnt/models/SD/PixArt-XL-2-1024-MS"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Pixart-sigma" ]; then
-    export SCRIPT=pixartsigma_example.py
-    export MODEL_ID="/cfs/dit/PixArt-Sigma-XL-2-2K-MS"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Sd3" ]; then
-    export SCRIPT=sd3_example.py
-    export MODEL_ID="/mnt/models/SD/stable-diffusion-3-medium-diffusers"
-    export INFERENCE_STEP=20
-elif [ "$MODEL_TYPE" = "Flux" ]; then
-    export SCRIPT=flux_example.py
-    export MODEL_ID="/mnt/models/SD/FLUX.1-schnell"
-    export INFERENCE_STEP=4
-    # Flux does not apply cfg
-    export CFG_ARGS=""
-elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-    export SCRIPT=hunyuandit_example.py
-    export MODEL_ID="/mnt/models/SD/HunyuanDiT-v1.2-Diffusers"
-    export INFERENCE_STEP=20
+if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then
+    IFS=' ' read -r SCRIPT MODEL_ID INFERENCE_STEP <<< "${MODEL_CONFIGS[$MODEL_TYPE]}"
+    export SCRIPT MODEL_ID INFERENCE_STEP
 else
     echo "Invalid MODEL_TYPE: $MODEL_TYPE"
     exit 1
 fi
 
-
-
 mkdir -p ./results
 
-for HEIGHT in 1024
-do
-for N_GPUS in 4;
-do 
+# task args
+TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning --guidance_scale 3.5"
 
-TASK_ARGS="--height $HEIGHT \
---width $HEIGHT \
---no_use_resolution_binning \
-"
+# cache args
+# CACHE_ARGS="--use_teacache"
+# CACHE_ARGS="--use_fbcache"
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 1"
+N_GPUS=8
+PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2"
 
-# Flux only supports SP, do not set the pipefusion degree
-if [ "$MODEL_TYPE" = "Flux" ]; then
-PARALLEL_ARGS="--ulysses_degree $N_GPUS"
-elif [ "$MODEL_TYPE" = "HunyuanDiT" ]; then
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 4 --ring_degree 1"
-fi
-
+# CFG_ARGS="--use_cfg_parallel"
 
 # By default, num_pipeline_patch = pipefusion_degree, and you can tune this parameter to achieve optimal performance.
 # PIPEFUSION_ARGS="--num_pipeline_patch 8 "
@@ -84,6 +47,15 @@ fi
 
 # PARALLLEL_VAE="--use_parallel_vae"
 
+# Another compile option is `--use_onediff` which will use onediff's compiler.
+# COMPILE_FLAG="--use_torch_compile"
+
+
+# Use this flag to quantize the T5 text encoder, which could reduce the memory usage and have no effect on the result quality.
+# QUANTIZE_FLAG="--use_fp8_t5_encoder"
+
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
+
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
 $PARALLEL_ARGS \
@@ -91,12 +63,10 @@ $TASK_ARGS \
 $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
---warmup_steps 0 \
---prompt "A small dog" \
+--warmup_steps 1 \
+--prompt "brown dog laying on the ground with a metal bowl in front of him." \
 $CFG_ARGS \
-$PARALLLEL_VAE
-
-done
-done
-
-
+$PARALLLEL_VAE \
+$COMPILE_FLAG \
+$QUANTIZE_FLAG \
+$CACHE_ARGS \

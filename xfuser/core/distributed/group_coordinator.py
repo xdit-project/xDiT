@@ -9,7 +9,14 @@ import pickle
 
 import torch
 import torch.distributed
+from torch.cuda import synchronize
 from torch.distributed import Backend, ProcessGroup
+
+try:
+    import torch_musa
+    from torch_musa.core.device import synchronize
+except ModuleNotFoundError:
+    pass
 
 import xfuser.envs as envs
 from xfuser.logger import init_logger
@@ -129,10 +136,7 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{local_rank}")
-        else:
-            self.device = torch.device("cpu")
+        self.device = envs.get_device(local_rank)
 
     @property
     def first_rank(self):
@@ -196,7 +200,7 @@ class GroupCoordinator:
         world_size = self.world_size
         return (world_size - rank_in_group - 1) % world_size
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor, op=torch._C._distributed_c10d.ReduceOp.SUM) -> torch.Tensor:
         """
         NOTE: This operation will be applied in-place or out-of-place.
         Always assume this function modifies its input, but use the return
@@ -206,7 +210,7 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+            torch.distributed.all_reduce(input_, op=op, group=self.device_group)
         return input_
 
     def all_gather(
@@ -223,15 +227,18 @@ class GroupCoordinator:
             # Convert negative dim to positive.
             dim += input_.dim()
         # Allocate output tensor.
-        input_size = input_.size()
+        input_size = list(input_.size())
+        input_size[0] *= world_size
         output_tensor = torch.empty(
-            (world_size,) + input_size, dtype=input_.dtype, device=input_.device
+            input_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
         torch.distributed.all_gather_into_tensor(
             output_tensor, input_, group=self.device_group
         )
         if dim != 0:
+            input_size[0] //= world_size
+            output_tensor = output_tensor.reshape([world_size, ] + input_size)
             output_tensor = output_tensor.movedim(0, dim)
 
         if separate_tensors:
@@ -689,10 +696,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{local_rank}")
-        else:
-            self.device = torch.device("cpu")
+        self.device = envs.get_device(local_rank)
 
         self.recv_buffer_set: bool = False
         self.recv_tasks_queue: List[Tuple[str, int]] = []
@@ -862,7 +866,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
 
         # To protect against race condition when using batch_isend_irecv().
         # should take this out once the bug with batch_isend_irecv is resolved.
-        torch.cuda.synchronize()
+        synchronize()
 
         ops = []
         recv_prev_shape_tensor = None
@@ -895,7 +899,7 @@ class PipelineGroupCoordinator(GroupCoordinator):
             for req in reqs:
                 req.wait()
 
-        torch.cuda.synchronize()
+        synchronize()
 
         recv_prev_shape = [0, 0, 0]
         if recv_prev_shape_tensor is not None:

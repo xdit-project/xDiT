@@ -1398,7 +1398,8 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                 )
                 from yunchang.kernels import AttnType
                 
-                if HAS_AITER and 'AITER' in AttnType.__members__:
+                if HAS_AITER:
+                    assert 'AITER' in AttnType.__members__, f"AttnType.AITER not implemented in existing yunchang version {yunchang.__version__}, consider upgrading."
                     self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache,
                         attn_type=AttnType.AITER,

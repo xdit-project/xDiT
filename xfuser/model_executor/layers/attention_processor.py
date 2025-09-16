@@ -55,6 +55,9 @@ HAS_AITER = env_info["has_aiter"]
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
+if HAS_LONG_CTX_ATTN:
+    from yunchang.kernels import AttnType
+
 
 def is_v100():
     if not torch.cuda.is_available():
@@ -216,8 +219,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
-        )
-        
+        )      
         set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
         if get_fast_attn_enable():
@@ -1319,7 +1321,6 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                 and use_long_ctx_attn_kvcache
                 and get_sequence_parallel_world_size() > 1
             )
-            
             set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
         def __call__(
@@ -1598,11 +1599,10 @@ class xFuserSanaLinearAttnProcessor2_0(SanaLinearAttnProcessor2_0):
 
             if HAS_FLASH_ATTN:
                 self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                    attn_type=AttnType.FA,
                 )
             else:
-                from yunchang.kernels import AttnType
-
                 self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
                     attn_type=AttnType.TORCH,

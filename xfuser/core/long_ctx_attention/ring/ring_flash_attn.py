@@ -21,10 +21,6 @@ try:
 except ImportError:
     flash_attn = None
     _flash_attn_forward = None
-    if torch.cuda.is_available():
-        from yunchang.kernels.attention import pytorch_attn_forward
-    else:
-        pytorch_attn_forward = None
 
 def xdit_ring_flash_attn_forward(
     process_group,

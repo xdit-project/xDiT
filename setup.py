@@ -37,7 +37,7 @@ if __name__ == "__main__":
         ],
         extras_require={
             "diffusers": [
-                "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux
+                "diffusers>=0.31.0",  # NOTE: diffusers>=0.32.0.dev is necessary for CogVideoX and Flux. HunyuanVideo depends on diffusers>=0.34.0
             ],
             "flash-attn": [
                 "flash-attn>=2.6.0",  # NOTE: flash-attn is necessary if ring_degree > 1

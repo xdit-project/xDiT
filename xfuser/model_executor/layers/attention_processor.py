@@ -51,6 +51,7 @@ else:
 logger = init_logger(__name__)
 
 env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_AITER = env_info["has_aiter"]
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 
@@ -69,6 +70,36 @@ def torch_compile_disable_if_v100(func):
     if is_v100():
         return torch.compiler.disable(func)
     return func
+
+
+def set_hybrid_seq_parallel_attn(self, use_long_ctx_attn_kvcache):
+    """
+    Initialize hybrid sequence-parallel attention based on available backend.
+    """
+    if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        from xfuser.core.long_ctx_attention import (
+            xFuserLongContextAttention,
+        )
+        from yunchang.kernels import AttnType
+
+        if HAS_AITER:
+            assert 'AITER' in AttnType.__members__, f"AttnType.AITER not implemented in yunchang version: {yunchang.__version__}. Upgrade to latest version from source."
+            self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                    attn_type=AttnType.AITER,
+            )
+        elif HAS_FLASH_ATTN:
+            self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                    attn_type=AttnType.FA,
+            )
+        else:
+            self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
+                    use_kv_cache=self.use_long_ctx_attn_kvcache,
+                    attn_type=AttnType.TORCH,
+            )
+    else:
+        self.hybrid_seq_parallel_attn = None
 
 
 class xFuserAttentionBaseWrapper(xFuserLayerBaseWrapper):
@@ -191,24 +222,8 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
-        )
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from xfuser.core.long_ctx_attention import (
-                xFuserLongContextAttention,
-            )
-
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
-        else:
-            self.hybrid_seq_parallel_attn = None
+        )      
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
         if get_fast_attn_enable():
             self.fast_attn = xFuserFastAttention()
@@ -399,21 +414,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from xfuser.core.long_ctx_attention import (
-                xFuserLongContextAttention,
-            )
-
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
         if get_fast_attn_enable():
             self.fast_attn = xFuserFastAttention()
@@ -631,21 +632,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from xfuser.core.long_ctx_attention import (
-                xFuserLongContextAttention,
-            )
-
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
     def __call__(
         self,
@@ -836,23 +823,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from xfuser.core.long_ctx_attention import (
-                xFuserLongContextAttention,
-            )
-
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
-        else:
-            self.hybrid_seq_parallel_attn = None
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
     # NOTE() torch.compile dose not works for V100
     @torch_compile_disable_if_v100
@@ -1038,23 +1009,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from xfuser.core.long_ctx_attention import (
-                xFuserLongContextAttention,
-            )
-
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
-        else:
-            self.hybrid_seq_parallel_attn = None
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
     def __call__(
         self,
@@ -1213,23 +1168,7 @@ class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-            from xfuser.core.long_ctx_attention import (
-                xFuserLongContextAttention,
-            )
-
-            if HAS_FLASH_ATTN:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.FA,
-                )
-            else:
-                self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                    use_kv_cache=self.use_long_ctx_attn_kvcache,
-                    attn_type=AttnType.TORCH,
-                )
-        else:
-            self.hybrid_seq_parallel_attn = None
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
     def __call__(
         self,
@@ -1385,23 +1324,7 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                 and use_long_ctx_attn_kvcache
                 and get_sequence_parallel_world_size() > 1
             )
-            if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
-                from xfuser.core.long_ctx_attention import (
-                    xFuserLongContextAttention,
-                )
-
-                if HAS_FLASH_ATTN:
-                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                        use_kv_cache=self.use_long_ctx_attn_kvcache,
-                        attn_type=AttnType.FA,
-                    )
-                else:
-                    self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
-                        use_kv_cache=self.use_long_ctx_attn_kvcache,
-                        attn_type=AttnType.TORCH,
-                    )
-            else:
-                self.hybrid_seq_parallel_attn = None
+            set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
         def __call__(
             self,

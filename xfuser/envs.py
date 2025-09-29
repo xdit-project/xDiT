@@ -164,12 +164,12 @@ class PackagesEnvChecker:
         return cls._instance
 
     def initialize(self):
-        self.packages_info = {
-            "has_aiter": self.check_aiter(),
-            "has_flash_attn": self.check_flash_attn(),
-            "has_long_ctx_attn": self.check_long_ctx_attn(),
-            "diffusers_version": self.check_diffusers_version(),
-        }
+        packages_info = {}
+        packages_info["has_aiter"] = self.check_aiter()
+        packages_info["has_flash_attn"] = self.check_flash_attn(packages_info)
+        packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
+        packages_info["diffusers_version"] = self.check_diffusers_version()
+        self.packages_info = packages_info
 
     def check_aiter(self):
         """
@@ -188,7 +188,7 @@ class PackagesEnvChecker:
             return False
 
 
-    def check_flash_attn(self):
+    def check_flash_attn(self, packages_info):
         if not torch.cuda.is_available():
             return False
         if _is_musa():
@@ -209,10 +209,11 @@ class PackagesEnvChecker:
                     raise ImportError(f"install flash_attn >= 2.6.0")
                 return True
         except ImportError:
-            logger.warning(
-                f'Flash Attention library "flash_attn" not found, '
-                f"using pytorch attention implementation"
-            )
+            if not packages_info.get("has_aiter", False):
+                logger.warning(
+                    f'Flash Attention library "flash_attn" not found, '
+                    f"using pytorch attention implementation"
+                )
             return False
 
     def check_long_ctx_attn(self):

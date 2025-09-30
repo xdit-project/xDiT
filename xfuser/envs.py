@@ -44,16 +44,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "XDIT_LOGGING_LEVEL": lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
 }
 
-
 def _is_hip():
     has_rocm = torch.version.hip is not None
     return has_rocm
 
-
 def _is_cuda():
     has_cuda = torch.version.cuda is not None
     return has_cuda
-
 
 def _is_musa():
     try:
@@ -117,7 +114,6 @@ def get_torch_distributed_backend() -> str:
         raise NotImplementedError(
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
         )
-
 
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================

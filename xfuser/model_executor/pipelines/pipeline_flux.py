@@ -40,6 +40,7 @@ from xfuser.core.distributed import (
 from xfuser.core.distributed.group_coordinator import GroupCoordinator
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
+from ...envs import _is_npu
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -75,13 +76,14 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
+        device = "npu" if _is_npu() else "cuda"
         self.__call__(
             height=input_config.height,
             width=input_config.width,
             prompt=prompt,
             num_inference_steps=steps,
             max_sequence_length=input_config.max_sequence_length,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=device).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps

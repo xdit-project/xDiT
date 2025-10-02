@@ -22,6 +22,11 @@ try:
 except ModuleNotFoundError:
     pass
 
+try:
+    from torch.npu import set_device, device_count
+except ModuleNotFoundError:
+    pass
+
 from .utils import RankGenerator
 
 env_info = envs.PACKAGES_CHECKER.get_packages_info()

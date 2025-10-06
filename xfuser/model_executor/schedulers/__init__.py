@@ -11,6 +11,7 @@ from .scheduling_ddpm import xFuserDDPMSchedulerWrapper
 from .scheduling_ddim_cogvideox import xFuserCogVideoXDDIMSchedulerWrapper
 from .scheduling_dpm_cogvideox import xFuserCogVideoXDPMSchedulerWrapper
 from .scheduling_scm import xFuserSCMSchedulerWrapper
+from .scheduling_unipc_multistep import xFuserUniPCMultistepScheduler
 
 __all__ = [
     "xFuserSchedulerWrappersRegister",
@@ -22,4 +23,5 @@ __all__ = [
     "xFuserCogVideoXDPMSchedulerWrapper",
     "xFuserDDPMSchedulerWrapper",
     "xFuserSCMSchedulerWrapper",
+    "xFuserUniPCMultistepScheduler",
 ]

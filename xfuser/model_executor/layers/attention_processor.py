@@ -7,6 +7,7 @@ import torch.distributed
 from torch.nn import functional as F
 from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
+from diffusers.models.transformers.transformer_wan import WanAttention
 from diffusers.models.transformers.sana_transformer import SanaAttnProcessor2_0
 from diffusers.models.attention_processor import (
     AttnProcessor2_0,
@@ -15,6 +16,8 @@ from diffusers.models.attention_processor import (
     CogVideoXAttnProcessor2_0,
     SanaLinearAttnProcessor2_0,
 )
+
+from diffusers.models.transformers.transformer_wan import WanAttnProcessor
 
 try:
     from diffusers.models.transformers.transformer_hunyuan_video import (
@@ -145,6 +148,32 @@ class xFuserAttentionProcessorRegister:
             f"Attention Processor class {processor.__class__.__name__} is not supported by xFuser"
         )
 
+@xFuserAttentionProcessorRegister.register(WanAttnProcessor)
+class xFuserWanAttnProcessorWrapper(WanAttnProcessor):
+    pass
+
+@xFuserLayerWrappersRegister.register(WanAttention)
+class xFuserWanAttentionWrapper(xFuserAttentionBaseWrapper):
+    def __init__(
+            self,
+            attention: WanAttention,
+            ##TODO: LATTE?
+    ):
+        super().__init__(attention=attention)
+        self.processor = xFuserAttentionProcessorRegister.get_processor(
+            attention.processor
+        )()
+        ##TODO: LATTE TEMPORAL?
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, rotary_emb, **kwargs)
 
 @xFuserLayerWrappersRegister.register(Attention)
 class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):

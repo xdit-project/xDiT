@@ -191,7 +191,7 @@ def main():
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     ).frames[0]
     if pipe.is_dp_last_group():
-        export_to_video(output, "i2v_output.mp4")
+        export_to_video(output, "i2v_output.mp4", fps=25)
 
     get_runtime_state().destroy_distributed_env()
 

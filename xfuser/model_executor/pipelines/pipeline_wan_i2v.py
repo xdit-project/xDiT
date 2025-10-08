@@ -246,8 +246,10 @@ class xFuserWanImageToVideoPipeline(xFuserPipelineBaseWrapper):
                 indicating whether the corresponding generated image contains "not-safe-for-work" (nsfw) content.
         """
 
-        max_area = 480 * 832
+        ##TODO: Figure out why this needs to be here
+        max_area = height * width
         aspect_ratio = height / width
+
         mod_value = self.vae_scale_factor_spatial * self.transformer.config.patch_size[1]
         height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
         width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value

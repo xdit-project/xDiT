@@ -47,7 +47,7 @@ class xFuserWanTransformer3DWrapper(xFuserTransformerBaseWrapper):
     ):
         super().__init__(
             transformer=transformer,
-            submodule_name_to_wrap=["attn1"]#, "attn2"]# "WanTransformerBlock"],
+            submodule_name_to_wrap=["attn1", "attn2"]# "WanTransformerBlock"],
         )
 
     def _split_transformer_blocks(

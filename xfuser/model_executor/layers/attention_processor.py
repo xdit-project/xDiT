@@ -151,7 +151,7 @@ class xFuserAttentionProcessorRegister:
         )
 
 @xFuserAttentionProcessorRegister.register(WanAttnProcessor)
-class xFuserWanAttnProcessorWrapper(WanAttnProcessor):
+class xFuserWanAttnProcessor(WanAttnProcessor):
 
     def __init__(self):
         super().__init__()
@@ -252,7 +252,7 @@ class xFuserWanAttnProcessorWrapper(WanAttnProcessor):
             hidden_states_img = hidden_states_img.type_as(query)
 
         hidden_states = self.hybrid_seq_parallel_attn(
-            None, query, key, value
+           None, query, key, value
         )
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)

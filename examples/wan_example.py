@@ -26,14 +26,17 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
 )
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import xFuserWanImageToVideoPipeline
+from xfuser.model_executor.layers.attention_processor import xFuserWanAttnProcessor
 
 def parallelize_transformer(pipe):
     transformer = pipe.transformer
+    transformer_2 = pipe.transformer_2
     original_forward = transformer.forward
 
 
 
     @functools.wraps(transformer.__class__.forward)
+    @functools.wraps(transformer_2.__class__.forward)
     def new_forward(
         self,
         hidden_states: torch.Tensor,
@@ -153,9 +156,19 @@ def parallelize_transformer(pipe):
 
         return Transformer2DModelOutput(sample=output)
 
+    new_forward_1 = new_forward.__get__(transformer)
+    new_forward_2 = new_forward.__get__(transformer_2)
+    transformer.forward = new_forward_1
+    transformer_2.forward = new_forward_2
 
-    new_forward = new_forward.__get__(transformer)
-    transformer.forward = new_forward
+    for block in transformer.blocks:
+        block.attn1.processor = xFuserWanAttnProcessor()
+        block.attn2.processor = xFuserWanAttnProcessor()
+
+    for block in transformer_2.blocks:
+        block.attn1.processor = xFuserWanAttnProcessor()
+        block.attn2.processor = xFuserWanAttnProcessor()
+
 
 
 def main():

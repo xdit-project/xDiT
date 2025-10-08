@@ -1,9 +1,12 @@
+import os
 import time
 import torch
 import functools
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from torch.profiler import profile, ProfilerActivity, record_function
+
 
 from typing import Any, Dict, List, Tuple, Callable, Optional, Union
 from xfuser import xFuserFluxPipeline, xFuserArgs
@@ -162,6 +165,7 @@ def main():
     print(engine_args)
     engine_config, input_config = engine_args.create_config()
     print(input_config)
+    rank = int(os.getenv("RANK", 0))
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
     dtype = torch.bfloat16
@@ -179,17 +183,35 @@ def main():
     )
     #pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
 
-    output = pipe(
-        height=input_config.height,
-        width=input_config.width,
-        image=image,
-        prompt=input_config.prompt,
-        #negative_prompt=X,
-        num_inference_steps=40,
-        num_frames=81,
-        guidance_scale=input_config.guidance_scale,
-        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-    ).frames[0]
+    use_profiling = False
+
+    def run_pipe(input_config, image):
+        start = time.perf_counter()
+        output = pipe(
+            height=input_config.height,
+            width=input_config.width,
+            image=image,
+            prompt=input_config.prompt,
+            #negative_prompt=X,
+            num_inference_steps=40,
+            num_frames=81,
+            guidance_scale=input_config.guidance_scale,
+            generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+        ).frames[0]
+        end = time.perf_counter()
+        print(f"Iteration took {end - start}s")
+        return output
+
+    if use_profiling:
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True, experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)) as prof:
+            with record_function("model_inference"):
+                output = run_pipe(input_config, image)
+        print(prof.key_averages(group_by_stack_n=25).table(sort_by="cuda_time_total", row_limit=15))
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+        prof.export_chrome_trace(f"trace_{rank}.json.gz")
+
+    else:
+        output = run_pipe(input_config, image)
     if pipe.is_dp_last_group():
         export_to_video(output, "i2v_output.mp4", fps=25)
 

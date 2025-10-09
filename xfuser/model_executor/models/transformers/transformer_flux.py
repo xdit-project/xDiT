@@ -1,10 +1,15 @@
-from typing import Optional, Dict, Any, Union
+import inspect
 import torch
 import torch.distributed
 import torch.nn as nn
+from typing import Optional, Dict, Any, Union
 
-from diffusers.models.embeddings import PatchEmbed
-from diffusers.models.transformers.transformer_flux import FluxTransformer2DModel
+#from diffusers.models.embeddings import PatchEmbed
+from diffusers.models.transformers.transformer_flux import (
+    FluxTransformer2DModel,
+    FluxAttnProcessor,
+    FluxAttention,
+)
 from diffusers.models.transformers.transformer_2d import Transformer2DModelOutput
 from diffusers.utils import (
     is_torch_version,
@@ -12,26 +17,167 @@ from diffusers.utils import (
     USE_PEFT_BACKEND,
     unscale_lora_layers,
 )
+from diffusers.models.attention import FeedForward
+from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
 )
-from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed import (
+    get_sequence_parallel_world_size,
+)
+
 from xfuser.logger import init_logger
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.transformers.register import (
     xFuserTransformerWrappersRegister,
 )
 from xfuser.model_executor.models.transformers.base_transformer import (
     xFuserTransformerBaseWrapper,
 )
+from xfuser.model_executor.layers import xFuserLayerWrappersRegister
+from xfuser.model_executor.layers.attention_processor import (
+    set_hybrid_seq_parallel_attn,
+    xFuserAttentionBaseWrapper,
+    xFuserAttentionProcessorRegister
+)
+from xfuser.model_executor.layers.usp import USP
 
 logger = init_logger(__name__)
-from diffusers.models.attention import FeedForward
+
+env_info = PACKAGES_CHECKER.get_packages_info()
+HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 
 
-@xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
+def _get_projections(attn: "FluxAttention", hidden_states, encoder_hidden_states=None):
+    query = attn.to_q(hidden_states)
+    key = attn.to_k(hidden_states)
+    value = attn.to_v(hidden_states)
+
+    encoder_query = encoder_key = encoder_value = None
+    if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+        encoder_query = attn.add_q_proj(encoder_hidden_states)
+        encoder_key = attn.add_k_proj(encoder_hidden_states)
+        encoder_value = attn.add_v_proj(encoder_hidden_states)
+
+    return query, key, value, encoder_query, encoder_key, encoder_value
+
+
+def _get_fused_projections(attn: "FluxAttention", hidden_states, encoder_hidden_states=None):
+    query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
+
+    encoder_query = encoder_key = encoder_value = (None,)
+    if encoder_hidden_states is not None and hasattr(attn, "to_added_qkv"):
+        encoder_query, encoder_key, encoder_value = attn.to_added_qkv(encoder_hidden_states).chunk(3, dim=-1)
+
+    return query, key, value, encoder_query, encoder_key, encoder_value
+
+
+def _get_qkv_projections(attn: "FluxAttention", hidden_states, encoder_hidden_states=None):
+    if attn.fused_projections:
+        return _get_fused_projections(attn, hidden_states, encoder_hidden_states)
+    return _get_projections(attn, hidden_states, encoder_hidden_states)
+
+@xFuserLayerWrappersRegister.register(FluxAttention)
+class xFuserFluxAttentionWrapper(xFuserAttentionBaseWrapper):
+    def __init__(
+        self,
+        attention: FluxAttention,
+    ):
+        super().__init__(attention=attention)
+        self.processor = xFuserAttentionProcessorRegister.get_processor(
+            attention.processor
+        )()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        attn_parameters = set(inspect.signature(self.processor.__call__).parameters.keys())
+        quiet_attn_parameters = {"ip_adapter_masks", "ip_hidden_states"}
+        unused_kwargs = [k for k, _ in kwargs.items() if k not in attn_parameters and k not in quiet_attn_parameters]
+        if len(unused_kwargs) > 0:
+            logger.warning(
+                f"joint_attention_kwargs {unused_kwargs} are not expected by {self.processor.__class__.__name__} and will be ignored."
+            )
+        kwargs = {k: w for k, w in kwargs.items() if k in attn_parameters}
+        return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, **kwargs)
+
+xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
+class xFuserFluxAttnProcessor(FluxAttnProcessor):
+
+    def __init__(self):
+        super().__init__()
+        use_long_ctx_attn_kvcache = True
+        self.use_long_ctx_attn_kvcache = (
+            HAS_LONG_CTX_ATTN
+            and use_long_ctx_attn_kvcache
+            and get_sequence_parallel_world_size() > 1
+        )
+        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
+
+    def __call__(
+        self,
+        attn: "FluxAttention",
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        query, key, value, encoder_query, encoder_key, encoder_value = _get_qkv_projections(
+            attn, hidden_states, encoder_hidden_states
+        )
+        query = query.unflatten(-1, (attn.heads, -1))
+        key = key.unflatten(-1, (attn.heads, -1))
+        value = value.unflatten(-1, (attn.heads, -1))
+
+        query = attn.norm_q(query)
+        key = attn.norm_k(key)
+
+
+        if attn.added_kv_proj_dim is not None:
+            encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
+            encoder_key = encoder_key.unflatten(-1, (attn.heads, -1))
+            encoder_value = encoder_value.unflatten(-1, (attn.heads, -1))
+
+            encoder_query = attn.norm_added_q(encoder_query)
+            encoder_key = attn.norm_added_k(encoder_key)
+
+            query = torch.cat([encoder_query, query], dim=1)
+            key = torch.cat([encoder_key, key], dim=1)
+            value = torch.cat([encoder_value, value], dim=1)
+
+        if image_rotary_emb is not None:
+            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+
+        hidden_states = self.hybrid_seq_parallel_attn(None, query, key, value)
+        hidden_states = hidden_states.flatten(2, 3)
+        hidden_states = hidden_states.to(query.dtype)
+
+        if encoder_hidden_states is not None:
+            encoder_hidden_states, hidden_states = hidden_states.split_with_sizes(
+                [encoder_hidden_states.shape[1], hidden_states.shape[1] - encoder_hidden_states.shape[1]], dim=1
+            )
+            hidden_states = attn.to_out[0](hidden_states)
+            hidden_states = attn.to_out[1](hidden_states)
+            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+            return hidden_states, encoder_hidden_states
+        else:
+            return hidden_states
+
+
+
+
+
+#@xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
 class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
         self,

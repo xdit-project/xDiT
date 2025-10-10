@@ -109,7 +109,7 @@ class xFuserFluxAttentionWrapper(xFuserAttentionBaseWrapper):
         kwargs = {k: w for k, w in kwargs.items() if k in attn_parameters}
         return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
-xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
+@xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
 class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
     def __init__(self):
@@ -177,7 +177,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
 
 
-#@xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
+@xFuserTransformerWrappersRegister.register(FluxTransformer2DModel)
 class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
         self,
@@ -324,7 +324,6 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             #     hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
 
         # if self.stage_info.after_flags["transformer_blocks"]:
-        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         for index_block, block in enumerate(self.single_transformer_blocks):
             if self.training and self.gradient_checkpointing:
@@ -341,17 +340,19 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
                 ckpt_kwargs: Dict[str, Any] = (
                     {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 )
-                hidden_states = torch.utils.checkpoint.checkpoint(
+                encoder_hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     hidden_states,
+                    encoder_hidden_states,
                     temb,
                     image_rotary_emb,
                     **ckpt_kwargs,
                 )
 
             else:
-                hidden_states = block(
+                encoder_hidden_states, hidden_states = block(
                     hidden_states=hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
                     temb=temb,
                     image_rotary_emb=image_rotary_emb,
                 )
@@ -365,6 +366,8 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
             #         + controlnet_single_block_samples[index_block // interval_control]
             #     )
 
+
+        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
         encoder_hidden_states = hidden_states[:, : encoder_hidden_states.shape[1], ...]
         hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...]
 

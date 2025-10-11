@@ -17,6 +17,10 @@ try:
 except ModuleNotFoundError:
     pass
 
+import xfuser.envs as envs
+if envs._is_npu():
+    from torch.npu import manual_seed as device_manual_seed
+    from torch.npu import manual_seed_all as device_manual_seed_all
 from xfuser.config.config import (
     ParallelConfig,
     RuntimeConfig,

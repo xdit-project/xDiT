@@ -9,6 +9,10 @@ try:
 except ModuleNotFoundError:
     pass
 
+import xfuser.envs as envs
+if envs._is_npu():
+    from torch.npu import synchronize
+
 def gpu_timer_decorator(func):
     def wrapper(*args, **kwargs):
         synchronize()

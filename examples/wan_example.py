@@ -8,24 +8,18 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from torch.profiler import profile, ProfilerActivity, record_function
 
 
-from typing import Any, Dict, List, Tuple, Callable, Optional, Union
-from xfuser import xFuserFluxPipeline, xFuserArgs
+from typing import Any, Dict, Optional, Union
+from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_world_group,
-    get_data_parallel_rank,
-    get_data_parallel_world_size,
     get_runtime_state,
     get_sp_group,
-    is_dp_last_group,
-    get_pipeline_parallel_world_size,
-    get_classifier_free_guidance_world_size,
-    get_tensor_model_parallel_world_size,
-    get_data_parallel_world_size,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
+    initialize_runtime_state,
+    is_dp_last_group,
 )
-from xfuser.model_executor.pipelines.pipeline_wan_i2v import xFuserWanImageToVideoPipeline
 from xfuser.model_executor.layers.attention_processor import xFuserWanAttnProcessor
 
 def parallelize_transformer(pipe):
@@ -52,15 +46,6 @@ def parallelize_transformer(pipe):
             lora_scale = attention_kwargs.pop("scale", 1.0)
         else:
             lora_scale = 1.0
-
-        # if USE_PEFT_BACKEND:
-        #     # weight the lora layers by setting `lora_scale` for each PEFT layer
-        #     scale_lora_layers(self, lora_scale)
-        # else:
-        #     if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
-        #         logger.warning(
-        #             "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
-        #         )
 
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.config.patch_size
@@ -139,17 +124,12 @@ def parallelize_transformer(pipe):
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
-        #hidden_states = get_cfg_group().all_gather(hidden_states, dim=0)
 
         hidden_states = hidden_states.reshape(
             batch_size, post_patch_num_frames, post_patch_height, post_patch_width, p_t, p_h, p_w, -1
         )
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
         output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
-
-        # if USE_PEFT_BACKEND:
-        #     # remove `lora_scale` from each PEFT layer
-        #     unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)
@@ -183,11 +163,11 @@ def main():
     local_rank = get_world_group().local_rank
     dtype = torch.bfloat16
     device = torch.device("cuda")
-    pipe = xFuserWanImageToVideoPipeline.from_pretrained(
+    pipe = WanImageToVideoPipeline.from_pretrained(
         pretrained_model_name_or_path="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
-        engine_config=engine_config,
         torch_dtype=torch.bfloat16,
     )
+    initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
 
@@ -225,7 +205,7 @@ def main():
 
     else:
         output = run_pipe(input_config, image)
-    if pipe.is_dp_last_group():
+    if is_dp_last_group():
         export_to_video(output, "i2v_output.mp4", fps=25)
 
     get_runtime_state().destroy_distributed_env()

@@ -8,7 +8,6 @@ from .hunyuan_transformer_2d import xFuserHunyuanDiT2DWrapper
 from .cogvideox_transformer_3d import xFuserCogVideoXTransformer3DWrapper
 from .consisid_transformer_3d import xFuserConsisIDTransformer3DWrapper
 from .sana_transformer_2d import xFuserSanaTransformer2DWrapper
-from .transformer_wan import xFuserWanTransformer3DWrapper
 
 __all__ = [
     "xFuserTransformerWrappersRegister",
@@ -21,7 +20,6 @@ __all__ = [
     "xFuserConsisIDTransformer3DWrapper",
     "xFuserSanaTransformer2DWrapper"
     "xFuserWanTransformer3DWrapper",
-]
 
 # Gating some imports based on diffusers version, as they import part of diffusers
 if has_valid_diffusers_version("flux"):

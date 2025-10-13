@@ -19,6 +19,11 @@ except ModuleNotFoundError:
     pass
 
 import xfuser.envs as envs
+if envs._is_npu():
+    print("torch.npu synchronize")
+    from torch.npu import synchronize
+
+import xfuser.envs as envs
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)

@@ -67,24 +67,36 @@ def _is_mps():
     return torch.backends.mps.is_available()
 
 
+def _is_npu():
+    try:
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return True
+    except ModuleNotFoundError:
+        return False
+
+
 def get_device(local_rank: int) -> torch.device:
-    if torch.cuda.is_available():
+    if _is_cuda():
         return torch.device("cuda", local_rank)
     elif _is_musa():
         return torch.device("musa", local_rank)
     elif _is_mps():
         return torch.device("mps")
+    elif _is_npu():
+        return torch.device("npu", local_rank)
     else:
         return torch.device("cpu")
 
 
 def get_device_name() -> str:
-    if torch.cuda.is_available():
+    if _is_cuda():
         return "cuda"
     elif _is_musa():
         return "musa"
     elif _is_mps():
         return "mps"
+    elif _is_npu():
+        return "npu"
     else:
         return "cpu"
 
@@ -100,6 +112,8 @@ def get_device_version():
         return torch.version.musa
     elif _is_mps():
         return None
+    elif _is_npu():
+        return None
     else:
         raise NotImplementedError(
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
@@ -107,12 +121,14 @@ def get_device_version():
 
 
 def get_torch_distributed_backend() -> str:
-    if torch.cuda.is_available():
+    if _is_cuda():
         return "nccl"
     elif _is_musa():
         return "mccl"
     elif _is_mps():
         return "gloo"
+    elif _is_npu():
+        return "hccl"
     else:
         raise NotImplementedError(
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
@@ -191,6 +207,12 @@ class PackagesEnvChecker:
     def check_flash_attn(self, packages_info):
         if not torch.cuda.is_available():
             return False
+
+        # Check if torch_npu is available
+        if _is_npu():
+            logger.info("falsh_attn is not ready on torch_npu for now")
+            return False
+
         if _is_musa():
             logger.info(
                 "Flash Attention library is not supported on MUSA for the moment."

@@ -11,6 +11,10 @@ try:
 except ModuleNotFoundError:
     pass
 
+import xfuser.envs as envs
+if envs._is_npu():
+    from torch.npu import empty_cache
+
 from xfuser.core.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tensor_model_parallel_rank,

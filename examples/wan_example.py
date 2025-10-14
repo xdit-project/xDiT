@@ -167,6 +167,7 @@ def main():
         pretrained_model_name_or_path="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
         torch_dtype=torch.bfloat16,
     )
+    pipe.vae_scale_factor = pipe.vae_scale_factor_spatial ##TODO: figure this one out
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
@@ -174,11 +175,11 @@ def main():
     image = load_image(
             "https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/wan_i2v_input.JPG"
     )
-    #pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
 
     use_profiling = False
 
     def run_pipe(input_config, image):
+        torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         output = pipe(
             height=input_config.height,
@@ -186,14 +187,23 @@ def main():
             image=image,
             prompt=input_config.prompt,
             #negative_prompt=X,
-            num_inference_steps=40,
-            num_frames=81,
+            num_inference_steps=input_config.num_inference_steps,
+            num_frames=input_config.num_frames,
             guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         ).frames[0]
         end = time.perf_counter()
-        print(f"Iteration took {end - start}s")
+        peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+        print(f"Iteration took {end - start}s, Peak memory: {peak_memory / 1024 ** 2:.2f} MB")
         return output
+    
+    if engine_config.runtime_config.use_torch_compile:
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        pipe.transformer = torch.compile(pipe.transformer, mode="max-autotune-no-cudagraphs")
+        pipe.transformer_2 = torch.compile(pipe.transformer_2, mode="max-autotune-no-cudagraphs")
+
+        # one step to warmup the torch compiler
+        _ = run_pipe(input_config, image)
 
     if use_profiling:
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True, experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)) as prof:

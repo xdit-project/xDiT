@@ -717,7 +717,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
 
             hidden_states_img = self.hybrid_seq_parallel_attn(
-                None, query, key, value
+                None, query, key_img, value_img
             )
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)

@@ -21,6 +21,12 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.layers.attention_processor import xFuserWanAttnProcessor
 
+def maybe_transformer_2(transformer_2):
+    if transformer_2 is not None:
+        return functools.wraps(transformer_2.__class__.forward)
+    else:
+        return (lambda f:f)
+
 def parallelize_transformer(pipe):
     transformer = pipe.transformer
     transformer_2 = pipe.transformer_2
@@ -28,7 +34,7 @@ def parallelize_transformer(pipe):
 
 
     @functools.wraps(transformer.__class__.forward)
-    @functools.wraps(transformer_2.__class__.forward)
+    @maybe_transformer_2(transformer_2)
     def new_forward(
         self,
         hidden_states: torch.Tensor,
@@ -74,10 +80,13 @@ def parallelize_transformer(pipe):
             timestep_proj = timestep_proj.unflatten(1, (6, -1))
 
         if encoder_hidden_states_image is not None:
+            # We only reach this for Wan2.1, when doing cross attention with image embeddings
             encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
-
+        else:
+            # Wan2.1 fails if we chunk encoder_hidden_states when cross attention is used. Should cross attention really be sharded?
+            encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
-        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        
 
         freqs_cos, freqs_sin = rotary_emb
 
@@ -134,17 +143,18 @@ def parallelize_transformer(pipe):
         return Transformer2DModelOutput(sample=output)
 
     new_forward_1 = new_forward.__get__(transformer)
-    new_forward_2 = new_forward.__get__(transformer_2)
     transformer.forward = new_forward_1
-    transformer_2.forward = new_forward_2
+    if transformer_2 is not None:
+        new_forward_2 = new_forward.__get__(transformer_2)
+        transformer_2.forward = new_forward_2
 
     for block in transformer.blocks:
         block.attn1.processor = xFuserWanAttnProcessor()
         block.attn2.processor = xFuserWanAttnProcessor()
-
-    for block in transformer_2.blocks:
-        block.attn1.processor = xFuserWanAttnProcessor()
-        block.attn2.processor = xFuserWanAttnProcessor()
+    if transformer_2 is not None:
+        for block in transformer_2.blocks:
+            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn2.processor = xFuserWanAttnProcessor()
 
 
 
@@ -158,11 +168,11 @@ def main():
     local_rank = get_world_group().local_rank
     dtype = torch.bfloat16
     device = torch.device("cuda")
+    assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
     pipe = WanImageToVideoPipeline.from_pretrained(
-        pretrained_model_name_or_path="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
-        torch_dtype=torch.bfloat16,
+        pretrained_model_name_or_path=engine_config.model_config.model,
+        torch_dtype=torch.bfloat16
     )
-    pipe.vae_scale_factor = pipe.vae_scale_factor_spatial ##TODO: figure this one out
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
@@ -193,14 +203,15 @@ def main():
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         pipe.transformer = torch.compile(pipe.transformer, mode="max-autotune-no-cudagraphs")
-        pipe.transformer_2 = torch.compile(pipe.transformer_2, mode="max-autotune-no-cudagraphs")
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2 = torch.compile(pipe.transformer_2, mode="max-autotune-no-cudagraphs")
 
         # one step to warmup the torch compiler
         _ = run_pipe(input_config, image)
 
     output = run_pipe(input_config, image)
     if is_dp_last_group():
-        export_to_video(output, "wan_i2v_output.mp4", fps=25)
+        export_to_video(output, "i2v_output.mp4", fps=16)
 
     get_runtime_state().destroy_distributed_env()
 

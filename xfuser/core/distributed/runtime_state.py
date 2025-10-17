@@ -131,7 +131,7 @@ class DiTRuntimeState(RuntimeState):
         self.cogvideox = False
         self.consisid = False
         self.hunyuan_video = False
-        if pipeline.__class__.__name__.startswith(("CogVideoX", "ConsisID", "HunyuanVideo")):
+        if pipeline.__class__.__name__.startswith(("CogVideoX", "ConsisID", "HunyuanVideo", "Wan")):
             if pipeline.__class__.__name__.startswith("CogVideoX"):
                 self.cogvideox = True
             elif pipeline.__class__.__name__.startswith("ConsisID"):

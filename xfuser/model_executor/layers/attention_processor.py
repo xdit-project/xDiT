@@ -43,7 +43,7 @@ from xfuser.logger import init_logger
 from xfuser.envs import PACKAGES_CHECKER
 
 if torch.__version__ >= "2.5.0":
-    from xfuser.model_executor.layers.usp import USP
+    from xfuser.model_executor.layers.usp import USP, USP_joint
 else:
     from xfuser.model_executor.layers.usp_legacy import USP
 
@@ -1247,26 +1247,43 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                         [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
                     )
 
-                    encoder_query = encoder_query.transpose(1, 2)
-                    encoder_key = encoder_key.transpose(1, 2)
-                    encoder_value = encoder_value.transpose(1, 2)
+                #     encoder_query = encoder_query.transpose(1, 2)
+                #     encoder_key = encoder_key.transpose(1, 2)
+                #     encoder_value = encoder_value.transpose(1, 2)
 
-                query = query.transpose(1, 2)
-                key = key.transpose(1, 2)
-                value = value.transpose(1, 2)
+                # query = query.transpose(1, 2)
+                # key = key.transpose(1, 2)
+                # value = value.transpose(1, 2)
 
-                hidden_states = self.hybrid_seq_parallel_attn(
-                    None,
+                hidden_states = USP_joint(
                     query,
                     key,
                     value,
+                    encoder_query,
+                    encoder_key,
+                    encoder_value,
+                    "rear",
                     dropout_p=0.0,
-                    causal=False,
-                    joint_tensor_query=encoder_query,
-                    joint_tensor_key=encoder_key,
-                    joint_tensor_value=encoder_value,
-                    joint_strategy="rear",
+                    is_causal=False
                 )
+                # hidden_states = self.hybrid_seq_parallel_attn(
+                #     None,
+                #     query,
+                #     key,
+                #     value,
+                #     dropout_p=0.0,
+                #     causal=False,
+                #     joint_tensor_query=encoder_query,
+                #     joint_tensor_key=encoder_key,
+                #     joint_tensor_value=encoder_value,
+                #     joint_strategy="rear",
+                # )
+
+                # print("attention out", hidden_states.shape)
+                # print("attention out", hidden_states.shape)
+                # print("attention out", hidden_states.shape)
+                # print("attention out", hidden_states.shape)
+                hidden_states = hidden_states.transpose(1, 2)
 
                 hidden_states = hidden_states.flatten(2, 3)
             else:

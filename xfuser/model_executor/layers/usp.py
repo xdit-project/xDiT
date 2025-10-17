@@ -15,6 +15,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_ulysses_parallel_world_size,
     get_ring_parallel_world_size,
+    get_sequence_parallel_rank,
 )
 
 from packaging.version import parse
@@ -233,5 +234,56 @@ def USP(query, key, value, dropout_p=0.0, is_causal=False):
             out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
         out = _ft_c_output_all_to_all(out)
+
+    return out
+
+def USP_joint(query, key, value, joint_query, joint_key, joint_value, joint_strategy, dropout_p=0.0, is_causal=False):
+
+    if joint_strategy == "rear":
+        query = torch.cat([query, joint_query], dim=2)
+    else:
+        query = torch.cat([joint_query, query], dim=2)
+
+    joint_key = joint_key.transpose(1, 2)
+    joint_value = joint_value.transpose(1, 2)
+
+    ulysses_world_size = get_ulysses_parallel_world_size()
+    ulysses_rank = get_sequence_parallel_rank()
+    attn_heads_per_ulysses_rank = (
+        joint_key.shape[-2] // ulysses_world_size
+    )
+    joint_key = joint_key[
+        ...,
+        attn_heads_per_ulysses_rank
+        * ulysses_rank : attn_heads_per_ulysses_rank
+        * (ulysses_rank + 1),
+        :,
+    ]
+    joint_value = joint_value[
+        ...,
+        attn_heads_per_ulysses_rank
+        * ulysses_rank : attn_heads_per_ulysses_rank
+        * (ulysses_rank + 1),
+        :,
+    ]
+
+    query = _ft_c_input_all_to_all(query)
+    key = _ft_c_input_all_to_all(key)
+    value = _ft_c_input_all_to_all(value)
+
+
+    joint_key = joint_key.transpose(1, 2)
+    joint_value = joint_value.transpose(1, 2)
+
+
+    if joint_strategy == "rear":
+        key = torch.cat([key, joint_key], dim=2)
+        value = torch.cat([value, joint_value], dim=2)
+    else:
+        key = torch.cat([joint_key, key], dim=2)
+        value = torch.cat([joint_value, value], dim=2)
+
+    out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+    out = _ft_c_output_all_to_all(out)
 
     return out

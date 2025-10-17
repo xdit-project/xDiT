@@ -76,7 +76,7 @@ def _is_npu():
 
 
 def get_device(local_rank: int) -> torch.device:
-    if _is_cuda():
+    if _is_cuda() or _is_hip():
         return torch.device("cuda", local_rank)
     elif _is_musa():
         return torch.device("musa", local_rank)
@@ -89,7 +89,7 @@ def get_device(local_rank: int) -> torch.device:
 
 
 def get_device_name() -> str:
-    if _is_cuda():
+    if _is_cuda() or _is_hip():
         return "cuda"
     elif _is_musa():
         return "musa"
@@ -121,7 +121,7 @@ def get_device_version():
 
 
 def get_torch_distributed_backend() -> str:
-    if _is_cuda():
+    if _is_cuda() or _is_hip():
         return "nccl"
     elif _is_musa():
         return "mccl"

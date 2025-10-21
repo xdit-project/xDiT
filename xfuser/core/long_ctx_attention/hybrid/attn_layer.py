@@ -55,6 +55,12 @@ class xFuserLongContextAttention(LongContextAttention):
             attn_type: AttnType = AttnType.FA, the attention type supported inside long context attention, including "TORCH", "FA", "FA3", "SAGE_FP16", "SAGE_FP8"
             attn_processor: nn.Module = None, the attention processor can be passed in to replace the attention processor if attn_type is do not support it.
         """
+
+        # A workaround to allow running xDiT without having yunchang installed
+        # while still supporting AttnType.FA as the default value for legacy reasons
+        if attn_type is None:
+            attn_type = AttnType.FA
+
         super().__init__(
             scatter_idx=scatter_idx,
             gather_idx=gather_idx,

@@ -16,6 +16,7 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_world_size,
     get_ring_parallel_world_size,
     get_sequence_parallel_rank,
+    get_ulysses_parallel_rank,
 )
 
 from packaging.version import parse
@@ -248,7 +249,7 @@ def USP_joint(query, key, value, joint_query, joint_key, joint_value, joint_stra
     joint_value = joint_value.transpose(1, 2)
 
     ulysses_world_size = get_ulysses_parallel_world_size()
-    ulysses_rank = get_sequence_parallel_rank()
+    ulysses_rank = get_ulysses_parallel_rank()
     attn_heads_per_ulysses_rank = (
         joint_key.shape[-2] // ulysses_world_size
     )

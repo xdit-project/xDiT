@@ -5,7 +5,6 @@ import functools
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from torch.profiler import profile, ProfilerActivity, record_function
 
 
 from typing import Any, Dict, Optional, Union
@@ -25,7 +24,6 @@ from xfuser.model_executor.layers.attention_processor import xFuserWanAttnProces
 def parallelize_transformer(pipe):
     transformer = pipe.transformer
     transformer_2 = pipe.transformer_2
-    original_forward = transformer.forward
 
 
 
@@ -53,7 +51,6 @@ def parallelize_transformer(pipe):
         post_patch_height = height // p_h
         post_patch_width = width // p_w
 
-        # 1. RoPE
         rotary_emb = self.rope(hidden_states)
 
         hidden_states = self.patch_embedding(hidden_states)
@@ -155,9 +152,7 @@ def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
-    print(engine_args)
     engine_config, input_config = engine_args.create_config()
-    print(input_config)
     rank = int(os.getenv("RANK", 0))
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
@@ -175,8 +170,6 @@ def main():
     image = load_image(
             "https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/wan_i2v_input.JPG"
     )
-
-    use_profiling = False
 
     def run_pipe(input_config, image):
         torch.cuda.reset_peak_memory_stats()
@@ -196,7 +189,7 @@ def main():
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
         print(f"Iteration took {end - start}s, Peak memory: {peak_memory / 1024 ** 2:.2f} MB")
         return output
-    
+
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         pipe.transformer = torch.compile(pipe.transformer, mode="max-autotune-no-cudagraphs")
@@ -205,18 +198,9 @@ def main():
         # one step to warmup the torch compiler
         _ = run_pipe(input_config, image)
 
-    if use_profiling:
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True, experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)) as prof:
-            with record_function("model_inference"):
-                output = run_pipe(input_config, image)
-        print(prof.key_averages(group_by_stack_n=25).table(sort_by="cuda_time_total", row_limit=15))
-        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-        prof.export_chrome_trace(f"trace_{rank}.json.gz")
-
-    else:
-        output = run_pipe(input_config, image)
+    output = run_pipe(input_config, image)
     if is_dp_last_group():
-        export_to_video(output, "i2v_output.mp4", fps=25)
+        export_to_video(output, "wan_i2v_output.mp4", fps=25)
 
     get_runtime_state().destroy_distributed_env()
 

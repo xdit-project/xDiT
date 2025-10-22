@@ -21,6 +21,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.layers.attention_processor import xFuserWanAttnProcessor
 
+# Wrapper to only wrap the transformer in case it exists, i.e. Wan2.2
 def maybe_transformer_2(transformer_2):
     if transformer_2 is not None:
         return functools.wraps(transformer_2.__class__.forward)

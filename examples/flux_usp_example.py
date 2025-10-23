@@ -2,11 +2,17 @@
 # from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_flux.py
 
 import functools
-from typing import List, Optional
 
 import logging
 import time
 import torch
+import diffusers
+from packaging import version
+from typing import List, Optional
+
+if version.parse(diffusers.__version__) < version.parse("0.35.2"):
+    raise ImportError("Please install diffusers>=0.35.2 to use Flux.")
+
 from diffusers import DiffusionPipeline, FluxPipeline
 
 from xfuser import xFuserArgs

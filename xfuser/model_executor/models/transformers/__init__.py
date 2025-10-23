@@ -1,4 +1,4 @@
-from config.diffusers import has_valid_diffusers_version
+from xfuser.config.diffusers import has_valid_diffusers_version
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 from .pixart_transformer_2d import xFuserPixArtTransformer2DWrapper

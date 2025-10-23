@@ -2,7 +2,7 @@
 adapted from https://github.com/ali-vilab/TeaCache.git
 adapted from https://github.com/chengzeyi/ParaAttention.git
 """
-from config.diffusers import has_valid_diffusers_version
+from xfuser.config.diffusers import has_valid_diffusers_version
 from typing import Type, Dict
 
 TRANSFORMER_ADAPTER_REGISTRY: Dict[Type, str] = {}

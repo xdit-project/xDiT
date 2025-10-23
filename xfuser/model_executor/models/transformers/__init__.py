@@ -1,5 +1,4 @@
-import diffusers
-from packaging import version
+from config.diffusers import has_valid_diffusers_version
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 from .pixart_transformer_2d import xFuserPixArtTransformer2DWrapper
@@ -23,6 +22,6 @@ __all__ = [
 ]
 
 # Gating some imports based on diffusers version, as they import part of diffusers
-if version.parse(diffusers.__version__) >= version.parse("0.35.2"):
+if has_valid_diffusers_version("flux"):
     from .transformer_flux import xFuserFluxTransformer2DWrapper
     __all__.append("xFuserFluxTransformer2DWrapper")

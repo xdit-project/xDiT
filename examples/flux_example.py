@@ -3,9 +3,9 @@ import time
 import torch
 import diffusers
 import torch.distributed
-from packaging import version
+from xfuser.config.diffusers import has_valid_diffusers_version
 
-if version.parse(diffusers.__version__) < version.parse("0.35.2"):
+if not has_valid_diffusers_version("flux"):
     raise ImportError("Please install diffusers>=0.35.2 to use Flux.")
 
 from transformers import T5EncoderModel

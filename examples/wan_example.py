@@ -2,6 +2,7 @@ import os
 import time
 import torch
 import functools
+import numpy as np
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -182,12 +183,19 @@ def main():
             "https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/wan_i2v_input.JPG"
     )
 
+    max_area = input_config.height * input_config.width
+    aspect_ratio = image.height / image.width
+    mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
+    height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
+    width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
+    image = image.resize((width, height))
+
     def run_pipe(input_config, image):
         torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         output = pipe(
-            height=input_config.height,
-            width=input_config.width,
+            height=height,
+            width=width,
             image=image,
             prompt=input_config.prompt,
             #negative_prompt=X,

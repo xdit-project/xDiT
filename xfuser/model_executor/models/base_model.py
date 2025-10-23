@@ -120,7 +120,7 @@ class xFuserModelBaseWrapper(nn.Module, xFuserBaseWrapper, metaclass=ABCMeta):
         self,
     ):
         for layer in self.wrapped_layers:
-            if isinstance(layer, xFuserAttentionWrapper):
+            if "AttentionWrapper" in layer._get_name():
                 # if getattr(layer.processor, 'use_long_ctx_attn_kvcache', False):
                 # TODO(Eigensystem): remove use_long_ctx_attn_kvcache flag
                 if get_sequence_parallel_world_size() == 1 or not getattr(

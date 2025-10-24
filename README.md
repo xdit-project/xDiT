@@ -232,6 +232,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | Model Name | Diffusers version |
 | --- | --- |
 | [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
+| [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |
 
 
 #### HunyuanVideo

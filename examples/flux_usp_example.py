@@ -6,11 +6,12 @@ import functools
 import logging
 import time
 import torch
-from xfuser.config.diffusers import has_valid_diffusers_version
+from xfuser.config.diffusers import has_valid_diffusers_version, get_minimum_diffusers_version
 from typing import List, Optional
 
 if not has_valid_diffusers_version("flux"):
-    raise ImportError("Please install diffusers>=0.35.2 to use Flux.")
+    minimum_diffusers_version = get_minimum_diffusers_version("flux")
+    raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Flux.")
 
 from diffusers import DiffusionPipeline, FluxPipeline
 

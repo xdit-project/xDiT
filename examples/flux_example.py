@@ -1,7 +1,14 @@
 import logging
 import time
 import torch
+import diffusers
 import torch.distributed
+from xfuser.config.diffusers import has_valid_diffusers_version, get_minimum_diffusers_version
+
+if not has_valid_diffusers_version("flux"):
+    minimum_diffusers_version = get_minimum_diffusers_version("flux")
+    raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Flux.")
+
 from transformers import T5EncoderModel
 from xfuser import xFuserFluxPipeline, xFuserArgs
 from xfuser.config import FlexibleArgumentParser

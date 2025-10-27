@@ -150,29 +150,28 @@ The blog article is also available: [Supercharge Your AIGC Experience: Leverage 
 
 ### 1. Install from pip
 
-We set `diffusers` and `flash_attn` as two optional installation requirements.
-
-About `diffusers` version: 
-- If you only use the USP interface, `diffusers` is not required. Models are typically released as `nn.Module`
- first, before being integrated into diffusers. xDiT sometimes is applied as an USP plugin to existing projects.
-- Different models may require different diffusers versions. Model implementations can vary between diffusers versions, especially for latest models, which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
-- While we specify a diffusers version in `setup.py`, newer models may require later versions or even need to be installed from main branch.
+We set `flash_attn` as optional installation requirement.
 
 About `flash_attn` version:
 - Without `flash_attn` installed, xDiT falls back to a PyTorch implementation of ring attention, which helps NPU users with compatibility
 - However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we strongly recommend installing `flash_attn`.
 
+About `diffusers` version:
+- Different models may require different diffusers versions. Model implementations can vary between diffusers versions, especially for latest models, which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
+- While we specify a diffusers version in `setup.py`, newer models may require later versions or even need to be installed from main branch.
+- Limited list of validated diffusers versions can be seen [here](#6-limitations)
+
 ```
 pip install xfuser  # Basic installation
-pip install "xfuser[diffusers,flash-attn]"  # With both diffusers and flash attention
+pip install "xfuser[flash-attn]"  # With flash attention
 ```
 
 ### 2. Install from source 
 
 ```
 pip install -e .
-# Or optionally, with diffusers
-pip install -e ".[diffusers,flash-attn]"
+# Or optionally, with flash attention
+pip install -e ".[flash-attn]"
 ```
 
 Note that we use two self-maintained packages:
@@ -225,6 +224,15 @@ You can also launch an HTTP service to generate images with xDiT.
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
 
 ### 6. Limitations
+
+#### Diffusers version
+
+Below is a list of validated diffusers version requirements. If the model is not in the list, you may need to try several diffusers versions to find a working configuration.
+
+| Model Name | Diffusers version |
+| --- | --- |
+| [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
+
 
 #### HunyuanVideo
 

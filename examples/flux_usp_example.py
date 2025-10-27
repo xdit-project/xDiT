@@ -2,11 +2,17 @@
 # from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_flux.py
 
 import functools
-from typing import List, Optional
 
 import logging
 import time
 import torch
+from xfuser.config.diffusers import has_valid_diffusers_version, get_minimum_diffusers_version
+from typing import List, Optional
+
+if not has_valid_diffusers_version("flux"):
+    minimum_diffusers_version = get_minimum_diffusers_version("flux")
+    raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Flux.")
+
 from diffusers import DiffusionPipeline, FluxPipeline
 
 from xfuser import xFuserArgs
@@ -27,7 +33,7 @@ from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
 )
 
-from xfuser.model_executor.layers.attention_processor import xFuserFluxAttnProcessor2_0
+from xfuser.model_executor.models.transformers.transformer_flux import xFuserFluxAttnProcessor
 
 def parallelize_transformer(pipe: DiffusionPipeline):
     transformer = pipe.transformer
@@ -50,7 +56,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
             get_runtime_state().split_text_embed_in_sp = False
         else:
             get_runtime_state().split_text_embed_in_sp = True
-        
+
         if isinstance(timestep, torch.Tensor) and timestep.ndim != 0 and timestep.shape[0] == hidden_states.shape[0]:
             timestep = torch.chunk(timestep, get_classifier_free_guidance_world_size(),dim=0)[get_classifier_free_guidance_rank()]
         hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(),dim=0)[get_classifier_free_guidance_rank()]
@@ -61,10 +67,8 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
         if get_runtime_state().split_text_embed_in_sp:
             txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(),dim=-2)[get_sequence_parallel_rank()]
-        
-        for block in transformer.transformer_blocks + transformer.single_transformer_blocks:
-            block.attn.processor = xFuserFluxAttnProcessor2_0()
-        
+
+
         output = original_forward(
             hidden_states,
             encoder_hidden_states,
@@ -85,6 +89,9 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 
     new_forward = new_forward.__get__(transformer)
     transformer.forward = new_forward
+
+    for block in transformer.transformer_blocks + transformer.single_transformer_blocks:
+        block.attn.processor = xFuserFluxAttnProcessor()
 
 
 def main():
@@ -119,7 +126,7 @@ def main():
         max_condition_sequence_length=512,
         split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
     )
-    
+
     parallelize_transformer(pipe)
 
     if engine_config.runtime_config.use_torch_compile:
@@ -139,7 +146,7 @@ def main():
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
-    
+
     output = pipe(
         height=input_config.height,
         width=input_config.width,

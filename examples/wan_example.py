@@ -208,6 +208,7 @@ def main():
 
     def run_pipe(input_config, image):
         torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
         start = time.perf_counter()
         output = pipe(
             height=height,
@@ -222,6 +223,7 @@ def main():
         ).frames[0]
         end = time.perf_counter()
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+        torch.cuda.synchronize()
         print(f"Iteration took {end - start}s, Peak memory: {peak_memory / 1024 ** 2:.2f} MB")
         return output
 

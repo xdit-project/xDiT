@@ -3,6 +3,10 @@ import functools
 from typing import Any, Dict, Union, Optional
 import logging
 import time
+from xfuser.config.diffusers import has_valid_diffusers_version, get_minimum_diffusers_version
+if not has_valid_diffusers_version("hunyuanvideo"):
+    minimum_diffusers_version = get_minimum_diffusers_version("hunyuanvideo")
+    raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use HunyuanVideo.")
 
 import torch
 
@@ -76,7 +80,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         image_rotary_emb = self.rope(hidden_states)
 
         # 2. Conditional embeddings
-        temb = self.time_text_embed(timestep, guidance, pooled_projections)
+        temb, _ = self.time_text_embed(timestep=timestep, pooled_projection=pooled_projections, guidance=guidance)
         hidden_states = self.x_embedder(hidden_states)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states,
                                                       timestep,

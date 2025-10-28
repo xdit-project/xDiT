@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import torch
 import functools
@@ -87,17 +88,28 @@ def parallelize_transformer(pipe):
         else:
             # Wan2.1 fails if we chunk encoder_hidden_states when cross attention is used. Should cross attention really be sharded?
             encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        # Part of sequence parallel: given the resolution, we may need to pad the sequence length to match this prior to chunking
+        max_chunked_sequence_length = int(math.ceil(hidden_states.shape[1] / get_sequence_parallel_world_size())) * get_sequence_parallel_world_size()
+        sequence_pad_amount = max_chunked_sequence_length - hidden_states.shape[1]
+        hidden_states = torch.cat([
+            hidden_states,
+            torch.zeros(batch_size, sequence_pad_amount, hidden_states.shape[2], device=hidden_states.device, dtype=hidden_states.dtype)
+        ], dim=1)
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
-        
 
         freqs_cos, freqs_sin = rotary_emb
 
-        def get_rotary_emb_chunk(freqs):
+        def get_rotary_emb_chunk(freqs, sequence_pad_amount):
+            freqs = torch.cat([
+                freqs,
+                torch.zeros(1, sequence_pad_amount, freqs.shape[2], freqs.shape[3], device=freqs.device, dtype=freqs.dtype)
+            ], dim=1)
             freqs = torch.chunk(freqs, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
             return freqs
 
-        freqs_cos = get_rotary_emb_chunk(freqs_cos)
-        freqs_sin = get_rotary_emb_chunk(freqs_sin)
+        freqs_cos = get_rotary_emb_chunk(freqs_cos, sequence_pad_amount)
+        freqs_sin = get_rotary_emb_chunk(freqs_sin, sequence_pad_amount)
         rotary_emb = (freqs_cos, freqs_sin)
 
 
@@ -132,6 +144,10 @@ def parallelize_transformer(pipe):
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
+
+
+        # Removing excess padding to get back to original sequence length
+        hidden_states = hidden_states[:, :math.prod([post_patch_num_frames, post_patch_height, post_patch_width]), :]
 
         hidden_states = hidden_states.reshape(
             batch_size, post_patch_num_frames, post_patch_height, post_patch_width, p_t, p_h, p_w, -1

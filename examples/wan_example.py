@@ -21,7 +21,7 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     is_dp_last_group,
 )
-from xfuser.model_executor.layers.attention_processor import xFuserWanAttnProcessor
+from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
 # Wrapper to only wrap the transformer in case it exists, i.e. Wan2.2
 def maybe_transformer_2(transformer_2):

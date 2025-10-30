@@ -19,7 +19,7 @@ __all__ = [
     "xFuserHunyuanDiT2DWrapper",
     "xFuserConsisIDTransformer3DWrapper",
     "xFuserSanaTransformer2DWrapper"
-    "xFuserWanTransformer3DWrapper",
+]
 
 # Gating some imports based on diffusers version, as they import part of diffusers
 if has_valid_diffusers_version("flux"):

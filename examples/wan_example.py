@@ -231,9 +231,9 @@ def main():
 
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        pipe.transformer = torch.compile(pipe.transformer, mode="max-autotune-no-cudagraphs")
+        pipe.transformer = torch.compile(pipe.transformer, mode="default")
         if pipe.transformer_2 is not None:
-            pipe.transformer_2 = torch.compile(pipe.transformer_2, mode="max-autotune-no-cudagraphs")
+            pipe.transformer_2 = torch.compile(pipe.transformer_2, mode="default")
 
         # one step to warmup the torch compiler
         _ = run_pipe(input_config, image)

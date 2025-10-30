@@ -193,6 +193,7 @@ def main():
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16
     )
+    pipe.scheduler.config.flow_shift = 5 # Match original implementation
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")

@@ -5,6 +5,7 @@ DEFAULT_MINIMUM_DIFFUSERS_VERSION = "0.33.0"
 MINIMUM_DIFFUSERS_VERSIONS = {
     "flux": "0.35.2",
     "hunyuanvideo": "0.35.2",
+    "wan": "0.35.2",
 }
 
 def has_valid_diffusers_version(model_name: str|None = None) -> bool:

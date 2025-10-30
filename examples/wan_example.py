@@ -4,6 +4,11 @@ import time
 import torch
 import functools
 import numpy as np
+from xfuser.config.diffusers import get_minimum_diffusers_version, has_valid_diffusers_version
+if not has_valid_diffusers_version("wan"):
+    minimum_diffusers_version = get_minimum_diffusers_version("wan")
+    raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Wan.")
+
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -181,11 +186,8 @@ def main():
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
-    rank = int(os.getenv("RANK", 0))
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
-    dtype = torch.bfloat16
-    device = torch.device("cuda")
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
     pipe = WanImageToVideoPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
@@ -215,7 +217,6 @@ def main():
             width=width,
             image=image,
             prompt=input_config.prompt,
-            #negative_prompt=X,
             num_inference_steps=input_config.num_inference_steps,
             num_frames=input_config.num_frames,
             guidance_scale=input_config.guidance_scale,

@@ -167,17 +167,17 @@ def parallelize_transformer(pipe):
 
     new_forward_1 = new_forward.__get__(transformer)
     transformer.forward = new_forward_1
-    if transformer_2 is not None:
-        new_forward_2 = new_forward.__get__(transformer_2)
-        transformer_2.forward = new_forward_2
-
     for block in transformer.blocks:
         block.attn1.processor = xFuserWanAttnProcessor()
         block.attn2.processor = xFuserWanAttnProcessor()
+
     if transformer_2 is not None:
+        new_forward_2 = new_forward.__get__(transformer_2)
+        transformer_2.forward = new_forward_2
         for block in transformer_2.blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
             block.attn2.processor = xFuserWanAttnProcessor()
+
 
 
 
@@ -189,6 +189,10 @@ def main():
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
+
+    if not args.img_file_path:
+        raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
+
     pipe = WanImageToVideoPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16
@@ -198,9 +202,7 @@ def main():
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
 
-    image = load_image(
-            "https://huggingface.co/datasets/YiYiXu/testing-images/resolve/main/wan_i2v_input.JPG"
-    )
+    image = load_image(args.img_file_path)
 
     max_area = input_config.height * input_config.width
     aspect_ratio = image.height / image.width

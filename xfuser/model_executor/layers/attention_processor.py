@@ -7,7 +7,9 @@ import torch.distributed
 from torch.nn import functional as F
 from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
+from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.transformers.sana_transformer import SanaAttnProcessor2_0
+
 from diffusers.models.attention_processor import (
     AttnProcessor2_0,
     JointAttnProcessor2_0,
@@ -23,12 +25,10 @@ try:
 except ImportError:
     HunyuanVideoAttnProcessor2_0 = None
 
-from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
-    get_ulysses_parallel_world_size,
 )
 from xfuser.core.fast_attention import (
     xFuserFastAttention,
@@ -144,7 +144,6 @@ class xFuserAttentionProcessorRegister:
         raise ValueError(
             f"Attention Processor class {processor.__class__.__name__} is not supported by xFuser"
         )
-
 
 @xFuserLayerWrappersRegister.register(Attention)
 class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):

@@ -108,12 +108,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             value_img = value_img.unflatten(2, (attn.heads, -1))
 
 
-            hidden_states_img = self.hybrid_seq_parallel_attn(
-                None, query, key_img, value_img
-            )
-            query, key_img, value_img = query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)
-            hidden_states_img = USP(query, key_img, value_img)
-            hidden_states_img = hidden_states_img.transpose(1, 2)
+            hidden_states_img = USP(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 

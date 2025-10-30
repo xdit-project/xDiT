@@ -226,7 +226,8 @@ def main():
         end = time.perf_counter()
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
         torch.cuda.synchronize()
-        print(f"Iteration took {end - start}s, Peak memory: {peak_memory / 1024 ** 2:.2f} MB")
+        if is_dp_last_group():
+            print(f"Iteration took {end - start}s, Peak memory: {peak_memory / 1024 ** 2:.2f} MB")
         return output
 
     if engine_config.runtime_config.use_torch_compile:

@@ -21,6 +21,7 @@ from xfuser.core.distributed import (
 
 from packaging.version import parse
 from xfuser.envs import PACKAGES_CHECKER
+from xfuser.core.cache_manager.cache_manager import get_cache_manager
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
 if HAS_FLASH_ATTN:
@@ -165,6 +166,7 @@ def _ft_c_output_all_to_all(x):
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
 
+
 def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     """
     Performs the necessary tensor permutes and
@@ -219,70 +221,90 @@ def _attention(query, key, value, dropout_p, is_causal):
             query, key, value, dropout_p=dropout_p, is_causal=is_causal
         )
 
-def USP(query, key, value, dropout_p=0.0, is_causal=False):
-    if get_sequence_parallel_world_size() == 1:
-        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
-    elif get_ulysses_parallel_world_size() == 1:
-        out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
-    elif get_ulysses_parallel_world_size() > 1:
-        query = _ft_c_input_all_to_all(query)
-        key = _ft_c_input_all_to_all(key)
-        value = _ft_c_input_all_to_all(value)
 
-        if get_ring_parallel_world_size() == 1:
-            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
-        else:
-            out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
-
-        out = _ft_c_output_all_to_all(out)
-
-    return out
-
-def USP_joint(query, key, value, joint_query, joint_key, joint_value, joint_strategy, dropout_p=0.0, is_causal=False):
-
-    if joint_strategy == "rear":
-        query = torch.cat([query, joint_query], dim=2)
-    else:
-        query = torch.cat([joint_query, query], dim=2)
-
-    joint_key = joint_key.transpose(1, 2)
-    joint_value = joint_value.transpose(1, 2)
-
+def _preprocess_joint_tensors(joint_key, joint_value):
+    """
+    Preprocess the joint key and value tensors for Ulysses parallelism.
+    """
     ulysses_world_size = get_ulysses_parallel_world_size()
     ulysses_rank = get_ulysses_parallel_rank()
     attn_heads_per_ulysses_rank = (
-        joint_key.shape[-2] // ulysses_world_size
+        joint_key.shape[1] // ulysses_world_size
     )
+    joint_key = joint_key.transpose(1,2)
+    joint_value = joint_value.transpose(1,2)
     joint_key = joint_key[
         ...,
         attn_heads_per_ulysses_rank
         * ulysses_rank : attn_heads_per_ulysses_rank
         * (ulysses_rank + 1),
-        :,
-    ]
+        :, ].transpose(1,2)
     joint_value = joint_value[
         ...,
         attn_heads_per_ulysses_rank
         * ulysses_rank : attn_heads_per_ulysses_rank
         * (ulysses_rank + 1),
         :,
-    ]
+    ].transpose(1,2)
+    return joint_key, joint_value
+
+def _concat_joint_tensor(tensor, joint_tensor, joint_strategy, dim):
+    """
+    Concatenate the joint tensor to the main tensor based on the joint strategy.
+    """
+    if joint_strategy == "rear":
+        tensor = torch.cat([tensor, joint_tensor], dim=dim)
+    elif joint_strategy == "front":
+        tensor = torch.cat([joint_tensor, tensor], dim=dim)
+    else:
+        raise ValueError(f"Invalid joint_strategy: {joint_strategy}")
+    return tensor
+
+def _update_and_get_kv_cache(key, value, attn_layer):
+    """
+    Update and get the key and value cache for pipeline parallelism.
+    """
+    key, value = get_cache_manager().update_and_get_kv_cache(
+        new_kv=[key.transpose(1, 2), value.transpose(1, 2)],
+        layer=attn_layer,
+        slice_dim=1,
+        layer_type="attn",
+    )
+    key = key.transpose(1, 2).contiguous()
+    value = value.transpose(1, 2).contiguous()
+    return key, value
+
+def USP(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        joint_query: torch.Tensor | None = None,
+        joint_key: torch.Tensor | None = None,
+        joint_value: torch.Tensor | None = None,
+        joint_strategy: str | None = None,
+        dropout_p: float = 0.0,
+        is_causal: bool = False,
+        attn_layer=None,
+    ):
+    """
+    Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
+    Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
+    """
+
+    if joint_strategy:
+        query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
+        joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
 
     query = _ft_c_input_all_to_all(query)
     key = _ft_c_input_all_to_all(key)
     value = _ft_c_input_all_to_all(value)
 
+    if attn_layer:
+        key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
-    joint_key = joint_key.transpose(1, 2)
-    joint_value = joint_value.transpose(1, 2)
-
-
-    if joint_strategy == "rear":
-        key = torch.cat([key, joint_key], dim=2)
-        value = torch.cat([value, joint_value], dim=2)
-    else:
-        key = torch.cat([joint_key, key], dim=2)
-        value = torch.cat([joint_value, value], dim=2)
+    if joint_strategy:
+        key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
+        value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
 
     out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     out = _ft_c_output_all_to_all(out)

@@ -1251,12 +1251,12 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                     query,
                     key,
                     value,
-                    encoder_query,
-                    encoder_key,
-                    encoder_value,
-                    "rear",
                     dropout_p=0.0,
                     is_causal=False,
+                    joint_query=encoder_query,
+                    joint_key=encoder_key,
+                    joint_value=encoder_value,
+                    joint_strategy="rear",
                 )
 
                 hidden_states = hidden_states.transpose(1, 2)

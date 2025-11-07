@@ -187,15 +187,16 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                 query,
                 key,
                 value,
+                dropout_p=0.0,
+                is_causal=False,
                 joint_query=encoder_hidden_states_query_proj,
                 joint_key=encoder_hidden_states_key_proj,
                 joint_value=encoder_hidden_states_value_proj,
                 joint_strategy="front",
-                dropout_p=0.0,
-                is_causal=False,
                 attn_layer=attn,
             )
             hidden_states = hidden_states.transpose(1, 2)
+
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)

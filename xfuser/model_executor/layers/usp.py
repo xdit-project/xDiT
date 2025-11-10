@@ -290,38 +290,35 @@ def USP(
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     """
+
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
+
+    if get_ulysses_parallel_world_size() > 1:
+        query = _ft_c_input_all_to_all(query)
+        key = _ft_c_input_all_to_all(key)
+        value = _ft_c_input_all_to_all(value)
+
+    if attn_layer:
+        key, value = _update_and_get_kv_cache(key, value, attn_layer)
+    if joint_strategy:
+        key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
+        value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
 
     if get_sequence_parallel_world_size() == 1: # No SP
         out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        if attn_layer:
-            key, value = _update_and_get_kv_cache(key, value, attn_layer)
-        if joint_strategy:
-            key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
-            value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
-
         out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
-    elif get_ulysses_parallel_world_size() > 1: # Ulysses only or USP
-        query = _ft_c_input_all_to_all(query)
-        key = _ft_c_input_all_to_all(key)
-        value = _ft_c_input_all_to_all(value)
-
-        if attn_layer:
-            key, value = _update_and_get_kv_cache(key, value, attn_layer)
-        if joint_strategy:
-            key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
-            value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
-
+    else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
             out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         else: # USP
             out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
-
         out = _ft_c_output_all_to_all(out)
 
     return out
+
+

@@ -163,7 +163,7 @@ class TestUSPHybridParallel(unittest.TestCase):
         ).transpose(1, 2)
 
         result_diff = (usp_results - hybrid_results).abs().max().float().cpu().numpy()
-        self.assertAlmostEqual(result_diff, 0, places=1)
+        self.assertAlmostEqual(result_diff, 0, places=3)
 
     def test_usp_hybrid_joint_equivalence(self):
         """
@@ -201,4 +201,4 @@ class TestUSPHybridParallel(unittest.TestCase):
         ).transpose(1, 2)
 
         result_diff = (usp_results - hybrid_results).abs().max().float().cpu().numpy()
-        self.assertAlmostEqual(result_diff, 0, places=1)
+        self.assertAlmostEqual(result_diff, 0, places=3)

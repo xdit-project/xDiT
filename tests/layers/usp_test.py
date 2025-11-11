@@ -11,7 +11,8 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 from xfuser.core.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
-
+from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+from yunchang.kernels import AttnType
 
 
 def _init_environment():
@@ -134,10 +135,6 @@ class TestUSPHybridParallel(unittest.TestCase):
         self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
-
-        ## Importing within test case for compatibility
-        from xfuser.core.long_ctx_attention import xFuserLongContextAttention
-        from yunchang.kernels import AttnType
 
         self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
             attn_type=AttnType.TORCH

@@ -145,7 +145,9 @@ More features and details can be found in our Intro Video:
 + [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) 
 + [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
 
-The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).   
+The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
+
+ComfyUI plugin for xDiT is now available: [xdit-comfyui-private](https://github.com/xdit-project/xdit-comfyui-private)
 
 <h2 id="QuickStart">🚀 QuickStart</h2>
 
@@ -289,7 +291,7 @@ As we can see, PipeFusion and Sequence Parallel achieve the lowest communication
 
 <h4 id="PipeFusion">1.1. PipeFusion</h4>
 
-[PipeFusion: Displaced Patch Pipeline Parallelism for Diffusion Models](./docs/methods/pipefusion.md)
+[PipeFusion: Displaced Patch Pipeline Parallelism for Diffusion Models](./docs/methods/pipefusion.md) **(Accepted by NeurIPS 2025)** <a href="https://neurips.cc/virtual/2025/loc/san-diego/poster/119821">Link</a>
 
 <h4 id="USP">1.2. USP: Unified Sequence Parallelism</h4>
 

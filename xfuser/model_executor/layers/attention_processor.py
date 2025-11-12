@@ -1231,7 +1231,7 @@ if HunyuanVideoAttnProcessor2_0 is not None:
             ):
                 hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
                 hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
-            elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            elif get_sequence_parallel_world_size() > 1:
                 if get_runtime_state().split_text_embed_in_sp:
                     encoder_query = None
                     encoder_key = None
@@ -1247,27 +1247,19 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                         [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
                     )
 
-                    encoder_query = encoder_query.transpose(1, 2)
-                    encoder_key = encoder_key.transpose(1, 2)
-                    encoder_value = encoder_value.transpose(1, 2)
-
-                query = query.transpose(1, 2)
-                key = key.transpose(1, 2)
-                value = value.transpose(1, 2)
-
-                hidden_states = self.hybrid_seq_parallel_attn(
-                    None,
+                hidden_states = USP(
                     query,
                     key,
                     value,
                     dropout_p=0.0,
-                    causal=False,
-                    joint_tensor_query=encoder_query,
-                    joint_tensor_key=encoder_key,
-                    joint_tensor_value=encoder_value,
+                    is_causal=False,
+                    joint_query=encoder_query,
+                    joint_key=encoder_key,
+                    joint_value=encoder_value,
                     joint_strategy="rear",
                 )
 
+                hidden_states = hidden_states.transpose(1, 2)
                 hidden_states = hidden_states.flatten(2, 3)
             else:
                 if HAS_FLASH_ATTN:

@@ -160,9 +160,12 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=1)
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=1)
 
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+
         uses_pipeline_parallelism = get_runtime_state().num_pipeline_patch > 1
         if not uses_pipeline_parallelism:
-            query, key, value = query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
             hidden_states = USP(query, key, value)
             hidden_states = hidden_states.transpose(1, 2)
         else:
@@ -172,26 +175,29 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                 encoder_hidden_states_value_proj = None
             else:
                 encoder_hidden_states_query_proj, query = query.split(
-                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
+                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
                 )
                 encoder_hidden_states_key_proj, key = key.split(
-                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
+                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
                 )
                 encoder_hidden_states_value_proj, value = value.split(
-                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=1
+                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
                 )
-            hidden_states = self.hybrid_seq_parallel_attn(
-                attn if get_runtime_state().num_pipeline_patch > 1 else None,
+            hidden_states = USP(
                 query,
                 key,
                 value,
                 dropout_p=0.0,
-                causal=False,
-                joint_tensor_query=encoder_hidden_states_query_proj,
-                joint_tensor_key=encoder_hidden_states_key_proj,
-                joint_tensor_value=encoder_hidden_states_value_proj,
+                is_causal=False,
+                joint_query=encoder_hidden_states_query_proj,
+                joint_key=encoder_hidden_states_key_proj,
+                joint_value=encoder_hidden_states_value_proj,
                 joint_strategy="front",
+                attn_layer=attn,
             )
+            hidden_states = hidden_states.transpose(1, 2)
+
+
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 

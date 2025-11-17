@@ -285,7 +285,9 @@ def main():
 
     output = run_pipe(input_config, image)
     if is_dp_last_group():
-        export_to_video(output, f"{args.task}_output.mp4", fps=TASK_FPS[args.task])
+        file_name = f"{args.task}_output.mp4"
+        export_to_video(output, file_name, fps=TASK_FPS[args.task])
+        print(f"Output video saved to {file_name}")
 
     get_runtime_state().destroy_distributed_env()
 

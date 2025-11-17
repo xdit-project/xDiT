@@ -183,6 +183,13 @@ def parallelize_transformer(pipe):
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
+    parser.add_argument(
+        "--task",
+        type=str,
+        required=True,
+        choices=["i2v", "t2v"],
+        help="The task to run."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -202,14 +209,25 @@ def main():
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
 
-    image = load_image(args.img_file_path)
-
-    max_area = input_config.height * input_config.width
-    aspect_ratio = image.height / image.width
-    mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
-    height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
-    width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
-    image = image.resize((width, height))
+    if args.task == "i2v":
+        image = load_image(args.img_file_path)
+        max_area = input_config.height * input_config.width
+        aspect_ratio = image.height / image.width
+        mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
+        height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
+        width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
+        image = image.resize((width, height))
+        if is_dp_last_group():
+            print("Max area is calculated from input height and width values, but the aspect ratio for the output video is retained from the input image.")
+            print(f"Input image resolution: {image.height}x{image.width}")
+            print(f"Generating a video with resolution: {height}x{width}")
+    else:
+        mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
+        height = input_config.height // mod_value * mod_value
+        width = input_config.width // mod_value * mod_value
+        if height != input_config.height or width != input_config.width:
+            print(f"Adjusting height and width to be multiples of {mod_value}. New dimensions: {height}x{width}")
+        image = None
 
     def run_pipe(input_config, image):
         torch.cuda.reset_peak_memory_stats()

@@ -120,6 +120,10 @@ def parallelize_transformer(pipe):
         ], dim=1)
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
+        if ts_seq_len is not None: # (wan2.2 ti2v)
+            temb = torch.chunk(temb, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
+            timestep_proj = torch.chunk(timestep_proj, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
+
         freqs_cos, freqs_sin = rotary_emb
 
         def get_rotary_emb_chunk(freqs, sequence_pad_amount):

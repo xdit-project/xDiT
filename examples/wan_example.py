@@ -9,7 +9,7 @@ if not has_valid_diffusers_version("wan"):
     minimum_diffusers_version = get_minimum_diffusers_version("wan")
     raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Wan.")
 
-from diffusers import WanImageToVideoPipeline
+from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
@@ -27,6 +27,23 @@ from xfuser.core.distributed import (
     is_dp_last_group,
 )
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
+
+TASK_PIPELINE = {
+    "i2v": WanImageToVideoPipeline,
+    "t2v": WanPipeline,
+    "ti2v": WanPipeline,
+}
+TASK_FPS = {
+    "i2v": 16,
+    "t2v": 16,
+    "ti2v": 24,
+}
+
+TASK_FLOW_SHIFT = {
+    "i2v": 5,
+    "t2v": 12,
+    "ti2v": 5,
+}
 
 # Wrapper to only wrap the transformer in case it exists, i.e. Wan2.2
 def maybe_transformer_2(transformer_2):
@@ -187,7 +204,7 @@ def main():
         "--task",
         type=str,
         required=True,
-        choices=["i2v", "t2v"],
+        choices=["i2v", "t2v", "ti2v"],
         help="The task to run."
     )
     args = xFuserArgs.add_cli_args(parser).parse_args()
@@ -200,11 +217,11 @@ def main():
     if not args.img_file_path:
         raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
 
-    pipe = WanImageToVideoPipeline.from_pretrained(
+    pipe = TASK_PIPELINE[args.task].from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16
     )
-    pipe.scheduler.config.flow_shift = 5 # Match original implementation
+    pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
@@ -233,15 +250,18 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         start = time.perf_counter()
+        optional_kwargs = {}
+        if image:
+            optional_kwargs["image"] = image
         output = pipe(
             height=height,
             width=width,
-            image=image,
             prompt=input_config.prompt,
             num_inference_steps=input_config.num_inference_steps,
             num_frames=input_config.num_frames,
             guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+            **optional_kwargs,
         ).frames[0]
         end = time.perf_counter()
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
@@ -261,7 +281,7 @@ def main():
 
     output = run_pipe(input_config, image)
     if is_dp_last_group():
-        export_to_video(output, "i2v_output.mp4", fps=16)
+        export_to_video(output, f"{args.task}_output.mp4", fps=TASK_FPS[args.task])
 
     get_runtime_state().destroy_distributed_env()
 

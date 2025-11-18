@@ -32,7 +32,7 @@ if HAS_AITER:
     import aiter
     import inspect
     try:
-        HAS_ROUND_MODE = inspect.signature(aiter.ops.mha.flash_attn_func).parameters.get("how_v3_bf16_cvt") is not None
+        HAS_ROUND_MODE = inspect.signature(aiter.flash_attn_func).parameters.get("how_v3_bf16_cvt") is not None
     except (AttributeError, TypeError):
         HAS_ROUND_MODE = False
     if HAS_ROUND_MODE:
@@ -191,7 +191,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     }
     if HAS_ROUND_MODE:
         attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-    output, softmax_lse = aiter.ops.mha.flash_attn_func(
+    output, softmax_lse = aiter.flash_attn_func(
             query,
             key,
             value,

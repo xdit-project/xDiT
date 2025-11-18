@@ -119,11 +119,11 @@ def parallelize_transformer(pipe):
             temb = torch.cat([
                 temb,
                 torch.zeros(batch_size, sequence_pad_amount, temb.shape[2], device=temb.device, dtype=temb.dtype)
-            ])
+            ], dim=1)
             timestep_proj = torch.cat([
                 timestep_proj,
                 torch.zeros(batch_size, sequence_pad_amount, timestep_proj.shape[2], timestep_proj.shape[3], device=timestep_proj.device, dtype=timestep_proj.dtype)
-            ])
+            ], dim=1)
             temb = torch.chunk(temb, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
             timestep_proj = torch.chunk(timestep_proj, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
 

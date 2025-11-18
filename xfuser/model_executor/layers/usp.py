@@ -192,11 +192,11 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     if HAS_ROUND_MODE:
         attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
     output, softmax_lse = aiter.flash_attn_func(
-            query,
-            key,
-            value,
-            **attn_kwargs
-        )
+        query,
+        key,
+        value,
+        **attn_kwargs
+    )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 

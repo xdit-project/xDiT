@@ -220,17 +220,18 @@ def main():
 
     pipe = TASK_PIPELINE[args.task].from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
     )
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
 
-    if args.task == "i2v":
-        if not args.img_file_path:
-            raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
+    if not args.img_file_path and args.task == "i2v":
+        raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
 
+    is_i2v_task = args.task == "i2v" or (args.task == "ti2v" and args.img_file_path != None)
+    if is_i2v_task:
         image = load_image(args.img_file_path)
         max_area = input_config.height * input_config.width
         aspect_ratio = image.height / image.width
@@ -242,12 +243,13 @@ def main():
             print("Max area is calculated from input height and width values, but the aspect ratio for the output video is retained from the input image.")
             print(f"Input image resolution: {image.height}x{image.width}")
             print(f"Generating a video with resolution: {height}x{width}")
-    else:
+    else: # T2V or TI2V with no image
         mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
         height = input_config.height // mod_value * mod_value
         width = input_config.width // mod_value * mod_value
         if height != input_config.height or width != input_config.width:
-            print(f"Adjusting height and width to be multiples of {mod_value}. New dimensions: {height}x{width}")
+            if is_dp_last_group():
+                print(f"Adjusting height and width to be multiples of {mod_value}. New dimensions: {height}x{width}")
         image = None
 
     def run_pipe(input_config, image):

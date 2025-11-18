@@ -116,6 +116,14 @@ def parallelize_transformer(pipe):
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
         if ts_seq_len is not None: # (wan2.2 ti2v)
+            temb = torch.cat([
+                temb,
+                torch.zeros(batch_size, sequence_pad_amount, temb.shape[2], device=temb.device, dtype=temb.dtype)
+            ])
+            timestep_proj = torch.cat([
+                timestep_proj,
+                torch.zeros(batch_size, sequence_pad_amount, timestep_proj.shape[2], timestep_proj.shape[3], device=timestep_proj.device, dtype=timestep_proj.dtype)
+            ])
             temb = torch.chunk(temb, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
             timestep_proj = torch.chunk(timestep_proj, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
 

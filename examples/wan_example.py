@@ -28,11 +28,6 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
-TASK_PIPELINE = {
-    "i2v": WanImageToVideoPipeline,
-    "t2v": WanPipeline,
-    "ti2v": WanPipeline,
-}
 TASK_FPS = {
     "i2v": 16,
     "t2v": 16,
@@ -218,7 +213,9 @@ def main():
     local_rank = get_world_group().local_rank
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
 
-    pipe = TASK_PIPELINE[args.task].from_pretrained(
+    is_i2v_task = args.task == "i2v" or (args.task == "ti2v" and args.img_file_path != None)
+    task_pipeline = WanImageToVideoPipeline if is_i2v_task else WanPipeline
+    pipe = task_pipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16,
     )
@@ -230,7 +227,6 @@ def main():
     if not args.img_file_path and args.task == "i2v":
         raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
 
-    is_i2v_task = args.task == "i2v" or (args.task == "ti2v" and args.img_file_path != None)
     if is_i2v_task:
         image = load_image(args.img_file_path)
         max_area = input_config.height * input_config.width

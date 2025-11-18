@@ -30,6 +30,8 @@ if HAS_FLASH_ATTN:
 HAS_AITER = env_info["has_aiter"]
 if HAS_AITER:
     import aiter
+    import os
+    HOW_V3_BF16_CVT = int(os.environ.get("HOW_V3_BF16_CVT", "2"))
 
 aten = torch.ops.aten
 
@@ -182,7 +184,8 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
         dropout_p=dropout_p,
         causal=is_causal,
         return_attn_probs=False,
-        return_lse=True
+        return_lse=True,
+        how_v3_bf16_cvt=HOW_V3_BF16_CVT
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse

@@ -218,9 +218,6 @@ def main():
     local_rank = get_world_group().local_rank
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
 
-    if not args.img_file_path:
-        raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
-
     pipe = TASK_PIPELINE[args.task].from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16
@@ -231,6 +228,9 @@ def main():
     pipe = pipe.to(f"cuda:{local_rank}")
 
     if args.task == "i2v":
+        if not args.img_file_path:
+            raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
+
         image = load_image(args.img_file_path)
         max_area = input_config.height * input_config.width
         aspect_ratio = image.height / image.width

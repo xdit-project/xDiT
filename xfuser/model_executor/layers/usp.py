@@ -31,7 +31,10 @@ HAS_AITER = env_info["has_aiter"]
 if HAS_AITER:
     import aiter
     import inspect
-    HAS_ROUND_MODE = inspect.signature(aiter.ops.mha.flash_attn_func).parameters.get("how_v3_bf16_cvt") is not None
+    try:
+        HAS_ROUND_MODE = inspect.signature(aiter.ops.mha.flash_attn_func).parameters.get("how_v3_bf16_cvt") is not None
+    except (AttributeError, TypeError):
+        HAS_ROUND_MODE = False
     if HAS_ROUND_MODE:
         import os
         HOW_V3_BF16_CVT = int(os.environ.get("HOW_V3_BF16_CVT", "2"))
@@ -180,26 +183,19 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    attn_kwargs = {
+        "dropout_p": dropout_p,
+        "causal": is_causal,
+        "return_attn_probs": False,
+        "return_lse": True,
+    }
     if HAS_ROUND_MODE:
-        output, softmax_lse = aiter.ops.mha.flash_attn_func(
+        attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+    output, softmax_lse = aiter.ops.mha.flash_attn_func(
             query,
             key,
             value,
-            dropout_p=dropout_p,
-            causal=is_causal,
-            return_attn_probs=False,
-            return_lse=True,
-            how_v3_bf16_cvt=HOW_V3_BF16_CVT
-        )
-    else:
-        output, softmax_lse = aiter.flash_attn_func(
-            query,
-            key,
-            value,
-            dropout_p=dropout_p,
-            causal=is_causal,
-            return_attn_probs=False,
-            return_lse=True
+            **attn_kwargs
         )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse

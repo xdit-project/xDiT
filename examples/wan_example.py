@@ -9,7 +9,7 @@ if not has_valid_diffusers_version("wan"):
     minimum_diffusers_version = get_minimum_diffusers_version("wan")
     raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Wan.")
 
-from diffusers import WanImageToVideoPipeline
+from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
@@ -27,6 +27,18 @@ from xfuser.core.distributed import (
     is_dp_last_group,
 )
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
+
+TASK_FPS = {
+    "i2v": 16,
+    "t2v": 16,
+    "ti2v": 24,
+}
+
+TASK_FLOW_SHIFT = {
+    "i2v": 5,
+    "t2v": 12,
+    "ti2v": 5,
+}
 
 # Wrapper to only wrap the transformer in case it exists, i.e. Wan2.2
 def maybe_transformer_2(transformer_2):
@@ -102,6 +114,18 @@ def parallelize_transformer(pipe):
             torch.zeros(batch_size, sequence_pad_amount, hidden_states.shape[2], device=hidden_states.device, dtype=hidden_states.dtype)
         ], dim=1)
         hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        if ts_seq_len is not None: # (wan2.2 ti2v)
+            temb = torch.cat([
+                temb,
+                torch.zeros(batch_size, sequence_pad_amount, temb.shape[2], device=temb.device, dtype=temb.dtype)
+            ], dim=1)
+            timestep_proj = torch.cat([
+                timestep_proj,
+                torch.zeros(batch_size, sequence_pad_amount, timestep_proj.shape[2], timestep_proj.shape[3], device=timestep_proj.device, dtype=timestep_proj.dtype)
+            ], dim=1)
+            temb = torch.chunk(temb, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
+            timestep_proj = torch.chunk(timestep_proj, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
 
         freqs_cos, freqs_sin = rotary_emb
 
@@ -183,6 +207,13 @@ def parallelize_transformer(pipe):
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
+    parser.add_argument(
+        "--task",
+        type=str,
+        required=True,
+        choices=["i2v", "t2v", "ti2v"],
+        help="The task to run."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -190,40 +221,57 @@ def main():
     local_rank = get_world_group().local_rank
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
 
-    if not args.img_file_path:
-        raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
-
-    pipe = WanImageToVideoPipeline.from_pretrained(
+    is_i2v_task = args.task == "i2v" or (args.task == "ti2v" and args.img_file_path != None)
+    task_pipeline = WanImageToVideoPipeline if is_i2v_task else WanPipeline
+    pipe = task_pipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
     )
-    pipe.scheduler.config.flow_shift = 5 # Match original implementation
+    pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     pipe = pipe.to(f"cuda:{local_rank}")
 
-    image = load_image(args.img_file_path)
+    if not args.img_file_path and args.task == "i2v":
+        raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")
 
-    max_area = input_config.height * input_config.width
-    aspect_ratio = image.height / image.width
-    mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
-    height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
-    width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
-    image = image.resize((width, height))
+    if is_i2v_task:
+        image = load_image(args.img_file_path)
+        max_area = input_config.height * input_config.width
+        aspect_ratio = image.height / image.width
+        mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
+        height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
+        width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
+        image = image.resize((width, height))
+        if is_dp_last_group():
+            print("Max area is calculated from input height and width values, but the aspect ratio for the output video is retained from the input image.")
+            print(f"Input image resolution: {image.height}x{image.width}")
+            print(f"Generating a video with resolution: {height}x{width}")
+    else: # T2V or TI2V with no image
+        mod_value = pipe.vae_scale_factor_spatial * pipe.transformer.config.patch_size[1]
+        height = input_config.height // mod_value * mod_value
+        width = input_config.width // mod_value * mod_value
+        if height != input_config.height or width != input_config.width:
+            if is_dp_last_group():
+                print(f"Adjusting height and width to be multiples of {mod_value}. New dimensions: {height}x{width}")
+        image = None
 
     def run_pipe(input_config, image):
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         start = time.perf_counter()
+        optional_kwargs = {}
+        if image:
+            optional_kwargs["image"] = image
         output = pipe(
             height=height,
             width=width,
-            image=image,
             prompt=input_config.prompt,
             num_inference_steps=input_config.num_inference_steps,
             num_frames=input_config.num_frames,
             guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+            **optional_kwargs,
         ).frames[0]
         end = time.perf_counter()
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
@@ -243,7 +291,9 @@ def main():
 
     output = run_pipe(input_config, image)
     if is_dp_last_group():
-        export_to_video(output, "i2v_output.mp4", fps=16)
+        file_name = f"{args.task}_output.mp4"
+        export_to_video(output, file_name, fps=TASK_FPS[args.task])
+        print(f"Output video saved to {file_name}")
 
     get_runtime_state().destroy_distributed_env()
 

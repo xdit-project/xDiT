@@ -62,7 +62,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 
         sp_world_size = get_sequence_parallel_world_size()
         sequence_length = hidden_states.shape[1]
-        padding_length = sp_world_size - (sequence_length % sp_world_size) % sp_world_size
+        padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
             hidden_states = pad_to_sp_divisable(hidden_states, padding_length, dim=1)
             img_ids = pad_to_sp_divisable(img_ids, padding_length, dim=0)

@@ -36,7 +36,7 @@ from xfuser.core.distributed import (
 
 from xfuser.model_executor.models.transformers.transformer_flux import xFuserFluxAttnProcessor
 
-def pad_to_sp_divisable(tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
+def pad_to_sp_divisible(tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
 
     padding =  torch.zeros(
         *tensor.shape[:dim], padding_length, *tensor.shape[dim + 1 :], dtype=tensor.dtype, device=tensor.device
@@ -64,8 +64,8 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         sequence_length = hidden_states.shape[1]
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
-            hidden_states = pad_to_sp_divisable(hidden_states, padding_length, dim=1)
-            img_ids = pad_to_sp_divisable(img_ids, padding_length, dim=0)
+            hidden_states = pad_to_sp_divisible(hidden_states, padding_length, dim=1)
+            img_ids = pad_to_sp_divisible(img_ids, padding_length, dim=0)
         assert hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0, \
             f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
         if encoder_hidden_states.shape[-2] % get_sequence_parallel_world_size() != 0:

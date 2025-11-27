@@ -190,7 +190,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, use_fp8_attn=False
         quant_q, _ = aiter.per_tensor_quant(query, scale=torch.tensor(1), quant_dtype=quant_dtype)
         quant_k, _ = aiter.per_tensor_quant(key, scale=torch.tensor(1), quant_dtype=quant_dtype)
         quant_v, _ = aiter.per_tensor_quant(value, scale=torch.tensor(1), quant_dtype=quant_dtype)
-        print(quant_k.dtype, quant_k.dtype, quant_v.dtype)
+        torch._dynamo.graph_break()
         output = aiter.flash_attn_fp8_pertensor_func(
             quant_q, quant_k, quant_v,
             causal=is_causal,

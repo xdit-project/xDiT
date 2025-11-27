@@ -18,11 +18,6 @@ from xfuser.model_executor.layers.usp import USP
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 
 
-
-from xfuser.envs import PACKAGES_CHECKER
-env_info = PACKAGES_CHECKER.get_packages_info()
-HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
-
 @xFuserAttentionProcessorRegister.register(Flux2AttnProcessor)
 class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
 

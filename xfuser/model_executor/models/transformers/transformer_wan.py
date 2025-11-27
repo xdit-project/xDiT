@@ -27,6 +27,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             and get_sequence_parallel_world_size() > 1
         )
         set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
+        self.use_fp8_attn = False
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention
@@ -55,6 +56,8 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             value_img = attn.add_v_proj(encoder_hidden_states_img)
         return key_img, value_img
 
+    def _set_fp8_attn(self, use_fp8_attn: bool):
+        self.use_fp8_attn = use_fp8_attn
 
     def __call__(
         self,
@@ -108,11 +111,11 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             value_img = value_img.unflatten(2, (attn.heads, -1))
 
 
-            hidden_states_img = USP(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)).transpose(1, 2)
+            hidden_states_img = USP(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2), use_fp8_attn=self.use_fp8_attn).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 
-        hidden_states = USP(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)).transpose(1, 2)
+        hidden_states = USP(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), use_fp8_attn=self.use_fp8_attn).transpose(1, 2)
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
 

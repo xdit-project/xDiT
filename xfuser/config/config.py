@@ -62,6 +62,8 @@ class RuntimeConfig:
     use_fp8_t5_encoder: bool = False
     use_teacache: bool = False
     use_fbcache: bool = False
+    use_fp8_attn: bool = False
+    use_hybrid_fp8_attn: bool = False
 
     def __post_init__(self):
         check_packages()

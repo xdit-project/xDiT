@@ -175,7 +175,7 @@ def _ft_c_output_all_to_all(x):
     return x
 
 
-def _aiter_attn_call(query, key, value, dropout_p, is_causal):
+def _aiter_attn_call(query, key, value, dropout_p, is_causal, use_fp8_attn=False):
     """
     Performs the necessary tensor permutes and
     then calls attention through AITER
@@ -183,28 +183,43 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    attn_kwargs = {
-        "dropout_p": dropout_p,
-        "causal": is_causal,
-        "return_attn_probs": False,
-        "return_lse": True,
-    }
-    if HAS_ROUND_MODE:
-        attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-    output, softmax_lse = aiter.flash_attn_func(
-        query,
-        key,
-        value,
-        **attn_kwargs
-    )
+    if use_fp8_attn:
+        softmax_lse = None
+        quant_dtype = aiter.dtypes.fp8
+        # Descale not yet supported in AITER.
+        quant_q, _ = aiter.per_tensor_quant(query, scale=torch.tensor(1), quant_dtype=quant_dtype)
+        quant_k, _ = aiter.per_tensor_quant(key, scale=torch.tensor(1), quant_dtype=quant_dtype)
+        quant_v, _ = aiter.per_tensor_quant(value, scale=torch.tensor(1), quant_dtype=quant_dtype)
+        print(quant_k.dtype, quant_k.dtype, quant_v.dtype)
+        output = aiter.flash_attn_fp8_pertensor_func(
+            quant_q, quant_k, quant_v,
+            causal=is_causal,
+        )
+    else:
+        attn_kwargs = {
+            "dropout_p": dropout_p,
+            "causal": is_causal,
+            "return_attn_probs": False,
+            "return_lse": True,
+        }
+        if HAS_ROUND_MODE:
+            attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+        output, softmax_lse = aiter.flash_attn_func(
+            query,
+            key,
+            value,
+            **attn_kwargs
+        )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 
-def _flash_attn_call(query, key, value, dropout_p, is_causal):
+def _flash_attn_call(query, key, value, dropout_p, is_causal, use_fp8_attn=False):
     """
     Performs the necessary tensor permutes and
     then calls attention through flash_attn
     """
+    if use_fp8_attn:
+        print("FP8 flash attention not supported yet in this function. Falling back to bf16 flash attention.")
     query = torch.permute(query, [0, 2, 1, 3])
     key = torch.permute(key, [0, 2, 1, 3])
     value = torch.permute(value, [0, 2, 1, 3])
@@ -219,15 +234,15 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal):
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 
-def _attention(query, key, value, dropout_p, is_causal):
+def _attention(query, key, value, dropout_p, is_causal, use_fp8_attn=False):
     """
     Calls the correct attention mechanism based on the available libraries
     """
     if HAS_AITER:
-        output, _ = _aiter_attn_call(query, key, value, dropout_p, is_causal)
+        output, _ = _aiter_attn_call(query, key, value, dropout_p, is_causal, use_fp8_attn=use_fp8_attn)
         return output
     elif HAS_FLASH_ATTN:
-        output, _ = _flash_attn_call(query, key, value, dropout_p, is_causal)
+        output, _ = _flash_attn_call(query, key, value, dropout_p, is_causal, use_fp8_attn=use_fp8_attn)
         return output
     else:
         return F.scaled_dot_product_attention(
@@ -298,6 +313,7 @@ def USP(
         joint_value: torch.Tensor | None = None,
         joint_strategy: str | None = None,
         attn_layer=None,
+        use_fp8_attn: bool = False,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -320,14 +336,14 @@ def USP(
         value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
 
     if get_sequence_parallel_world_size() == 1: # No SP
-        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal, use_fp8_attn=use_fp8_attn)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
         out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal, use_fp8_attn=use_fp8_attn)
         else: # USP
             out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         out = _ft_c_output_all_to_all(out)

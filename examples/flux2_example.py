@@ -1,5 +1,4 @@
 # Flux inference with USP
-# from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_flux.py
 
 import functools
 
@@ -23,9 +22,6 @@ from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_data_parallel_rank,
     get_runtime_state,
-    get_classifier_free_guidance_world_size,
-    get_classifier_free_guidance_rank,
-    get_cfg_group,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
@@ -77,7 +73,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         return_dict = not isinstance(output, tuple)
         sample = output[0]
         sample = get_sp_group().all_gather(sample, dim=-2)
-        sample = get_cfg_group().all_gather(sample, dim=0)
         if return_dict:
             return output.__class__(sample, *output[1:])
         return (sample, *output[1:])
@@ -100,7 +95,6 @@ def main():
         help="Paths to input images. Can be local paths or URLs. If not specified, will only use text prompt.",
     )
     args = xFuserArgs.add_cli_args(parser).parse_args()
-    print(args.input_images)
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
     engine_config.runtime_config.dtype = torch.bfloat16

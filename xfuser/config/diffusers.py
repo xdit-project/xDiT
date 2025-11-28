@@ -1,8 +1,9 @@
 import diffusers
-from packaging import version
+from packaging.version import Version
 
 DEFAULT_MINIMUM_DIFFUSERS_VERSION = "0.33.0"
 MINIMUM_DIFFUSERS_VERSIONS = {
+    "flux2": "0.36.0",
     "flux": "0.35.2",
     "flux_kontext": "0.35.2",
     "hunyuanvideo": "0.35.2",
@@ -12,7 +13,7 @@ MINIMUM_DIFFUSERS_VERSIONS = {
 def has_valid_diffusers_version(model_name: str|None = None) -> bool:
     diffusers_version = diffusers.__version__
     minimum_diffusers_version = MINIMUM_DIFFUSERS_VERSIONS.get(model_name, DEFAULT_MINIMUM_DIFFUSERS_VERSION)
-    return version.parse(diffusers_version) >= version.parse(minimum_diffusers_version)
+    return Version(diffusers_version).release >= Version(minimum_diffusers_version).release
 
 
 def get_minimum_diffusers_version(model_name: str|None = None) -> str:

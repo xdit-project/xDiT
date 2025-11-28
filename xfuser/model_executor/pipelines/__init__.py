@@ -11,7 +11,7 @@ from .pipeline_stable_diffusion_xl import xFuserStableDiffusionXLPipeline
 from .pipeline_sana import xFuserSanaPipeline
 from .pipeline_sana_sprint import xFuserSanaSprintPipeline
 from .pipeline_wan import xFuserWanPipeline
-from .pipeline_wan import xFuserWanImageToVideoPipeline
+from .pipeline_wan_i2v import xFuserWanImageToVideoPipeline
 
 __all__ = [
     "xFuserPipelineBaseWrapper",

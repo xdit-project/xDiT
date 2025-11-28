@@ -19,9 +19,10 @@ from typing import Any, Dict, List, Tuple, Callable, Optional, Union
 import numpy as np
 import torch
 import torch.distributed
-from diffusers import WanPipeline
+from diffusers import WanImageToVideoPipeline
 from diffusers.utils import is_torch_xla_available
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
+from diffusers.image_processor import PipelineImageInput
 
 from xfuser.config import EngineConfig, InputConfig
 from xfuser.core.distributed import (
@@ -50,8 +51,8 @@ if is_torch_xla_available():
 else:
     XLA_AVAILABLE = False
 
-@xFuserPipelineWrapperRegister.register(WanPipeline)
-class xFuserWanPipeline(xFuserPipelineBaseWrapper):
+@xFuserPipelineWrapperRegister.register(WanImageToVideoPipeline)
+class xFuserWanImageToVideoPipeline(xFuserPipelineBaseWrapper):
     @classmethod
     def from_pretrained(
         cls,
@@ -61,14 +62,39 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
         return_org_pipeline: bool = False,
         **kwargs,
     ):
-        pipeline = WanPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        pipeline = WanImageToVideoPipeline.from_pretrained(pretrained_model_name_or_path, **kwargs)
         if return_org_pipeline:
             return pipeline
         return cls(pipeline, engine_config, cache_args)
+    
+    @property
+    def guidance_scale(self):
+        return self._guidance_scale
+
+    @property
+    def do_classifier_free_guidance(self):
+        return self._guidance_scale > 1
+
+    @property
+    def num_timesteps(self):
+        return self._num_timesteps
+
+    @property
+    def current_timestep(self):
+        return self._current_timestep
+
+    @property
+    def interrupt(self):
+        return self._interrupt
+
+    @property
+    def attention_kwargs(self):
+        return self._attention_kwargs
 
     @torch.no_grad()
     def __call__(
         self,
+        image: PipelineImageInput,
         prompt: Union[str, List[str]] = None,
         negative_prompt: Union[str, List[str]] = None,
         height: int = 480,
@@ -82,6 +108,8 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
         latents: Optional[torch.Tensor] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
+        image_embeds: Optional[torch.Tensor] = None,
+        last_image: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "np",
         return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -93,15 +121,19 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
         The call function to the pipeline for generation.
 
         Args:
+            image (`PipelineImageInput`):
+                The input image to condition the generation on. Must be an image, a list of images or a `torch.Tensor`.
             prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts to guide the image generation. If not defined, pass `prompt_embeds` instead.
+                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
+                instead.
             negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts to avoid during image generation. If not defined, pass `negative_prompt_embeds`
-                instead. Ignored when not using guidance (`guidance_scale` < `1`).
+                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
+                less than `1`).
             height (`int`, defaults to `480`):
-                The height in pixels of the generated image.
+                The height of the generated video.
             width (`int`, defaults to `832`):
-                The width in pixels of the generated image.
+                The width of the generated video.
             num_frames (`int`, defaults to `81`):
                 The number of frames in the generated video.
             num_inference_steps (`int`, defaults to `50`):
@@ -129,6 +161,12 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
             prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs (prompt weighting). If not
                 provided, text embeddings are generated from the `prompt` input argument.
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs (prompt weighting). If not
+                provided, text embeddings are generated from the `negative_prompt` input argument.
+            image_embeds (`torch.Tensor`, *optional*):
+                Pre-generated image embeddings. Can be used to easily tweak image inputs (weighting). If not provided,
+                image embeddings are generated from the `image` input argument.
             output_type (`str`, *optional*, defaults to `"np"`):
                 The output format of the generated image. Choose between `PIL.Image` or `np.array`.
             return_dict (`bool`, *optional*, defaults to `True`):
@@ -159,17 +197,19 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
                 indicating whether the corresponding generated image contains "not-safe-for-work" (nsfw) content.
         """
 
-        if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
-            callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
+        #if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
+        #    callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
             negative_prompt,
+            image,
             height,
             width,
             prompt_embeds,
             negative_prompt_embeds,
+            image_embeds,
             callback_on_step_end_tensor_inputs,
             guidance_scale_2,
         )
@@ -212,22 +252,36 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
             device=device,
         )
 
+        # Encode image embedding
         transformer_dtype = self.transformer.dtype if self.transformer is not None else self.transformer_2.dtype
         prompt_embeds = prompt_embeds.to(transformer_dtype)
         if negative_prompt_embeds is not None:
             negative_prompt_embeds = negative_prompt_embeds.to(transformer_dtype)
+
+        # only wan 2.1 i2v transformer accepts image_embeds
+        if self.transformer is not None and self.transformer.config.image_dim is not None:
+            if image_embeds is None:
+                if last_image is None:
+                    image_embeds = self.encode_image(image, device)
+                else:
+                    image_embeds = self.encode_image([image, last_image], device)
+            image_embeds = image_embeds.repeat(batch_size, 1, 1)
+            image_embeds = image_embeds.to(transformer_dtype)
 
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
         # 5. Prepare latent variables
-        num_channels_latents = (
-            self.transformer.config.in_channels
-            if self.transformer is not None
-            else self.transformer_2.config.in_channels
-        )
-        latents = self.prepare_latents(
+        num_channels_latents = self.vae.config.z_dim
+        image = self.video_processor.preprocess(image, height=height, width=width).to(device, dtype=torch.float32)
+        if last_image is not None:
+            last_image = self.video_processor.preprocess(last_image, height=height, width=width).to(
+                device, dtype=torch.float32
+            )
+
+        latents_outputs = self.prepare_latents(
+            image,
             batch_size * num_videos_per_prompt,
             num_channels_latents,
             height,
@@ -237,9 +291,13 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
             device,
             generator,
             latents,
+            last_image,
         )
-
-        mask = torch.ones(latents.shape, dtype=torch.float32, device=device)
+        if self.config.expand_timesteps:
+            # wan 2.2 5b i2v use firt_frame_mask to mask timesteps
+            latents, condition, first_frame_mask = latents_outputs
+        else:
+            latents, condition = latents_outputs
 
         # 6. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -250,10 +308,22 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
         else:
             boundary_timestep = None
 
+        hybrid_attention = self.attention_kwargs.get("use_hybrid_fp8_attn", None)
+        using_fp8_flash_attn = False # This flag is used for printing purpose only.
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+                if hybrid_attention:
+                    # TODO: Remove magic numbers
+                    if i >= 3 and i < (len(timesteps) - 3) and not using_fp8_flash_attn:
+                        print("Enabling FP8 flash attention for faster inference")
+                        attention_kwargs["use_fp8_attn"] = True
+                        using_fp8_flash_attn = True
+                    elif (i < 3 or i >= (len(timesteps) - 3)) and using_fp8_flash_attn:
+                        print("Disabling FP8 flash attention for better quality")
+                        attention_kwargs["use_fp8_attn"] = False
+                        using_fp8_flash_attn = False
 
                 self._current_timestep = t
 
@@ -266,13 +336,16 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
                     current_model = self.transformer_2
                     current_guidance_scale = guidance_scale_2
 
-                latent_model_input = latents.to(transformer_dtype)
                 if self.config.expand_timesteps:
-                    # seq_len: num_latent_frames * latent_height//2 * latent_width//2
-                    temp_ts = (mask[0][0][:, ::2, ::2] * t).flatten()
+                    latent_model_input = (1 - first_frame_mask) * condition + first_frame_mask * latents
+                    latent_model_input = latent_model_input.to(transformer_dtype)
+
+                    # seq_len: num_latent_frames * (latent_height // patch_size) * (latent_width // patch_size)
+                    temp_ts = (first_frame_mask[0][0][:, ::2, ::2] * t).flatten()
                     # batch_size, seq_len
                     timestep = temp_ts.unsqueeze(0).expand(latents.shape[0], -1)
                 else:
+                    latent_model_input = torch.cat([latents, condition], dim=1).to(transformer_dtype)
                     timestep = t.expand(latents.shape[0])
 
                 with current_model.cache_context("cond"):
@@ -280,6 +353,7 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
                         hidden_states=latent_model_input,
                         timestep=timestep,
                         encoder_hidden_states=prompt_embeds,
+                        encoder_hidden_states_image=image_embeds,
                         attention_kwargs=attention_kwargs,
                         return_dict=False,
                     )[0]
@@ -290,10 +364,11 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
                             hidden_states=latent_model_input,
                             timestep=timestep,
                             encoder_hidden_states=negative_prompt_embeds,
+                            encoder_hidden_states_image=image_embeds,
                             attention_kwargs=attention_kwargs,
                             return_dict=False,
                         )[0]
-                    noise_pred = noise_uncond + current_guidance_scale * (noise_pred - noise_uncond)
+                        noise_pred = noise_uncond + current_guidance_scale * (noise_pred - noise_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -316,6 +391,9 @@ class xFuserWanPipeline(xFuserPipelineBaseWrapper):
                     xm.mark_step()
 
         self._current_timestep = None
+
+        if self.config.expand_timesteps:
+            latents = (1 - first_frame_mask) * condition + first_frame_mask * latents
 
         if not output_type == "latent":
             latents = latents.to(self.vae.dtype)

@@ -9,7 +9,7 @@ if not has_valid_diffusers_version("wan"):
     minimum_diffusers_version = get_minimum_diffusers_version("wan")
     raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Wan.")
 
-from xfuser import xFuserWanImageToVideoPipeline, xFuserWanPipeline
+from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
@@ -51,6 +51,8 @@ def parallelize_transformer(pipe):
     transformer = pipe.transformer
     transformer_2 = pipe.transformer_2
 
+
+
     @functools.wraps(transformer.__class__.forward)
     @maybe_transformer_2(transformer_2)
     def new_forward(
@@ -66,10 +68,8 @@ def parallelize_transformer(pipe):
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
-            fp8_enabled = attention_kwargs.pop("use_fp8_attn", False)
         else:
             lora_scale = 1.0
-            fp8_enabled = False
 
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.config.patch_size
@@ -145,15 +145,11 @@ def parallelize_transformer(pipe):
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.blocks:
-                block.attn1.processor._set_fp8_attn(fp8_enabled)
-                block.attn2.processor._set_fp8_attn(fp8_enabled)
                 hidden_states = self._gradient_checkpointing_func(
                     block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb
                 )
         else:
             for block in self.blocks:
-                block.attn1.processor._set_fp8_attn(fp8_enabled)
-                block.attn2.processor._set_fp8_attn(fp8_enabled)
                 hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
 
         # 5. Output norm, projection & unpatchify
@@ -206,6 +202,9 @@ def parallelize_transformer(pipe):
             block.attn1.processor = xFuserWanAttnProcessor()
             block.attn2.processor = xFuserWanAttnProcessor()
 
+
+
+
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     parser.add_argument(
@@ -223,7 +222,7 @@ def main():
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
 
     is_i2v_task = args.task == "i2v" or (args.task == "ti2v" and args.img_file_path != None)
-    task_pipeline = xFuserWanImageToVideoPipeline if is_i2v_task else xFuserWanPipeline
+    task_pipeline = WanImageToVideoPipeline if is_i2v_task else WanPipeline
     pipe = task_pipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16,
@@ -264,8 +263,6 @@ def main():
         optional_kwargs = {}
         if image:
             optional_kwargs["image"] = image
-        attn_kwargs = {'use_fp8_attn': engine_config.runtime_config.use_fp8_attn,
-                       'use_hybrid_fp8_attn': engine_config.runtime_config.use_hybrid_fp8_attn}
         output = pipe(
             height=height,
             width=width,
@@ -274,7 +271,6 @@ def main():
             num_frames=input_config.num_frames,
             guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-            attention_kwargs=attn_kwargs,
             **optional_kwargs,
         ).frames[0]
         end = time.perf_counter()

@@ -25,3 +25,8 @@ __all__ = [
 if has_valid_diffusers_version("flux"):
     from .transformer_flux import xFuserFluxTransformer2DWrapper
     __all__.append("xFuserFluxTransformer2DWrapper")
+
+
+if has_valid_diffusers_version("zimage"):
+    from .transformer_z_image import xFuserZImageTransformer2DWrapper
+    __all__.append("xFuserZImageTransformer2DWrapper")

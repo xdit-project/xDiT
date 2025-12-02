@@ -3,6 +3,7 @@ from packaging.version import Version
 
 DEFAULT_MINIMUM_DIFFUSERS_VERSION = "0.33.0"
 MINIMUM_DIFFUSERS_VERSIONS = {
+    "zimage": "0.36.0",
     "flux2": "0.36.0",
     "flux": "0.35.2",
     "flux_kontext": "0.35.2",

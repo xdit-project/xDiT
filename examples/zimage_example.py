@@ -27,10 +27,15 @@ from xfuser.core.distributed import (
 from xfuser.model_executor.models.transformers.transformer_flux import xFuserFluxAttnProcessor
 
 def run_pipe(pipe: DiffusionPipeline, input_config):
+    # Pipe implementation currently encodes the prompt in-place,
+    # causing any subsequent calls to use the already encoded prompt as prompt,
+    # causing cascading encodings unless we provide a new list each time.
+    prompt = str(input_config.prompt)
+
     return pipe(
         height=input_config.height,
         width=input_config.width,
-        prompt=input_config.prompt,
+        prompt=prompt,
         num_inference_steps=input_config.num_inference_steps,
         guidance_scale=input_config.guidance_scale,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),

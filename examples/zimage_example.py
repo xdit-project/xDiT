@@ -1,20 +1,14 @@
-# Flux inference with USP
-# from https://github.com/chengzeyi/ParaAttention/blob/main/examples/run_flux.py
-
-import functools
-
-import logging
 import time
 import torch
+from diffusers import ZImagePipeline
 from xfuser.config.diffusers import has_valid_diffusers_version, get_minimum_diffusers_version
-from typing import List, Optional
 
 if not has_valid_diffusers_version("zimage"):
     minimum_diffusers_version = get_minimum_diffusers_version("zimage")
     raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use Z-Image models.")
 
 from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
-from diffusers import DiffusionPipeline, FluxPipeline
+from diffusers import DiffusionPipeline
 
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
@@ -23,8 +17,6 @@ from xfuser.core.distributed import (
     get_runtime_state,
     initialize_runtime_state,
 )
-
-from xfuser.model_executor.models.transformers.transformer_flux import xFuserFluxAttnProcessor
 
 def run_pipe(pipe: DiffusionPipeline, input_config):
     # Pipe implementation currently encodes the prompt in-place,
@@ -52,7 +44,6 @@ def main():
 
     assert engine_args.pipefusion_parallel_degree == 1, "This script does not support PipeFusion."
 
-    from diffusers import ZImagePipeline
     transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
         engine_config.model_config.model,
         torch_dtype=torch.bfloat16,

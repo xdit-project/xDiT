@@ -1,17 +1,11 @@
 import torch
 import math
 from torch.nn.utils.rnn import pad_sequence
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 from diffusers.models.attention_processor import Attention
 
-from xfuser.model_executor.models.transformers.register import (
-    xFuserTransformerWrappersRegister,
-)
-from xfuser.model_executor.models.transformers.base_transformer import (
-    xFuserTransformerBaseWrapper,
-)
 from xfuser.model_executor.layers.usp import USP
 
 from xfuser.core.distributed import (
@@ -201,6 +195,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
                 for layer in self.noise_refiner:
                     x = layer(x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
 
+            # Gather SP outputs and remove padding
             x = self._gather_and_unpad(x, pad_amount, dim=-2)
 
             # cap embed & refine

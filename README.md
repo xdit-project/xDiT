@@ -369,11 +369,13 @@ We also warmly welcome developers to join us in enhancing the project. If you ha
 [PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://arxiv.org/abs/2405.14430)
 
 ```
-@article{fang2024pipefusion,
-  title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference},
-  author={Jiarui Fang and Jinzhe Pan and Jiannan Wang and Aoyu Li and Xibo Sun},
-  journal={arXiv preprint arXiv:2405.14430},
-  year={2024}
+@inproceedings{
+    fang2025pipefusion,
+    title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference},
+    author={Jiarui Fang and Jinzhe Pan and Aoyu Li and Xibo Sun and WANG Jiannan},
+    booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+    year={2025},
+    url={https://openreview.net/forum?id=5xwyxupsLL}
 }
 
 ```

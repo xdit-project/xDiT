@@ -28,8 +28,8 @@ def run_pipe(pipe: DiffusionPipeline, input_config):
         height=input_config.height,
         width=input_config.width,
         prompt=prompt,
-        num_inference_steps=input_config.num_inference_steps,
-        guidance_scale=input_config.guidance_scale,
+        num_inference_steps=9, # Recommended value
+        guidance_scale=0.0, # Recommended value
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     ).images[0]
 

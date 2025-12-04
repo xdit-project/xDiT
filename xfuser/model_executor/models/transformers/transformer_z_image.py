@@ -51,7 +51,7 @@ class xFuserZSingleStreamAttnProcessor:
                 x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
                 freqs_cis = freqs_cis.unsqueeze(2)
                 x_out = torch.view_as_real(x * freqs_cis).flatten(3)
-                return x_out.type_as(x_in)  # todo
+                return x_out.type_as(x_in)
 
         if freqs_cis is not None:
             query = apply_rotary_emb(query, freqs_cis)

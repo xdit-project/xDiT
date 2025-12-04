@@ -107,7 +107,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
         is_list = False
-        if type(x) is list:
+        if isinstance(x, list):
             x = x[0]
             is_list = True
         if pad_amount > 0:

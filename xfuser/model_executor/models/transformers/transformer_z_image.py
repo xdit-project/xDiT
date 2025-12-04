@@ -182,21 +182,24 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         for i, seq_len in enumerate(x_item_seqlens):
             x_attn_mask[i, :seq_len] = 1
 
-        # # SP support
-        pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
-        x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        # SP support
+        # Leaving these here for posteriority - these would make the model slightly faster
+        # but causes slight numerical differences.
+
+        # pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
+        # x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        # x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        # x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.noise_refiner:
-                x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
+                x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
         else:
             for layer in self.noise_refiner:
-                x = layer(x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
+                x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
 
         # Gather SP outputs and remove padding
-        x = self._gather_and_unpad(x, pad_amount, dim=-2)
+        #x = self._gather_and_unpad(x, pad_amount, dim=-2)
 
         # cap embed & refine
         cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -219,21 +222,23 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             cap_attn_mask[i, :seq_len] = 1
 
 
-        # # SP support
-        pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
-        cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        # SP support
+        # Same as above comments about speed vs numerical differences apply here.
+
+        # pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
+        # cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        # cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        # cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.context_refiner:
-                cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
+                cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
         else:
             for layer in self.context_refiner:
-                cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
+                cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
 
         # Gather SP outputs and remove padding
-        cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
+        # cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
 
 
         # unified

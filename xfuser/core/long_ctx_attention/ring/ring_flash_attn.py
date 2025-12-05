@@ -206,6 +206,41 @@ class xFuserRingFlashAttnFunc(RingFlashAttnFunc):
         ctx.attn_type = attn_type
         ctx.attn_processor = attn_processor
         return out if not return_softmax else (out, softmax_lse, None)
+    
+    @staticmethod
+    def backward(ctx, dout, *args):
+        from yunchang.ring.ring_flash_attn import ring_flash_attn_backward
+        
+        q, k, v, out, softmax_lse = ctx.saved_tensors
+        dq, dk, dv = ring_flash_attn_backward(
+            ctx.group,
+            dout,
+            q, k, v,
+            out,
+            softmax_lse,
+            softmax_scale=ctx.softmax_scale,
+            dropout_p=ctx.dropout_p,
+            causal=ctx.causal,
+            window_size=ctx.window_size,
+            softcap=0.0,  # xFuser doesn't use softcap in forward
+            alibi_slopes=ctx.alibi_slopes,
+            deterministic=ctx.deterministic,
+            attn_type=ctx.attn_type,
+        )
+        
+        # Return gradients: 3 tensor gradients + 14 None values for non-tensor params
+        # Order matches forward parameters:
+        # dq, dk, dv, (dropout_p, softmax_scale, causal, window_size,
+        #              alibi_slopes, deterministic, return_softmax, group,
+        #              attn_type, attn_processor, attn_layer, joint_tensor_key,
+        #              joint_tensor_value, joint_strategy)
+        return (
+            dq, dk, dv,        # Gradients for q, k, v
+            None, None, None, None,  # dropout_p, softmax_scale, causal, window_size
+            None, None, None, None,  # alibi_slopes, deterministic, return_softmax, group
+            None, None,              # attn_type, attn_processor
+            None, None, None, None   # attn_layer, joint_tensor_key, joint_tensor_value, joint_strategy
+        )
 
 
 def xdit_ring_flash_attn_func(

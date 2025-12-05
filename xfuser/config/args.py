@@ -322,6 +322,11 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the T5 text encoder.",
         )
+        runtime_group.add_argument(
+            "--use_fp8_gemms",
+            action="store_true",
+            help="Quantize the transformer linear layers (selected models only).",
+        )
 
         # DiTFastAttn arguments
         fast_attn_group = parser.add_argument_group("DiTFastAttn Options")

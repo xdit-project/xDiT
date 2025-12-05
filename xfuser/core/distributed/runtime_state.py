@@ -146,6 +146,14 @@ class DiTRuntimeState(RuntimeState):
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
                 * pipeline.transformer.config.attention_head_dim,
             )
+        elif pipeline.__class__.__name__.startswith("ZImage"):
+            self._set_model_parameters(
+                vae_scale_factor=pipeline.vae_scale_factor,
+                backbone_patch_size=pipeline.transformer.config.all_patch_size,
+                backbone_in_channel=pipeline.transformer.config.in_channels,
+                backbone_inner_dim=pipeline.transformer.config.n_heads
+                * pipeline.transformer.config.axes_dims[-1]
+            )
         else:
             vae_scale_factor = pipeline.vae_scale_factor
             if pipeline.__class__.__name__.startswith("Flux") and diffusers.__version__ >= '0.32':
@@ -249,13 +257,23 @@ class DiTRuntimeState(RuntimeState):
         pipeline: DiffusionPipeline,
         parallel_config: ParallelConfig,
     ):
-        num_heads = pipeline.transformer.config.num_attention_heads
+        num_heads = self._get_model_attention_heads(pipeline)
         ulysses_degree = parallel_config.sp_config.ulysses_degree
         if num_heads % ulysses_degree != 0 or num_heads < ulysses_degree:
             raise RuntimeError(
                 f"transformer backbone has {num_heads} heads, which is not "
                 f"divisible by or smaller than ulysses_degree "
                 f"{ulysses_degree}."
+            )
+
+    def _get_model_attention_heads(self, pipeline: DiffusionPipeline) -> int:
+        if "num_attention_heads" in pipeline.transformer.config:
+            return pipeline.transformer.config.num_attention_heads
+        elif "n_heads" in pipeline.transformer.config:
+            return pipeline.transformer.config.n_heads
+        else:
+            raise RuntimeError(
+                "Cannot find the number of attention heads in transformer config. Model is not supported."
             )
 
     def _set_model_parameters(

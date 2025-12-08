@@ -17,32 +17,49 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_ulysses_parallel_rank,
+    get_runtime_state,
 )
+from xfuser.core.distributed.runtime_state import AttentionBackendType
 
 from packaging.version import parse
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-env_info = PACKAGES_CHECKER.get_packages_info()
-HAS_FLASH_ATTN = env_info["has_flash_attn"]
-if HAS_FLASH_ATTN:
-    import flash_attn
 
-HAS_AITER = env_info["has_aiter"]
-if HAS_AITER:
-    import aiter
+env_info = PACKAGES_CHECKER.get_packages_info()
+if env_info["has_aiter"]:
+    from aiter import flash_attn_func as flash_attn_func_aiter
     import inspect
     try:
-        HAS_ROUND_MODE = inspect.signature(aiter.flash_attn_func).parameters.get("how_v3_bf16_cvt") is not None
+        AITER_HAS_ROUND_MODE = inspect.signature(flash_attn_func_aiter).parameters.get("how_v3_bf16_cvt") is not None
     except (AttributeError, TypeError):
-        HAS_ROUND_MODE = False
-    if HAS_ROUND_MODE:
+        AITER_HAS_ROUND_MODE = False
+    if AITER_HAS_ROUND_MODE:
         import os
         HOW_V3_BF16_CVT = int(os.environ.get("HOW_V3_BF16_CVT", "2"))
 
+if env_info["has_flash_attn"]:
+    from flash_attn import flash_attn_func as flash_attn_func_2
+if env_info["has_flash_attn_3"]:
+    from flash_attn_interface import flash_attn_func as flash_attn_func_3
+if env_info["has_flash_attn_4"]:
+    from flash_attn.cute.interface import flash_attn_fwd as flash_attn_func_4
+
 aten = torch.ops.aten
 
+# Attention function registry
+_ATTENTION_FUNCTION_REGISTRY = {}
 
-def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
+def register_attention_function(backend_type):
+    """
+    Decorator to register attention functions with their corresponding backend type.
+    """
+    def decorator(func):
+        _ATTENTION_FUNCTION_REGISTRY[backend_type] = func
+        return func
+    return decorator
+
+
+def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False):
     if parse(torch.__version__).release >= parse("2.6.0").release:
         from torch.distributed.tensor.experimental._attention import _cp_options
         _cp_options.enable_load_balance = False
@@ -202,7 +219,79 @@ def _ft_c_output_all_to_all(x):
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
 
+@register_attention_function(AttentionBackendType.SDPA)
+def _sdpa_attn_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs attention through PyTorch's scaled_dot_product_attention.
+    Allows Pytorch to decide which SDPA backend to use.
+    """
+    output = F.scaled_dot_product_attention(
+        query, key, value, dropout_p=dropout_p, is_causal=is_causal
+    )
+    return output, None
 
+@register_attention_function(AttentionBackendType.CUDNN)
+def _cudnn_attn_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs the necessary tensor permutes and
+    then calls attention through cuDNN backend
+    """
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output = aten.cudnn_scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        dropout_p,
+        is_causal,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output
+
+@register_attention_function(AttentionBackendType.FLASH_3)
+def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs the necessary tensor permutes and
+    then calls attention through flash_attn V3
+    """
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output, softmax_lse = flash_attn_func_3.flash_attn_func(
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_attn_probs=False,
+        return_lse=True,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, softmax_lse
+
+@register_attention_function(AttentionBackendType.FLASH_4)
+def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs the necessary tensor permutes and
+    then calls attention through flash_attn V4
+    """
+
+    ## TODO: check the dimensions
+    # query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    # key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    # value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output, softmax_lse = flash_attn_func_4(
+        query,
+        key,
+        value,
+    )
+    # output = torch.permute(output, [0, 2, 1, 3])
+    ## TODO: Check if it really doesn't output lse
+    softmax_lse = False
+    return output, softmax_lse
+
+@register_attention_function(AttentionBackendType.AITER)
 def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     """
     Performs the necessary tensor permutes and
@@ -217,9 +306,9 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
         "return_attn_probs": False,
         "return_lse": True,
     }
-    if HAS_ROUND_MODE:
+    if AITER_HAS_ROUND_MODE:
         attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-    output, softmax_lse = aiter.flash_attn_func(
+    output, softmax_lse = flash_attn_func_aiter(
         query,
         key,
         value,
@@ -228,6 +317,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 
+@register_attention_function(AttentionBackendType.FLASH)
 def _flash_attn_call(query, key, value, dropout_p, is_causal):
     """
     Performs the necessary tensor permutes and
@@ -236,7 +326,7 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3])
     key = torch.permute(key, [0, 2, 1, 3])
     value = torch.permute(value, [0, 2, 1, 3])
-    output, softmax_lse, S_mask = flash_attn.flash_attn_func(
+    output, softmax_lse, S_mask = flash_attn_func_2(
         query,
         key,
         value,
@@ -246,21 +336,6 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal):
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
-
-def _attention(query, key, value, dropout_p, is_causal):
-    """
-    Calls the correct attention mechanism based on the available libraries
-    """
-    if HAS_AITER:
-        output, _ = _aiter_attn_call(query, key, value, dropout_p, is_causal)
-        return output
-    elif HAS_FLASH_ATTN:
-        output, _ = _flash_attn_call(query, key, value, dropout_p, is_causal)
-        return output
-    else:
-        return F.scaled_dot_product_attention(
-            query, key, value, dropout_p=dropout_p, is_causal=is_causal
-        )
 
 
 def _preprocess_joint_tensors(joint_key, joint_value):
@@ -315,6 +390,16 @@ def _update_and_get_kv_cache(key, value, attn_layer):
     value = value.transpose(1, 2).contiguous()
     return key, value
 
+def _get_attention_function():
+    """
+    Get the attention function based on the runtime state.
+    """
+    attention_backend = get_runtime_state().attention_backend
+    func = _ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
+    if func is None:
+        raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
+    return func
+
 def USP(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -332,9 +417,10 @@ def USP(
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     """
-
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
+
+    attention_function = _get_attention_function()
 
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
@@ -355,16 +441,16 @@ def USP(
         value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
 
     if get_sequence_parallel_world_size() == 1: # No SP
-        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         else: # USP
-            out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         out = _ft_c_output_all_to_all(out)
 
     return out

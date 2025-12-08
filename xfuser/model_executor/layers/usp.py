@@ -185,15 +185,17 @@ def _cudnn_attn_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output = aten.cudnn_scaled_dot_product_attention(
+    output, softmax_lse = aten._scaled_dot_product_cudnn_attention(
         query,
         key,
         value,
-        dropout_p,
-        is_causal,
+        attn_bias=None,
+        compute_logsumexp=True,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
     )
     output = torch.permute(output, [0, 2, 1, 3])
-    return output
+    return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.FLASH_3)
 def _flash_attn_3_call(query, key, value, dropout_p, is_causal):

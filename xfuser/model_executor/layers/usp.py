@@ -325,8 +325,8 @@ def USP(
         joint_key: torch.Tensor | None = None,
         joint_value: torch.Tensor | None = None,
         joint_strategy: str | None = None,
-        combine_qkv_a2a: bool = False,
         attn_layer=None,
+        combine_qkv_a2a: bool = False,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and

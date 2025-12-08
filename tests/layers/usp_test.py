@@ -199,3 +199,45 @@ class TestUSPHybridParallel(unittest.TestCase):
 
         result_diff = (usp_results - hybrid_results).abs().max().float().cpu().numpy()
         self.assertAlmostEqual(result_diff, 0, places=3)
+
+
+class TestUSPCombinedQKV(unittest.TestCase):
+
+    @unittest.mock.patch('xfuser.model_executor.layers.usp.get_ulysses_parallel_world_size')
+    @unittest.mock.patch('xfuser.model_executor.layers.usp._sdpa_all_to_all_single')
+    def test_combined_qkv_all_to_all(self, mock_all_to_all, mock_world_size):
+        """
+        Verifies that _combined_qkv_all_to_all produces identical results to 
+        calling _ft_c_input_all_to_all separately for Q, K, and V.
+        """
+        # 1. Mock the world size to be > 1 to trigger the distributed logic
+        world_size = 2
+        mock_world_size.return_value = world_size
+
+        # 2. Mock the collective communication to be an identity function.
+        #    This isolates the test to verify that the reshaping, stacking, 
+        #    and permuting logic is mathematically consistent between the two approaches.
+        mock_all_to_all.side_effect = lambda x: x
+
+        # 3. Setup input tensors
+        b, h, s, d = 2, 4, 128, 64
+        # Ensure heads are divisible by world_size as required by the implementation
+        self.assertTrue(h % world_size == 0)
+
+        q = torch.randn(b, h, s, d)
+        k = torch.randn(b, h, s, d)
+        v = torch.randn(b, h, s, d)
+
+        # 4. Run separate calls (Baseline)
+        q_out_sep = usp._ft_c_input_all_to_all(q)
+        k_out_sep = usp._ft_c_input_all_to_all(k)
+        v_out_sep = usp._ft_c_input_all_to_all(v)
+
+        # 5. Run combined call (Target)
+        q_out_comb, k_out_comb, v_out_comb = usp._combined_qkv_all_to_all(q, k, v)
+
+        # 6. Assertions
+        # We use assert_close to handle floating point nuances
+        torch.testing.assert_close(q_out_sep, q_out_comb, msg="Q tensors mismatch")
+        torch.testing.assert_close(k_out_sep, k_out_comb, msg="K tensors mismatch")
+        torch.testing.assert_close(v_out_sep, v_out_comb, msg="V tensors mismatch")

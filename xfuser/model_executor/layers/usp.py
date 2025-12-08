@@ -79,7 +79,6 @@ def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=Fa
     else:
         out, *_ = _templated_ring_attention(
             PROCESS_GROUP.RING_PG,
-            1,
             attention_function,
             query,
             key,

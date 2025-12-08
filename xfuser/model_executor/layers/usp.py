@@ -60,86 +60,32 @@ def register_attention_function(backend_type):
 
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False):
+    kwargs = {
+        "dropout_p": dropout_p,
+        "is_causal": is_causal,
+    }
     if parse(torch.__version__).release >= parse("2.6.0").release:
         from torch.distributed.tensor.experimental._attention import _cp_options
         _cp_options.enable_load_balance = False
-        kwargs = {
-            "dropout_p": dropout_p,
-            "is_causal": is_causal,
-        }
-        if HAS_AITER:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                _aiter_attn_call,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
-        elif HAS_FLASH_ATTN:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                _flash_attn_call,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
-        else:
-            kwargs = {
-                **kwargs,
-                "attn_bias": None,
-                "compute_log_sumexp": True,
-            }
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                aten._scaled_dot_product_efficient_attention,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
+        out, *_ = _templated_ring_attention(
+            PROCESS_GROUP.RING_PG,
+            1,
+            attention_function,
+            query,
+            key,
+            value,
+            **kwargs,
+        )
     else:
-        kwargs = {
-            "dropout_p": dropout_p,
-            "is_causal": is_causal,
-        }
-        if HAS_AITER:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                _aiter_attn_call,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
-        elif HAS_FLASH_ATTN:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                _flash_attn_call,
-                query,
-                key,
-                value,
-                **kwargs
-            )
-        else:
-            kwargs = {
-                **kwargs,
-                "attn_bias": None,
-                "compute_log_sumexp": True,
-            }
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                aten._scaled_dot_product_efficient_attention,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
+        out, *_ = _templated_ring_attention(
+            PROCESS_GROUP.RING_PG,
+            1,
+            attention_function,
+            query,
+            key,
+            value,
+            **kwargs,
+        )
     return out
 
 

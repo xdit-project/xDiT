@@ -125,7 +125,7 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        hidden_states = USP(query, key, value)
+        hidden_states = USP(query, key, value, combine_qkv_a2a=True)
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)

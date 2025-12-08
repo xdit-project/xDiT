@@ -160,6 +160,34 @@ def _ft_c_input_all_to_all(x):
     return x
 
 
+def _combined_qkv_all_to_all(q, k, v):
+    """Concatenate query, key, value tensors and perform a single all-to-all communication."""
+    world_size = get_ulysses_parallel_world_size()
+    if world_size <= 1:
+        return q, k, v
+
+    assert q.ndim == 4, "q must have 4 dimensions, got {}".format(q.ndim)
+    b, h, s, d = q.shape
+    assert h % world_size == 0, "h must be divisible by world_size, got {} and {}".format(h, world_size)
+
+    # [3, b, h, s, d]
+    qkv = torch.stack([q, k, v], dim=0)
+    # [3, b, P, h/P, s, d]
+    qkv = qkv.view(3, b, world_size, h // world_size, s, d)
+    # [P, 3, b, h/P, s, d]
+    qkv = qkv.permute(2, 0, 1, 3, 4, 5).contiguous()
+
+    qkv = _sdpa_all_to_all_single(qkv)
+
+    # [3, b, h/P, P, s, d]
+    qkv = qkv.permute(1, 2, 3, 0, 4, 5).contiguous()
+    # [3, b, h/P, P*s, d]
+    qkv = qkv.view(3, b, h // world_size, -1, d)
+
+    q, k, v = torch.unbind(qkv, dim=0)
+    return q, k, v
+
+
 def _ft_c_output_all_to_all(x):
     world_size = get_ulysses_parallel_world_size()
     if world_size <= 1:
@@ -297,6 +325,7 @@ def USP(
         joint_key: torch.Tensor | None = None,
         joint_value: torch.Tensor | None = None,
         joint_strategy: str | None = None,
+        combine_qkv_a2a: bool = False,
         attn_layer=None,
     ):
     """
@@ -309,9 +338,12 @@ def USP(
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
 
     if get_ulysses_parallel_world_size() > 1:
-        query = _ft_c_input_all_to_all(query)
-        key = _ft_c_input_all_to_all(key)
-        value = _ft_c_input_all_to_all(value)
+        if combine_qkv_a2a and (query.shape == key.shape) and (key.shape == value.shape):
+            query, key, value = _combined_qkv_all_to_all(query, key, value)
+        else:
+            query = _ft_c_input_all_to_all(query)
+            key = _ft_c_input_all_to_all(key)
+            value = _ft_c_input_all_to_all(value)
 
     if attn_layer:
         key, value = _update_and_get_kv_cache(key, value, attn_layer)

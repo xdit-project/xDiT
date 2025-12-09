@@ -23,7 +23,7 @@ if env_info["has_flash_attn"]:
 if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
 if env_info["has_flash_attn_4"]:
-    from flash_attn.cute.interface import _flash_attn_fwd as flash_attn_func_4
+    from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4
 
 class AttentionBackendType(Enum):
     SDPA = "SDPA"
@@ -136,8 +136,7 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
         value,
         dropout_p=dropout_p,
         causal=is_causal,
-        return_attn_probs=False,
-        return_lse=True,
+        return_attn_probs=True,
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
@@ -152,13 +151,13 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output = flash_attn_func_4(
+    output, softmax_lse = flash_attn_func_4(
         query,
         key,
         value,
+        causal=is_causal,
     )
     output = torch.permute(output, [0, 2, 1, 3])
-    softmax_lse = False
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER)

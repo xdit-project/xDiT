@@ -166,9 +166,9 @@ def _combined_qkv_all_to_all(q, k, v):
     if world_size <= 1:
         return q, k, v
 
-    assert q.ndim == 4, "q must have 4 dimensions, got {}".format(q.ndim)
+    assert q.ndim == 4, f"q must have 4 dimensions, got {q.ndim}"
     b, h, s, d = q.shape
-    assert h % world_size == 0, "h must be divisible by world_size, got {} and {}".format(h, world_size)
+    assert h % world_size == 0, f"h must be divisible by world_size, got {h} and {world_size}"
 
     # [3, b, h, s, d]
     qkv = torch.stack([q, k, v], dim=0)
@@ -341,7 +341,7 @@ def USP(
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
 
     if get_ulysses_parallel_world_size() > 1:
-        if combine_qkv_a2a and (query.shape == key.shape) and (key.shape == value.shape):
+        if combine_qkv_a2a and query.shape == key.shape == value.shape:
             query, key, value = _combined_qkv_all_to_all(query, key, value)
         else:
             query = _ft_c_input_all_to_all(query)

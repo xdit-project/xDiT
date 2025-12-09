@@ -1,5 +1,4 @@
 from abc import ABCMeta
-from enum import Enum
 import random
 from typing import List, Optional
 
@@ -23,6 +22,8 @@ from xfuser.envs import PACKAGES_CHECKER
 if envs._is_npu():
     from torch.npu import manual_seed as device_manual_seed
     from torch.npu import manual_seed_all as device_manual_seed_all
+
+from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.config.config import (
     ParallelConfig,
     RuntimeConfig,
@@ -52,13 +53,6 @@ def set_random_seed(seed: int):
     device_manual_seed(seed)
     device_manual_seed_all(seed)
 
-class AttentionBackendType(Enum):
-    SDPA = "SDPA"
-    FLASH = "Flash Attention V2"
-    CUDNN =  "cuDNN"
-    FLASH_3 = "Flash Attention V3"
-    FLASH_4 = "Flash Attention V4"
-    AITER = "AITER"
 
 class RuntimeState(metaclass=ABCMeta):
     attention_backend: AttentionBackendType = AttentionBackendType.SDPA

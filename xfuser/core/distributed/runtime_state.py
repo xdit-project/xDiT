@@ -136,10 +136,10 @@ class RuntimeState(metaclass=ABCMeta):
             backend = AttentionBackendType.FLASH_4
         elif env_info["has_flash_attn_3"]:
             backend = AttentionBackendType.FLASH_3
-        elif env_info["has_flash_attn"]:
-            backend = AttentionBackendType.FLASH
         elif torch.backends.cudnn.is_available():
             backend = AttentionBackendType.CUDNN
+        elif env_info["has_flash_attn"]:
+            backend = AttentionBackendType.FLASH
         else:
             backend = AttentionBackendType.SDPA
 

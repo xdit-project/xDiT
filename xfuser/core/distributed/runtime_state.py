@@ -126,9 +126,8 @@ class RuntimeState(metaclass=ABCMeta):
         """
         Select the best attention backend for the current environment.
         """
-        if engine_config.runtime_config.attention_backend_override:
-            logger.warning(f"Using {engine_config.runtime_config.attention_backend_override} as attention backend due to override setting.")
-            return AttentionBackendType[engine_config.runtime_config.attention_backend_override.upper()]
+        if engine_config.runtime_config.attention_backend:
+            backend = AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
 
         if envs._is_hip():
             if env_info["has_aiter"]:

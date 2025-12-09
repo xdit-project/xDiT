@@ -41,6 +41,7 @@ from .parallel_state import (
     initialize_model_parallel,
     model_parallel_is_initialized,
 )
+from xfuser.config.args import xFuserArgs
 
 logger = init_logger(__name__)
 
@@ -123,7 +124,7 @@ class RuntimeState(metaclass=ABCMeta):
         if engine_config.runtime_config.attention_backend:
             backend = AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
 
-        if envs._is_hip():
+        elif envs._is_hip():
             if env_info["has_aiter"]:
                 backend = AttentionBackendType.AITER
             elif env_info["has_flash_attn"]:
@@ -736,6 +737,22 @@ class DiTRuntimeState(RuntimeState):
         )
 
 
+class ExternalRuntimeState(RuntimeState):
+    """
+    Runtime state for running xDiT components outside xDiT.
+    This can be used to test individual components in tests without
+    having to setup a full distributed environment.
+    """
+    def __init__(self):
+        # Creating config with default params
+        config, _ = xFuserArgs().create_config()
+        super().__init__(config)
+
+
+    def _check_distributed_env(self, parallel_config):
+        pass
+
+
 # _RUNTIME: Optional[RuntimeState] = None
 # TODO: change to RuntimeState after implementing the unet
 _RUNTIME: Optional[DiTRuntimeState] = None
@@ -750,7 +767,7 @@ def get_runtime_state():
     return _RUNTIME
 
 
-def initialize_runtime_state(pipeline: DiffusionPipeline, engine_config: EngineConfig):
+def initialize_runtime_state(pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None):
     global _RUNTIME
     if _RUNTIME is not None:
         logger.warning(
@@ -760,4 +777,6 @@ def initialize_runtime_state(pipeline: DiffusionPipeline, engine_config: EngineC
         _RUNTIME = DiTRuntimeState(pipeline=pipeline, config=engine_config)
     elif hasattr(pipeline, "unet"):
         _RUNTIME = UnetRuntimeState(pipeline=pipeline, config=engine_config)
+    elif not pipeline:
+        _RUNTIME = ExternalRuntimeState()
 

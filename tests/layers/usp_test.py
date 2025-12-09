@@ -195,9 +195,8 @@ class TestUSPHybridParallel(unittest.TestCase):
 
     def setUp(self):
         _init_environment()
-        # Using SDPA here
-        self.HAS_FLASH_ATTN = False
-        self.HAS_AITER = False
+        self.runtime_state = get_runtime_state()
+        self.runtime_state.set_attention_backend("sdpa_flash")
         self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)

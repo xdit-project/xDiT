@@ -280,6 +280,23 @@ def main():
             print(f"Iteration took {end - start}s, Peak memory: {peak_memory / 1024 ** 2:.2f} MB")
         return output
 
+    if args.use_fp8_gemms:
+        import itertools
+        from torchao.quantization.granularity import PerTensor
+        from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, _is_linear, quantize_
+        from torchao.quantization.quantize_.common import KernelPreference
+        for module in itertools.chain(pipe.transformer.blocks, pipe.transformer_2.blocks) if pipe.transformer_2 is not None else pipe.transformer.blocks:
+            quantize_(
+                module,
+                config=Float8DynamicActivationFloat8WeightConfig(
+                            granularity=PerTensor(),
+                            set_inductor_config=False,
+                            kernel_preference=KernelPreference.AUTO
+                        ),
+                filter_fn=_is_linear,
+                device=f"cuda:{local_rank}",
+            )
+
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         pipe.transformer = torch.compile(pipe.transformer, mode="default")

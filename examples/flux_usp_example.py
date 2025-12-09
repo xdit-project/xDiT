@@ -109,6 +109,24 @@ def main():
         torch_dtype=torch.bfloat16,
     )
 
+    if args.use_fp8_gemms:
+        import itertools
+        from torchao.quantization.granularity import PerTensor
+        from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, _is_linear, quantize_
+        from torchao.quantization.quantize_.common import KernelPreference
+        logging.info(f"rank {local_rank} quantizing transformer linear layers")
+        for module in itertools.chain(pipe.transformer.transformer_blocks, pipe.transformer.single_transformer_blocks):
+            quantize_(
+                module, 
+                config=Float8DynamicActivationFloat8WeightConfig(
+                            granularity=PerTensor(),
+                            set_inductor_config=False,
+                            kernel_preference=KernelPreference.AUTO
+                        ),
+                filter_fn=_is_linear,
+                device=f"cuda:{local_rank}",
+            )
+
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
         logging.info(f"rank {local_rank} sequential CPU offload enabled")

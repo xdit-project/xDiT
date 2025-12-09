@@ -39,15 +39,15 @@
 
 <h2 id="meet-xdit">🔥 Meet xDiT</h2>
 
-Diffusion Transformers (DiTs) are driving advancements in high-quality image and video generation. 
-With the escalating input context length in DiTs, the computational demand of the Attention mechanism grows **quadratically**! 
+Diffusion Transformers (DiTs) are driving advancements in high-quality image and video generation.
+With the escalating input context length in DiTs, the computational demand of the Attention mechanism grows **quadratically**!
 Consequently, multi-GPU and multi-machine deployments are essential to meet the **real-time** requirements in online services.
 
 
 <h3 id="meet-xdit-parallel">Parallel Inference</h3>
 
 To meet real-time demand for DiTs applications, parallel inference is a must.
-xDiT is an inference engine designed for the parallel deployment of DiTs on a large scale. 
+xDiT is an inference engine designed for the parallel deployment of DiTs on a large scale.
 xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as computation accelerations.
 
 The overview of xDiT is shown as follows.
@@ -67,7 +67,7 @@ The overview of xDiT is shown as follows.
 
 The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
 
-As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers. 
+As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers.
 If the model you require is not available in the model zoo, developing it by yourself is not so difficult; please refer to our [Dev Guide](#dev-guide).
 
 We also have implemented the following parallel strategies for reference:
@@ -136,8 +136,8 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 
 <h2 id="comfyui">🖼️ TACO-DiT: ComfyUI with xDiT</h2>
 
-ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow. 
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today's large DiTs, resulting in unacceptably high latency for users like Flux.1. 
+ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow.
+It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today's large DiTs, resulting in unacceptably high latency for users like Flux.1.
 
 Using our commercial project **TACO-DiT**, a close-sourced ComfyUI variant built with xDiT, we've successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1's performance challenges. Below is an example of using TACO-DiT to accelerate a Flux workflow with LoRA:
 
@@ -145,8 +145,8 @@ Using our commercial project **TACO-DiT**, a close-sourced ComfyUI variant built
 
 By using TACO-DiT, you could significantly reduce your ComfyUI workflow inference latency, and  boosting the throughput with Multi-GPUs. Now it is compatible with multiple Plug-ins, including ControlNet and LoRAs.
 
-More features and details can be found in our Intro Video: 
-+ [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys) 
+More features and details can be found in our Intro Video:
++ [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys)
 + [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
 
 The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
@@ -157,23 +157,19 @@ ComfyUI plugin for xDiT is now available: [xdit-comfyui-private](https://github.
 
 ### 1. Install from pip
 
-We set `flash_attn` as optional installation requirement.
-
-About `flash_attn` version:
-- Without `flash_attn` installed, xDiT falls back to a PyTorch implementation of ring attention, which helps NPU users with compatibility
-- However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we strongly recommend installing `flash_attn`.
-
 About `diffusers` version:
 - Different models may require different diffusers versions. Model implementations can vary between diffusers versions, especially for latest models, which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
 - While we specify a diffusers version in `setup.py`, newer models may require later versions or even need to be installed from main branch.
-- Limited list of validated diffusers versions can be seen [here](#6-limitations)
+- Limited list of validated diffusers versions can be seen [here](#7-limitations).
+
+`flash_attn` is an optional library that can be installed with xDiT. More supported attention backends can be seen [here](#6-supported-attention-backends).
 
 ```
 pip install xfuser  # Basic installation
 pip install "xfuser[flash-attn]"  # With flash attention
 ```
 
-### 2. Install from source 
+### 2. Install from source
 
 ```
 pip install -e .
@@ -190,20 +186,20 @@ The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang
 
 ### 3. Docker
 
-We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev).
+We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev). For running with AMD GPUs, a monthly image with validated support for select models is available as well: [rocm/pytorch-xdit](https://hub.docker.com/r/rocm/pytorch-xdit)
 
 ### 4. Usage
 
-We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory. 
+We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory.
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
 
 ```bash
 bash examples/run.sh
 ```
 
-Hybridizing multiple parallelism techniques together is essential for efficiently scaling. 
-It's important that **the product of all parallel degrees matches the number of devices**. 
-Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism. 
+Hybridizing multiple parallelism techniques together is essential for efficiently scaling.
+It's important that **the product of all parallel degrees matches the number of devices**.
+Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism.
 Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
 
 
@@ -220,7 +216,7 @@ examples/pixartalpha_example.py \
 ```
 
 ⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
-The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution. 
+The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution.
 We observed that a warmup of 0 had no effect on the PixArt model.
 Users can tune this value according to their specific tasks.
 
@@ -230,7 +226,29 @@ You can also launch an HTTP service to generate images with xDiT.
 
 [Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
 
-### 6. Limitations
+### 6. Supported attention backends
+
+When initializing the runtime, xDiT checks which attention backends are installed and available and chooses the fastest one automatically.
+This behaviour can be overriden via command line argument `--attention-backend <backend cli name>`.
+
+Several different attention backends are supported:
+
+| Backend name | CLI name |
+| --- | --- |
+| [SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa |
+| [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/frontend/latest/operations/Attention.html) | cudnn |
+| [FAv2](https://github.com/Dao-AILab/flash-attention) | flash |
+| [FAv3](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3 |
+| [FAv4](https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute) | flash_4 |
+| [AITER](https://github.com/rocm/aiter) | aiter |
+
+xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architechtures.
+However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3` (on _hopper_ GPUs) or `FAv4` (on _blackwell_ GPUs).
+On AMD GPUs it is generally recommended to use `AITER` in all cases to get the best possible performance.
+
+
+
+### 7. Limitations
 
 #### Diffusers version
 
@@ -335,7 +353,7 @@ For usage instructions, refer to the [example/run.sh](./examples/run.sh). Simply
 
 <h4 id="cache_acceleration">Cache Acceleration</h4>
 
-You can use `--use_teacache` or `--use_fbcache` in examples/run.sh, which applies TeaCache and First-Block-Cache respectively. 
+You can use `--use_teacache` or `--use_fbcache` in examples/run.sh, which applies TeaCache and First-Block-Cache respectively.
 Note, cache method is only supported for FLUX model with USP. It is currently not applicable for PipeFusion.
 
 xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce the computation cost of attention layers by leveraging redundancies between different steps of the Diffusion Model.

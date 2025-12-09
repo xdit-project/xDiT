@@ -11,7 +11,6 @@ from xfuser.core.distributed import (
     get_runtime_state,
     initialize_runtime_state,
 )
-from xfuser import xFuserArgs
 from xfuser.core.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 from yunchang.kernels import AttnType

@@ -23,7 +23,7 @@ if env_info["has_flash_attn"]:
 if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
 if env_info["has_flash_attn_4"]:
-    from flash_attn.cute.interface import flash_attn_fwd as flash_attn_func_4
+    from flash_attn.cute.interface import _flash_attn_fwd as flash_attn_func_4
 
 class AttentionBackendType(Enum):
     SDPA = "SDPA"
@@ -149,17 +149,15 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
     then calls attention through flash_attn V4
     """
 
-    ## TODO: check the dimensions
-    # query = torch.permute(query, [0, 2, 1, 3]).contiguous()
-    # key = torch.permute(key, [0, 2, 1, 3]).contiguous()
-    # value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output, softmax_lse = flash_attn_func_4(
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output = flash_attn_func_4(
         query,
         key,
         value,
     )
-    # output = torch.permute(output, [0, 2, 1, 3])
-    ## TODO: Check if it really doesn't output lse
+    output = torch.permute(output, [0, 2, 1, 3])
     softmax_lse = False
     return output, softmax_lse
 

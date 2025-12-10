@@ -106,19 +106,15 @@ def _cudnn_attn_call(query, key, value, dropout_p, is_causal):
     Performs the necessary tensor permutes and
     then calls attention through cuDNN backend
     """
-    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
-    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
-    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output, softmax_lse = aten._scaled_dot_product_cudnn_attention(
+    output, softmax_lse, *rest = aten._scaled_dot_product_cudnn_attention(
         query,
         key,
         value,
         attn_bias=None,
-        compute_logsumexp=True,
+        compute_log_sumexp=True,
         dropout_p=dropout_p,
         is_causal=is_causal,
     )
-    output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.FLASH_3)
@@ -130,11 +126,10 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output, softmax_lse = flash_attn_func_3.flash_attn_func(
+    output, softmax_lse = flash_attn_func_3(
         query,
         key,
         value,
-        dropout_p=dropout_p,
         causal=is_causal,
         return_attn_probs=True,
     )

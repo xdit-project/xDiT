@@ -106,16 +106,17 @@ class RuntimeState(metaclass=ABCMeta):
         Set the attention backend for the current environment.
         Given attention_backend can be either AttentionBackendType or a string with the name of the backend.
         """
-        if isinstance(attention_backend, AttentionBackendType):
-            new_attention_backend = attention_backend
-        elif isinstance(attention_backend, str):
-            new_attention_backend = AttentionBackendType[attention_backend.upper()]
-        else:
+        if isinstance(attention_backend, str):
+            try:
+                attention_backend = AttentionBackendType[attention_backend.upper()]
+            except:
+                pass
+
+        if not isinstance(attention_backend, AttentionBackendType):
             raise ValueError(f"Value '{attention_backend}' is not a valid attention backend.")
 
-        self._check_if_backend_compatible_with_current_configuration(new_attention_backend)
-        self.attention_backend = new_attention_backend
-
+        self._check_if_backend_compatible_with_current_configuration(attention_backend)
+        self.attention_backend = attention_backend
 
     def _select_attention_backend(self, engine_config: EngineConfig):
         """

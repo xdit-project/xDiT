@@ -56,7 +56,7 @@ def set_random_seed(seed: int):
 
 
 class RuntimeState(metaclass=ABCMeta):
-    attention_backend: AttentionBackendType = AttentionBackendType.SDPA
+    attention_backend: AttentionBackendType = AttentionBackendType.SDPA_FLASH
     parallel_config: ParallelConfig
     runtime_config: RuntimeConfig
     input_config: InputConfig

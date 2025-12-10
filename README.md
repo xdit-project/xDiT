@@ -236,6 +236,9 @@ Several different attention backends are supported:
 | Backend name | CLI name |
 | --- | --- |
 | [SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa |
+| [SDPA - Math](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa_math |
+| [SDPA - Memory Efficient](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa_efficient |
+| [SDPA - Flash](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa_flash |
 | [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/frontend/latest/operations/Attention.html) | cudnn |
 | [FAv2](https://github.com/Dao-AILab/flash-attention) | flash |
 | [FAv3](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3 |

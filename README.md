@@ -186,7 +186,7 @@ The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang
 
 ### 3. Docker
 
-We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev). For running with AMD GPUs, a monthly image with validated support for select models is available as well: [rocm/pytorch-xdit](https://hub.docker.com/r/rocm/pytorch-xdit)
+We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev). For running with AMD GPUs (MI300X or newer), a monthly image with validated support for select models is available as well: [rocm/pytorch-xdit](https://hub.docker.com/r/rocm/pytorch-xdit)
 
 ### 4. Usage
 

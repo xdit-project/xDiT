@@ -151,7 +151,7 @@ class RuntimeState(metaclass=ABCMeta):
         """
         Check if the selected attention backend is compatible with the current configuration.
         """
-        if attention_backend in [AttentionBackendType.SDPA, AttentionBackendType.FLASH_4]:
+        if attention_backend in [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH, AttentionBackendType.FLASH_4]:
             if self.parallel_config.ring_degree > 1:
                 raise RuntimeError("Selected attention backend does not support ring parallelism.")
 

@@ -245,7 +245,7 @@ Several different attention backends are supported:
 | [FAv4](https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute) | flash_4 |
 | [AITER](https://github.com/rocm/aiter) | aiter |
 
-xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architechtures.
+xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3` (on _hopper_ GPUs) or `FAv4` (on _blackwell_ GPUs).
 On AMD GPUs it is generally recommended to use `AITER` in all cases to get the best possible performance.
 

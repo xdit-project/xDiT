@@ -118,7 +118,7 @@ class TestUSP(unittest.TestCase):
 
     def test_usp_cudnn(self):
         """
-        Verifies ring_attn results with cuDNN are close to F.SDPA results
+        Verifies USP results with cuDNN are close to F.SDPA results
         """
         if not torch.backends.cudnn.is_available() or _is_hip():
             self.skipTest("cuDNN is not available in the environment.")

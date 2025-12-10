@@ -115,6 +115,7 @@ def _cudnn_attn_call(query, key, value, dropout_p, is_causal):
         dropout_p=dropout_p,
         is_causal=is_causal,
     )
+    softmax_lse = softmax_lse.squeeze(-1)
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.FLASH_3)

@@ -138,6 +138,7 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.FLASH_4)
+@torch.compiler.disable # Disabling compile, as it is not currently supported with FAv4
 def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
     """
     Performs the necessary tensor permutes and

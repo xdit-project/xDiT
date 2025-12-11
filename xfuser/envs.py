@@ -182,7 +182,9 @@ class PackagesEnvChecker:
     def initialize(self):
         packages_info = {}
         packages_info["has_aiter"] = self.check_aiter()
-        packages_info["has_flash_attn"] = self.check_flash_attn(packages_info)
+        packages_info["has_flash_attn"] = self.check_flash_attn()
+        packages_info["has_flash_attn_3"] = self._check_flash_attn_3()
+        packages_info["has_flash_attn_4"] = self._check_flash_attn_4()
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         self.packages_info = packages_info
@@ -193,7 +195,6 @@ class PackagesEnvChecker:
         """
         try:
             import aiter
-            logger.info("Using AITER as the attention library")
             return True
         except:
             if _is_hip():
@@ -204,13 +205,13 @@ class PackagesEnvChecker:
             return False
 
 
-    def check_flash_attn(self, packages_info):
+    def check_flash_attn(self):
         if not torch.cuda.is_available():
             return False
 
         # Check if torch_npu is available
         if _is_npu():
-            logger.info("falsh_attn is not ready on torch_npu for now")
+            logger.info("flash_attn is not ready on torch_npu for now")
             return False
 
         if _is_musa():
@@ -231,12 +232,22 @@ class PackagesEnvChecker:
                     raise ImportError(f"install flash_attn >= 2.6.0")
                 return True
         except ImportError:
-            if not packages_info.get("has_aiter", False):
-                logger.warning(
-                    f'Flash Attention library "flash_attn" not found, '
-                    f"using pytorch attention implementation"
-                )
             return False
+
+    def _check_flash_attn_3(self):
+        try:
+            from flash_attn_interface import flash_attn_func as flash3_attn_func
+            return True
+        except:
+            return False
+
+    def _check_flash_attn_4(self):
+        try:
+            from flash_attn.cute import interface as flash_cute
+            return True
+        except:
+            return False
+
 
     def check_long_ctx_attn(self):
         if not torch.cuda.is_available():

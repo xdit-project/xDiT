@@ -2,13 +2,14 @@ import os
 import torch
 import unittest
 import importlib
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, _is_hip
 from xfuser.model_executor.layers import usp
 
 from xfuser.core.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
     get_runtime_state,
+    initialize_runtime_state,
 )
 from xfuser.core.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
@@ -22,15 +23,16 @@ def _init_environment():
     os.environ["MASTER_PORT"] = "12355"
     os.environ["LOCAL_RANK"] = "0"
     init_distributed_environment(rank=0, world_size=1)
+    initialize_runtime_state()
     initialize_model_parallel(ring_degree=1, ulysses_degree=1)
 
 class TestUSP(unittest.TestCase):
 
     def setUp(self):
         _init_environment()
-        env_info = PACKAGES_CHECKER.get_packages_info()
-        self.HAS_FLASH_ATTN = env_info["has_flash_attn"]
-        self.HAS_AITER = env_info["has_aiter"]
+        self.env_info = PACKAGES_CHECKER.get_packages_info()
+        self.runtime_state = get_runtime_state()
+        self.default_comparison_backend = "sdpa_flash"
         self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
@@ -39,23 +41,37 @@ class TestUSP(unittest.TestCase):
         destroy_model_parallel()
         destroy_distributed_environment()
 
+    def _run_usp_comparison(self, attention_backend):
+        self.runtime_state.set_attention_backend(self.default_comparison_backend)
+        fsdpa_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+
+        self.runtime_state.set_attention_backend(attention_backend)
+        comparison_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+
+        result_diff = (fsdpa_results - comparison_results).abs().max()
+        return result_diff
+
+    def _run_ring_comparison(self, attention_backend):
+        self.runtime_state.set_attention_backend(self.default_comparison_backend)
+        attention_function = usp._get_attention_function()
+        fsdpa_results = usp.ring_attn(attention_function, self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+
+        self.runtime_state.set_attention_backend(attention_backend)
+        attention_function = usp._get_attention_function()
+        comparison_results = usp.ring_attn(attention_function, self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+
+        result_diff = (fsdpa_results - comparison_results).abs().max()
+        return result_diff
 
     def test_usp_flash_attn(self):
         """
         Verifies USP results with flash_attn are close to F.SDPA results
         """
-        if not self.HAS_FLASH_ATTN:
+        if not self.env_info["has_flash_attn"]:
             self.skipTest("flash_attn library is not available in the environment.")
 
-        # Disabling flash_attn and aiter to get SDPA results
-        usp.HAS_FLASH_ATTN = False
-        usp.HAS_AITER = False
-        fsdpa_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+        result_diff = self._run_usp_comparison("flash")
 
-        usp.HAS_FLASH_ATTN = True
-        flash_attn_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
-
-        result_diff = (fsdpa_results - flash_attn_results).abs().max()
         self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
         self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
 
@@ -67,18 +83,11 @@ class TestUSP(unittest.TestCase):
         multi-GPU parallelization, which this test is not using. Therefore the function is called
         directly to test its output.
         """
-        if not self.HAS_FLASH_ATTN:
+        if not self.env_info["has_flash_attn"]:
             self.skipTest("flash_attn library is not available in the environment.")
 
-        # Disabling flash_attn and aiter to get SDPA results
-        usp.HAS_FLASH_ATTN = False
-        usp.HAS_AITER = False
-        fsdpa_results = usp.ring_attn(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+        result_diff = self._run_ring_comparison("flash")
 
-        usp.HAS_FLASH_ATTN = True
-        flash_attn_results = usp.ring_attn(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
-
-        result_diff = (fsdpa_results - flash_attn_results).abs().max()
         self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
         self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
 
@@ -86,52 +95,107 @@ class TestUSP(unittest.TestCase):
         """
         Verifies USP results with aiter are close to F.SDPA results
         """
-        if not self.HAS_AITER:
+        if not self.env_info["has_aiter"]:
             self.skipTest("aiter library is not available in the environment.")
 
-        # Disabling flash_attn and aiter to get SDPA results
-        usp.HAS_FLASH_ATTN = False
-        usp.HAS_AITER = False
-        fsdpa_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+        result_diff = self._run_usp_comparison("aiter")
 
-        usp.HAS_AITER = True
-        aiter_attn_results = usp.USP(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
-
-        result_diff = (fsdpa_results - aiter_attn_results).abs().max()
         self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
         self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
 
     def test_ring_attn_aiter(self):
         """
         Verifies ring_attn results with aiter are close to F.SDPA results
-
-        Ring_attn function is called through the USP function when using ring attention, but that requires
-        multi-GPU parallelization, which this test is not using. Therefore the function is called
-        directly to test its output.
         """
-        if not self.HAS_AITER:
+        if not self.env_info["has_aiter"]:
             self.skipTest("aiter library is not available in the environment.")
 
-        # Disabling flash_attn and aiter to get SDPA results
-        usp.HAS_FLASH_ATTN = False
-        usp.HAS_AITER = False
-        fsdpa_results = usp.ring_attn(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
+        result_diff = self._run_ring_comparison("aiter")
 
-        usp.HAS_AITER = True
-        aiter_attn_results = usp.ring_attn(self.query, self.key, self.value, dropout_p=0.0, is_causal=False)
-
-        result_diff = (fsdpa_results - aiter_attn_results).abs().max()
         self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
         self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
+    def test_usp_cudnn(self):
+        """
+        Verifies USP results with cuDNN are close to F.SDPA results
+        """
+        if not torch.backends.cudnn.is_available() or _is_hip():
+            self.skipTest("cuDNN is not available in the environment.")
+
+        result_diff = self._run_usp_comparison("cudnn")
+
+        self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
+        self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
+    def test_ring_cudnn(self):
+        """
+        Verifies ring_attn results with cuDNN are close to F.SDPA results
+        """
+        if not torch.backends.cudnn.is_available() or _is_hip():
+            self.skipTest("cuDNN is not available in the environment.")
+
+        result_diff = self._run_ring_comparison("cudnn")
+
+        self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
+        self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
+    def test_usp_flash3(self):
+        """
+        Verifies USP results with FAv3 are close to F.SDPA results
+        """
+        if not self.env_info["has_flash_attn_3"]:
+            self.skipTest("FAv3 library is not available in the environment.")
+
+        result_diff = self._run_usp_comparison("flash_3")
+
+        self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
+        self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
+    def test_ring_flash3(self):
+        """
+        Verifies ring_attn results with FAv3 are close to F.SDPA results
+        """
+        if not self.env_info["has_flash_attn_3"]:
+            self.skipTest("FAv3 library is not available in the environment.")
+
+        result_diff = self._run_ring_comparison("flash_3")
+
+        self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
+        self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
+    def test_usp_flash4(self):
+        """
+        Verifies USP results with FAv4 are close to F.SDPA results
+        """
+        if not self.env_info["has_flash_attn_4"]:
+            self.skipTest("FAv4 library is not available in the environment.")
+
+        result_diff = self._run_usp_comparison("flash_4")
+
+        self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
+        self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
+    def test_ring_flash4(self):
+        """
+        Verifies ring_attn results with FAv4 are close to F.SDPA results
+        """
+        if not self.env_info["has_flash_attn_4"]:
+            self.skipTest("FAv4 library is not available in the environment.")
+
+        result_diff = self._run_ring_comparison("flash_4")
+
+        self.assertNotEqual(result_diff, 0) # Different implementations won't produce same output
+        self.assertAlmostEqual(result_diff.item(), 0, places=1) # Difference can be 0.15ish
+
 
 
 class TestUSPHybridParallel(unittest.TestCase):
 
     def setUp(self):
         _init_environment()
-        # Using SDPA here
-        self.HAS_FLASH_ATTN = False
-        self.HAS_AITER = False
+        self.runtime_state = get_runtime_state()
+        self.runtime_state.set_attention_backend("sdpa_flash")
         self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)

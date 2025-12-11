@@ -18,9 +18,12 @@ except ModuleNotFoundError:
     pass
 
 import xfuser.envs as envs
+from xfuser.envs import PACKAGES_CHECKER
 if envs._is_npu():
     from torch.npu import manual_seed as device_manual_seed
     from torch.npu import manual_seed_all as device_manual_seed_all
+
+from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.config.config import (
     ParallelConfig,
     RuntimeConfig,
@@ -38,9 +41,11 @@ from .parallel_state import (
     initialize_model_parallel,
     model_parallel_is_initialized,
 )
+from xfuser.config.args import xFuserArgs
 
 logger = init_logger(__name__)
 
+env_info = PACKAGES_CHECKER.get_packages_info()
 
 def set_random_seed(seed: int):
     random.seed(seed)
@@ -51,6 +56,7 @@ def set_random_seed(seed: int):
 
 
 class RuntimeState(metaclass=ABCMeta):
+    attention_backend: AttentionBackendType = AttentionBackendType.SDPA_FLASH
     parallel_config: ParallelConfig
     runtime_config: RuntimeConfig
     input_config: InputConfig
@@ -65,6 +71,8 @@ class RuntimeState(metaclass=ABCMeta):
         self.ready = False
 
         self._check_distributed_env(config.parallel_config)
+        attention_backend = self._select_attention_backend(config)
+        self.set_attention_backend(attention_backend)
 
     def is_ready(self):
         return self.ready
@@ -93,12 +101,68 @@ class RuntimeState(metaclass=ABCMeta):
             destroy_model_parallel()
         destroy_distributed_environment()
 
+    def set_attention_backend(self, attention_backend: str | AttentionBackendType):
+        """
+        Set the attention backend for the current environment.
+        Given attention_backend can be either AttentionBackendType or a string with the name of the backend.
+        """
+        if isinstance(attention_backend, str):
+            try:
+                attention_backend = AttentionBackendType[attention_backend.upper()]
+            except:
+                pass
+
+        if not isinstance(attention_backend, AttentionBackendType):
+            raise ValueError(f"Value '{attention_backend}' is not a valid attention backend.")
+
+        self._check_if_backend_compatible_with_current_configuration(attention_backend)
+        self.attention_backend = attention_backend
+
+    def _select_attention_backend(self, engine_config: EngineConfig):
+        """
+        Select the best attention backend for the current environment.
+        """
+        if engine_config.runtime_config.attention_backend:
+            backend = AttentionBackendType[engine_config.runtime_config.attention_backend.upper()]
+
+        elif envs._is_hip():
+            if env_info["has_aiter"]:
+                backend = AttentionBackendType.AITER
+            elif env_info["has_flash_attn"]:
+                backend = AttentionBackendType.FLASH
+            else:
+                backend = AttentionBackendType.SDPA
+
+        elif env_info["has_flash_attn_4"]:
+            backend = AttentionBackendType.FLASH_4
+        elif env_info["has_flash_attn_3"]:
+            backend = AttentionBackendType.FLASH_3
+        elif torch.backends.cudnn.is_available():
+            backend = AttentionBackendType.CUDNN
+        elif env_info["has_flash_attn"]:
+            backend = AttentionBackendType.FLASH
+        else:
+            backend = AttentionBackendType.SDPA
+
+        logger.warning("Using {} as attention backend.".format(backend.name))
+        return backend
+
+    def _check_if_backend_compatible_with_current_configuration(self, attention_backend: AttentionBackendType):
+        """
+        Check if the selected attention backend is compatible with the current configuration.
+        """
+        if attention_backend in [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH, AttentionBackendType.FLASH_4]:
+            if self.parallel_config.ring_degree > 1:
+                raise RuntimeError("Selected attention backend does not support ring parallelism.")
+
+
 
 class UnetRuntimeState(RuntimeState):
+
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         super().__init__(config)
         self.sanity_check()
-    
+
     def sanity_check(self):
         if self.parallel_config.world_size > 1:
             if not(self.parallel_config.cfg_degree == 2 and self.parallel_config.world_size == 2):
@@ -674,6 +738,22 @@ class DiTRuntimeState(RuntimeState):
         )
 
 
+class ExternalRuntimeState(RuntimeState):
+    """
+    Runtime state for running xDiT components outside xDiT.
+    This can be used to test individual components in tests without
+    having to setup a full distributed environment.
+    """
+    def __init__(self):
+        # Creating config with default params
+        config, _ = xFuserArgs().create_config()
+        super().__init__(config)
+
+
+    def _check_distributed_env(self, parallel_config):
+        pass
+
+
 # _RUNTIME: Optional[RuntimeState] = None
 # TODO: change to RuntimeState after implementing the unet
 _RUNTIME: Optional[DiTRuntimeState] = None
@@ -688,7 +768,7 @@ def get_runtime_state():
     return _RUNTIME
 
 
-def initialize_runtime_state(pipeline: DiffusionPipeline, engine_config: EngineConfig):
+def initialize_runtime_state(pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None):
     global _RUNTIME
     if _RUNTIME is not None:
         logger.warning(
@@ -698,4 +778,6 @@ def initialize_runtime_state(pipeline: DiffusionPipeline, engine_config: EngineC
         _RUNTIME = DiTRuntimeState(pipeline=pipeline, config=engine_config)
     elif hasattr(pipeline, "unet"):
         _RUNTIME = UnetRuntimeState(pipeline=pipeline, config=engine_config)
+    elif not pipeline:
+        _RUNTIME = ExternalRuntimeState()
 

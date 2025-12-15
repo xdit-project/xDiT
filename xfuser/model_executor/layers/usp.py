@@ -17,112 +17,40 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_ulysses_parallel_rank,
+    get_runtime_state,
 )
 
 from packaging.version import parse
-from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-env_info = PACKAGES_CHECKER.get_packages_info()
-HAS_FLASH_ATTN = env_info["has_flash_attn"]
-if HAS_FLASH_ATTN:
-    import flash_attn
-
-HAS_AITER = env_info["has_aiter"]
-if HAS_AITER:
-    import aiter
-    import inspect
-    try:
-        HAS_ROUND_MODE = inspect.signature(aiter.flash_attn_func).parameters.get("how_v3_bf16_cvt") is not None
-    except (AttributeError, TypeError):
-        HAS_ROUND_MODE = False
-    if HAS_ROUND_MODE:
-        import os
-        HOW_V3_BF16_CVT = int(os.environ.get("HOW_V3_BF16_CVT", "2"))
-
-aten = torch.ops.aten
+from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
 
 
-def ring_attn(query, key, value, dropout_p=0.0, is_causal=False):
+def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False):
+    kwargs = {
+        "dropout_p": dropout_p,
+        "is_causal": is_causal,
+    }
     if parse(torch.__version__).release >= parse("2.6.0").release:
         from torch.distributed.tensor.experimental._attention import _cp_options
         _cp_options.enable_load_balance = False
-        kwargs = {
-            "dropout_p": dropout_p,
-            "is_causal": is_causal,
-        }
-        if HAS_AITER:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                _aiter_attn_call,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
-        elif HAS_FLASH_ATTN:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                _flash_attn_call,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
-        else:
-            kwargs = {
-                **kwargs,
-                "attn_bias": None,
-                "compute_log_sumexp": True,
-            }
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                aten._scaled_dot_product_efficient_attention,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
+        out, *_ = _templated_ring_attention(
+            PROCESS_GROUP.RING_PG,
+            1,
+            attention_function,
+            query,
+            key,
+            value,
+            **kwargs,
+        )
     else:
-        kwargs = {
-            "dropout_p": dropout_p,
-            "is_causal": is_causal,
-        }
-        if HAS_AITER:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                1,
-                _aiter_attn_call,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
-        elif HAS_FLASH_ATTN:
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                _flash_attn_call,
-                query,
-                key,
-                value,
-                **kwargs
-            )
-        else:
-            kwargs = {
-                **kwargs,
-                "attn_bias": None,
-                "compute_log_sumexp": True,
-            }
-            out, *_ = _templated_ring_attention(
-                PROCESS_GROUP.RING_PG,
-                aten._scaled_dot_product_efficient_attention,
-                query,
-                key,
-                value,
-                **kwargs,
-            )
+        out, *_ = _templated_ring_attention(
+            PROCESS_GROUP.RING_PG,
+            attention_function,
+            query,
+            key,
+            value,
+            **kwargs,
+        )
     return out
 
 
@@ -202,67 +130,6 @@ def _ft_c_output_all_to_all(x):
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
 
-
-def _aiter_attn_call(query, key, value, dropout_p, is_causal):
-    """
-    Performs the necessary tensor permutes and
-    then calls attention through AITER
-    """
-    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
-    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
-    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    attn_kwargs = {
-        "dropout_p": dropout_p,
-        "causal": is_causal,
-        "return_attn_probs": False,
-        "return_lse": True,
-    }
-    if HAS_ROUND_MODE:
-        attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-    output, softmax_lse = aiter.flash_attn_func(
-        query,
-        key,
-        value,
-        **attn_kwargs
-    )
-    output = torch.permute(output, [0, 2, 1, 3])
-    return output, softmax_lse
-
-def _flash_attn_call(query, key, value, dropout_p, is_causal):
-    """
-    Performs the necessary tensor permutes and
-    then calls attention through flash_attn
-    """
-    query = torch.permute(query, [0, 2, 1, 3])
-    key = torch.permute(key, [0, 2, 1, 3])
-    value = torch.permute(value, [0, 2, 1, 3])
-    output, softmax_lse, S_mask = flash_attn.flash_attn_func(
-        query,
-        key,
-        value,
-        dropout_p=dropout_p,
-        causal=is_causal,
-        return_attn_probs=True,
-    )
-    output = torch.permute(output, [0, 2, 1, 3])
-    return output, softmax_lse
-
-def _attention(query, key, value, dropout_p, is_causal):
-    """
-    Calls the correct attention mechanism based on the available libraries
-    """
-    if HAS_AITER:
-        output, _ = _aiter_attn_call(query, key, value, dropout_p, is_causal)
-        return output
-    elif HAS_FLASH_ATTN:
-        output, _ = _flash_attn_call(query, key, value, dropout_p, is_causal)
-        return output
-    else:
-        return F.scaled_dot_product_attention(
-            query, key, value, dropout_p=dropout_p, is_causal=is_causal
-        )
-
-
 def _preprocess_joint_tensors(joint_key, joint_value):
     """
     Preprocess the joint key and value tensors for Ulysses parallelism.
@@ -315,6 +182,16 @@ def _update_and_get_kv_cache(key, value, attn_layer):
     value = value.transpose(1, 2).contiguous()
     return key, value
 
+def _get_attention_function():
+    """
+    Get the attention function based on the runtime state.
+    """
+    attention_backend = get_runtime_state().attention_backend
+    func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
+    if func is None:
+        raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
+    return func
+
 def USP(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -332,9 +209,10 @@ def USP(
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     """
-
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
+
+    attention_function = _get_attention_function()
 
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
@@ -355,16 +233,16 @@ def USP(
         value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
 
     if get_sequence_parallel_world_size() == 1: # No SP
-        out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out = _attention(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         else: # USP
-            out = ring_attn(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         out = _ft_c_output_all_to_all(out)
 
     return out

@@ -59,7 +59,7 @@ class xFuserArgs:
     """Arguments for xFuser engine."""
 
     # Model arguments
-    model: str
+    model: str = ""
     download_dir: Optional[str] = None
     trust_remote_code: bool = False
     # Runtime arguments
@@ -115,6 +115,7 @@ class xFuserArgs:
     use_teacache: bool = False
     use_fbcache: bool = False
     use_fp8_t5_encoder: bool = False
+    attention_backend: Optional[str] = None
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -166,6 +167,12 @@ class xFuserArgs:
             "--use_fbcache",
             action="store_true",
             help="Enable teacache to accelerate inference in a single card",
+        )
+        runtime_group.add_argument(
+            "--attention_backend",
+            type=str,
+            default=None,
+            help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
         )
 
         # Parallel arguments
@@ -405,6 +412,7 @@ class xFuserArgs:
             use_onediff=self.use_onediff,
             # use_profiler=self.use_profiler,
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
+            attention_backend=self.attention_backend,
         )
 
         parallel_config = ParallelConfig(

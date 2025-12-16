@@ -101,9 +101,9 @@ def main():
     )
     if input_config.output_type == "pil":
         if is_last_process:
-            video_name = f"hunyuan_video_15_result_{parallel_info}_tc_{engine_args.use_torch_compile}_{input_config.height}x{input_config.width}.mp4"
+            video_name = f"hunyuan_video_15_{args.task}_result_{parallel_info}_tc_{engine_args.use_torch_compile}_{input_config.height}x{input_config.width}.mp4"
             export_to_video(output, video_name, fps=24)
-            print(f"video saved to ./results/{video_name}")
+            print(f"video saved to {video_name}")
 
     if is_last_process:
         print(

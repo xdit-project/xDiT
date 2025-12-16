@@ -1,6 +1,5 @@
 import time
 import torch
-from diffusers import HunyuanVideo15Pipeline
 from xfuser.config.diffusers import has_valid_diffusers_version, get_minimum_diffusers_version
 
 if not has_valid_diffusers_version("hunyuanvideo_15"):
@@ -8,8 +7,9 @@ if not has_valid_diffusers_version("hunyuanvideo_15"):
     raise ImportError(f"Please install diffusers>={minimum_diffusers_version} to use HunyuanVideo 1.5 models.")
 
 from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import xFuserHunyuanVideo15Transformer3DWrapper
+from diffusers import HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
 from diffusers import DiffusionPipeline
-from diffusers.utils import export_to_video
+from diffusers.utils import export_to_video, load_image
 
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
@@ -19,18 +19,29 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
 )
 
-def run_pipe(pipe: DiffusionPipeline, input_config):
-    return pipe(
-        height=input_config.height,
-        width=input_config.width,
-        prompt=input_config.prompt,
-        num_inference_steps=50, # Recommended value
-        num_frames=121, # Recommended value
-        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-    ).frames[0]
+def run_pipe(pipe: DiffusionPipeline, input_config, image, task):
+    kwargs = {
+        "prompt": input_config.prompt,
+        "num_inference_steps": input_config.num_inference_steps, # Recommended value
+        "num_frames": input_config.num_frames, # Recommended value
+        "generator": torch.Generator(device="cuda").manual_seed(input_config.seed),
+    }
+    if task == "i2v":
+        kwargs["image"] = image
+    else: # t2v task
+        kwargs["height"] = input_config.height
+        kwargs["width"] = input_config.width
+    return pipe(**kwargs).frames[0]
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
+    parser.add_argument(
+        "--task",
+        type=str,
+        required=True,
+        choices=["i2v", "t2v"],
+        help="The task to run."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -38,12 +49,19 @@ def main():
     local_rank = get_world_group().local_rank
     is_last_process =  get_world_group().rank == get_world_group().world_size - 1
 
+    image = None
+    if args.task == "i2v":
+        if not input_config.img_file_path:
+            raise ValueError("Image file path must be provided for image-to-video task.")
+        image = load_image(args.img_file_path)
+
     transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
         engine_config.model_config.model,
         torch_dtype=torch.bfloat16,
         subfolder="transformer",
     )
-    pipe = HunyuanVideo15Pipeline.from_pretrained(
+    pipe = HunyuanVideo15Pipeline if args.task == "t2v" else HunyuanVideo15ImageToVideoPipeline
+    pipe = pipe.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         transformer=transformer,
         torch_dtype=torch.bfloat16,
@@ -66,14 +84,15 @@ def main():
         pipe.transformer = torch.compile(pipe.transformer, mode="default")
 
         # one full pass to warmup the torch compiler
-        output = run_pipe(pipe, input_config)
+        output = run_pipe(pipe, input_config, image, args.task)
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
 
-    output = run_pipe(pipe, input_config)
+    output = run_pipe(pipe, input_config, image, args.task)
 
     end_time = time.time()
+
     elapsed_time = end_time - start_time
     peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 

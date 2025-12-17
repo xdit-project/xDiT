@@ -312,3 +312,4 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             return (hidden_states,)
 
         return Transformer2DModelOutput(sample=hidden_states)
+

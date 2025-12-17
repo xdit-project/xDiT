@@ -47,7 +47,7 @@ def main():
     engine_config, input_config = engine_args.create_config()
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
-    is_last_process =  get_world_group().rank == get_world_group().world_size - 1
+    is_last_process = get_world_group().rank == get_world_group().world_size - 1
 
     image = None
     if args.task == "i2v":

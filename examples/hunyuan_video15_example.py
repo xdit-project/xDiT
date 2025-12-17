@@ -22,8 +22,8 @@ from xfuser.core.distributed import (
 def run_pipe(pipe: DiffusionPipeline, input_config, image, task):
     kwargs = {
         "prompt": input_config.prompt,
-        "num_inference_steps": input_config.num_inference_steps, # Recommended value
-        "num_frames": input_config.num_frames, # Recommended value
+        "num_inference_steps": input_config.num_inference_steps,
+        "num_frames": input_config.num_frames,
         "generator": torch.Generator(device="cuda").manual_seed(input_config.seed),
     }
     if task == "i2v":

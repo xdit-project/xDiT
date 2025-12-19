@@ -108,6 +108,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | --- | --- | --- | --- | --- | --- |
 | [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ | [Report](./docs/performance/stepvideo.md) |
 | [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuanvideo.md) |
+| [🎬 HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | ❎ | ✔️ | ❎ | ❎ | NA |
 | [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/consisid.md) |
 | [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
 | [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ | [Report](https://github.com/xdit-project/mochi-xdit) |
@@ -259,6 +260,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 
 | Model Name | Diffusers version |
 | --- | --- |
+| [HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | >= 0.36.0 |
 | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | >= 0.36.0 |
 | [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
 | [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |

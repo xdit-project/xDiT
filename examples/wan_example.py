@@ -65,6 +65,8 @@ def parallelize_transformer(pipe):
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
 
+        get_runtime_state().increment_step_counter()
+
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
@@ -214,6 +216,18 @@ def main():
         choices=["i2v", "t2v", "ti2v"],
         help="The task to run."
     )
+    parser.add_argument(
+        "--use_fp8_attn",
+        default=False,
+        action="store_true",
+        help="Whether to use FP8 attention."
+    )
+    parser.add_argument(
+        "--use_hybrid_fp8_attn",
+        default=False,
+        action="store_true",
+        help="Whether to use hybrid FP8 attention."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -296,6 +310,22 @@ def main():
                 filter_fn=_is_linear,
                 device=f"cuda:{local_rank}",
             )
+    
+    if args.use_hybrid_fp8_attn:
+        get_runtime_state().check_fp8_availability(use_fp8_attn=args.use_fp8_attn, use_hybrid_fp8_attn=args.use_hybrid_fp8_attn)
+        guidance_scale = input_config.guidance_scale
+        multiplier = 2 if guidance_scale > 1.0 else 1 # CFG is switched on in this case and double the transformers are called
+        fp8_steps_threshold = 10 * multiplier # Number of initial and final steps to use bf16 attention for stability
+        total_steps = input_config.num_inference_steps * multiplier # Total number of transformer calls during the denoising process
+        # Create a boolean vector indicating which steps should use fp8 attention
+        fp8_decision_vector = torch.tensor(
+        [i >= fp8_steps_threshold and i < (total_steps - fp8_steps_threshold)
+            for i in range(total_steps)], dtype=torch.bool
+        )
+        get_runtime_state().set_hybrid_attn_parameters(fp8_decision_vector)
+    elif args.use_fp8_attn:
+        get_runtime_state().check_fp8_availability(use_fp8_attn=args.use_fp8_attn, use_hybrid_fp8_attn=args.use_hybrid_fp8_attn)
+        get_runtime_state().use_fp8_attn = True
 
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True

@@ -186,7 +186,7 @@ def _get_attention_function():
     """
     Get the attention function based on the runtime state.
     """
-    attention_backend = get_runtime_state().attention_backend
+    attention_backend = get_runtime_state()._select_attention_backend()
     func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
     if func is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")

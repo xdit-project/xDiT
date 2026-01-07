@@ -224,18 +224,23 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal):
 
     softmax_lse = None
     quant_dtype = aiter.dtypes.fp8
-    dtypeMax = torch.finfo(quant_dtype).max
-    scale=torch.tensor(1.0, dtype=torch.float32, device=query.device)
-    # TODO: Make it possible to choose either static or dynamic scaling with input arguments
+    if AITER_FP8_HAS_DESCALE:
+        # Skip calling .max() every attention call, but take height for relatively large values,
+        # to avoid overflows and possible NaNs in attention computation.
+        scale=torch.tensor(2.5, dtype=torch.float32, device=query.device)
+        # TODO: Is it possible to improve dynamic scaling perf?
+    else:
+        # Use static scale of 1.0, since descale is not available.
+        scale = torch.tensor(1.0, dtype=torch.float32, device=query.device)
 
     quant_q, q_descale = aiter.per_tensor_quant(query,
-                                                scale=torch.abs(query).max() / dtypeMax if AITER_FP8_HAS_DESCALE else scale,
+                                                scale=scale,
                                                 quant_dtype=quant_dtype)
     quant_k, k_descale = aiter.per_tensor_quant(key,
-                                                scale=torch.abs(key).max() / dtypeMax if AITER_FP8_HAS_DESCALE else scale,
+                                                scale=scale,
                                                 quant_dtype=quant_dtype)
     quant_v, v_descale = aiter.per_tensor_quant(value,
-                                                scale=torch.abs(value).max() / dtypeMax if AITER_FP8_HAS_DESCALE else scale,
+                                                scale=scale,
                                                 quant_dtype=quant_dtype)
 
     attn_kwargs = {}

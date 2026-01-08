@@ -266,6 +266,7 @@ class DiTRuntimeState(RuntimeState):
         else:
             raise RuntimeError("Hybrid fp8 attention is currently only supported for AITER and FlashAttention v3 backends.")
 
+        # The below needs to be torch tensors to avoid recompilations with torch.compile.
         self.total_steps = torch.tensor(len(fp8_decision_vector), dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
         self.use_hybrid_fp8_attn = torch.tensor(True, dtype=torch.bool)

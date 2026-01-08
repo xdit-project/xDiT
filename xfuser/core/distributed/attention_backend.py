@@ -5,6 +5,8 @@ from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER
 
 ATTENTION_FUNCTION_REGISTRY = {}
+AITER_FP8_STATIC_SCALE_WITH_DESCALE = 2.5
+AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0
 
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
@@ -150,7 +152,7 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
 def get_dtype_max(dtype):
     try:
         dtypeMax = torch.finfo(dtype).max
-    except:
+    except TypeError:
         dtypeMax = torch.iinfo(dtype).max
     return dtypeMax
 
@@ -227,12 +229,11 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal):
     if AITER_FP8_HAS_DESCALE:
         # Skip calling .max() every attention call, but take height for relatively large values,
         # to avoid overflows and possible NaNs in attention computation.
-        scale=torch.tensor(2.5, dtype=torch.float32, device=query.device)
+        scale=torch.tensor(AITER_FP8_STATIC_SCALE_WITH_DESCALE, dtype=torch.float32, device=query.device)
         # TODO: Is it possible to improve dynamic scaling perf?
     else:
         # Use static scale of 1.0, since descale is not available.
-        scale = torch.tensor(1.0, dtype=torch.float32, device=query.device)
-
+        scale = torch.tensor(AITER_FP8_STATIC_SCALE_NO_DESCALE, dtype=torch.float32, device=query.device)
     quant_q, q_descale = aiter.per_tensor_quant(query,
                                                 scale=scale,
                                                 quant_dtype=quant_dtype)

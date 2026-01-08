@@ -242,7 +242,7 @@ Several different attention backends are supported:
 | [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/frontend/latest/operations/Attention.html) | cudnn |
 | [FAv2](https://github.com/Dao-AILab/flash-attention) | flash |
 | [FAv3](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3 |
-| [Fav3 FP8](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3_fp8 |
+| [FAv3 FP8](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3_fp8 |
 | [FAv4](https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute) | flash_4 |
 | [AITER](https://github.com/rocm/aiter) | aiter |
 | [AITER FP8](https://github.com/rocm/aiter) | aiter_fp8 |

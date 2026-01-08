@@ -4,6 +4,8 @@ import time
 import torch
 import functools
 import numpy as np
+from typing import Any, Dict, Optional, Union
+
 from xfuser.config.diffusers import get_minimum_diffusers_version, has_valid_diffusers_version
 if not has_valid_diffusers_version("wan"):
     minimum_diffusers_version = get_minimum_diffusers_version("wan")
@@ -13,8 +15,6 @@ from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-
-from typing import Any, Dict, Optional, Union
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -25,6 +25,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     initialize_runtime_state,
     is_dp_last_group,
+    shard_model,
 )
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
@@ -203,8 +204,6 @@ def parallelize_transformer(pipe):
             block.attn2.processor = xFuserWanAttnProcessor()
 
 
-
-
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     parser.add_argument(
@@ -230,6 +229,9 @@ def main():
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
+    if engine_args.shard_dit:
+        shard_model(pipe.transformer, device_id=local_rank)
+
     pipe = pipe.to(f"cuda:{local_rank}")
 
     if not args.img_file_path and args.task == "i2v":

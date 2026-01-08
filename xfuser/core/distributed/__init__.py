@@ -36,6 +36,8 @@ from .runtime_state import (
     runtime_state_is_initialized,
     initialize_runtime_state,
 )
+from .sharding import shard_model
+
 
 __all__ = [
     "get_world_group",
@@ -72,4 +74,5 @@ __all__ = [
     "init_vae_group",
     "init_dit_group",
     "get_dit_group",
+    "shard_model",
 ]

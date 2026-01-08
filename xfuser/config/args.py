@@ -76,6 +76,7 @@ class xFuserArgs:
     # sequence parallel
     ulysses_degree: Optional[int] = None
     ring_degree: Optional[int] = None
+    shard_dit: Optional[bool] = False
     # tensor parallel
     tensor_parallel_degree: int = 1
     split_scheme: Optional[str] = "row"
@@ -213,6 +214,12 @@ class xFuserArgs:
             type=int,
             default=None,
             help="Ring sequence parallel degree. Used in attention layer.",
+        )
+        parallel_group.add_argument(
+            "--shard_dit",
+            type=bool,
+            default=False,
+            help="Enable full model sharding. Used together with sequence parallelism.",
         )
         parallel_group.add_argument(
             "--pipefusion_parallel_degree",

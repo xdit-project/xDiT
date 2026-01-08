@@ -1218,7 +1218,11 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
                 "Currently SANA not support split_text_embed_in_sp!"
             )
         else:
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
             hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
+            hidden_states = hidden_states.transpose(1, 2)
 
         hidden_states = hidden_states.reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)

@@ -207,12 +207,6 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     parser.add_argument(
-        "--use_fp8_attn",
-        default=False,
-        action="store_true",
-        help="Whether to use FP8 attention."
-    )
-    parser.add_argument(
         "--use_hybrid_fp8_attn",
         default=False,
         action="store_true",
@@ -280,7 +274,6 @@ def main():
         device=f"cuda:{local_rank}")
 
     if args.use_hybrid_fp8_attn:
-        get_runtime_state().check_fp8_availability(use_fp8_attn=args.use_fp8_attn, use_hybrid_fp8_attn=args.use_hybrid_fp8_attn)
         guidance_scale = input_config.guidance_scale
         multiplier = 2 if guidance_scale > 1.0 else 1 # CFG is switched on in this case and double the transformers are called
         fp8_steps_threshold = 10 * multiplier # Number of initial and final steps to use bf16 attention for stability
@@ -291,9 +284,6 @@ def main():
             for i in range(total_steps)], dtype=torch.bool
         )
         get_runtime_state().set_hybrid_attn_parameters(fp8_decision_vector)
-    elif args.use_fp8_attn:
-        get_runtime_state().check_fp8_availability(use_fp8_attn=args.use_fp8_attn, use_hybrid_fp8_attn=args.use_hybrid_fp8_attn)
-        get_runtime_state().use_fp8_attn = True
 
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True

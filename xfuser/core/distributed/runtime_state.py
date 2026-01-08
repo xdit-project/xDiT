@@ -152,9 +152,14 @@ class RuntimeState(metaclass=ABCMeta):
         """
         Check if the selected attention backend is compatible with the current configuration.
         """
-        if attention_backend in [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH, AttentionBackendType.FLASH_4]:
+        if attention_backend in [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH, AttentionBackendType.FLASH_4, AttentionBackendType.AITER_FP8]:
             if self.parallel_config.ring_degree > 1:
                 raise RuntimeError("Selected attention backend does not support ring parallelism.")
+        if attention_backend == AttentionBackendType.AITER_FP8:
+            try:
+                from aiter import flash_attn_fp8_pertensor_func
+            except ImportError:
+                raise RuntimeError("AITER fp8 flash attention is not available, please update AITER")
 
 
 
@@ -188,7 +193,6 @@ class DiTRuntimeState(RuntimeState):
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.use_hybrid_fp8_attn = False
-        self.use_fp8_attn = False
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
@@ -233,31 +237,6 @@ class DiTRuntimeState(RuntimeState):
                 * pipeline.transformer.config.attention_head_dim,
             )
 
-    def check_fp8_availability(self, use_fp8_attn: bool, use_hybrid_fp8_attn: bool):
-        if (use_fp8_attn or use_hybrid_fp8_attn):
-            if envs.PACKAGES_CHECKER.packages_info["has_aiter"]:
-                try:
-                    from aiter import flash_attn_fp8_pertensor_func
-                except ImportError:
-                    raise RuntimeError("aiter fp8 flash attention is not available")
-
-                if self.parallel_config.sp_config.ring_degree > 1:
-                    raise RuntimeError(
-                        "Fp8 attention is not supported with ring flash attention"
-                    )
-            elif envs.PACKAGES_CHECKER.packages_info["has_flash_attn_3"]:
-                try:
-                    from flash_attn_interface import flash_attn_func
-                except ImportError:
-                    raise RuntimeError("Hopper fp8 flash attention v3 is not available")
-            else:
-                raise RuntimeError(
-                    "Only AITER or FLASH_3 is currently supported for fp8 attention."
-                )
-
-        if (use_fp8_attn and use_hybrid_fp8_attn):
-            raise RuntimeError("Choose either fp8 attention or hybrid fp8 attention, not both.")
-
     def increment_step_counter(self):
         """
         Keep track of the current denoising step, and set fp8 flag based on the current step.
@@ -265,7 +244,7 @@ class DiTRuntimeState(RuntimeState):
         When the entire denoising process is over, the step counter is reset to 0.
         """
         if self.use_hybrid_fp8_attn:
-            self.use_fp8_attn = self.fp8_decision_vector[self.step_counter]
+            self.attention_backend = self.fp8_decision_vector[self.step_counter]
             self.step_counter = self.step_counter + 1
             if self.step_counter >= self.total_steps:
                 self.step_counter = torch.tensor(0, dtype=torch.int)
@@ -276,32 +255,20 @@ class DiTRuntimeState(RuntimeState):
         fp8_decision_vector: A boolean tensor of length equal to the total number of denoising steps.
         Each element indicates whether to use fp8 attention (True) or bf16 attention (False).
         """
-        self.fp8_decision_vector = fp8_decision_vector
+        # Hybrid attention does not neccessarily set fp8 as the first attention backend.
+        # Thus, we need to check fp8 availability in advance if hybrid attention is enabled.
+        if envs.PACKAGES_CHECKER.packages_info["has_aiter"]:
+            self._check_if_backend_compatible_with_current_configuration(AttentionBackendType.AITER_FP8)
+            self.fp8_decision_vector = [AttentionBackendType.AITER_FP8 if use_fp8 else AttentionBackendType.AITER for use_fp8 in fp8_decision_vector]
+        elif envs.PACKAGES_CHECKER.packages_info["has_flash_attn_3"]:
+            self._check_if_backend_compatible_with_current_configuration(AttentionBackendType.FLASH_3_FP8)
+            self.fp8_decision_vector = [AttentionBackendType.FLASH_3_FP8 if use_fp8 else AttentionBackendType.FLASH_3 for use_fp8 in fp8_decision_vector]
+        else:
+            raise RuntimeError("Hybrid fp8 attention is currently only supported for AITER and FlashAttention v3 backends.")
+
         self.total_steps = torch.tensor(len(fp8_decision_vector), dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
         self.use_hybrid_fp8_attn = torch.tensor(True, dtype=torch.bool)
-
-    def _select_attention_backend(self, engine_config: Optional[EngineConfig] = None):
-        """
-        Select the best attention backend for the current environment.
-        """
-        if self.use_hybrid_fp8_attn:
-            if envs._is_hip() and env_info["has_aiter"]:
-                backend = AttentionBackendType.AITER_FP8 if self.use_fp8_attn else AttentionBackendType.AITER
-            elif envs._is_cuda() and env_info["has_flash_attn_3"]:
-                backend = AttentionBackendType.FLASH_3_FP8 if self.use_fp8_attn else AttentionBackendType.FLASH_3
-            else:
-                raise NotImplementedError("FP8 hybrid attention not implemented for this configuration.")
-        elif self.use_fp8_attn:
-            if envs._is_hip() and env_info["has_aiter"]:
-                backend = AttentionBackendType.AITER_FP8
-            elif envs._is_cuda() and env_info["has_flash_attn_3"]:
-                backend = AttentionBackendType.FLASH_3_FP8
-            else:
-                raise NotImplementedError("FP8 attention not implemented for this configuration.")
-        else:
-            backend = super()._select_attention_backend(engine_config)
-        return backend
 
     def set_input_parameters(
         self,

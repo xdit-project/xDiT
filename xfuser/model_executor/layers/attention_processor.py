@@ -192,6 +192,9 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
         )
 
+        if get_fast_attn_enable():
+            self.fast_attn = xFuserFastAttention()
+
     def __call__(
         self,
         attn: Attention,

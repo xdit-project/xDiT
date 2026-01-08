@@ -43,7 +43,6 @@ from xfuser.model_executor.models.transformers.base_transformer import (
 )
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.model_executor.layers.attention_processor import (
-    set_hybrid_seq_parallel_attn,
     xFuserAttentionBaseWrapper,
     xFuserAttentionProcessorRegister
 )
@@ -95,7 +94,6 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
     def __call__(
         self,

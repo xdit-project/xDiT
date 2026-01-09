@@ -201,22 +201,23 @@ def concat_joint_tensors_decorator(func):
     but only on the last step.
     """
     def wrapper(*args, **kwargs):
-        joint_strategy = kwargs.get("joint_strategy", None)
-        joint_key = kwargs.get("joint_key", None)
-        joint_value = kwargs.get("joint_value", None)
-        step = kwargs.get("step", None)
-        total_steps = kwargs.get("total_steps", 1)
-        if joint_strategy is None:
-            return func(*args, **kwargs)
-        else:
+        query, key, value = args[0:3]
+        is_causal = kwargs.get("is_causal")
+        dropout_p = kwargs.get("dropout_p")
+        ring_attn_kwargs = kwargs.get("ring_attn_kwargs", {})
+
+        if ring_attn_kwargs is not None:
+            joint_strategy = ring_attn_kwargs.get("joint_strategy", None)
+            joint_key = ring_attn_kwargs.get("joint_key", None)
+            joint_value = ring_attn_kwargs.get("joint_value", None)
+            step = ring_attn_kwargs.get("step", 0)
+            total_steps = ring_attn_kwargs.get("total_steps", 1)
             if (joint_strategy == "front" and step == 0) or (joint_strategy == "rear" and step == total_steps - 1):
                 key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
                 value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
-            step = step + 1
-            kwargs["step"] = step
-            kwargs["key"] = key
-            kwargs["value"] = value
-            return func(*args, **kwargs)
+            ring_attn_kwargs["step"] = step + 1 # In place increment step
+
+        return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     return wrapper
 
 def USP(

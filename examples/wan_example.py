@@ -229,7 +229,7 @@ def main():
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
-    if engine_args.shard_dit:
+    if args.shard_dit:
         shard_model(pipe.transformer, device_id=local_rank)
 
     pipe = pipe.to(f"cuda:{local_rank}")

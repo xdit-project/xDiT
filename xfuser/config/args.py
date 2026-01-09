@@ -217,8 +217,7 @@ class xFuserArgs:
         )
         parallel_group.add_argument(
             "--shard_dit",
-            type=bool,
-            default=False,
+            action="store_true",
             help="Enable full model sharding. Used together with sequence parallelism.",
         )
         parallel_group.add_argument(
@@ -431,6 +430,7 @@ class xFuserArgs:
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
+                shard_dit=self.shard_dit,
                 dit_parallel_size=self.dit_parallel_size,
             ),
             tp_config=TensorParallelConfig(

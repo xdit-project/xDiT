@@ -25,10 +25,11 @@ from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
 
 
-def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False):
+def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, ring_attn_kwargs=None):
     kwargs = {
         "dropout_p": dropout_p,
         "is_causal": is_causal,
+        "ring_attn_kwargs": ring_attn_kwargs,
     }
     if parse(torch.__version__).release >= parse("2.6.0").release:
         from torch.distributed.tensor.experimental._attention import _cp_options
@@ -190,7 +191,33 @@ def _get_attention_function():
     func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
     if func is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
-    return func
+    return concat_joint_tensors_decorator(func)
+
+def concat_joint_tensors_decorator(func):
+    """
+    Decorator to handle joint tensor concatenation
+    This is needed for ring attention with 'rear' joint_strategy, as it
+    needs to concat the joint tensors before calling the attention function
+    but only on the last step.
+    """
+    def wrapper(*args, **kwargs):
+        joint_strategy = kwargs.get("joint_strategy", None)
+        joint_key = kwargs.get("joint_key", None)
+        joint_value = kwargs.get("joint_value", None)
+        step = kwargs.get("step", None)
+        total_steps = kwargs.get("total_steps", 1)
+        if joint_strategy is None:
+            return func(*args, **kwargs)
+        else:
+            if (joint_strategy == "front" and step == 0) or (joint_strategy == "rear" and step == total_steps - 1):
+                key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
+                value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
+            step = step + 1
+            kwargs["step"] = step
+            kwargs["key"] = key
+            kwargs["value"] = value
+            return func(*args, **kwargs)
+    return wrapper
 
 def USP(
         query: torch.Tensor,
@@ -214,9 +241,19 @@ def USP(
 
     attention_function = _get_attention_function()
 
+
+    ring_attn_kwargs = {}
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
+        ring_attn_kwargs = {
+            "joint_value": joint_value,
+            "joint_key": joint_key,
+            "joint_strategy": joint_strategy,
+            "step": 0,
+            "total_steps": get_ring_parallel_world_size(),
+
+        }
 
     if get_ulysses_parallel_world_size() > 1:
         if combine_qkv_a2a and query.shape == key.shape == value.shape:
@@ -228,21 +265,18 @@ def USP(
 
     if attn_layer:
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
-    if joint_strategy:
-        key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
-        value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
 
     if get_sequence_parallel_world_size() == 1: # No SP
         out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, ring_attn_kwargs=ring_attn_kwargs)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
             out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
         else: # USP
-            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, ring_attn_kwargs=ring_attn_kwargs)
         out = _ft_c_output_all_to_all(out)
 
     return out

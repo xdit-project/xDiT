@@ -46,7 +46,7 @@ def register_attention_function(backend_type):
     return decorator
 
 @register_attention_function(AttentionBackendType.SDPA)
-def _sdpa_attn_call(query, key, value, dropout_p, is_causal):
+def _sdpa_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs attention through PyTorch's scaled_dot_product_attention.
     Allows Pytorch to decide which SDPA backend to use.
@@ -57,7 +57,7 @@ def _sdpa_attn_call(query, key, value, dropout_p, is_causal):
     return output, None
 
 @register_attention_function(AttentionBackendType.SDPA_FLASH)
-def _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal):
+def _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs flash attention using Pytorch's internal implementation.
     """
@@ -71,7 +71,7 @@ def _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.SDPA_MATH)
-def _sdpa_math_attn_call(query, key, value, dropout_p, is_causal):
+def _sdpa_math_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs attention using Pytorch's internal math implementation.
     """
@@ -85,7 +85,7 @@ def _sdpa_math_attn_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.SDPA_EFFICIENT)
-def _sdpa_efficient_attn_call(query, key, value, dropout_p, is_causal):
+def _sdpa_efficient_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs attention using Pytorch's internal memory-efficient implementation.
     """
@@ -101,7 +101,7 @@ def _sdpa_efficient_attn_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.CUDNN)
-def _cudnn_attn_call(query, key, value, dropout_p, is_causal):
+def _cudnn_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs the necessary tensor permutes and
     then calls attention through cuDNN backend
@@ -119,7 +119,7 @@ def _cudnn_attn_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.FLASH_3)
-def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
+def _flash_attn_3_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs the necessary tensor permutes and
     then calls attention through flash_attn V3
@@ -139,7 +139,7 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal):
 
 @register_attention_function(AttentionBackendType.FLASH_4)
 @torch.compiler.disable # Disabling compile, as it is not currently supported with FAv4
-def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
+def _flash_attn_4_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs the necessary tensor permutes and
     then calls attention through flash_attn V4
@@ -158,7 +158,7 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER)
-def _aiter_attn_call(query, key, value, dropout_p, is_causal):
+def _aiter_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs the necessary tensor permutes and
     then calls attention through AITER
@@ -184,7 +184,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.FLASH)
-def _flash_attn_call(query, key, value, dropout_p, is_causal):
+def _flash_attn_call(query, key, value, dropout_p, is_causal, **kwargs):
     """
     Performs the necessary tensor permutes and
     then calls attention through flash_attn

@@ -25,11 +25,11 @@ from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
 
 
-def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, ring_attn_kwargs=None):
+def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None):
     kwargs = {
         "dropout_p": dropout_p,
         "is_causal": is_causal,
-        "ring_attn_kwargs": ring_attn_kwargs,
+        "joint_attn_kwargs": joint_attn_kwargs,
     }
     if parse(torch.__version__).release >= parse("2.6.0").release:
         from torch.distributed.tensor.experimental._attention import _cp_options
@@ -204,18 +204,18 @@ def concat_joint_tensors_decorator(func):
         query, key, value = args[0:3]
         is_causal = kwargs.get("is_causal")
         dropout_p = kwargs.get("dropout_p")
-        ring_attn_kwargs = kwargs.get("ring_attn_kwargs", {})
+        joint_attn_kwargs = kwargs.get("joint_attn_kwargs", {})
 
-        if ring_attn_kwargs is not None:
-            joint_strategy = ring_attn_kwargs.get("joint_strategy", None)
-            joint_key = ring_attn_kwargs.get("joint_key", None)
-            joint_value = ring_attn_kwargs.get("joint_value", None)
-            step = ring_attn_kwargs.get("step", 0)
-            total_steps = ring_attn_kwargs.get("total_steps", 1)
+        if joint_attn_kwargs is not None:
+            joint_strategy = joint_attn_kwargs.get("joint_strategy", None)
+            joint_key = joint_attn_kwargs.get("joint_key", None)
+            joint_value = joint_attn_kwargs.get("joint_value", None)
+            step = joint_attn_kwargs.get("step", 0)
+            total_steps = joint_attn_kwargs.get("total_steps", 1)
             if (joint_strategy == "front" and step == 0) or (joint_strategy == "rear" and step == total_steps - 1):
                 key = _concat_joint_tensor(key, joint_key, joint_strategy, dim=2)
                 value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
-            ring_attn_kwargs["step"] = step + 1 # In place increment step
+            joint_attn_kwargs["step"] = step + 1 # In place increment step
 
         return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
     return wrapper
@@ -243,11 +243,11 @@ def USP(
     attention_function = _get_attention_function()
 
 
-    ring_attn_kwargs = {}
+    joint_attn_kwargs = {}
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)
-        ring_attn_kwargs = {
+        joint_attn_kwargs = {
             "joint_value": joint_value,
             "joint_key": joint_key,
             "joint_strategy": joint_strategy,
@@ -268,16 +268,16 @@ def USP(
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
     if get_sequence_parallel_world_size() == 1: # No SP
-        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, ring_attn_kwargs=ring_attn_kwargs)
+        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
         else: # USP
-            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, ring_attn_kwargs=ring_attn_kwargs)
+            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
         out = _ft_c_output_all_to_all(out)
 
     return out

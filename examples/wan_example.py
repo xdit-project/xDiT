@@ -229,16 +229,10 @@ def main():
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
-<<<<<<< HEAD
     pipe.transformer = shard_model(pipe.transformer) if args.shard_dit else pipe.transformer
     if pipe.transformer_2 is not None:
         pipe.transformer_2 = shard_model(pipe.transformer_2) if args.shard_dit else pipe.transformer_2
-    pipe.text_encoder = shard_model(pipe.text_encoder) if args.shard_t5encoder else pipe.text_encoder
-=======
-    if args.shard_dit:
-        shard_model(pipe.transformer, device_id=local_rank)
-
->>>>>>> 3b0c9dcc9488bdd50473ddecdc784a1c98a46330
+    pipe.text_encoder = shard_model(pipe.text_encoder) if args.shard_t5_encoder else pipe.text_encoder
     pipe = pipe.to(f"cuda:{local_rank}")
 
     if not args.img_file_path and args.task == "i2v":

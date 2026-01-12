@@ -407,7 +407,7 @@ class xFuserArgs:
             self.world_size = self.ray_world_size
         else:
             self.world_size = torch.distributed.get_world_size()
-        
+
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size
         assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
@@ -437,7 +437,6 @@ class xFuserArgs:
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
-                shard_dit=self.shard_dit,
                 shard_dit=self.shard_dit,
                 dit_parallel_size=self.dit_parallel_size,
             ),

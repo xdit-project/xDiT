@@ -1,5 +1,6 @@
 # This file implements USP with torch version >= '2.5.0'
 import torch
+import functools
 from torch.nn import functional as F
 
 import torch.distributed._functional_collectives as ft_c
@@ -200,6 +201,7 @@ def concat_joint_tensors_decorator(func):
     needs to concat the joint tensors before calling the attention function
     but only on the last step.
     """
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         query, key, value = args[0:3]
         is_causal = kwargs.get("is_causal")

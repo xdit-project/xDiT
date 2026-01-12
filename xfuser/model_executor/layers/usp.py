@@ -206,7 +206,7 @@ def concat_joint_tensors_decorator(func):
         query, key, value = args[0:3]
         is_causal = kwargs.get("is_causal")
         dropout_p = kwargs.get("dropout_p")
-        joint_attn_kwargs = kwargs.get("joint_attn_kwargs", {})
+        joint_attn_kwargs = kwargs.get("joint_attn_kwargs", None)
 
         if joint_attn_kwargs is not None:
             joint_strategy = joint_attn_kwargs.get("joint_strategy", None)
@@ -245,7 +245,7 @@ def USP(
     attention_function = _get_attention_function()
 
 
-    joint_attn_kwargs = {}
+    joint_attn_kwargs = None
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)
         joint_key, joint_value = _preprocess_joint_tensors(joint_key, joint_value)

@@ -118,6 +118,8 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
+        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8]:
+            logger.warning("FP8 attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
     def _select_attention_backend(self, engine_config: Optional[EngineConfig] = None):

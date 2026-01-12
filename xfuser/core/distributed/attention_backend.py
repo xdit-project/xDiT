@@ -2,11 +2,11 @@ import functools
 import torch
 import torch.nn.functional as F
 from enum import Enum
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, environment_variables
 
 ATTENTION_FUNCTION_REGISTRY = {}
-AITER_FP8_STATIC_SCALE_WITH_DESCALE = 2.5
-AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0
+AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
+AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale vectors are not used.
 
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()

@@ -222,6 +222,12 @@ def main():
         action="store_true",
         help="Whether to use hybrid FP8 attention."
     )
+    parser.add_argument(
+        "--number_of_bf16_attn_steps",
+        type=int,
+        default=10,
+        help="Number of steps to use BF16 attention."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -306,10 +312,10 @@ def main():
             )
     
     if args.use_hybrid_fp8_attn:
-        number_of_initial_and_final_fp8_attn_steps = 10 # Number of initial and final steps to use bf16 attention for stability
+        number_of_initial_and_final_bf16_attn_steps = args.number_of_bf16_attn_steps # Number of initial and final steps to use bf16 attention for stability
         guidance_scale = input_config.guidance_scale
         multiplier = 2 if guidance_scale > 1.0 else 1 # CFG is switched on in this case and double the transformers are called
-        fp8_steps_threshold = number_of_initial_and_final_fp8_attn_steps * multiplier
+        fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps * multiplier
         total_steps = input_config.num_inference_steps * multiplier # Total number of transformer calls during the denoising process
         # Create a boolean vector indicating which steps should use fp8 attention
         fp8_decision_vector = torch.tensor(

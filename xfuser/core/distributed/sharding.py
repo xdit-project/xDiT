@@ -1,37 +1,48 @@
 from functools import partial
 
 import torch
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
-from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+import torch.nn
+from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.fsdp import ShardingStrategy
 
 
 def shard_model(
     model,
-    device_id,
-    param_dtype=torch.bfloat16,
-    reduce_dtype=torch.float32,
-    buffer_dtype=torch.float32,
+    dtype=torch.bfloat16,
     process_group=None,
     sharding_strategy=ShardingStrategy.FULL_SHARD,
-    sync_module_states=True,
-    use_lora=False
+    min_num_params=1e3,  # Minimum parameters to benefit from sharding
 ):
-    model = FSDP(
-        module=model,
-        process_group=process_group,
-        sharding_strategy=sharding_strategy,
-        auto_wrap_policy=partial(
-            lambda_auto_wrap_policy, lambda_fn=lambda m: m in model.blocks
-        ),
-        mixed_precision=MixedPrecision(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            buffer_dtype=buffer_dtype
-        ),
-        device_id=device_id,
-        sync_module_states=sync_module_states,
-        use_orig_params=True if use_lora else False
-    )
-
+    # Bottom-up approach: shard individual modules that are in target dtype
+    for name, module in model.named_modules():
+        # Skip the root model itself
+        if module is model:
+            continue
+        
+        # Only consider leaf modules (modules with parameters but no submodules with parameters)
+        has_params = any(True for _ in module.parameters(recurse=False))
+        if not has_params:
+            continue
+        
+        # Check if all parameters in this module are in the target dtype
+        params_list = list(module.parameters(recurse=False))
+        if not params_list:
+            continue
+            
+        all_target_dtype = all(p.dtype == dtype for p in params_list)
+        if not all_target_dtype:
+            continue
+        
+        # Check if module is large enough to benefit from sharding
+        num_params = sum(p.numel() for p in params_list)
+        if num_params < min_num_params:
+            continue
+        
+        # Apply FSDP2 to this module
+        fully_shard(
+            module,
+            mesh=process_group,
+            reshard_after_forward=sharding_strategy == ShardingStrategy.FULL_SHARD,
+        )
+    
     return model

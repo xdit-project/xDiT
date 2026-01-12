@@ -115,7 +115,9 @@ class xFuserArgs:
     use_cache: bool = False
     use_teacache: bool = False
     use_fbcache: bool = False
+    # Other arguments
     use_fp8_t5_encoder: bool = False
+    shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
 
     @staticmethod
@@ -217,9 +219,13 @@ class xFuserArgs:
         )
         parallel_group.add_argument(
             "--shard_dit",
-            type=bool,
-            default=False,
-            help="Enable full model sharding. Used together with sequence parallelism.",
+            action="store_true",
+            help="Enable DiT model sharding. Used together with sequence parallelism.",
+        )
+        parallel_group.add_argument(
+            "--shard_t5_encoder",
+            action="store_true",
+            help="Enable t5 encoder sharding.",
         )
         parallel_group.add_argument(
             "--pipefusion_parallel_degree",
@@ -431,6 +437,7 @@ class xFuserArgs:
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
+                shard_dit=self.shard_dit,
                 dit_parallel_size=self.dit_parallel_size,
             ),
             tp_config=TensorParallelConfig(
@@ -447,6 +454,7 @@ class xFuserArgs:
             world_size=self.world_size,
             dit_parallel_size=self.dit_parallel_size,
             vae_parallel_size=self.vae_parallel_size,
+            shard_t5_encoder=self.shard_t5_encoder,
         )
 
         fast_attn_config = FastAttnConfig(

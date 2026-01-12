@@ -200,6 +200,7 @@ class ParallelConfig:
     world_size: int = 1 # FIXME: remove this
     dit_parallel_size: int = 1
     vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
+    shard_t5_encoder: bool = False
 
     def __post_init__(self):
         assert self.tp_config is not None, "tp_config must be set"

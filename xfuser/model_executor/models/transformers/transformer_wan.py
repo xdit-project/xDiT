@@ -7,7 +7,6 @@ from diffusers.models.transformers.transformer_wan import WanAttention
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed import get_sequence_parallel_world_size
 from xfuser.model_executor.layers.attention_processor import (
-    set_hybrid_seq_parallel_attn,
     xFuserAttentionProcessorRegister
 )
 from xfuser.envs import PACKAGES_CHECKER
@@ -26,7 +25,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             and use_long_ctx_attn_kvcache
             and get_sequence_parallel_world_size() > 1
         )
-        set_hybrid_seq_parallel_attn(self, self.use_long_ctx_attn_kvcache)
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention

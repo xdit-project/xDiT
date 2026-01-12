@@ -438,6 +438,7 @@ class xFuserArgs:
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
                 shard_dit=self.shard_dit,
+                shard_dit=self.shard_dit,
                 dit_parallel_size=self.dit_parallel_size,
             ),
             tp_config=TensorParallelConfig(

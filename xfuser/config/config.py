@@ -112,6 +112,7 @@ class DataParallelConfig:
 class SequenceParallelConfig:
     ulysses_degree: Optional[int] = None
     ring_degree: Optional[int] = None
+    shard_dit: bool = False
     dit_parallel_size: int = 1
 
     def __post_init__(self):
@@ -126,6 +127,11 @@ class SequenceParallelConfig:
                 f"Ring degree not set, " f"using default value {self.ring_degree}"
             )
         self.sp_degree = self.ulysses_degree * self.ring_degree
+        if self.sp_degree == 1 and self.shard_dit:
+            self.shard_dit = False
+            logger.info(
+                f"Sequence parallelism not set, model sharding disabled"
+            )
 
         if not HAS_LONG_CTX_ATTN and self.sp_degree > 1:
             raise ImportError(
@@ -194,6 +200,7 @@ class ParallelConfig:
     world_size: int = 1 # FIXME: remove this
     dit_parallel_size: int = 1
     vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
+    shard_t5_encoder: bool = False
 
     def __post_init__(self):
         assert self.tp_config is not None, "tp_config must be set"

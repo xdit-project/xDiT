@@ -4,6 +4,8 @@ import diffusers
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from packaging import version
 
+from xfuser.core.utils.npu_device import IS_NPU_AVAILABLE
+
 try:
     import torch_musa
 except ModuleNotFoundError:
@@ -250,7 +252,7 @@ class PackagesEnvChecker:
 
 
     def check_long_ctx_attn(self):
-        if not torch.cuda.is_available():
+        if not (torch.cuda.is_available() or IS_NPU_AVAILABLE):
             return False
         try:
             from yunchang import (

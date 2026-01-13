@@ -1,11 +1,19 @@
 import torch
-from typing import Optional
+import math
+from typing import Optional, Union, Dict, Any
 
 from diffusers.models.transformers.transformer_wan import WanAttnProcessor
 from diffusers.models.transformers.transformer_wan import WanAttention
+from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from xfuser.model_executor.layers.usp import USP
-from xfuser.core.distributed import get_sequence_parallel_world_size
+from xfuser.core.distributed import (
+    get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
+    get_sp_group,
+    get_runtime_state,
+)
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister
 )
@@ -120,3 +128,192 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         return hidden_states
+
+
+class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
+
+    def __init__(
+        self,
+        **kwargs
+    ):
+        super().__init__(
+            **kwargs
+        )
+        for block in self.blocks:
+            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn2.processor = xFuserWanAttnProcessor()
+
+
+    def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
+        if pad_amount > 0:
+            if dim < 0:
+                dim = x.ndim + dim
+            pad_shape = list(x.shape)
+            pad_shape[dim] = pad_amount
+            x = torch.cat([x,
+                        torch.zeros(
+                            pad_shape,
+                            dtype=x.dtype,
+                            device=x.device,
+                        )], dim=dim)
+        x = torch.chunk(x,
+                        sp_world_size,
+                        dim=dim)[sp_world_rank]
+        return x
+
+    def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
+        x = get_sp_group().all_gather(x, dim=dim)
+        size = x.size(dim)
+        return x.narrow(dim=dim, start=0, length=size - pad_amount)
+
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        timestep: torch.LongTensor,
+        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states_image: Optional[torch.Tensor] = None,
+        return_dict: bool = True,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+
+        if attention_kwargs is not None:
+            attention_kwargs = attention_kwargs.copy()
+            lora_scale = attention_kwargs.pop("scale", 1.0)
+        else:
+            lora_scale = 1.0
+
+        get_runtime_state().increment_step_counter()
+
+        sp_world_rank = get_sequence_parallel_rank()
+        sp_world_size = get_sequence_parallel_world_size()
+                # SP support
+        pad_amount = (sp_world_size - (unified.shape[1] % sp_world_size)) % sp_world_size
+        unified = self._chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        unified_attn_mask = self._chunk_and_pad_sequence(unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        unified_freqs_cis = self._chunk_and_pad_sequence(unified_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+
+                # Gather SP outputs and remove padding
+        unified = self._gather_and_unpad(unified, pad_amount, dim=-2)
+
+
+        batch_size, num_channels, num_frames, height, width = hidden_states.shape
+        p_t, p_h, p_w = self.config.patch_size
+        post_patch_num_frames = num_frames // p_t
+        post_patch_height = height // p_h
+        post_patch_width = width // p_w
+
+        # 1. RoPE
+        rotary_emb = self.rope(hidden_states)
+
+        hidden_states = self.patch_embedding(hidden_states)
+        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+
+        # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
+        if timestep.ndim == 2:
+            ts_seq_len = timestep.shape[1]
+            timestep = timestep.flatten()  # batch_size * seq_len
+        else:
+            ts_seq_len = None
+
+        temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
+            timestep, encoder_hidden_states, encoder_hidden_states_image, timestep_seq_len=ts_seq_len
+        )
+        if ts_seq_len is not None:
+            # batch_size, seq_len, 6, inner_dim
+            timestep_proj = timestep_proj.unflatten(2, (6, -1))
+        else:
+            # batch_size, 6, inner_dim
+            timestep_proj = timestep_proj.unflatten(1, (6, -1))
+
+        if encoder_hidden_states_image is not None:
+            # We only reach this for Wan2.1, when doing cross attention with image embeddings
+            encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
+        else:
+            # Wan2.1 fails if we chunk encoder_hidden_states when cross attention is used. Should cross attention really be sharded?
+            encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        # Part of sequence parallel: given the resolution, we may need to pad the sequence length to match this prior to chunking
+        pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        # hidden_states = torch.cat([
+        #     hidden_states,
+        #     torch.zeros(batch_size, sequence_pad_amount, hidden_states.shape[2], device=hidden_states.device, dtype=hidden_states.dtype)
+        # ], dim=1)
+        # hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+
+        if ts_seq_len is not None: # (wan2.2 ti2v)
+            # temb = torch.cat([
+            #     temb,
+            #     torch.zeros(batch_size, sequence_pad_amount, temb.shape[2], device=temb.device, dtype=temb.dtype)
+            # ], dim=1)
+            # timestep_proj = torch.cat([
+            #     timestep_proj,
+            #     torch.zeros(batch_size, sequence_pad_amount, timestep_proj.shape[2], timestep_proj.shape[3], device=timestep_proj.device, dtype=timestep_proj.dtype)
+            # ], dim=1)
+            # temb = torch.chunk(temb, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
+            # timestep_proj = torch.chunk(timestep_proj, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
+            temb = self._chunk_and_pad_sequence(temb, sp_world_rank, sp_world_size, pad_amount, dim=1)
+            timestep_proj = self._chunk_and_pad_sequence(timestep_proj, sp_world_rank, sp_world_size, pad_amount, dim=1)
+
+        freqs_cos, freqs_sin = rotary_emb
+
+        def get_rotary_emb_chunk(freqs, pad_amount):
+            # freqs = torch.cat([
+            #     freqs,
+            #     torch.zeros(1, sequence_pad_amount, freqs.shape[2], freqs.shape[3], device=freqs.device, dtype=freqs.dtype)
+            # ], dim=1)
+            # freqs = torch.chunk(freqs, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
+            freqs = self._chunk_and_pad_sequence(freqs, sp_world_rank, sp_world_size, pad_amount, dim=1)
+            return freqs
+
+        freqs_cos = get_rotary_emb_chunk(freqs_cos, pad_amount)
+        freqs_sin = get_rotary_emb_chunk(freqs_sin, pad_amount)
+        rotary_emb = (freqs_cos, freqs_sin)
+
+
+        # 4. Transformer blocks
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            for block in self.blocks:
+                hidden_states = self._gradient_checkpointing_func(
+                    block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb
+                )
+        else:
+            for block in self.blocks:
+                hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
+
+        # 5. Output norm, projection & unpatchify
+        if temb.ndim == 3:
+            # batch_size, seq_len, inner_dim (wan 2.2 ti2v)
+            shift, scale = (self.scale_shift_table.unsqueeze(0).to(temb.device) + temb.unsqueeze(2)).chunk(2, dim=2)
+            shift = shift.squeeze(2)
+            scale = scale.squeeze(2)
+        else:
+            # batch_size, inner_dim
+            shift, scale = (self.scale_shift_table.to(temb.device) + temb.unsqueeze(1)).chunk(2, dim=1)
+
+        # Move the shift and scale tensors to the same device as hidden_states.
+        # When using multi-GPU inference via accelerate these will be on the
+        # first device rather than the last device, which hidden_states ends up
+        # on.
+        shift = shift.to(hidden_states.device)
+        scale = scale.to(hidden_states.device)
+
+        hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
+        hidden_states = self.proj_out(hidden_states)
+
+        #hidden_states = get_sp_group().all_gather(hidden_states, dim=-2)
+        hidden_states = self._gather_and_unpad(hidden_states, pad_amount, dim=-2)
+
+        # # Removing excess padding to get back to original sequence length
+        # hidden_states = hidden_states[:, :math.prod([post_patch_num_frames, post_patch_height, post_patch_width]), :]
+
+        hidden_states = hidden_states.reshape(
+            batch_size, post_patch_num_frames, post_patch_height, post_patch_width, p_t, p_h, p_w, -1
+        )
+        hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
+        output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+
+        if not return_dict:
+            return (output,)
+
+        return Transformer2DModelOutput(sample=output)

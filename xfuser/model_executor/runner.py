@@ -11,7 +11,7 @@ import gc
 import numpy as np
 from typing import Optional, Tuple, Any, Union, Dict
 from torch.profiler import profile, record_function, ProfilerActivity
-from diffusers.utils import load_image
+from diffusers.utils import load_image, export_to_video
 
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
@@ -101,10 +101,14 @@ class xFuserModelRunner:
 
     def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """
+        if type(input_args) == argparse.Namespace:
+            input_args = vars(input_args)
         return self.model.preprocess_args(input_args)
 
     def validate_args(self, input_args: dict):
         """ Validate input arguments """
+        if type(input_args) == argparse.Namespace:
+            input_args = vars(input_args)
         return self.model.validate_args(input_args)
 
     def profile(self, input_args: dict):
@@ -219,6 +223,10 @@ class xFuserModel(abc.ABC):
                 log(f"Profiling iteration {iteration + 1} completed in {timing:.2f}s")
         return out, [], profile_object
 
+    def validate_args(self, input_args: dict):
+        """ Validate input arguments """
+        return True
+
     def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """
         if type(input_args) == argparse.Namespace:
@@ -232,16 +240,7 @@ class xFuserModel(abc.ABC):
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess image inputs if necessary """
         # For legacy reasons, we support several ways to pass images
-        images = []
-        image_path_keys = ["image_path", "image_paths", "input_images"]
-        for key in image_path_keys:
-            if key in input_args:
-                paths = input_args[key]
-                if isinstance(paths, str):
-                    paths = [paths]
-                for path in paths:
-                    image = load_image(path)
-                    images.append(image)
+        images = [load_image(path) for path in input_args.get("input_images", [])]
         input_args["input_images"] = images
         return input_args
 
@@ -260,9 +259,10 @@ class xFuserModel(abc.ABC):
             log(f"Output image saved to {output_path}")
 
         elif self.model_output_type == "video":
+            output_video = output.frames[0] # TODO: BS > 1
             output_name = self.get_output_name()
             output_path = f"{self.config.output_directory}/{output_name}.mp4"
-            output.save(output_path)
+            export_to_video(output_video, output_path, fps=self.fps)
             log(f"Output video saved to {output_path}")
 
     def save_timings(self, timings: list):
@@ -313,6 +313,63 @@ class xFuserModel(abc.ABC):
     def enable_slicing(self):
         raise NotImplementedError("This model does not support slicing.")
 
+    def enable_tiling(self):
+        raise NotImplementedError("This model does not support tiling.")
+
+    def _resize_and_crop_image(self, image, target_height, target_width, mod_value):
+        """ Resize and center-crop image to target dimensions """
+
+        ##TODO: move this func to utils
+        target_height_aligned = target_height // mod_value * mod_value
+        target_width_aligned = target_width // mod_value * mod_value
+
+        if is_last_process():
+            print("Force output size mode enabled.")
+            print(f"Input image resolution: {image.height}x{image.width}")
+            print(f"Requested output resolution: {target_height}x{target_width}")
+            print(f"Aligned output resolution (multiple of {mod_value}): {target_height_aligned}x{target_width_aligned}")
+
+        # Step 1: Resize image maintaining aspect ratio so both dimensions >= target
+        img_width, img_height = image.size
+
+        # Calculate scale factor to ensure both dimensions are at least target size
+        scale_width = target_width_aligned / img_width
+        scale_height = target_height_aligned / img_height
+        scale = max(scale_width, scale_height)  # Use max to ensure both dims are >= target
+
+        # Resize with aspect ratio preserved
+        new_width = int(img_width * scale)
+        new_height = int(img_height * scale)
+        image = image.resize((new_width, new_height))
+
+        if is_last_process():
+            print(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
+
+        # Step 2: Crop from center to get exact target dimensions
+        left = (new_width - target_width_aligned) // 2
+        top = (new_height - target_height_aligned) // 2
+        image = image.crop((left, top, left + target_width_aligned, top + target_height_aligned))
+
+        if is_last_process():
+            print(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
+        return image
+
+
+
+    def _resize_image_to_max_area(self, image, input_height, input_width, mod_value):
+        """ Resize image to fit within max area while retaining aspect ratio """
+        ##TODO: move to utils
+
+        max_area = input_height * input_width
+        width, height = image.size
+        aspect_ratio = image.height / image.width
+        height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
+        width = round(np.sqrt(max_area /aspect_ratio)) // mod_value * mod_value
+
+        image = image.resize((width, height))
+        return image
+
+
 
 
 
@@ -355,6 +412,94 @@ class xFuserZImageTurboModel(xFuserModel):
         return output
 
 
+from diffusers import WanImageToVideoPipeline, WanPipeline
+from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
+@register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
+@register_model("Wan2.2-I2V")
+class xFuserWanI2VModel(xFuserModel):
+
+    mod_value = 8 # vae_scale_factor_spatial * patch_size[1] = 8
+    fps = 16
+
+
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.is_wan_2_2 = "2.2" in config.model
+        if self.is_wan_2_2:
+            self.model_name: str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+            self.output_name: str = "wan2.2_i2v"
+        else:
+            self.model_name: str = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+            self.output_name = "wan2.1_i2v"
+        self.model_output_type: str = "video"
+
+    def _load_model(self):
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+
+        if self.is_wan_2_2:
+            transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
+                pretrained_model_name_or_path=self.model_name,
+                torch_dtype=torch.bfloat16,
+                subfolder="transformer_2",
+            )
+            pipe = WanImageToVideoPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+                transformer_2=transformer_2,
+            )
+        else:
+            pipe = WanImageToVideoPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+                transformer_2=transformer_2,
+            )
+
+        local_rank = get_world_group().local_rank
+        pipe = pipe.to(f"cuda:{local_rank}")
+        return pipe
+
+    def _run_pipe(self, input_args: dict):
+        output = self.pipe(
+            image=input_args["image"],
+            height=input_args["height"],
+            width=input_args["width"],
+            prompt=str(input_args["prompt"]),
+            num_inference_steps=input_args["num_inference_steps"],
+            num_frames=input_args["num_frames"],
+            guidance_scale=input_args["guidance_scale"],
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        )
+        return output
+
+    def _preprocess_args_custom(self, input_args):
+        image = input_args["input_images"][0]
+        width, height = input_args["width"], input_args["height"]
+        if input_args.get("resize_image", False):
+            image = self._resize_and_crop_image(image, width, height, self.mod_value)
+            input_args["input_images"] = [image]
+            log(f"Resized and cropped image to {image.width}x{image.height}")
+        else:
+            image = self._resize_image_to_max_area(image, height, width, self.mod_value)
+            log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
+        input_args["height"] = image.height
+        input_args["width"] = image.width
+        input_args["image"] = image
+        return input_args
+
+    def validate_args(self, input_args: dict):
+        """ Validate input arguments """
+        images = input_args.get("input_images", [])
+        if len(images) != 1:
+            raise ValueError("Exactly one input image is required for Wan I2V model.")
+
+
+
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="xFuser Arguments")
@@ -390,9 +535,16 @@ if __name__ == "__main__":
         default=".",
         help="Directory where to save outputs, profiles and timings.",
     )
+    parser.add_argument(
+        "--input_images",
+        default=[],
+        nargs="*",
+        help="Path(s)/URL(s) to input image(s).",
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     runner = xFuserModelRunner(args)
     runner.print_args(args)
+    runner.validate_args(args)
     input_args = runner.preprocess_args(args)
     runner.initialize(input_args)
     if args.profile:

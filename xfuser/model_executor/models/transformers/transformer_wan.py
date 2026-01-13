@@ -1,6 +1,6 @@
 import torch
 import math
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, Tuple
 
 from diffusers.models.transformers.transformer_wan import WanAttnProcessor
 from diffusers.models.transformers.transformer_wan import WanAttention
@@ -27,12 +27,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
-        self.use_long_ctx_attn_kvcache = (
-            HAS_LONG_CTX_ATTN
-            and use_long_ctx_attn_kvcache
-            and get_sequence_parallel_world_size() > 1
-        )
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention
@@ -132,12 +126,43 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
 class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
 
+
     def __init__(
         self,
-        **kwargs
-    ):
+        patch_size: Tuple[int, ...] = (1, 2, 2),
+        num_attention_heads: int = 40,
+        attention_head_dim: int = 128,
+        in_channels: int = 16,
+        out_channels: int = 16,
+        text_dim: int = 4096,
+        freq_dim: int = 256,
+        ffn_dim: int = 13824,
+        num_layers: int = 40,
+        cross_attn_norm: bool = True,
+        qk_norm: Optional[str] = "rms_norm_across_heads",
+        eps: float = 1e-6,
+        image_dim: Optional[int] = None,
+        added_kv_proj_dim: Optional[int] = None,
+        rope_max_seq_len: int = 1024,
+        pos_embed_seq_len: Optional[int] = None,
+    ) -> None:
         super().__init__(
-            **kwargs
+           patch_size,
+           num_attention_heads,
+           attention_head_dim,
+           in_channels,
+           out_channels,
+           text_dim,
+           freq_dim,
+           ffn_dim,
+           num_layers,
+           cross_attn_norm,
+           qk_norm,
+           eps,
+           image_dim,
+           added_kv_proj_dim,
+           rope_max_seq_len,
+           pos_embed_seq_len,
         )
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
@@ -183,19 +208,10 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         else:
             lora_scale = 1.0
 
-        get_runtime_state().increment_step_counter()
+        #get_runtime_state().increment_step_counter()
 
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
-                # SP support
-        pad_amount = (sp_world_size - (unified.shape[1] % sp_world_size)) % sp_world_size
-        unified = self._chunk_and_pad_sequence(unified, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        unified_attn_mask = self._chunk_and_pad_sequence(unified_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        unified_freqs_cis = self._chunk_and_pad_sequence(unified_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-
-                # Gather SP outputs and remove padding
-        unified = self._gather_and_unpad(unified, pad_amount, dim=-2)
-
 
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.config.patch_size
@@ -240,6 +256,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         #     torch.zeros(batch_size, sequence_pad_amount, hidden_states.shape[2], device=hidden_states.device, dtype=hidden_states.dtype)
         # ], dim=1)
         # hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
 
         if ts_seq_len is not None: # (wan2.2 ti2v)
             # temb = torch.cat([

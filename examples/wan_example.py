@@ -234,14 +234,14 @@ def main():
 
     # Shard model
     pipe.transformer = shard_dit(
-        pipe.transformer, local_rank, "blocks"
+        pipe.transformer, local_rank, get_sp_group()
     ) if args.shard_dit else pipe.transformer.to(f"cuda:{local_rank}")
     if pipe.transformer_2 is not None:
         pipe.transformer_2 = shard_dit(
-            pipe.transformer_2, local_rank, "blocks"
+            pipe.transformer_2, local_rank, get_sp_group()
         ) if args.shard_dit else pipe.transformer_2.to(f"cuda:{local_rank}")
     pipe.text_encoder = shard_t5_encoder(
-        pipe.text_encoder, local_rank, "block"
+        pipe.text_encoder, local_rank, get_world_group()
     ) if args.shard_t5_encoder else pipe.text_encoder.to(f"cuda:{local_rank}")
     pipe.vae = pipe.vae.to(f"cuda:{local_rank}")
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]

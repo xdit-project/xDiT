@@ -29,7 +29,7 @@ from torch.distributed.fsdp.wrap import (
 )
 
 
-def shard_dit(transformer, local_rank, block_attr):
+def shard_dit(transformer, local_rank, process_group=None, block_attr="blocks"):
     """
     Shard a DiT (Diffusion Transformer) model with FSDP block-by-block.
     
@@ -53,6 +53,7 @@ def shard_dit(transformer, local_rank, block_attr):
         transformer,
         block_attr=block_attr,
         device_id=local_rank,
+        process_group=process_group,
         dtype=torch.bfloat16,
         use_orig_params=True,
         sync_module_states=True,
@@ -67,7 +68,7 @@ def shard_dit(transformer, local_rank, block_attr):
     return transformer
 
 
-def shard_t5_encoder(transformer, local_rank, block_attr):
+def shard_t5_encoder(transformer, local_rank, process_group=None, block_attr="block"):
     """
     Shard a T5 encoder model with FSDP block-by-block.
     
@@ -89,6 +90,7 @@ def shard_t5_encoder(transformer, local_rank, block_attr):
         transformer.encoder,
         block_attr=block_attr,
         device_id=local_rank,
+        process_group=process_group,
         use_orig_params=True,
         sync_module_states=True,
         forward_prefetch=True 

@@ -205,7 +205,7 @@ def parallelize_transformer(pipe):
             block.attn2.processor = xFuserWanAttnProcessor()
 
 
-def shard_model_wan(pipe, shard_dit, shard_5_encoder):
+def shard_model_wan(pipe, shard_dit, shard_t5_encoder):
     local_rank = get_world_group().local_rank
     sp_local_rank = get_sp_group().local_rank
     sp_device_group = get_sp_group().device_group

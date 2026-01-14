@@ -1,5 +1,5 @@
 """
-FSDP Sharding Utilities for Transformer Models.
+Sharding Utilities for Transformer Models.
 
 This module provides functions to wrap transformer models with PyTorch's Fully Sharded
 Data Parallel (FSDP) for distributed training. It enables efficient memory usage by
@@ -7,7 +7,6 @@ sharding model parameters across multiple GPUs while maintaining model paralleli
 
 Key Features:
     - Block-level FSDP wrapping for transformer architectures
-    - Mixed precision training support (bfloat16/float32)
     - Automatic handling of model conversion and device placement
     - Support for DiT and T5 encoder models
 
@@ -213,7 +212,7 @@ def shard_transformer_blocks(
     Example:
         >>> from xfuser.core.distributed import get_sp_group
         >>> model = Transformer(...)
-        >>> # Correct: extract cpu_group from coordinator
+        >>> # Correct: extract device_group from coordinator
         >>> fsdp_model = shard_transformer_blocks(
         ...     model,
         ...     block_attr='blocks',

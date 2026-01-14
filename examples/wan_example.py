@@ -239,7 +239,7 @@ def shard_model_wan(
         pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
     else:
         pipe.text_encoder.to(f"cuda:{local_rank}")
-    pipe.vae = pipe.vae.to(f"cuda:{local_rank}")
+    pipe.vae.to(f"cuda:{local_rank}")
 
 
 def main():

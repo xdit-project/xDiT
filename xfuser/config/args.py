@@ -74,9 +74,9 @@ class xFuserArgs:
     data_parallel_degree: int = 1
     use_cfg_parallel: bool = False
     # sequence parallel
-    ulysses_degree: Optional[int] = None
-    ring_degree: Optional[int] = None
     shard_dit: Optional[bool] = False
+    ulysses_degree: Optional[int] = 1
+    ring_degree: Optional[int] = 1
     # tensor parallel
     tensor_parallel_degree: int = 1
     split_scheme: Optional[str] = "row"
@@ -208,13 +208,13 @@ class xFuserArgs:
         parallel_group.add_argument(
             "--ulysses_degree",
             type=int,
-            default=None,
+            default=1,
             help="Ulysses sequence parallel degree. Used in attention layer.",
         )
         parallel_group.add_argument(
             "--ring_degree",
             type=int,
-            default=None,
+            default=1,
             help="Ring sequence parallel degree. Used in attention layer.",
         )
         parallel_group.add_argument(

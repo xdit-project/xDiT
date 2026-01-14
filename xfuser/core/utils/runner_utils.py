@@ -8,10 +8,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def log(message: str) -> None:
+def log(message: str, debug=False) -> None:
     """Log message only from the last process to avoid duplicates."""
     if is_last_process():
-        logger.info(message)
+        if debug:
+            logger.debug(message)
+        else:
+            logger.info(message)
 
 def is_last_process() -> bool:
     """ Checks based on env rank and world size if this is last process in """

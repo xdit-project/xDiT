@@ -4,10 +4,11 @@ import torch
 import copy
 import argparse
 import json
+from dataclasses import dataclass
 from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers.utils import load_image, export_to_video
 import numpy as np
-from xfuser.config import xFuserArgs
+from xfuser.config import args, xFuserArgs
 from xfuser.core.utils.runner_utils import (
     log,
     is_last_process,
@@ -24,16 +25,21 @@ def register_model(name: str) -> callable:
     """ Decorator to register a model in the registry. """
     def decorator(cls):
         MODEL_REGISTRY[name] = cls
-        log(f"Registered model: {name}")
+        log(f"Registered model: {name}", debug=True)
         return cls
     return decorator
 
-class ModelCapabilities(enum.Enum):
-    """ Enum to define model capabilities """
-    ulysses_sp: bool = True # All xDiT models support these
-    ring_sp: bool = True
-    pipefusion_sp: bool = False
-    cfg: bool = False
+@dataclass
+class ModelCapabilities:
+    """ Class to define model capabilities """
+    ulysses_degree: bool = True  # All xDiT models support these
+    ring_degree: bool = True
+    pipefusion_parallel_degree: bool = False
+    use_cfg_parallel: bool = False
+    use_parallel_vae: bool = False
+    enable_slicing: bool = False
+    enable_tiling: bool = False
+
 
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
@@ -52,28 +58,42 @@ class xFuserModel(abc.ABC):
         engine_args = xFuserArgs.from_cli_args(self.config)
         engine_config, input_config = engine_args.create_config()
 
-
         self.pipe = self._load_model()
-
 
         log("Initializing runtime state...")
         initialize_runtime_state(self.pipe, engine_config)
+
+        self._enable_options(self.pipe)
 
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
             self._compile_model(input_args)
 
+    def _enable_options(self, pipe):
+        """ Enable model options based on config"""
+        if self.config.enable_slicing:
+            pipe.vae.enable_slicing()
+
+        if self.config.enable_tiling:
+            pipe.vae.enable_tiling()
+
+        if self.config.enable_sequential_cpu_offload:
+            pipe.enable_sequential_cpu_offload()
+        elif self.config.enable_model_cpu_offload:
+            pipe.enable_model_cpu_offload()
+
 
     def _validate_capabilities(self, config):
         """ Validate if the model supports requested capabilities """
-        if config.ulysses_degree and not self.capabilities.ulysses_sp:
-            raise ValueError(f"Model {self.model_name} does not support Ulysses SP.")
-        if config.ring_degree and not self.capabilities.ring_sp:
-            raise ValueError(f"Model {self.model_name} does not support Ring SP.")
-        if config.pipefusion_parallel_degree and not self.capabilities.pipefusion_sp:
-            raise ValueError(f"Model {self.model_name} does not support Pipefusion.")
-        if config.use_cfg and not self.capabilities.cfg:
-            raise ValueError(f"Model {self.model_name} does not support CFG.")
+        for key in ModelCapabilities.__annotations__.keys():
+            config_value = getattr(config, key)
+            if type(config_value) == int:
+                if not getattr(self.capabilities, key) and config_value > 1:
+                    raise ValueError(f"Model {self.model_name} does not support {key}.")
+            if type(config_value) == bool:
+                if config_value and not getattr(self.capabilities, key):
+                    raise ValueError(f"Model {self.model_name} does not support {key}.")
+
 
     def _compile_model(self, input_args):
         """ Compile the model using torch.compile """
@@ -218,12 +238,6 @@ class xFuserModel(abc.ABC):
     def _load_model(self):
         """ Load the model. Must be implemented by subclasses. """
         pass
-
-    def enable_slicing(self):
-        raise NotImplementedError("This model does not support slicing.")
-
-    def enable_tiling(self):
-        raise NotImplementedError("This model does not support tiling.")
 
     def _resize_and_crop_image(self, image, target_height, target_width, mod_value):
         """ Resize and center-crop image to target dimensions """

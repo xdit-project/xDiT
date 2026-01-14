@@ -22,7 +22,6 @@ class xFuserWanI2VModel(xFuserModel):
     fps = 16
 
     def __init__(self, config: dict):
-        super().__init__(config)
         self.is_wan_2_2 = "2.2" in config.model
         if self.is_wan_2_2:
             self.model_name: str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
@@ -31,6 +30,7 @@ class xFuserWanI2VModel(xFuserModel):
             self.model_name: str = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
             self.output_name = "wan2.1_i2v"
         self.model_output_type: str = "video"
+        super().__init__(config)
 
     def _load_model(self):
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

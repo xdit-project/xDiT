@@ -53,6 +53,7 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        get_runtime_state().increment_step_counter()
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
@@ -205,6 +206,18 @@ def parallelize_transformer(pipe: DiffusionPipeline):
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
+    parser.add_argument(
+        "--use_hybrid_fp8_attn",
+        default=False,
+        action="store_true",
+        help="Whether to use hybrid FP8 attention."
+    )
+    parser.add_argument(
+        "--number_of_bf16_attn_steps",
+        type=int,
+        default=10,
+        help="Number of steps to use BF16 attention."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
 
@@ -266,6 +279,17 @@ def main():
     parameter_peak_memory = torch.cuda.max_memory_allocated(
         device=f"cuda:{local_rank}")
 
+    if args.use_hybrid_fp8_attn:
+        number_of_initial_and_final_bf16_attn_steps = args.number_of_bf16_attn_steps # Number of initial and final steps to use bf16 attention for stability
+        fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps
+        total_steps = input_config.num_inference_steps # Total number of transformer calls during the denoising process
+        # Create a boolean vector indicating which steps should use fp8 attention
+        fp8_decision_vector = torch.tensor(
+        [i >= fp8_steps_threshold and i < (total_steps - fp8_steps_threshold)
+            for i in range(total_steps)], dtype=torch.bool
+        )
+        get_runtime_state().set_hybrid_attn_parameters(fp8_decision_vector)
+
     if engine_config.runtime_config.use_torch_compile:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         pipe.transformer.compile()
@@ -276,7 +300,7 @@ def main():
             width=input_config.width,
             num_frames=input_config.num_frames,
             prompt=input_config.prompt,
-            num_inference_steps=1,
+            num_inference_steps=1 if not args.use_hybrid_fp8_attn else input_config.num_inference_steps,
             guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(
                 input_config.seed),

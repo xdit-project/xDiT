@@ -17,6 +17,7 @@ Functions:
     - shard_transformer_blocks: Generic transformer block sharding
 """
 from functools import partial
+from typing import Iterable
 
 import torch
 from torch.distributed.fsdp import (
@@ -26,6 +27,38 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import (
     lambda_auto_wrap_policy,
 )
+
+
+def _children_to_device(
+    module: torch.nn.Module, device: str, excluded_children: Iterable[str] = []
+):
+    """
+    Move immediate children of a module to the specified device.
+    
+    This helper function moves only the direct children (non-recursive) of a module
+    to the target device. Since `.to(device)` is recursive, calling it on each
+    immediate child will move that child and all its descendants.
+    
+    Args:
+        module (torch.nn.Module): Parent module whose children should be moved.
+        device (str): Target device string (e.g., 'cuda:0', 'cpu').
+        excluded_children (Iterable[str], optional): Names of children to skip.
+            Useful for excluding already-sharded modules (e.g., FSDP-wrapped blocks).
+            Defaults to empty list.
+    
+    Note:
+        - Uses `named_children()` not `named_modules()` because `.to()` is recursive
+        - Each child's `.to()` call handles that child and all its descendants
+        - Excluded children remain on their current device
+    
+    Example:
+        >>> model = TransformerModel()
+        >>> # Move all children except 'blocks' to GPU
+        >>> _children_to_device(model, 'cuda:0', excluded_children=['blocks'])
+    """
+    for name, child in module.named_children():
+        if name not in excluded_children:
+            child.to(device)
 
 
 def shard_dit(transformer, local_rank, process_group=None, block_attr="blocks"):
@@ -70,11 +103,10 @@ def shard_dit(transformer, local_rank, process_group=None, block_attr="blocks"):
         forward_prefetch=True
     )
     
-    # Move any non-FSDP submodules to GPU (but NOT the blocks, they're already handled)
-    for name, module in transformer.named_children():
-        if name != block_attr and isinstance(module, torch.nn.Module):
-            module.to(f"cuda:{local_rank}")
-    
+    # Move any non-FSDP submodules to device (but NOT the blocks, they're already handled)
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    _children_to_device(transformer, device, [block_attr])
+
     return transformer
 
 
@@ -120,13 +152,10 @@ def shard_t5_encoder(transformer, local_rank, process_group=None, block_attr="bl
         forward_prefetch=True 
     )
 
-    # Move any non-FSDP submodules to GPU (but NOT the block_attr, they're already handled)
-    for name, module in transformer.encoder.named_modules():
-        if name != block_attr and isinstance(module, torch.nn.Module):
-            module.to(f"cuda:{local_rank}")
-    for name, module in transformer.named_modules():
-        if name != "encoder" and isinstance(module, torch.nn.Module):
-            module.to(f"cuda:{local_rank}")
+    # Move any non-FSDP submodules to device (but NOT the block_attr, they're already handled)
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    _children_to_device(transformer.encoder, device, [block_attr])
+    _children_to_device(transformer, device, ["encoder"])
 
     return transformer
 
@@ -190,8 +219,12 @@ def shard_transformer_blocks(
         - When passing a GroupCoordinator from get_sp_group() or get_world_group(),
           extract the ProcessGroup with `.device_group` attribute
     """
+    # Determine device: use CUDA if available and device_id specified, else CPU
     if device_id is None:
-        device_id = torch.cuda.current_device()
+        if torch.cuda.is_available():
+            device_id = torch.cuda.current_device()
+        else:
+            device_id = None  # CPU mode
     
     if not hasattr(model, block_attr):
         raise ValueError(f"Model does not have attribute '{block_attr}'")

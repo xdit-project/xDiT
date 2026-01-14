@@ -14,7 +14,6 @@ if not has_valid_diffusers_version("wan"):
 from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.transformers.transformer_wan import Fp32LayerNorm
 
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
@@ -206,6 +205,25 @@ def parallelize_transformer(pipe):
             block.attn2.processor = xFuserWanAttnProcessor()
 
 
+def shard_model_wan(pipe, shard_dit, shard_5_encoder):
+    local_rank = get_world_group().local_rank
+    sp_local_rank = get_sp_group().local_rank
+    sp_device_group = get_sp_group().device_group
+    if shard_dit:
+        pipe.transformer = shard_dit(pipe.transformer, sp_local_rank, sp_device_group)
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2 = shard_dit(pipe.transformer_2, sp_local_rank, sp_device_group)
+    else:
+        pipe.transformer.to(f"cuda:{sp_local_rank}")
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2.to(f"cuda:{sp_local_rank}")
+    if shard_t5_encoder:
+        pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
+    else:
+        pipe.text_encoder.to(f"cuda:{{local_rank}}")
+    pipe.vae = pipe.vae.to(f"cuda:{local_rank}")
+
+
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     parser.add_argument(
@@ -231,21 +249,11 @@ def main():
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
-
     # Shard model
-    sp_device_group = get_sp_group().device_group
-    sp_local_rank = get_sp_group().local_rank
-    pipe.transformer = shard_dit(
-        pipe.transformer, sp_local_rank, sp_device_group
-    ) if args.shard_dit else pipe.transformer.to(f"cuda:{sp_local_rank}")
-    if pipe.transformer_2 is not None:
-        pipe.transformer_2 = shard_dit(
-            pipe.transformer_2, sp_local_rank, sp_device_group
-        ) if args.shard_dit else pipe.transformer_2.to(f"cuda:{sp_local_rank}")
-    pipe.text_encoder = shard_t5_encoder(
-        pipe.text_encoder, local_rank, get_world_group().device_group
-    ) if args.shard_t5_encoder else pipe.text_encoder.to(f"cuda:{local_rank}")
-    pipe.vae = pipe.vae.to(f"cuda:{local_rank}")
+    if args.shard_dit or args.shard_t5_encoder:
+        shard_model_wan(pipe, args.shard_dit, args.shard_t5_encoder)
+    else:
+        pipe.to(f"cuda:{local_rank}")
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
 
     if not args.img_file_path and args.task == "i2v":

@@ -205,7 +205,25 @@ def parallelize_transformer(pipe):
             block.attn2.processor = xFuserWanAttnProcessor()
 
 
-def shard_model_wan(pipe, shard_dit, shard_t5_encoder):
+def shard_model_wan(
+    pipe: Union[WanImageToVideoPipeline, WanPipeline],
+    shard_dit: bool,
+    shard_t5_encoder: bool
+) -> None:
+    """
+    Shard the transformer and text encoder models in the pipeline using FSDP.
+    
+    Args:
+        pipe: The Wan pipeline (either WanImageToVideoPipeline or WanPipeline).
+        should_shard_dit: Whether to shard the DiT transformer(s) with FSDP.
+        should_shard_t5_encoder: Whether to shard the T5 text encoder with FSDP.
+    
+    Note:
+        - Uses imported shard_dit and shard_t5_encoder functions from xfuser.core.distributed
+        - Handles both single and dual transformer models (Wan 2.1 vs 2.2)
+        - Non-sharded modules are moved to appropriate CUDA devices
+    """
+    
     local_rank = get_world_group().local_rank
     sp_local_rank = get_sp_group().local_rank
     sp_device_group = get_sp_group().device_group
@@ -220,7 +238,7 @@ def shard_model_wan(pipe, shard_dit, shard_t5_encoder):
     if shard_t5_encoder:
         pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
     else:
-        pipe.text_encoder.to(f"cuda:{{local_rank}}")
+        pipe.text_encoder.to(f"cuda:{local_rank}")
     pipe.vae = pipe.vae.to(f"cuda:{local_rank}")
 
 

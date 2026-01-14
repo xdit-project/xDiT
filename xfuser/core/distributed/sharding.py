@@ -17,7 +17,7 @@ Functions:
     - shard_transformer_blocks: Generic transformer block sharding
 """
 from functools import partial
-from typing import Iterable
+from typing import Iterable, Optional, Any
 
 import torch
 from torch.distributed.fsdp import (
@@ -31,7 +31,7 @@ from torch.distributed.fsdp.wrap import (
 
 def _children_to_device(
     module: torch.nn.Module, device: str, excluded_children: Iterable[str] = []
-):
+) -> None:
     """
     Move immediate children of a module to the specified device.
     
@@ -61,7 +61,12 @@ def _children_to_device(
             child.to(device)
 
 
-def shard_dit(transformer, local_rank, process_group=None, block_attr="blocks"):
+def shard_dit(
+    transformer: torch.nn.Module,
+    local_rank: int,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+    block_attr: str = "blocks"
+) -> torch.nn.Module:
     """
     Shard a DiT (Diffusion Transformer) model with FSDP block-by-block.
     
@@ -110,7 +115,12 @@ def shard_dit(transformer, local_rank, process_group=None, block_attr="blocks"):
     return transformer
 
 
-def shard_t5_encoder(transformer, local_rank, process_group=None, block_attr="block"):
+def shard_t5_encoder(
+    transformer: torch.nn.Module,
+    local_rank: int,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+    block_attr: str = "block"
+) -> torch.nn.Module:
     """
     Shard a T5 encoder model with FSDP block-by-block.
     
@@ -161,13 +171,13 @@ def shard_t5_encoder(transformer, local_rank, process_group=None, block_attr="bl
 
 
 def shard_transformer_blocks(
-    model,
+    model: torch.nn.Module,
     block_attr='blocks',
-    process_group=None,
-    device_id=None,
-    dtype=None,
-    **fsdp_kwargs
-):
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+    device_id: Optional[int] = None,
+    dtype: Optional[torch.dtype] = None,
+    **fsdp_kwargs: Any
+) -> torch.nn.Module:
     """
     Wrap a transformer model with FSDP, treating each block as a separate FSDP unit.
     

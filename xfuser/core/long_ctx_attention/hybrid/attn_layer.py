@@ -4,7 +4,9 @@ from torch import Tensor
 
 import torch.distributed
 
-if torch.cuda.is_available():
+import xfuser.envs as envs
+
+if torch.cuda.is_available() or envs._is_npu():
     from yunchang import LongContextAttention
     try:
         from yunchang.kernels import AttnType

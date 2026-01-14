@@ -254,7 +254,7 @@ class PackagesEnvChecker:
 
 
     def check_long_ctx_attn(self):
-        if not torch.cuda.is_available():
+        if not (torch.cuda.is_available() or _is_npu()):
             return False
         try:
             from yunchang import (

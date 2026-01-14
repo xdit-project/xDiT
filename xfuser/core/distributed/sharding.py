@@ -21,7 +21,6 @@ from functools import partial
 import torch
 from torch.distributed.fsdp import (
     ShardingStrategy,
-    MixedPrecision,
     FullyShardedDataParallel as FSDP,
 )
 from torch.distributed.fsdp.wrap import (
@@ -34,20 +33,31 @@ def shard_dit(transformer, local_rank, process_group=None, block_attr="blocks"):
     Shard a DiT (Diffusion Transformer) model with FSDP block-by-block.
     
     This function wraps each transformer block with FSDP for distributed training,
-    using bfloat16 mixed precision and enabling forward prefetching for performance.
+    using bfloat16 dtype conversion and enabling forward prefetching for performance.
     Non-FSDP submodules are moved to the appropriate GPU device.
     
     Args:
         transformer (nn.Module): The transformer model to shard.
         local_rank (int): Local GPU rank/device ID for this process.
-        block_attr (str): Name of the attribute containing transformer blocks (e.g., 'blocks').
+        process_group (ProcessGroup, optional): PyTorch distributed process group for
+            FSDP communication. If None, uses the default process group. Note: pass
+            `group.device_group` if using a GroupCoordinator wrapper.
+        block_attr (str, optional): Name of the attribute containing transformer blocks.
+            Defaults to 'blocks'.
     
     Returns:
         nn.Module: The FSDP-wrapped transformer model.
     
     Example:
+        >>> from xfuser.core.distributed import get_sp_group
         >>> transformer = DiT(...)
-        >>> sharded_model = shard_dit(transformer, local_rank=0, block_attr='blocks')
+        >>> # Pass the actual ProcessGroup, not the coordinator
+        >>> sharded_model = shard_dit(
+        ...     transformer, 
+        ...     local_rank=0, 
+        ...     process_group=get_sp_group().device_group,
+        ...     block_attr='blocks'
+        ... )
     """
     transformer = shard_transformer_blocks(
         transformer,
@@ -76,15 +86,29 @@ def shard_t5_encoder(transformer, local_rank, process_group=None, block_attr="bl
     transformer blocks with FSDP. Non-FSDP submodules are moved to the appropriate GPU.
     
     Args:
-        transformer: The T5 transformer model containing an encoder.
+        transformer (nn.Module): The T5 transformer model containing an encoder.
         local_rank (int): Local GPU rank/device ID for this process.
-        block_attr (str): Name of the attribute containing encoder blocks.
+        process_group (ProcessGroup, optional): PyTorch distributed process group for
+            FSDP communication. If None, uses the default process group. Note: pass
+            `group.device_group` if using a GroupCoordinator wrapper.
+        block_attr (str, optional): Name of the attribute containing encoder blocks.
+            Defaults to 'block' (T5 uses 'block' not 'blocks').
     
     Returns:
-        The transformer with FSDP-wrapped encoder.
+        nn.Module: The transformer with FSDP-wrapped encoder.
     
     Note:
         This function assumes the transformer has an 'encoder' attribute with transformer blocks.
+    
+    Example:
+        >>> from xfuser.core.distributed import get_world_group
+        >>> t5_model = T5EncoderModel(...)
+        >>> sharded_model = shard_t5_encoder(
+        ...     t5_model,
+        ...     local_rank=0,
+        ...     process_group=get_world_group().device_group,
+        ...     block_attr='block'
+        ... )
     """
     transformer.encoder = shard_transformer_blocks(
         transformer.encoder,
@@ -120,34 +144,40 @@ def shard_transformer_blocks(
     
     This function applies Fully Sharded Data Parallel (FSDP) to a transformer model,
     automatically wrapping each transformer block separately for optimal memory
-    distribution. It uses mixed precision training with bfloat16 parameters and
-    float32 gradient reduction for numerical stability.
+    distribution. Parameters and buffers are converted to the specified dtype.
     
     Args:
         model (nn.Module): The transformer model to wrap with FSDP.
         block_attr (str, optional): Name of the model attribute containing transformer
             blocks. Defaults to 'blocks'.
         process_group (ProcessGroup, optional): PyTorch distributed process group for
-            FSDP communication. If None, uses the default process group.
+            FSDP communication. If None, uses the default process group. 
+            **Important**: Pass `group.cpu_group` if using a GroupCoordinator wrapper
+            (e.g., from `get_sp_group()` or `get_world_group()`), not the coordinator itself.
         device_id (int, optional): CUDA device ID to place the model on. If None,
             uses the current CUDA device.
         dtype (torch.dtype, optional): Target dtype to convert the model to before
             wrapping. If None, keeps the original dtype.
         **fsdp_kwargs: Additional keyword arguments to pass to the FSDP constructor,
-            such as 'sync_module_states', 'forward_prefetch', etc.
+            such as 'sync_module_states', 'forward_prefetch', 'use_orig_params', etc.
     
     Returns:
-        nn.Module: The FSDP-wrapped model with mixed precision enabled.
+        nn.Module: The FSDP-wrapped model.
     
     Raises:
         ValueError: If the model does not have the specified block_attr attribute.
+        TypeError: If process_group is a GroupCoordinator instead of a ProcessGroup.
+            Use `group.device_group` to extract the actual ProcessGroup.
     
     Example:
+        >>> from xfuser.core.distributed import get_sp_group
         >>> model = Transformer(...)
+        >>> # Correct: extract cpu_group from coordinator
         >>> fsdp_model = shard_transformer_blocks(
         ...     model,
         ...     block_attr='blocks',
         ...     device_id=0,
+        ...     process_group=get_sp_group().device_group,  # NOT get_sp_group()
         ...     dtype=torch.bfloat16,
         ...     sync_module_states=True,
         ...     forward_prefetch=True
@@ -157,6 +187,8 @@ def shard_transformer_blocks(
         - Uses FULL_SHARD strategy for maximum memory savings
         - Each block in 'block_attr' becomes a separate FSDP unit
         - Requires PyTorch distributed to be initialized before calling
+        - When passing a GroupCoordinator from get_sp_group() or get_world_group(),
+          extract the ProcessGroup with `.device_group` attribute
     """
     if device_id is None:
         device_id = torch.cuda.current_device()

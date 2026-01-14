@@ -1,48 +1,177 @@
+"""
+FSDP Sharding Utilities for Transformer Models.
+
+This module provides functions to wrap transformer models with PyTorch's Fully Sharded
+Data Parallel (FSDP) for distributed training. It enables efficient memory usage by
+sharding model parameters across multiple GPUs while maintaining model parallelism.
+
+Key Features:
+    - Block-level FSDP wrapping for transformer architectures
+    - Mixed precision training support (bfloat16/float32)
+    - Automatic handling of model conversion and device placement
+    - Support for DiT and T5 encoder models
+
+Functions:
+    - shard_dit: Shard a Diffusion Transformer (DiT) model
+    - shard_t5_encoder: Shard a T5 encoder model
+    - shard_transformer_blocks: Generic transformer block sharding
+"""
 from functools import partial
 
 import torch
-import torch.nn
-from torch.distributed._composable.fsdp import fully_shard
-from torch.distributed.fsdp import ShardingStrategy
+from torch.distributed.fsdp import (
+    ShardingStrategy,
+    MixedPrecision,
+    FullyShardedDataParallel as FSDP,
+)
+from torch.distributed.fsdp.wrap import (
+    lambda_auto_wrap_policy,
+)
 
 
-def shard_model(
+def shard_dit(transformer, local_rank, block_attr):
+    """
+    Shard a DiT (Diffusion Transformer) model with FSDP block-by-block.
+    
+    This function wraps each transformer block with FSDP for distributed training,
+    using bfloat16 mixed precision and enabling forward prefetching for performance.
+    Non-FSDP submodules are moved to the appropriate GPU device.
+    
+    Args:
+        transformer (nn.Module): The transformer model to shard.
+        local_rank (int): Local GPU rank/device ID for this process.
+        block_attr (str): Name of the attribute containing transformer blocks (e.g., 'blocks').
+    
+    Returns:
+        nn.Module: The FSDP-wrapped transformer model.
+    
+    Example:
+        >>> transformer = DiT(...)
+        >>> sharded_model = shard_dit(transformer, local_rank=0, block_attr='blocks')
+    """
+    transformer = shard_transformer_blocks(
+        transformer,
+        block_attr=block_attr,
+        device_id=local_rank,
+        dtype=torch.bfloat16,
+        use_orig_params=True,
+        sync_module_states=True,
+        forward_prefetch=True
+    )
+    
+    # Move any non-FSDP submodules to GPU (but NOT the blocks, they're already handled)
+    for name, module in transformer.named_children():
+        if name != block_attr and isinstance(module, torch.nn.Module):
+            module.to(f"cuda:{local_rank}")
+    
+    return transformer
+
+
+def shard_t5_encoder(transformer, local_rank, block_attr):
+    """
+    Shard a T5 encoder model with FSDP block-by-block.
+    
+    This function specifically handles T5 encoder sharding by wrapping the encoder's
+    transformer blocks with FSDP. Non-FSDP submodules are moved to the appropriate GPU.
+    
+    Args:
+        transformer: The T5 transformer model containing an encoder.
+        local_rank (int): Local GPU rank/device ID for this process.
+        block_attr (str): Name of the attribute containing encoder blocks.
+    
+    Returns:
+        The transformer with FSDP-wrapped encoder.
+    
+    Note:
+        This function assumes the transformer has an 'encoder' attribute with transformer blocks.
+    """
+    transformer.encoder = shard_transformer_blocks(
+        transformer.encoder,
+        block_attr=block_attr,
+        device_id=local_rank,
+        use_orig_params=True,
+        sync_module_states=True,
+        forward_prefetch=True 
+    )
+
+    # Move any non-FSDP submodules to GPU (but NOT the block_attr, they're already handled)
+    for name, module in transformer.encoder.named_modules():
+        if name != block_attr and isinstance(module, torch.nn.Module):
+            module.to(f"cuda:{local_rank}")
+    for name, module in transformer.named_modules():
+        if name != "encoder" and isinstance(module, torch.nn.Module):
+            module.to(f"cuda:{local_rank}")
+
+    return transformer
+
+
+def shard_transformer_blocks(
     model,
-    dtype=torch.bfloat16,
+    block_attr='blocks',
     process_group=None,
-    sharding_strategy=ShardingStrategy.FULL_SHARD,
-    min_num_params=1e3,  # Minimum parameters to benefit from sharding
+    device_id=None,
+    dtype=None,
+    **fsdp_kwargs
 ):
-    # Bottom-up approach: shard individual modules that are in target dtype
-    for name, module in model.named_modules():
-        # Skip the root model itself
-        if module is model:
-            continue
-        
-        # Only consider leaf modules (modules with parameters but no submodules with parameters)
-        has_params = any(True for _ in module.parameters(recurse=False))
-        if not has_params:
-            continue
-        
-        # Check if all parameters in this module are in the target dtype
-        params_list = list(module.parameters(recurse=False))
-        if not params_list:
-            continue
-            
-        all_target_dtype = all(p.dtype == dtype for p in params_list)
-        if not all_target_dtype:
-            continue
-        
-        # Check if module is large enough to benefit from sharding
-        num_params = sum(p.numel() for p in params_list)
-        if num_params < min_num_params:
-            continue
-        
-        # Apply FSDP2 to this module
-        fully_shard(
-            module,
-            mesh=process_group,
-            reshard_after_forward=sharding_strategy == ShardingStrategy.FULL_SHARD,
-        )
+    """
+    Wrap a transformer model with FSDP, treating each block as a separate FSDP unit.
+    
+    This function applies Fully Sharded Data Parallel (FSDP) to a transformer model,
+    automatically wrapping each transformer block separately for optimal memory
+    distribution. It uses mixed precision training with bfloat16 parameters and
+    float32 gradient reduction for numerical stability.
+    
+    Args:
+        model (nn.Module): The transformer model to wrap with FSDP.
+        block_attr (str, optional): Name of the model attribute containing transformer
+            blocks. Defaults to 'blocks'.
+        process_group (ProcessGroup, optional): PyTorch distributed process group for
+            FSDP communication. If None, uses the default process group.
+        device_id (int, optional): CUDA device ID to place the model on. If None,
+            uses the current CUDA device.
+        dtype (torch.dtype, optional): Target dtype to convert the model to before
+            wrapping. If None, keeps the original dtype.
+        **fsdp_kwargs: Additional keyword arguments to pass to the FSDP constructor,
+            such as 'sync_module_states', 'forward_prefetch', etc.
+    
+    Returns:
+        nn.Module: The FSDP-wrapped model with mixed precision enabled.
+    
+    Raises:
+        ValueError: If the model does not have the specified block_attr attribute.
+    
+    Example:
+        >>> model = Transformer(...)
+        >>> fsdp_model = shard_transformer_blocks(
+        ...     model,
+        ...     block_attr='blocks',
+        ...     device_id=0,
+        ...     dtype=torch.bfloat16,
+        ...     sync_module_states=True,
+        ...     forward_prefetch=True
+        ... )
+    
+    Note:
+        - Uses FULL_SHARD strategy for maximum memory savings
+        - Each block in 'block_attr' becomes a separate FSDP unit
+        - Requires PyTorch distributed to be initialized before calling
+    """
+    if device_id is None:
+        device_id = torch.cuda.current_device()
+    
+    if not hasattr(model, block_attr):
+        raise ValueError(f"Model does not have attribute '{block_attr}'")
+    
+    blocks = getattr(model, block_attr)
+
+    model = model.to(dtype) if dtype is not None else model
+    model = FSDP(
+        model,
+        process_group=process_group,
+        device_id=device_id,
+        auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=lambda module: module in blocks),
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        **fsdp_kwargs
+    )
     
     return model

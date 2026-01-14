@@ -14,6 +14,7 @@ if not has_valid_diffusers_version("wan"):
 from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.models.transformers.transformer_wan import Fp32LayerNorm
 
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
@@ -25,7 +26,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     initialize_runtime_state,
     is_dp_last_group,
-    shard_model,
+    shard_dit,
+    shard_t5_encoder,
 )
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
@@ -229,11 +231,20 @@ def main():
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
-    pipe.transformer = shard_model(pipe.transformer) if args.shard_dit else pipe.transformer
+
+    # Shard model
+    pipe.transformer = shard_dit(
+        pipe.transformer, local_rank, "blocks"
+    ) if args.shard_dit else pipe.transformer.to(f"cuda:{local_rank}")
     if pipe.transformer_2 is not None:
-        pipe.transformer_2 = shard_model(pipe.transformer_2) if args.shard_dit else pipe.transformer_2
-    pipe.text_encoder = shard_model(pipe.text_encoder) if args.shard_t5_encoder else pipe.text_encoder
-    pipe = pipe.to(f"cuda:{local_rank}")
+        pipe.transformer_2 = shard_dit(
+            pipe.transformer_2, local_rank, "blocks"
+        ) if args.shard_dit else pipe.transformer_2.to(f"cuda:{local_rank}")
+    pipe.text_encoder = shard_t5_encoder(
+        pipe.text_encoder, local_rank, "block"
+    ) if args.shard_t5_encoder else pipe.text_encoder.to(f"cuda:{local_rank}")
+    pipe.vae = pipe.vae.to(f"cuda:{local_rank}")
+    pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
 
     if not args.img_file_path and args.task == "i2v":
         raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")

@@ -36,7 +36,7 @@ from .runtime_state import (
     runtime_state_is_initialized,
     initialize_runtime_state,
 )
-from .sharding import shard_model
+from .sharding import shard_dit, shard_t5_encoder
 
 
 __all__ = [
@@ -74,5 +74,6 @@ __all__ = [
     "init_vae_group",
     "init_dit_group",
     "get_dit_group",
-    "shard_model",
+    "shard_dit",
+    "shard_t5_encoder",
 ]

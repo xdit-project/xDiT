@@ -97,6 +97,10 @@ def shard_dit(
         ...     block_attr='blocks'
         ... )
     """
+    # Move any non-FSDP submodules to device (but NOT the blocks, they're already handled)
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    _children_to_device(transformer, device, [block_attr])
+
     transformer = shard_transformer_blocks(
         transformer,
         block_attr=block_attr,
@@ -108,9 +112,6 @@ def shard_dit(
         forward_prefetch=True
     )
     
-    # Move any non-FSDP submodules to device (but NOT the blocks, they're already handled)
-    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
-    _children_to_device(transformer, device, [block_attr])
 
     return transformer
 
@@ -152,6 +153,11 @@ def shard_t5_encoder(
         ...     block_attr='block'
         ... )
     """
+    # Move any non-FSDP submodules to device (but NOT the block_attr, they're already handled)
+    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    _children_to_device(transformer.encoder, device, [block_attr])
+    _children_to_device(transformer, device, ["encoder"])
+
     transformer.encoder = shard_transformer_blocks(
         transformer.encoder,
         block_attr=block_attr,
@@ -162,10 +168,6 @@ def shard_t5_encoder(
         forward_prefetch=True 
     )
 
-    # Move any non-FSDP submodules to device (but NOT the block_attr, they're already handled)
-    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
-    _children_to_device(transformer.encoder, device, [block_attr])
-    _children_to_device(transformer, device, ["encoder"])
 
     return transformer
 

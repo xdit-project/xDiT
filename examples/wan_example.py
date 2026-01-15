@@ -263,7 +263,6 @@ def main():
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16,
     )
-    pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
     if args.shard_dit or args.shard_t5_encoder:

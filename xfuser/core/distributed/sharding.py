@@ -192,7 +192,7 @@ def shard_transformer_blocks(
             blocks. Defaults to 'blocks'.
         process_group (ProcessGroup, optional): PyTorch distributed process group for
             FSDP communication. If None, uses the default process group. 
-            **Important**: Pass `group.cpu_group` if using a GroupCoordinator wrapper
+            **Important**: Pass `group.device_group` if using a GroupCoordinator wrapper
             (e.g., from `get_sp_group()` or `get_world_group()`), not the coordinator itself.
         device_id (int, optional): CUDA device ID to place the model on. If None,
             uses the current CUDA device.

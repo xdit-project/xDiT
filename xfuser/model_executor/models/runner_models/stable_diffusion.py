@@ -9,7 +9,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
-class xFuserZImageTurboModel(xFuserModel):
+class xFuserStableDiffusionModel(xFuserModel):
 
     model_name: str = "stabilityai/stable-diffusion-3.5-large"
     output_name: str = "stable_diffusion_3_5_large"
@@ -22,14 +22,22 @@ class xFuserZImageTurboModel(xFuserModel):
     )
 
     def _load_model(self):
+        dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
         engine_args = xFuserArgs.from_cli_args(self.config)
         engine_config, _ = engine_args.create_config()
         pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.model_name,
             engine_config=engine_config,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
         )
         return pipe
+
+    def _compile_model(self, input_args):
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self.pipe.text_encoder = torch.compile(self.pipe.text_encoder, mode="default")
+        self.pipe.text_encoder_2 = torch.compile(self.pipe.text_encoder_2, mode="default")
+        self.pipe.text_encoder_3 = torch.compile(self.pipe.text_encoder_3, mode="default")
+        self._run_timed_pipe(input_args)
 
     def _run_pipe(self, input_args: dict):
         output = self.pipe(

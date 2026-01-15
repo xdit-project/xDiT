@@ -242,7 +242,10 @@ class xFuserModel(abc.ABC):
         ring_degree = self.config.ring_degree or 1
         height = self.config.height
         width = self.config.width
-        return f"{self.output_name}_u{ulysses_degree}r{ring_degree}_tc_{use_compile}_{height}x{width}"
+        name = f"{self.output_name}_u{ulysses_degree}r{ring_degree}_tc_{use_compile}_{height}x{width}"
+        if self.config.task:
+            name += f"_{self.config.task}"
+        return name
 
     def _post_load_and_state_initialization(self, input_args: dict):
         """ Hook for any post model-load and state initialization """

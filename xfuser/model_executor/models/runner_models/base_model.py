@@ -1,11 +1,14 @@
 import abc
-import enum
 import torch
 import copy
 import argparse
 import json
+from typing import Callable, Optional
 from dataclasses import dataclass
 from torch.profiler import profile, record_function, ProfilerActivity
+from torchao.quantization.granularity import PerTensor
+from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
+from torchao.quantization.quantize_.common import KernelPreference
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
@@ -40,6 +43,7 @@ class ModelCapabilities:
     use_parallel_vae: bool = False
     enable_slicing: bool = False
     enable_tiling: bool = False
+    use_fp8_gemms: bool = False
 
 
 class xFuserModel(abc.ABC):
@@ -48,6 +52,7 @@ class xFuserModel(abc.ABC):
     capabilities: ModelCapabilities = ModelCapabilities()
     valid_tasks = []
     model_output_type = ""
+    fps = 24
 
     def __init__(self, config: dict):
         self._validate_config(config)
@@ -316,3 +321,22 @@ class xFuserModel(abc.ABC):
         if is_last_process():
             log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
         return image
+
+
+    def _quantize_linear_layers_to_fp8(self, module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
+        filter_fn: Callable[[torch.nn.Module, str], bool] = _is_linear,
+        device: Optional[torch.device] = None):
+        config = Float8DynamicActivationFloat8WeightConfig(
+                  granularity=PerTensor(),
+                  set_inductor_config=False,
+                  kernel_preference=KernelPreference.AUTO
+            )
+        """Quantize all linear layers in the given module or module list to FP8."""
+        log("Quantizing linear layers to FP8...")
+        if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
+            quantize_(module_or_module_list_to_quantize, config=config, filter_fn=filter_fn, device=device)
+        elif isinstance(module_or_module_list_to_quantize, torch.nn.ModuleList):
+            for module in module_or_module_list_to_quantize:
+                quantize_(module, config=config, filter_fn=filter_fn, device=device)
+        else:
+            raise ValueError(f"Failed to quantize linear layers. Invalid module type: {type(module_or_module_list_to_quantize)}, expected torch.nn.Module or torch.nn.ModuleList")

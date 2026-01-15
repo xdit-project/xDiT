@@ -20,6 +20,11 @@ class xFuserWanI2VModel(xFuserModel):
 
     mod_value = 16 # vae_scale_factor_spatial * patch_size[1] = 8
     fps = 16
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        use_fp8_gemms=True,
+    )
 
     def __init__(self, config: dict):
         self.is_wan_2_2 = "2.2" in config.model
@@ -93,6 +98,14 @@ class xFuserWanI2VModel(xFuserModel):
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
+    def _post_load_and_state_initialization(self, input_args):
+        super()._post_load_and_state_initialization(input_args)
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+            if self.is_wan_2_2:
+                self._quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
+
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
@@ -102,6 +115,11 @@ class xFuserWanT2VModel(xFuserModel):
 
     mod_value = 8 # vae_scale_factor_spatial * patch_size[1] = 8
     fps = 16
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        use_fp8_gemms=True,
+    )
 
 
     def __init__(self, config: dict):
@@ -145,6 +163,14 @@ class xFuserWanT2VModel(xFuserModel):
         local_rank = get_world_group().local_rank
         pipe = pipe.to(f"cuda:{local_rank}")
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args):
+        super()._post_load_and_state_initialization(input_args)
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+            if self.is_wan_2_2:
+                self._quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
 
     def _run_pipe(self, input_args: dict):
         output = self.pipe(

@@ -18,15 +18,14 @@ from xfuser import xFuserFluxPipeline, xFuserArgs
 @register_model("FLUX.1-dev")
 class xFuserFluxModel(xFuserModel):
 
+    model_name: str = "black-forest-labs/FLUX.1-dev"
+    output_name: str = "flux_1_dev"
+    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         pipefusion_parallel_degree=True,
     )
-
-    model_name: str = "black-forest-labs/FLUX.1-dev"
-    output_name: str = "flux_1_dev"
-    model_output_type: str = "image"
 
     def _load_model(self):
         if self.config.pipefusion_parallel_degree > 1:
@@ -48,6 +47,7 @@ class xFuserFluxModel(xFuserModel):
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
             )
+
         return pipe
 
     def _post_load_and_state_initialization(self, input_args):
@@ -58,6 +58,12 @@ class xFuserFluxModel(xFuserModel):
             max_condition_sequence_length=self.config.max_sequence_length,
             split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
         )
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
+
+
 
     def _run_pipe(self, input_args: dict):
         output = self.pipe(
@@ -74,7 +80,7 @@ class xFuserFluxModel(xFuserModel):
 
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
 @register_model("FLUX.1-Kontext-dev")
-class xFuserFluxKontextModel(xFuserFluxModel):
+class xFuserFluxKontextModel(xFuserModel):
 
     mod_value: int = 8 * 2 # TODO: Check if correct
     model_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
@@ -128,11 +134,24 @@ class xFuserFluxKontextModel(xFuserFluxModel):
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")
 
+    def _post_load_and_state_initialization(self, input_args):
+        super()._post_load_and_state_initialization(input_args)
+        get_runtime_state().set_input_parameters(
+            batch_size=1,
+            num_inference_steps=self.config.num_inference_steps,
+            max_condition_sequence_length=self.config.max_sequence_length,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+        )
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
+
 
 
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
-class xFuserFlux2Model(xFuserFluxModel):
+class xFuserFlux2Model(xFuserModel):
 
     mod_value: int = 8 * 2 # TODO: Check if correct
     model_name: str = "black-forest-labs/FLUX.2-dev"
@@ -178,3 +197,16 @@ class xFuserFlux2Model(xFuserFluxModel):
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
         return output
+
+    def _post_load_and_state_initialization(self, input_args):
+        super()._post_load_and_state_initialization(input_args)
+        get_runtime_state().set_input_parameters(
+            batch_size=1,
+            num_inference_steps=self.config.num_inference_steps,
+            max_condition_sequence_length=self.config.max_sequence_length,
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+        )
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
+            self._quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)

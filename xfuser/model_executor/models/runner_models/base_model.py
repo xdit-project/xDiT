@@ -3,13 +3,15 @@ import torch
 import copy
 import argparse
 import json
-from typing import Callable, Optional
+from PIL.Image import Image
+from typing import Callable, Optional, Tuple
 from dataclasses import dataclass
 from torch.profiler import profile, record_function, ProfilerActivity
 from torchao.quantization.granularity import PerTensor
 from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 from torchao.quantization.quantize_.common import KernelPreference
-from diffusers.utils import load_image, export_to_video
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.utils import load_image, export_to_video, BaseOutput
 import numpy as np
 from xfuser.config import args, xFuserArgs
 from xfuser.core.utils.runner_utils import (
@@ -46,20 +48,21 @@ class ModelCapabilities:
     use_fp8_gemms: bool = False
 
 
+
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     capabilities: ModelCapabilities = ModelCapabilities()
-    valid_tasks = []
-    model_output_type = ""
-    fps = 24
+    valid_tasks: list = []
+    model_output_type: str = ""
+    fps: int = 24
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
         self._validate_config(config)
         self.config = config
         self.pipe = None
 
-    def initialize(self, input_args):
+    def initialize(self, input_args) -> None:
         """ Load the model pipeline """
         # These initialize some internal states as a side-effect ...
 
@@ -79,7 +82,7 @@ class xFuserModel(abc.ABC):
             log("Torch.compile enabled. Warming up torch compiler ...")
             self._compile_model(input_args)
 
-    def _enable_options(self, pipe):
+    def _enable_options(self, pipe: DiffusionPipeline) -> None:
         """ Enable model options based on config"""
         if self.config.enable_slicing:
             log("Enabling VAE slicing...")
@@ -97,7 +100,7 @@ class xFuserModel(abc.ABC):
             pipe.enable_model_cpu_offload()
 
 
-    def _validate_config(self, config):
+    def _validate_config(self, config) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key)
@@ -118,7 +121,7 @@ class xFuserModel(abc.ABC):
             raise ValueError(f"Model {self.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
 
 
-    def _compile_model(self, input_args):
+    def _compile_model(self, input_args) -> None:
         """ Compile the model using torch.compile """
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe = torch.compile(self.pipe, mode="default") # TODO: Configurable
@@ -129,7 +132,7 @@ class xFuserModel(abc.ABC):
         self._run_timed_pipe(compile_args)
 
 
-    def run(self, input_args):
+    def run(self, input_args) -> Tuple[BaseOutput, list]:
         """ Run the model with given input arguments and return output and timings """
         timings = []
 
@@ -143,7 +146,7 @@ class xFuserModel(abc.ABC):
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
         return out, timings
 
-    def _run_warmup_calls(self, input_args):
+    def _run_warmup_calls(self, input_args) -> None:
         """ Run initial warmup calls if specified """
         if self.config.warmup_calls:
             log(f"Warming up model with {self.config.warmup_calls} calls...")
@@ -152,7 +155,7 @@ class xFuserModel(abc.ABC):
                 self._run_timed_pipe(input_args)
             log(f"Warmup complete.")
 
-    def profile(self, input_args: dict):
+    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profile]:
         """ Profile the model execution """
         schedule = torch.profiler.schedule(
             wait=self.config.profile_wait,
@@ -175,7 +178,7 @@ class xFuserModel(abc.ABC):
                 log(f"Profiling iteration {iteration + 1} completed in {timing:.2f}s")
         return out, [], profile_object
 
-    def validate_args(self, input_args: dict):
+    def validate_args(self, input_args: dict) -> bool:
         """ Validate input arguments """
         return True
 
@@ -195,7 +198,7 @@ class xFuserModel(abc.ABC):
         input_args["input_images"] = images
         return input_args
 
-    def save_output(self, output):
+    def save_output(self, output: BaseOutput) -> None:
         """ Saves the output based on its type """
         if self.model_output_type == "image":
             from PIL import Image
@@ -214,18 +217,18 @@ class xFuserModel(abc.ABC):
         else:
             raise NotImplementedError(f"Saving output of type {self.model_output_type} is not implemented.")
 
-    def save_timings(self, timings: list):
+    def save_timings(self, timings: list) -> None:
         timing_file = open(f"{self.config.output_directory}/timings.json", "w")
         json.dump(timings, timing_file)
         timing_file.close()
         log(f"Timings saved to {self.config.output_directory}/timings.json")
 
-    def save_profile(self, profile):
+    def save_profile(self, profile) -> None:
         profile_file = f"{self.config.output_directory}/profile_trace_rank_{get_world_group().rank}.json"
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}")
 
-    def _run_timed_pipe(self, input_args: dict):
+    def _run_timed_pipe(self, input_args: dict) -> Tuple[BaseOutput, float]:
         """ Run a a full pipeline with timing information """
 
         events = {
@@ -252,22 +255,22 @@ class xFuserModel(abc.ABC):
             name += f"_{self.config.task}"
         return name
 
-    def _post_load_and_state_initialization(self, input_args: dict):
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
         """ Hook for any post model-load and state initialization """
         local_rank = get_world_group().local_rank
         self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
     @abc.abstractmethod
-    def _run_pipe(self, input_args: dict):
+    def _run_pipe(self, input_args: dict) -> BaseOutput:
         """ Execute the pipeline. Muyst be implemented by subclasses. """
         pass
 
     @abc.abstractmethod
-    def _load_model(self):
+    def _load_model(self) -> DiffusionPipeline:
         """ Load the model. Must be implemented by subclasses. """
         pass
 
-    def _resize_and_crop_image(self, image, target_height, target_width, mod_value):
+    def _resize_and_crop_image(self, image: Image, target_height: int, target_width:int , mod_value: int) -> Image:
         """ Resize and center-crop image to target dimensions """
 
         ##TODO: move this func to utils
@@ -307,7 +310,7 @@ class xFuserModel(abc.ABC):
 
 
 
-    def _resize_image_to_max_area(self, image, input_height, input_width, mod_value):
+    def _resize_image_to_max_area(self, image: Image, input_height: int, input_width: int, mod_value: int) -> Image:
         """ Resize image to fit within max area while retaining aspect ratio """
         ##TODO: move to utils
 
@@ -325,7 +328,7 @@ class xFuserModel(abc.ABC):
 
     def _quantize_linear_layers_to_fp8(self, module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
         filter_fn: Callable[[torch.nn.Module, str], bool] = _is_linear,
-        device: Optional[torch.device] = None):
+        device: Optional[torch.device] = None) -> None:
         config = Float8DynamicActivationFloat8WeightConfig(
                   granularity=PerTensor(),
                   set_inductor_config=False,

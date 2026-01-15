@@ -1,4 +1,6 @@
 import torch
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.utils import BaseOutput
 from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -21,7 +23,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         use_cfg_parallel=True,
     )
 
-    def _load_model(self):
+    def _load_model(self) -> DiffusionPipeline:
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
         engine_args = xFuserArgs.from_cli_args(self.config)
         engine_config, _ = engine_args.create_config()
@@ -32,14 +34,14 @@ class xFuserStableDiffusionModel(xFuserModel):
         )
         return pipe
 
-    def _compile_model(self, input_args):
+    def _compile_model(self, input_args) -> None:
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.text_encoder = torch.compile(self.pipe.text_encoder, mode="default")
         self.pipe.text_encoder_2 = torch.compile(self.pipe.text_encoder_2, mode="default")
         self.pipe.text_encoder_3 = torch.compile(self.pipe.text_encoder_3, mode="default")
         self._run_timed_pipe(input_args)
 
-    def _run_pipe(self, input_args: dict):
+    def _run_pipe(self, input_args: dict) -> BaseOutput:
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],

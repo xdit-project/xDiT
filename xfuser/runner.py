@@ -14,8 +14,11 @@ if not os.environ.get("RANK"):
     os.environ["MASTER_PORT"] = "12355"
 
 
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.utils import BaseOutput
 from xfuser.model_executor.models.runner_models.base_model import (
     MODEL_REGISTRY,
+    xFuserModel,
 )
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -33,7 +36,7 @@ class xFuserModelRunner:
         self.model = self._select_model(config.model, config)
         self.is_initialized = False
 
-    def _select_model(self, model_name: str, config: dict) -> "xFuserModel":
+    def _select_model(self, model_name: str, config: dict) -> xFuserModel:
         """ Select and instantiate model from registry"""
         model = MODEL_REGISTRY.get(model_name, None)
         if not model:
@@ -68,13 +71,13 @@ class xFuserModelRunner:
             input_args = vars(input_args)
         return self.model.preprocess_args(input_args)
 
-    def validate_args(self, input_args: dict|argparse.Namespace) -> None:
+    def validate_args(self, input_args: dict|argparse.Namespace) -> bool:
         """ Validate input arguments """
         if type(input_args) == argparse.Namespace:
             input_args = vars(input_args)
         return self.model.validate_args(input_args)
 
-    def profile(self, input_args: dict) -> Tuple[Any, list, Any]:
+    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, Any]:
         """ Profile the model execution """
         output, timings, profile_object = self.model.profile(input_args)
         return output, timings, profile_object
@@ -94,7 +97,7 @@ class xFuserModelRunner:
         log("Cleaned up resources.")
 
 
-    def save(self, output=None, timings=None, profile=None, save_once: bool = True) -> None:
+    def save(self, output: BaseOutput = None, timings: list = None, profile: Any = None, save_once: bool = True) -> None:
         """ Save model output, timings and profiles to file, if applicable """
         if save_once: # TODO: add rank info to file names so this can even make sense
             if not is_last_process():

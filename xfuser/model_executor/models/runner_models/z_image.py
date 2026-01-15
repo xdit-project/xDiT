@@ -1,5 +1,7 @@
 import torch
 from diffusers import ZImagePipeline
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.utils import BaseOutput
 from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -17,7 +19,7 @@ class xFuserZImageTurboModel(xFuserModel):
     output_name: str = "z_image_turbo"
     model_output_type: str = "image"
 
-    def _load_model(self):
+    def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
             self.model_name,
             torch_dtype=torch.bfloat16,
@@ -30,7 +32,7 @@ class xFuserZImageTurboModel(xFuserModel):
         )
         return pipe
 
-    def _run_pipe(self, input_args: dict):
+    def _run_pipe(self, input_args: dict) -> BaseOutput:
         prompt = str(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],

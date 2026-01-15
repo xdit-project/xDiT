@@ -58,10 +58,8 @@ class xFuserWanI2VModel(xFuserModel):
                 transformer=transformer,
                 transformer_2=transformer_2,
             )
-
-        local_rank = get_world_group().local_rank
-        pipe = pipe.to(f"cuda:{local_rank}")
         return pipe
+
 
     def _run_pipe(self, input_args: dict):
         output = self.pipe(
@@ -76,16 +74,14 @@ class xFuserWanI2VModel(xFuserModel):
         )
         return output
 
-    def _preprocess_args_custom(self, input_args):
+    def _preprocess_args_images(self, input_args):
+        input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
         if input_args.get("resize_image", False):
             image = self._resize_and_crop_image(image, width, height, self.mod_value)
-            input_args["input_images"] = [image]
-            log(f"Resized and cropped image to {image.width}x{image.height}")
         else:
             image = self._resize_image_to_max_area(image, height, width, self.mod_value)
-            log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
         input_args["height"] = image.height
         input_args["width"] = image.width
         input_args["image"] = image
@@ -102,7 +98,7 @@ class xFuserWanI2VModel(xFuserModel):
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.2-T2V")
 @register_model("Wan2.1-T2V")
-class xFuserWanI2VModel(xFuserModel):
+class xFuserWanT2VModel(xFuserModel):
 
     mod_value = 8 # vae_scale_factor_spatial * patch_size[1] = 8
     fps = 16

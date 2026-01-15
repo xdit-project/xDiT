@@ -28,8 +28,6 @@ class xFuserZImageTurboModel(xFuserModel):
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
-        local_rank = get_world_group().local_rank
-        pipe = pipe.to(f"cuda:{local_rank}")
         return pipe
 
     def _run_pipe(self, input_args: dict):

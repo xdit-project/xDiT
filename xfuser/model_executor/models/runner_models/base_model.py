@@ -35,6 +35,7 @@ class ModelCapabilities:
     ulysses_degree: bool = True  # All xDiT models support these
     ring_degree: bool = True
     pipefusion_parallel_degree: bool = False
+    tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
     enable_slicing: bool = False
@@ -46,6 +47,7 @@ class xFuserModel(abc.ABC):
 
     capabilities: ModelCapabilities = ModelCapabilities()
     valid_tasks = []
+    model_output_type = ""
 
     def __init__(self, config: dict):
         self._validate_config(config)
@@ -204,6 +206,8 @@ class xFuserModel(abc.ABC):
             output_path = f"{self.config.output_directory}/{output_name}.mp4"
             export_to_video(output_video, output_path, fps=self.fps)
             log(f"Output video saved to {output_path}")
+        else:
+            raise NotImplementedError(f"Saving output of type {self.model_output_type} is not implemented.")
 
     def save_timings(self, timings: list):
         timing_file = open(f"{self.config.output_directory}/timings.json", "w")

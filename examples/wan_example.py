@@ -207,8 +207,8 @@ def parallelize_transformer(pipe):
 
 def shard_model_wan(
     pipe: Union[WanImageToVideoPipeline, WanPipeline],
-    shard_dit: bool,
-    shard_t5_encoder: bool
+    use_shard_dit: bool,
+    use_shard_t5_encoder: bool
 ) -> None:
     """
     Shard the transformer and text encoder models in the pipeline using FSDP.
@@ -223,11 +223,10 @@ def shard_model_wan(
         - Handles both single and dual transformer models (Wan 2.1 vs 2.2)
         - Non-sharded modules are moved to appropriate CUDA devices
     """
-    
     local_rank = get_world_group().local_rank
     sp_local_rank = get_sp_group().local_rank
     sp_device_group = get_sp_group().device_group
-    if shard_dit:
+    if use_shard_dit:
         pipe.transformer = shard_dit(pipe.transformer, sp_local_rank, sp_device_group)
         if pipe.transformer_2 is not None:
             pipe.transformer_2 = shard_dit(pipe.transformer_2, sp_local_rank, sp_device_group)
@@ -235,7 +234,7 @@ def shard_model_wan(
         pipe.transformer.to(f"cuda:{sp_local_rank}")
         if pipe.transformer_2 is not None:
             pipe.transformer_2.to(f"cuda:{sp_local_rank}")
-    if shard_t5_encoder:
+    if use_shard_t5_encoder:
         pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
     else:
         pipe.text_encoder.to(f"cuda:{local_rank}")

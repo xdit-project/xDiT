@@ -147,6 +147,17 @@ if __name__ == "__main__":
         nargs="*",
         help="Path(s)/URL(s) to input image(s).",
     )
+    parser.add_argument(
+        "--resize_image",
+        default=False,
+        action="store_true",
+        help="Whether to resize and crop the input image to the specified width and height.",
+    )
+    parser.add_argument(
+        "--task",
+        default=None,
+        help="Task to perform. Only applicable if the model supports multiple tasks."
+    )
     args = xFuserArgs.add_cli_args(parser).parse_args()
     runner = xFuserModelRunner(args)
     runner.print_args(args)

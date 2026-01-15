@@ -148,10 +148,10 @@ if __name__ == "__main__":
         help="Path(s)/URL(s) to input image(s).",
     )
     parser.add_argument(
-        "--resize_image",
+        "--resize_input_images",
         default=False,
         action="store_true",
-        help="Whether to resize and crop the input image to the specified width and height.",
+        help="Whether to resize and crop the input image(s) to the specified width and height.",
     )
     parser.add_argument(
         "--task",

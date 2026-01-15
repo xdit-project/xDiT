@@ -78,7 +78,7 @@ class xFuserWanI2VModel(xFuserModel):
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
-        if input_args.get("resize_image", False):
+        if input_args.get("resize_input_images", False):
             image = self._resize_and_crop_image(image, width, height, self.mod_value)
         else:
             image = self._resize_image_to_max_area(image, height, width, self.mod_value)

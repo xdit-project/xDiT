@@ -118,7 +118,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         """ Preprocess input images if necessary based on task and other args """
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
-        if self.config.task == "i2v" and input_args.get("resize_image", False):
+        if self.config.task == "i2v" and input_args.get("resize_input_images", False):
             image = self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
         input_args["image"] = image
         return input_args

@@ -62,12 +62,16 @@ class xFuserHunyuanvideoModel(xFuserModel):
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        compile_args["num_inference_steps"] = 2
         self._run_timed_pipe(compile_args)
 
 
 @register_model("tencent/HunyuanVideo-1.5")
 @register_model("Hunyuanvideo-1.5")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
 
     fps = 24
@@ -79,12 +83,19 @@ class xFuserHunyuanvideo15Model(xFuserModel):
     )
 
     valid_tasks = ["i2v", "t2v"]
-    model_name: str = "tencent/HunyuanVideo-1.5"
     output_name: str = "hunyuan_video_1_5"
     model_output_type: str = "video"
 
+    def __init__(self, config):
+        super().__init__(config)
+        if self.config.task == "i2v": # TODO: different model for 480p
+            self.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
+        else:
+            self.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
+
+
     def _load_model(self):
-        task = self.config.get("task")
+        task = self.config.task
         pipeline = HunyuanVideo15Pipeline if task == "t2v" else HunyuanVideo15ImageToVideoPipeline
         transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
             self.model_name,
@@ -101,7 +112,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
     def _run_pipe(self, input_args: dict):
         kwargs = {
             "num_inference_steps": input_args["num_inference_steps"],
-            "guidance_scale": input_args["guidance_scale"],
             "num_frames": input_args["num_frames"],
             "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
             "prompt": input_args["prompt"],
@@ -117,10 +127,11 @@ class xFuserHunyuanvideo15Model(xFuserModel):
     def _preprocess_args_images(self, input_args):
         """ Preprocess input images if necessary based on task and other args """
         input_args = super()._preprocess_args_images(input_args)
-        image = input_args["input_images"][0]
-        if self.config.task == "i2v" and input_args.get("resize_input_images", False):
-            image = self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
-        input_args["image"] = image
+        if self.config.task == "i2v":
+            image = input_args["input_images"][0]
+            if input_args.get("resize_input_images", False):
+                image = self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
+            input_args["image"] = image
         return input_args
 
     def validate_args(self, input_args: dict):

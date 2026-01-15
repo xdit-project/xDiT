@@ -144,7 +144,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--input_images",
         default=[],
-        nargs="*",
+        nargs="+",
         help="Path(s)/URL(s) to input image(s).",
     )
     parser.add_argument(

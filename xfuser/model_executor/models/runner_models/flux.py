@@ -117,7 +117,9 @@ class xFuserFluxKontextModel(xFuserFluxModel):
         image = input_args["input_images"][0]
         if input_args.get("resize_input_images", False):
             image = self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
+            input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
+        input_args["max_area"] = input_args["height"] * input_args["width"]
         return input_args
 
     def validate_args(self, input_args: dict):
@@ -157,7 +159,9 @@ class xFuserFlux2Model(xFuserFluxModel):
         """ Preprocess input images if provided """
         input_args = super()._preprocess_args_images(input_args)
         images = input_args["input_images"]
-        if input_args.get("resize_input_images", False):
+        if not images:
+            images = None
+        elif input_args.get("resize_input_images", False):
             images = [self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value) for image in images]
         input_args["images"] = images
         return input_args
@@ -167,7 +171,7 @@ class xFuserFlux2Model(xFuserFluxModel):
             height=input_args["height"],
             width=input_args["width"],
             prompt=input_args["prompt"],
-            images=input_args["images"],
+            image=input_args["images"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],

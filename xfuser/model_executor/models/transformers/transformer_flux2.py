@@ -198,7 +198,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         axes_dims_rope: Tuple[int, ...] = (32, 32, 32, 32),
         rope_theta: int = 2000,
         eps: float = 1e-6,
-    )
+    ):
         super().__init__(
             patch_size=patch_size,
             in_channels=in_channels,

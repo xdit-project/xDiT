@@ -45,9 +45,10 @@ class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    valid_tasks = []
 
     def __init__(self, config: dict):
-        self._validate_capabilities(config)
+        self._validate_config(config)
         self.config = config
         self.pipe = None
 
@@ -62,6 +63,8 @@ class xFuserModel(abc.ABC):
 
         log("Initializing runtime state...")
         initialize_runtime_state(self.pipe, engine_config)
+        self._post_load_and_state_initialization(input_args)
+
 
         self._enable_options(self.pipe)
 
@@ -72,19 +75,23 @@ class xFuserModel(abc.ABC):
     def _enable_options(self, pipe):
         """ Enable model options based on config"""
         if self.config.enable_slicing:
+            log("Enabling VAE slicing...")
             pipe.vae.enable_slicing()
 
         if self.config.enable_tiling:
+            log("Enabling VAE tiling...")
             pipe.vae.enable_tiling()
 
         if self.config.enable_sequential_cpu_offload:
+            log("Enabling sequential CPU offload...")
             pipe.enable_sequential_cpu_offload()
         elif self.config.enable_model_cpu_offload:
+            log("Enabling model CPU offload...")
             pipe.enable_model_cpu_offload()
 
 
-    def _validate_capabilities(self, config):
-        """ Validate if the model supports requested capabilities """
+    def _validate_config(self, config):
+        """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key)
             if type(config_value) == int:
@@ -93,6 +100,15 @@ class xFuserModel(abc.ABC):
             if type(config_value) == bool:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.model_name} does not support {key}.")
+
+        possible_task = getattr(config, "task", None)
+        if possible_task and self.valid_tasks:
+            if possible_task not in self.valid_tasks:
+                raise ValueError(f"Model {self.model_name} does not support task '{possible_task}'. Supported tasks: {self.valid_tasks}")
+        if possible_task and not self.valid_tasks:
+            raise ValueError(f"Model {self.model_name} does not support multiple tasks, but task '{possible_task}' was specified.")
+        if not possible_task and self.valid_tasks:
+            raise ValueError(f"Model {self.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
 
 
     def _compile_model(self, input_args):
@@ -162,7 +178,6 @@ class xFuserModel(abc.ABC):
             input_args = vars(input_args)
         args = copy.deepcopy(input_args)
         args = self._preprocess_args_images(args)
-        args = self._preprocess_args_custom(args)
         return args
 
 
@@ -171,10 +186,6 @@ class xFuserModel(abc.ABC):
         # For legacy reasons, we support several ways to pass images
         images = [load_image(path) for path in input_args.get("input_images", [])]
         input_args["input_images"] = images
-        return input_args
-
-    def _preprocess_args_custom(self, input_args: dict) -> dict:
-        """ Preprocess custom inputs if necessary """
         return input_args
 
     def save_output(self, output):
@@ -228,6 +239,11 @@ class xFuserModel(abc.ABC):
         height = self.config.height
         width = self.config.width
         return f"{self.output_name}_u{ulysses_degree}r{ring_degree}_tc_{use_compile}_{height}x{width}"
+
+    def _post_load_and_state_initialization(self, input_args: dict):
+        """ Hook for any post model-load and state initialization """
+        local_rank = get_world_group().local_rank
+        self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict):
@@ -290,4 +306,6 @@ class xFuserModel(abc.ABC):
         width = round(np.sqrt(max_area /aspect_ratio)) // mod_value * mod_value
 
         image = image.resize((width, height))
+        if is_last_process():
+            log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
         return image

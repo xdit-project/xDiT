@@ -215,8 +215,8 @@ def shard_model_wan(
     
     Args:
         pipe: The Wan pipeline (either WanImageToVideoPipeline or WanPipeline).
-        should_shard_dit: Whether to shard the DiT transformer(s) with FSDP.
-        should_shard_t5_encoder: Whether to shard the T5 text encoder with FSDP.
+        use_shard_dit: Whether to shard the DiT transformer(s) with FSDP.
+        use_shard_t5_encoder: Whether to shard the T5 text encoder with FSDP.
     
     Note:
         - Uses imported shard_dit and shard_t5_encoder functions from xfuser.core.distributed
@@ -266,7 +266,6 @@ def main():
     pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
-    # Shard model
     if args.shard_dit or args.shard_t5_encoder:
         shard_model_wan(pipe, args.shard_dit, args.shard_t5_encoder)
     else:

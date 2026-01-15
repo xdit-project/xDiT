@@ -206,8 +206,6 @@ def shard_transformer_blocks(
     
     Raises:
         ValueError: If the model does not have the specified block_attr attribute.
-        TypeError: If process_group is a GroupCoordinator instead of a ProcessGroup.
-            Use `group.device_group` to extract the actual ProcessGroup.
     
     Example:
         >>> from xfuser.core.distributed import get_sp_group

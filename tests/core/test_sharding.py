@@ -35,7 +35,7 @@ def setup_distributed():
     """Initialize distributed environment once for all tests."""
     if not dist.is_initialized():
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '29500'
+        os.environ['MASTER_PORT'] = '29501'
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
         
@@ -93,7 +93,7 @@ def dit_model():
     class DiT(nn.Module):
         def __init__(self, num_blocks=2):
             super().__init__()
-            self.blocks = nn.ModuleList([DiTBlock() for _ in range(num_blocks)])
+            self.blocks = nn.ModuleList([DiTBlock(dim=256) for _ in range(num_blocks)])
             self.proj_out = nn.Linear(256, 256)
         
         def forward(self, x):

@@ -76,6 +76,7 @@ class xFuserArgs:
     # sequence parallel
     ulysses_degree: Optional[int] = None
     ring_degree: Optional[int] = None
+    shard_dit: Optional[bool] = False
     # tensor parallel
     tensor_parallel_degree: int = 1
     split_scheme: Optional[str] = "row"
@@ -114,7 +115,9 @@ class xFuserArgs:
     use_cache: bool = False
     use_teacache: bool = False
     use_fbcache: bool = False
+    # Other arguments
     use_fp8_t5_encoder: bool = False
+    shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
 
     @staticmethod
@@ -213,6 +216,16 @@ class xFuserArgs:
             type=int,
             default=None,
             help="Ring sequence parallel degree. Used in attention layer.",
+        )
+        parallel_group.add_argument(
+            "--shard_dit",
+            action="store_true",
+            help="Enable DiT model sharding. Used together with sequence parallelism.",
+        )
+        parallel_group.add_argument(
+            "--shard_t5_encoder",
+            action="store_true",
+            help="Enable t5 encoder sharding.",
         )
         parallel_group.add_argument(
             "--pipefusion_parallel_degree",
@@ -394,7 +407,7 @@ class xFuserArgs:
             self.world_size = self.ray_world_size
         else:
             self.world_size = torch.distributed.get_world_size()
-        
+
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size
         assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
@@ -424,6 +437,7 @@ class xFuserArgs:
             sp_config=SequenceParallelConfig(
                 ulysses_degree=self.ulysses_degree,
                 ring_degree=self.ring_degree,
+                shard_dit=self.shard_dit,
                 dit_parallel_size=self.dit_parallel_size,
             ),
             tp_config=TensorParallelConfig(
@@ -440,6 +454,7 @@ class xFuserArgs:
             world_size=self.world_size,
             dit_parallel_size=self.dit_parallel_size,
             vae_parallel_size=self.vae_parallel_size,
+            shard_t5_encoder=self.shard_t5_encoder,
         )
 
         fast_attn_config = FastAttnConfig(

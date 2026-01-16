@@ -4,6 +4,8 @@ import time
 import torch
 import functools
 import numpy as np
+from typing import Any, Dict, Optional, Union
+
 from xfuser.config.diffusers import get_minimum_diffusers_version, has_valid_diffusers_version
 if not has_valid_diffusers_version("wan"):
     minimum_diffusers_version = get_minimum_diffusers_version("wan")
@@ -13,8 +15,6 @@ from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.utils import export_to_video, load_image
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-
-from typing import Any, Dict, Optional, Union
 from xfuser import xFuserArgs
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -25,6 +25,8 @@ from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     initialize_runtime_state,
     is_dp_last_group,
+    shard_dit,
+    shard_t5_encoder,
 )
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 
@@ -205,6 +207,40 @@ def parallelize_transformer(pipe):
             block.attn2.processor = xFuserWanAttnProcessor()
 
 
+def shard_model_wan(
+    pipe: Union[WanImageToVideoPipeline, WanPipeline],
+    use_shard_dit: bool,
+    use_shard_t5_encoder: bool
+) -> None:
+    """
+    Shard the transformer and text encoder models in the pipeline using FSDP.
+    
+    Args:
+        pipe: The Wan pipeline (either WanImageToVideoPipeline or WanPipeline).
+        use_shard_dit: Whether to shard the DiT transformer(s) with FSDP.
+        use_shard_t5_encoder: Whether to shard the T5 text encoder with FSDP.
+    
+    Note:
+        - Uses imported shard_dit and shard_t5_encoder functions from xfuser.core.distributed
+        - Handles both single and dual transformer models (Wan 2.1 vs 2.2)
+        - Non-sharded modules are moved to appropriate CUDA devices
+    """
+    local_rank = get_world_group().local_rank
+    sp_local_rank = get_sp_group().local_rank
+    sp_device_group = get_sp_group().device_group
+    if use_shard_dit:
+        pipe.transformer = shard_dit(pipe.transformer, sp_local_rank, sp_device_group)
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2 = shard_dit(pipe.transformer_2, sp_local_rank, sp_device_group)
+    else:
+        pipe.transformer.to(f"cuda:{sp_local_rank}")
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2.to(f"cuda:{sp_local_rank}")
+    if use_shard_t5_encoder:
+        pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
+    else:
+        pipe.text_encoder.to(f"cuda:{local_rank}")
+    pipe.vae.to(f"cuda:{local_rank}")
 
 
 def main():
@@ -241,10 +277,13 @@ def main():
         pretrained_model_name_or_path=engine_config.model_config.model,
         torch_dtype=torch.bfloat16,
     )
-    pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
     initialize_runtime_state(pipe, engine_config)
     parallelize_transformer(pipe)
-    pipe = pipe.to(f"cuda:{local_rank}")
+    if args.shard_dit or args.shard_t5_encoder:
+        shard_model_wan(pipe, args.shard_dit, args.shard_t5_encoder)
+    else:
+        pipe.to(f"cuda:{local_rank}")
+    pipe.scheduler.config.flow_shift = TASK_FLOW_SHIFT[args.task]
 
     if not args.img_file_path and args.task == "i2v":
         raise ValueError("Please provide an input image path via --img_file_path. This may be a local path or a URL.")

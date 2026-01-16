@@ -16,7 +16,7 @@ import numpy as np
 from xfuser.config import args, xFuserArgs
 from xfuser.core.utils.runner_utils import (
     log,
-    is_last_process,
+    is_first_process,
 )
 
 from xfuser.core.distributed import (
@@ -169,7 +169,7 @@ class xFuserModel(abc.ABC):
                 self._run_timed_pipe(input_args)
             log(f"Warmup complete.")
 
-    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profile]:
+    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
         self._validate_args(input_args)
 
@@ -192,6 +192,7 @@ class xFuserModel(abc.ABC):
                     out, timing = self._run_timed_pipe(input_args)
                 profile_object.step()
                 log(f"Profiling iteration {iteration + 1} completed in {timing:.2f}s")
+
         return out, [], profile_object
 
     def preprocess_args(self, input_args: dict) -> dict:
@@ -298,7 +299,7 @@ class xFuserModel(abc.ABC):
         target_height_aligned = target_height // mod_value * mod_value
         target_width_aligned = target_width // mod_value * mod_value
 
-        if is_last_process():
+        if is_first_process():
             print("Force output size mode enabled.")
             print(f"Input image resolution: {image.height}x{image.width}")
             print(f"Requested output resolution: {target_height}x{target_width}")
@@ -317,7 +318,7 @@ class xFuserModel(abc.ABC):
         new_height = int(img_height * scale)
         image = image.resize((new_width, new_height))
 
-        if is_last_process():
+        if is_first_process():
             print(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
 
         # Step 2: Crop from center to get exact target dimensions
@@ -325,7 +326,7 @@ class xFuserModel(abc.ABC):
         top = (new_height - target_height_aligned) // 2
         image = image.crop((left, top, left + target_width_aligned, top + target_height_aligned))
 
-        if is_last_process():
+        if is_first_process():
             print(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
         return image
 
@@ -342,7 +343,7 @@ class xFuserModel(abc.ABC):
         width = round(np.sqrt(max_area /aspect_ratio)) // mod_value * mod_value
 
         image = image.resize((width, height))
-        if is_last_process():
+        if is_first_process():
             log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
         return image
 

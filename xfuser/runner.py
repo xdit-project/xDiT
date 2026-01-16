@@ -21,7 +21,7 @@ from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_runtime_state,
 )
-from xfuser.core.utils.runner_utils import log, is_last_process
+from xfuser.core.utils.runner_utils import log, is_first_process
 from xfuser import xFuserArgs
 
 
@@ -70,7 +70,7 @@ class xFuserModelRunner:
         """ Preprocess input arguments before passing them to the model """
         return self.model.preprocess_args(input_args)
 
-    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, Any]:
+    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
         output, timings, profile_object = self.model.profile(input_args)
         return output, timings, profile_object
@@ -90,10 +90,10 @@ class xFuserModelRunner:
         log("Cleaned up resources.")
 
 
-    def save(self, output: BaseOutput = None, timings: list = None, profile: Any = None, save_once: bool = True) -> None:
+    def save(self, output: BaseOutput = None, timings: list = None, profile: torch.profiler.profiler.profile = None, save_once: bool = True) -> None:
         """ Save model output, timings and profiles to file, if applicable """
         if save_once: # TODO: add rank info to file names so this can even make sense
-            if not is_last_process():
+            if not is_first_process():
                 return
         if output:
             self.model.save_output(output) # Handle different output types

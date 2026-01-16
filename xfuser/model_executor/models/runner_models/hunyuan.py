@@ -3,6 +3,7 @@ import copy
 from diffusers import HunyuanVideoPipeline, HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import BaseOutput
+from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_hunyuan_video import xFuserHunyuanVideoTransformer3DWrapper
 from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import xFuserHunyuanVideo15Transformer3DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -57,7 +58,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return output
 
-    def _compile_model(self, input_args) -> None:
+    def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer.compile()
@@ -88,7 +89,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
     output_name: str = "hunyuan_video_1_5"
     model_output_type: str = "video"
 
-    def __init__(self, config):
+    def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
         if self.config.task == "i2v": # TODO: different model for 480p
             self.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
@@ -126,7 +127,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
         return self.pipe(**kwargs)
 
-    def _preprocess_args_images(self, input_args) -> dict:
+    def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if necessary based on task and other args """
         input_args = super()._preprocess_args_images(input_args)
         if self.config.task == "i2v":

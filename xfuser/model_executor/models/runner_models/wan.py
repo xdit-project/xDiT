@@ -2,6 +2,7 @@ import torch
 from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import BaseOutput
+from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -28,7 +29,7 @@ class xFuserWanI2VModel(xFuserModel):
         use_fp8_gemms=True,
     )
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: xFuserArgs) -> None:
         self.is_wan_2_2 = "2.2" in config.model
         if self.is_wan_2_2:
             self.model_name: str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
@@ -81,7 +82,7 @@ class xFuserWanI2VModel(xFuserModel):
         )
         return output
 
-    def _preprocess_args_images(self, input_args) -> dict:
+    def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
@@ -94,13 +95,13 @@ class xFuserWanI2VModel(xFuserModel):
         input_args["image"] = image
         return input_args
 
-    def validate_args(self, input_args: dict) -> None:
+    def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments """
         images = input_args.get("input_images", [])
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
-    def _post_load_and_state_initialization(self, input_args) -> None:
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:
@@ -124,7 +125,7 @@ class xFuserWanT2VModel(xFuserModel):
     )
 
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
         self.is_wan_2_2 = "2.2" in config.model
         if self.is_wan_2_2:
@@ -166,7 +167,7 @@ class xFuserWanT2VModel(xFuserModel):
         pipe = pipe.to(f"cuda:{local_rank}")
         return pipe
 
-    def _post_load_and_state_initialization(self, input_args) -> None:
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:

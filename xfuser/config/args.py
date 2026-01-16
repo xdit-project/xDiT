@@ -119,6 +119,20 @@ class xFuserArgs:
     use_fp8_t5_encoder: bool = False
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
+    use_fp8_gemms: bool = False
+    # Model runner specific
+    num_iterations: int = 1
+    repetition_sleep_duration: Optional[int] = None
+    profile: bool = False
+    profile_wait: int = 2
+    profile_warmup: int = 2
+    profile_active: int = 1
+    warmup_calls: int = 0
+    output_directory: str = "."
+    input_images: Optional[List[str]] = None
+    resize_input_images: bool = False
+    task: Optional[str] = None
+
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -130,6 +144,7 @@ class xFuserArgs:
             type=str,
             default="PixArt-alpha/PixArt-XL-2-1024-MS",
             help="Name or path of the huggingface model to use.",
+            required=True,
         )
         model_group.add_argument(
             "--download-dir",
@@ -387,6 +402,78 @@ class xFuserArgs:
 
         return parser
 
+    @staticmethod
+    def add_runner_args(parser: FlexibleArgumentParser):
+        parser = xFuserArgs.add_cli_args(parser)
+        parser.set_defaults(model=None) # No default model for runner
+        parser.add_argument(
+            "--num_iterations",
+            type=int,
+            default=1,
+            help="Number of iterations to run the model."
+        )
+        parser.add_argument(
+            "--repetition_sleep_duration",
+            type=int,
+            default=None,
+            help="The duration to sleep in between different pipe calls in seconds."
+        )
+        parser.add_argument(
+            "--profile",
+            default=False,
+            action="store_true",
+            help="Whether to run Pytorch profiler. See --profile_wait, --profile_warmup and --profile_active for profiler specific warmup."
+        )
+        parser.add_argument(
+            "--profile_wait",
+            type=int,
+            default=2,
+            help="wait argument for torch.profiler.schedule. Only used with --profile.",
+        )
+        parser.add_argument(
+            "--profile_warmup",
+            type=int,
+            default=2,
+            help="warmup argument for torch.profiler.schedule. Only used with --profile.",
+        )
+        parser.add_argument(
+            "--profile_active",
+            type=int,
+            default=1,
+            help="active argument for torch.profiler.schedule. Only used with --profile.",
+        )
+        parser.add_argument(
+            "--warmup_calls",
+            help="The number of full pipe calls to warmup the model.",
+            default=0,
+            type=int,
+        )
+        parser.add_argument(
+            "--output_directory",
+            type=str,
+            default=".",
+            help="Directory where to save outputs, profiles and timings.",
+        )
+        parser.add_argument(
+            "--input_images",
+            default=[],
+            nargs="+",
+            help="Path(s)/URL(s) to input image(s).",
+        )
+        parser.add_argument(
+            "--resize_input_images",
+            default=False,
+            action="store_true",
+            help="Whether to resize and crop the input image(s) to the specified width and height.",
+        )
+        parser.add_argument(
+            "--task",
+            default=None,
+            help="Task to perform. Only applicable if the model supports multiple tasks."
+        )
+        return parser
+
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
@@ -394,6 +481,13 @@ class xFuserArgs:
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
+
+    @classmethod
+    def from_runner_args(cls, args: dict):
+        engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items()})
+        return engine_args
+
+
 
     def create_config(
         self,

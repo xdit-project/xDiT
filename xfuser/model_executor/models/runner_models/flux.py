@@ -31,11 +31,11 @@ class xFuserFluxModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
-            engine_args = xFuserArgs.from_cli_args(self.config)
+            engine_args = xFuserArgs.from_cli_args(self.config) # Models using the xFuser pipeline require these
             engine_config, _ = engine_args.create_config()
             pipe = xFuserFluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.model_name,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=torch.float16,
                 engine_config=engine_config
             )
         else:
@@ -52,7 +52,7 @@ class xFuserFluxModel(xFuserModel):
 
         return pipe
 
-    def _post_load_and_state_initialization(self, input_args) -> None:
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         get_runtime_state().set_input_parameters(
             batch_size=1,
@@ -119,7 +119,7 @@ class xFuserFluxKontextModel(xFuserModel):
         )
         return output
 
-    def _preprocess_args_images(self, input_args) -> dict:
+    def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if necessary based on task and other args """
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
@@ -130,13 +130,13 @@ class xFuserFluxKontextModel(xFuserModel):
         input_args["max_area"] = input_args["height"] * input_args["width"]
         return input_args
 
-    def validate_args(self, input_args: dict) -> None:
+    def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments """
         images = input_args.get("input_images", [])
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")
 
-    def _post_load_and_state_initialization(self, input_args) -> None:
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         get_runtime_state().set_input_parameters(
             batch_size=1,
@@ -176,7 +176,7 @@ class xFuserFlux2Model(xFuserModel):
         )
         return pipe
 
-    def _preprocess_args_images(self, input_args) -> dict:
+    def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if provided """
         input_args = super()._preprocess_args_images(input_args)
         images = input_args["input_images"]
@@ -200,7 +200,7 @@ class xFuserFlux2Model(xFuserModel):
         )
         return output
 
-    def _post_load_and_state_initialization(self, input_args) -> None:
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         get_runtime_state().set_input_parameters(
             batch_size=1,

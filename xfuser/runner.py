@@ -31,12 +31,16 @@ from xfuser import xFuserArgs
 class xFuserModelRunner:
     """ A generic model runner for models supported by xDiT """
 
-    def __init__(self, config: dict):
-        self.config = config
-        self.model = self._select_model(config.model, config)
+    def __init__(self, config: dict) -> None:
+        xfuser_config = xFuserArgs.from_runner_args(config)
+        # Runs the config through argument parsing and validation
+        engine_config, input_config = xfuser_config.create_config()
+
+        self.config = xfuser_config
+        self.model = self._select_model(xfuser_config.model, xfuser_config)
         self.is_initialized = False
 
-    def _select_model(self, model_name: str, config: dict) -> xFuserModel:
+    def _select_model(self, model_name: str, config: xFuserArgs) -> xFuserModel:
         """ Select and instantiate model from registry"""
         model = MODEL_REGISTRY.get(model_name, None)
         if not model:
@@ -56,7 +60,7 @@ class xFuserModelRunner:
         self.is_initialized = True
         log("Model initialization complete.")
 
-    def run(self, input_args: dict[str, Any]) -> Tuple[Any, list]:
+    def run(self, input_args: dict) -> Tuple[BaseOutput, list]:
         """ Run the model with given input arguments """
         if not self.is_initialized:
             raise RuntimeError("ModelRunner not initialized. Call initialize() before run().")
@@ -65,27 +69,19 @@ class xFuserModelRunner:
         output, timings = self.model.run(input_args)
         return output, timings
 
-    def preprocess_args(self, input_args: dict|argparse.Namespace) -> dict:
+    def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """
-        if type(input_args) == argparse.Namespace:
-            input_args = vars(input_args)
         return self.model.preprocess_args(input_args)
-
-    def validate_args(self, input_args: dict|argparse.Namespace) -> bool:
-        """ Validate input arguments """
-        if type(input_args) == argparse.Namespace:
-            input_args = vars(input_args)
-        return self.model.validate_args(input_args)
 
     def profile(self, input_args: dict) -> Tuple[BaseOutput, list, Any]:
         """ Profile the model execution """
         output, timings, profile_object = self.model.profile(input_args)
         return output, timings, profile_object
 
-    def print_args(self, args: argparse.Namespace) -> None:
+    def print_args(self, args: dict) -> None:
         """ Print the arguments from the Namespace """
         log("Model Runner Arguments:")
-        for arg, value in vars(args).items():
+        for arg, value in args.items():
             log(f"  {arg}: {value}")
 
     def cleanup(self) -> None:
@@ -112,62 +108,13 @@ class xFuserModelRunner:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="xFuser Arguments")
-    parser.add_argument("--num_iterations", type=int, default=1, help="Number of iterations to run the model.")
-    parser.add_argument("--repetition_sleep_duration", type=int, default=None, help="The duration to sleep in between different pipe calls in seconds.")
-    parser.add_argument("--profile", default=False, action="store_true", help="Whether to run Pytorch profiler. See --profile_wait, --profile_warmup and --profile_active for profiler specific warmup.")
-    parser.add_argument(
-        "--profile_wait",
-        type=int,
-        default=2,
-        help="wait argument for torch.profiler.schedule. Only used with --profile.",
-    )
-    parser.add_argument(
-        "--profile_warmup",
-        type=int,
-        default=2,
-        help="warmup argument for torch.profiler.schedule. Only used with --profile.",
-    )
-    parser.add_argument(
-        "--profile_active",
-        type=int,
-        default=1,
-        help="active argument for torch.profiler.schedule. Only used with --profile.",
-    )
-    parser.add_argument(
-        "--warmup_calls",
-        help="The number of full pipe calls to warmup the model.",
-        type=int,
-    )
-    parser.add_argument(
-        "--output_directory",
-        type=str,
-        default=".",
-        help="Directory where to save outputs, profiles and timings.",
-    )
-    parser.add_argument(
-        "--input_images",
-        default=[],
-        nargs="+",
-        help="Path(s)/URL(s) to input image(s).",
-    )
-    parser.add_argument(
-        "--resize_input_images",
-        default=False,
-        action="store_true",
-        help="Whether to resize and crop the input image(s) to the specified width and height.",
-    )
-    parser.add_argument(
-        "--task",
-        default=None,
-        help="Task to perform. Only applicable if the model supports multiple tasks."
-    )
-    args = xFuserArgs.add_cli_args(parser).parse_args()
+    xfuser_args = xFuserArgs.add_runner_args(parser).parse_args()
+    args = vars(xfuser_args)
     runner = xFuserModelRunner(args)
     runner.print_args(args)
-    runner.validate_args(args)
     input_args = runner.preprocess_args(args)
     runner.initialize(input_args)
-    if args.profile:
+    if xfuser_args.profile:
         out, timing, profile = runner.profile(input_args)
         runner.save(profile=profile)
     else:

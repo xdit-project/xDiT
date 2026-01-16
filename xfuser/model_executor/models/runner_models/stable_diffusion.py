@@ -34,7 +34,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         )
         return pipe
 
-    def _compile_model(self, input_args) -> None:
+    def _compile_model(self, input_args: dict) -> None:
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.text_encoder = torch.compile(self.pipe.text_encoder, mode="default")
         self.pipe.text_encoder_2 = torch.compile(self.pipe.text_encoder_2, mode="default")

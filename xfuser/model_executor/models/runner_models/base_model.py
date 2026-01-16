@@ -22,6 +22,7 @@ from xfuser.core.utils.runner_utils import (
 from xfuser.core.distributed import (
     get_world_group,
     initialize_runtime_state,
+    init_distributed_environment,
 )
 
 MODEL_REGISTRY = {}
@@ -57,22 +58,25 @@ class xFuserModel(abc.ABC):
     model_output_type: str = ""
     fps: int = 24
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: xFuserArgs) -> None:
         self._validate_config(config)
         self.config = config
         self.pipe = None
 
-    def initialize(self, input_args) -> None:
+    def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
         # These initialize some internal states as a side-effect ...
 
-        engine_args = xFuserArgs.from_cli_args(self.config)
-        engine_config, input_config = engine_args.create_config()
+        if not torch.distributed.is_initialized():
+            log("Initializing distributed environment.. .")
+            init_distributed_environment()
 
+        log("Loading model pipeline...")
         self.pipe = self._load_model()
 
         log("Initializing runtime state...")
-        initialize_runtime_state(self.pipe, engine_config)
+        self.engine_config, _ = self.config.create_config()
+        initialize_runtime_state(self.pipe, self.engine_config)
         self._post_load_and_state_initialization(input_args)
 
 
@@ -100,7 +104,7 @@ class xFuserModel(abc.ABC):
             pipe.enable_model_cpu_offload()
 
 
-    def _validate_config(self, config) -> None:
+    def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key)
@@ -121,7 +125,7 @@ class xFuserModel(abc.ABC):
             raise ValueError(f"Model {self.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
 
 
-    def _compile_model(self, input_args) -> None:
+    def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe = torch.compile(self.pipe, mode="default") # TODO: Configurable
@@ -132,8 +136,9 @@ class xFuserModel(abc.ABC):
         self._run_timed_pipe(compile_args)
 
 
-    def run(self, input_args) -> Tuple[BaseOutput, list]:
+    def run(self, input_args: dict) -> Tuple[BaseOutput, list]:
         """ Run the model with given input arguments and return output and timings """
+        self._validate_args(input_args)
         timings = []
 
         self._run_warmup_calls(input_args)
@@ -146,7 +151,7 @@ class xFuserModel(abc.ABC):
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
         return out, timings
 
-    def _run_warmup_calls(self, input_args) -> None:
+    def _run_warmup_calls(self, input_args: dict) -> None:
         """ Run initial warmup calls if specified """
         if self.config.warmup_calls:
             log(f"Warming up model with {self.config.warmup_calls} calls...")
@@ -178,14 +183,8 @@ class xFuserModel(abc.ABC):
                 log(f"Profiling iteration {iteration + 1} completed in {timing:.2f}s")
         return out, [], profile_object
 
-    def validate_args(self, input_args: dict) -> bool:
-        """ Validate input arguments """
-        return True
-
     def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """
-        if type(input_args) == argparse.Namespace:
-            input_args = vars(input_args)
         args = copy.deepcopy(input_args)
         args = self._preprocess_args_images(args)
         return args
@@ -268,6 +267,10 @@ class xFuserModel(abc.ABC):
     @abc.abstractmethod
     def _load_model(self) -> DiffusionPipeline:
         """ Load the model. Must be implemented by subclasses. """
+        pass
+
+    def _validate_args(self, input_args: dict) -> None:
+        """ Validate input arguments. Can be overridden by subclasses. """
         pass
 
     def _resize_and_crop_image(self, image: Image, target_height: int, target_width:int , mod_value: int) -> Image:

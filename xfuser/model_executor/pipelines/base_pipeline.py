@@ -68,7 +68,7 @@ logger = init_logger(__name__)
 
 class xFuserVAEWrapper:
     def __init__(
-        self, 
+        self,
         vae,
         engine_config: EngineConfig,
         dit_parallel_config: ParallelConfig,

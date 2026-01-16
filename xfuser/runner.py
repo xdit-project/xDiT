@@ -12,10 +12,10 @@ if not os.environ.get("RANK"):
     os.environ["MASTER_PORT"] = "12355"
 
 
-from diffusers.utils import BaseOutput
 from xfuser.model_executor.models.runner_models.base_model import (
     MODEL_REGISTRY,
     xFuserModel,
+    DiffusionOutput
 )
 from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
@@ -57,7 +57,7 @@ class xFuserModelRunner:
         self.is_initialized = True
         log("Model initialization complete.")
 
-    def run(self, input_args: dict) -> Tuple[BaseOutput, list]:
+    def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """ Run the model with given input arguments """
         if not self.is_initialized:
             raise RuntimeError("ModelRunner not initialized. Call initialize() before run().")
@@ -70,7 +70,7 @@ class xFuserModelRunner:
         """ Preprocess input arguments before passing them to the model """
         return self.model.preprocess_args(input_args)
 
-    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profiler.profile]:
+    def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
         output, timings, profile_object = self.model.profile(input_args)
         return output, timings, profile_object
@@ -89,8 +89,7 @@ class xFuserModelRunner:
         torch.cuda.empty_cache()
         log("Cleaned up resources.")
 
-
-    def save(self, output: BaseOutput = None, timings: list = None, profile: torch.profiler.profiler.profile = None, save_once: bool = True) -> None:
+    def save(self, output: DiffusionOutput = None, timings: list = None, profile: torch.profiler.profiler.profile = None, save_once: bool = True) -> None:
         """ Save model output, timings and profiles to file, if applicable """
         if save_once: # TODO: add rank info to file names so this can even make sense
             if not is_first_process():

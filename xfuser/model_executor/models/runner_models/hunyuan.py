@@ -2,7 +2,6 @@ import torch
 import copy
 from diffusers import HunyuanVideoPipeline, HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import BaseOutput
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_hunyuan_video import xFuserHunyuanVideoTransformer3DWrapper
 from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import xFuserHunyuanVideo15Transformer3DWrapper
@@ -11,6 +10,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     ModelCapabilities,
     DefaultInputValues,
+    DiffusionOutput,
 )
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -53,7 +53,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         return pipe
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             prompt=input_args["prompt"],
             height=input_args["height"],
@@ -63,7 +63,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(videos=output.frames, input_args=input_args)
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
@@ -125,7 +125,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         )
         return pipe
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         kwargs = {
             "num_inference_steps": input_args["num_inference_steps"],
             "num_frames": input_args["num_frames"],
@@ -138,7 +138,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             kwargs["height"] = input_args["height"]
             kwargs["width"] = input_args["width"]
 
-        return self.pipe(**kwargs)
+        output = self.pipe(**kwargs)
+        return DiffusionOutput(videos=output.frames, input_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if necessary based on task and other args """

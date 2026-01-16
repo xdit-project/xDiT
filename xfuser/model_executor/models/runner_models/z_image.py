@@ -1,12 +1,12 @@
 import torch
 from diffusers import ZImagePipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import BaseOutput
 from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     DefaultInputValues,
+    DiffusionOutput,
 )
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")
@@ -36,7 +36,7 @@ class xFuserZImageTurboModel(xFuserModel):
         )
         return pipe
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = str(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],
@@ -46,4 +46,4 @@ class xFuserZImageTurboModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(images=output.images)

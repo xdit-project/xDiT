@@ -56,6 +56,39 @@ class DefaultInputValues:
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
 
+class DiffusionOutput:
+    """ Class to encapsulate diffusion model outputs """
+    def __init__(self, images: list[Image] = None, videos: list[np.ndarray]|np.ndarray = None, input_args: list[dict]|dict = []) -> None:
+        if images and videos:
+            raise ValueError("DiffusionOutput can only contain either images or videos, not both.")
+        self.images = images
+        if type(videos) != list:
+            videos = [videos]
+        self.videos = videos
+        if type(input_args) != list:
+            input_args = [input_args]
+        self.input_args = input_args
+
+    @classmethod
+    def from_outputs(cls, outputs: List["DiffusionOutput"], output_type: str) -> None:
+        if output_type == "image":
+            args_list = []
+            all_images = []
+            for out in outputs:
+                all_images.extend(out.images)
+                args_list.extend(out.input_args)
+            return DiffusionOutput(images=all_images, input_args=args_list)
+        elif output_type == "video":
+            all_videos = []
+            args_list = []
+            for out in outputs:
+                all_videos.extend(out.videos)
+                args_list.extend(out.input_args)
+            return DiffusionOutput(videos=all_videos, input_args=args_list)
+        else:
+            raise NotImplementedError(f"DiffusionOutput does not support output type: {output_type}")
+
+
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
@@ -234,9 +267,12 @@ class xFuserModel(abc.ABC):
                     args[default_key] = default_value
                     log(f"Parameter '{default_key}' not specified. Using model-specific default value: {default_value}")
 
+        # Dataset to prompts
+        if input_args.get("dataset_path", None):
+            args["prompt"] = load_dataset_prompts(input_args["dataset_path"])
+
         args = self._preprocess_args_images(args)
         return args
-
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess image inputs if necessary """
@@ -244,23 +280,26 @@ class xFuserModel(abc.ABC):
         input_args["input_images"] = images
         return input_args
 
-    def save_output(self, output: BaseOutput) -> None:
+    def save_output(self, output: DiffusionOutput) -> None:
         """ Saves the output based on its type """
-        if self.model_output_type == "image":
-            output_image = output.images[0] # TODO: BS > 1
-            output_name = self.get_output_name()
-            output_path = f"{self.config.output_directory}/{output_name}.png"
-            output_image.save(output_path)
-            log(f"Output image saved to {output_path}")
-
-        elif self.model_output_type == "video":
-            output_video = output.frames[0] # TODO: BS > 1
-            output_name = self.get_output_name()
-            output_path = f"{self.config.output_directory}/{output_name}.mp4"
-            export_to_video(output_video, output_path, fps=self.fps)
-            log(f"Output video saved to {output_path}")
+        # Assumes output only has images or videos, not both
+        if output.images:
+            images = output.images
+            for image_index, image in enumerate(images):
+                output_name = self.get_output_name()
+                output_path = f"{self.config.output_directory}/{output_name}_{image_index}.png"
+                image.save(output_path)
+                log(f"Output image saved to {output_path}")
+        elif output.videos:
+            videos = output.videos
+            for video_index, video in enumerate(videos):
+                video = video[0]
+                output_name = self.get_output_name()
+                output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
+                export_to_video(video, output_path, fps=self.fps)
+                log(f"Output video saved to {output_path}")
         else:
-            raise NotImplementedError(f"Saving output of type {self.model_output_type} is not implemented.")
+            raise NotImplementedError(f"No output to save.")
 
     def save_timings(self, timings: list) -> None:
         timing_file = open(f"{self.config.output_directory}/timings.json", "w")
@@ -273,7 +312,7 @@ class xFuserModel(abc.ABC):
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}")
 
-    def _run_timed_pipe(self, input_args: dict) -> Tuple[BaseOutput, float]:
+    def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
         events = {
@@ -306,7 +345,7 @@ class xFuserModel(abc.ABC):
         self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
     @abc.abstractmethod
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         """ Execute the pipeline. Muyst be implemented by subclasses. """
         pass
 

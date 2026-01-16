@@ -1,12 +1,12 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import BaseOutput
 from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
     DefaultInputValues,
+    DiffusionOutput,
 )
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
@@ -48,7 +48,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         self.pipe.text_encoder_3 = torch.compile(self.pipe.text_encoder_3, mode="default")
         self._run_timed_pipe(input_args)
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -57,4 +57,4 @@ class xFuserStableDiffusionModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(images=output.images, input_args=input_args)

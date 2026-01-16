@@ -8,6 +8,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     ModelCapabilities,
     DefaultInputValues,
+    DiffusionOutput,
 )
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -70,7 +71,7 @@ class xFuserFluxModel(xFuserModel):
 
 
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         get_runtime_state().set_input_parameters(
             batch_size=1,
             num_inference_steps=input_args["num_inference_steps"],
@@ -86,7 +87,7 @@ class xFuserFluxModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(images=output.images, input_args=input_args)
 
 
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
@@ -122,7 +123,7 @@ class xFuserFluxKontextModel(xFuserModel):
         )
         return pipe
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -134,7 +135,7 @@ class xFuserFluxKontextModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(images=output.images, input_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if necessary based on task and other args """
@@ -206,7 +207,7 @@ class xFuserFlux2Model(xFuserModel):
         input_args["images"] = images
         return input_args
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -217,7 +218,7 @@ class xFuserFlux2Model(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(images=output.images, input_args=input_args)
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)

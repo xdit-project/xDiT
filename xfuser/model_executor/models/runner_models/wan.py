@@ -1,7 +1,6 @@
 import torch
 from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import BaseOutput
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -9,6 +8,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     ModelCapabilities,
     DefaultInputValues,
+    DiffusionOutput,
 )
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -79,7 +79,7 @@ class xFuserWanI2VModel(xFuserModel):
         return pipe
 
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             image=input_args["image"],
             height=input_args["height"],
@@ -91,7 +91,7 @@ class xFuserWanI2VModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(videos=output.frames, input_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)
@@ -192,7 +192,7 @@ class xFuserWanT2VModel(xFuserModel):
             if self.is_wan_2_2:
                 quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
 
-    def _run_pipe(self, input_args: dict) -> BaseOutput:
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -203,5 +203,5 @@ class xFuserWanT2VModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return output
+        return DiffusionOutput(videos=output.frames, input_args=input_args)
 

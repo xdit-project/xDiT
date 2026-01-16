@@ -34,6 +34,7 @@ from xfuser.core.distributed import (
     get_cfg_group,
     get_sp_group,
 )
+from xfuser.core.distributed.parallel_state import _SP
 
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.runtime_state import get_runtime_state
@@ -97,6 +98,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
+            and _SP # required for pipeline parallelism
             and get_sequence_parallel_world_size() > 1
         )
 

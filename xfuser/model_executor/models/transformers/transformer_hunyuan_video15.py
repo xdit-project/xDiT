@@ -126,6 +126,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         # YiYi Notes: config based on target_size_config https://github.com/yiyixuxu/hy15/blob/main/hyvideo/pipelines/hunyuan_video_pipeline.py#L205
         target_size: int = 640,  # did not name sample_size since it is in pixel spaces
         task_type: str = "i2v",
+        use_meanflow: bool = False,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -145,6 +146,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             rope_axes_dim=rope_axes_dim,
             target_size=target_size,
             task_type=task_type,
+            use_meanflow=use_meanflow,
         )
 
         for block in self.transformer_blocks:

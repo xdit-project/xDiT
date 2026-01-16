@@ -7,7 +7,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     ModelCapabilities,
     DefaultInputValues,
-
 )
 
 @register_model("stabilityai/stable-diffusion-3.5-large")

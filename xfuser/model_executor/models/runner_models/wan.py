@@ -10,10 +10,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
 )
-from xfuser.core.distributed import (
-    get_world_group,
+from xfuser.core.utils.runner_utils import (
+    resize_and_crop_image,
+    resize_image_to_max_area,
+    quantize_linear_layers_to_fp8
 )
-from xfuser.core.utils.runner_utils import log
 
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
@@ -97,9 +98,9 @@ class xFuserWanI2VModel(xFuserModel):
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
         if input_args.get("resize_input_images", False):
-            image = self._resize_and_crop_image(image, width, height, self.mod_value)
+            image = resize_and_crop_image(image, width, height, self.mod_value)
         else:
-            image = self._resize_image_to_max_area(image, height, width, self.mod_value)
+            image = resize_image_to_max_area(image, height, width, self.mod_value)
         input_args["height"] = image.height
         input_args["width"] = image.width
         input_args["image"] = image
@@ -115,9 +116,9 @@ class xFuserWanI2VModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
             if self.is_wan_2_2:
-                self._quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
+                quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
 
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
@@ -187,9 +188,9 @@ class xFuserWanT2VModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
             if self.is_wan_2_2:
-                self._quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
+                quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
 
     def _run_pipe(self, input_args: dict) -> BaseOutput:
         output = self.pipe(

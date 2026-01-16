@@ -12,8 +12,8 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
 )
-from xfuser.core.distributed import (
-    get_world_group,
+from xfuser.core.utils.runner_utils import (
+    resize_and_crop_image,
 )
 
 @register_model("tencent/HunyuanVideo")
@@ -146,7 +146,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         if self.config.task == "i2v":
             image = input_args["input_images"][0]
             if input_args.get("resize_input_images", False):
-                image = self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
+                image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
             input_args["image"] = image
         return input_args
 

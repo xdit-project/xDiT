@@ -7,16 +7,12 @@ from PIL.Image import Image
 from typing import Callable, Optional, Tuple
 from dataclasses import dataclass
 from torch.profiler import profile, record_function, ProfilerActivity
-from torchao.quantization.granularity import PerTensor
-from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
-from torchao.quantization.quantize_.common import KernelPreference
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video, BaseOutput
 import numpy as np
 from xfuser.config import args, xFuserArgs
 from xfuser.core.utils.runner_utils import (
     log,
-    is_first_process,
 )
 
 from xfuser.core.distributed import (
@@ -241,7 +237,7 @@ class xFuserModel(abc.ABC):
         timing_file.close()
         log(f"Timings saved to {self.config.output_directory}/timings.json")
 
-    def save_profile(self, profile) -> None:
+    def save_profile(self, profile: torch.profiler.profiler.profile) -> None:
         profile_file = f"{self.config.output_directory}/profile_trace_rank_{get_world_group().rank}.json"
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}")
@@ -291,77 +287,3 @@ class xFuserModel(abc.ABC):
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments. Can be overridden by subclasses. """
         pass
-
-    def _resize_and_crop_image(self, image: Image, target_height: int, target_width:int , mod_value: int) -> Image:
-        """ Resize and center-crop image to target dimensions """
-
-        ##TODO: move this func to utils
-        target_height_aligned = target_height // mod_value * mod_value
-        target_width_aligned = target_width // mod_value * mod_value
-
-        if is_first_process():
-            print("Force output size mode enabled.")
-            print(f"Input image resolution: {image.height}x{image.width}")
-            print(f"Requested output resolution: {target_height}x{target_width}")
-            print(f"Aligned output resolution (multiple of {mod_value}): {target_height_aligned}x{target_width_aligned}")
-
-        # Step 1: Resize image maintaining aspect ratio so both dimensions >= target
-        img_width, img_height = image.size
-
-        # Calculate scale factor to ensure both dimensions are at least target size
-        scale_width = target_width_aligned / img_width
-        scale_height = target_height_aligned / img_height
-        scale = max(scale_width, scale_height)  # Use max to ensure both dims are >= target
-
-        # Resize with aspect ratio preserved
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-        image = image.resize((new_width, new_height))
-
-        if is_first_process():
-            print(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
-
-        # Step 2: Crop from center to get exact target dimensions
-        left = (new_width - target_width_aligned) // 2
-        top = (new_height - target_height_aligned) // 2
-        image = image.crop((left, top, left + target_width_aligned, top + target_height_aligned))
-
-        if is_first_process():
-            print(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
-        return image
-
-
-
-    def _resize_image_to_max_area(self, image: Image, input_height: int, input_width: int, mod_value: int) -> Image:
-        """ Resize image to fit within max area while retaining aspect ratio """
-        ##TODO: move to utils
-
-        max_area = input_height * input_width
-        width, height = image.size
-        aspect_ratio = image.height / image.width
-        height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
-        width = round(np.sqrt(max_area /aspect_ratio)) // mod_value * mod_value
-
-        image = image.resize((width, height))
-        if is_first_process():
-            log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
-        return image
-
-
-    def _quantize_linear_layers_to_fp8(self, module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
-        filter_fn: Callable[[torch.nn.Module, str], bool] = _is_linear,
-        device: Optional[torch.device] = None) -> None:
-        config = Float8DynamicActivationFloat8WeightConfig(
-                  granularity=PerTensor(),
-                  set_inductor_config=False,
-                  kernel_preference=KernelPreference.AUTO
-            )
-        """Quantize all linear layers in the given module or module list to FP8."""
-        log("Quantizing linear layers to FP8...")
-        if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
-            quantize_(module_or_module_list_to_quantize, config=config, filter_fn=filter_fn, device=device)
-        elif isinstance(module_or_module_list_to_quantize, torch.nn.ModuleList):
-            for module in module_or_module_list_to_quantize:
-                quantize_(module, config=config, filter_fn=filter_fn, device=device)
-        else:
-            raise ValueError(f"Failed to quantize linear layers. Invalid module type: {type(module_or_module_list_to_quantize)}, expected torch.nn.Module or torch.nn.ModuleList")

@@ -8,9 +8,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     DefaultInputValues,
 )
-from xfuser.core.distributed import (
-    get_world_group,
-)
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")

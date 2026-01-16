@@ -10,8 +10,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
 )
+from xfuser.core.utils.runner_utils import (
+    resize_and_crop_image,
+    quantize_linear_layers_to_fp8
+)
 from xfuser.core.distributed import (
-    get_world_group,
     get_runtime_state,
     get_pipeline_parallel_world_size
 )
@@ -63,8 +66,8 @@ class xFuserFluxModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
 
 
 
@@ -139,7 +142,7 @@ class xFuserFluxKontextModel(xFuserModel):
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
         if input_args.get("resize_input_images", False):
-            image = self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
+            image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
             input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
         input_args["max_area"] = input_args["height"] * input_args["width"]
@@ -155,8 +158,8 @@ class xFuserFluxKontextModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
 
 
 
@@ -221,5 +224,5 @@ class xFuserFlux2Model(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         device = self.pipe.device
         if self.config.use_fp8_gemms:
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
-            self._quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)

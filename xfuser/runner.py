@@ -1,5 +1,3 @@
-import argparse
-import logging
 import torch
 import os
 import gc
@@ -14,7 +12,6 @@ if not os.environ.get("RANK"):
     os.environ["MASTER_PORT"] = "12355"
 
 
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import BaseOutput
 from xfuser.model_executor.models.runner_models.base_model import (
     MODEL_REGISTRY,
@@ -33,7 +30,7 @@ class xFuserModelRunner:
 
     def __init__(self, config: dict) -> None:
         xfuser_config = xFuserArgs.from_runner_args(config)
-        # Runs the config through argument parsing and validation
+        # Runs the config through argument parsing and validation - not the cleanest solution but has to be done inside the runner
         engine_config, input_config = xfuser_config.create_config()
 
         self.config = xfuser_config
@@ -112,8 +109,10 @@ if __name__ == "__main__":
     args = vars(xfuser_args)
     runner = xFuserModelRunner(args)
     runner.print_args(args)
+
     input_args = runner.preprocess_args(args)
     runner.initialize(input_args)
+
     if xfuser_args.profile:
         out, timing, profile = runner.profile(input_args)
         runner.save(profile=profile)

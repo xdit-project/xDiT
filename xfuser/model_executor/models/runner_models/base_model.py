@@ -87,31 +87,30 @@ class xFuserModel(abc.ABC):
         log("Initializing runtime state...")
         self.engine_config, _ = self.config.create_config()
         initialize_runtime_state(self.pipe, self.engine_config)
+
         self._post_load_and_state_initialization(input_args)
-
-
-        self._enable_options(self.pipe)
+        self._enable_options()
 
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
             self._compile_model(input_args)
 
-    def _enable_options(self, pipe: DiffusionPipeline) -> None:
+    def _enable_options(self) -> None:
         """ Enable model options based on config"""
         if self.config.enable_slicing:
             log("Enabling VAE slicing...")
-            pipe.vae.enable_slicing()
+            self.pipe.vae.enable_slicing()
 
         if self.config.enable_tiling:
             log("Enabling VAE tiling...")
-            pipe.vae.enable_tiling()
+            self.pipe.vae.enable_tiling()
 
         if self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
-            pipe.enable_sequential_cpu_offload()
+            self.pipe.enable_sequential_cpu_offload()
         elif self.config.enable_model_cpu_offload:
             log("Enabling model CPU offload...")
-            pipe.enable_model_cpu_offload()
+            self.pipe.enable_model_cpu_offload()
 
 
     def _validate_config(self, config: xFuserArgs) -> None:
@@ -172,6 +171,8 @@ class xFuserModel(abc.ABC):
 
     def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profile]:
         """ Profile the model execution """
+        self._validate_args(input_args)
+
         schedule = torch.profiler.schedule(
             wait=self.config.profile_wait,
             warmup=self.config.profile_warmup,
@@ -211,7 +212,6 @@ class xFuserModel(abc.ABC):
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess image inputs if necessary """
-        # For legacy reasons, we support several ways to pass images
         images = [load_image(path) for path in input_args.get("input_images", [])]
         input_args["input_images"] = images
         return input_args
@@ -219,7 +219,6 @@ class xFuserModel(abc.ABC):
     def save_output(self, output: BaseOutput) -> None:
         """ Saves the output based on its type """
         if self.model_output_type == "image":
-            from PIL import Image
             output_image = output.images[0] # TODO: BS > 1
             output_name = self.get_output_name()
             output_path = f"{self.config.output_directory}/{output_name}.png"
@@ -237,7 +236,7 @@ class xFuserModel(abc.ABC):
 
     def save_timings(self, timings: list) -> None:
         timing_file = open(f"{self.config.output_directory}/timings.json", "w")
-        json.dump(timings, timing_file)
+        json.dump(timings, timing_file, indent=2)
         timing_file.close()
         log(f"Timings saved to {self.config.output_directory}/timings.json")
 

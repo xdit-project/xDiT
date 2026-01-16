@@ -6,6 +6,7 @@ from xfuser.model_executor.models.transformers.transformer_z_image import xFuser
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
+    DefaultInputValues,
 )
 from xfuser.core.distributed import (
     get_world_group,
@@ -18,6 +19,12 @@ class xFuserZImageTurboModel(xFuserModel):
     model_name: str = "Tongyi-MAI/Z-Image-Turbo"
     output_name: str = "z_image_turbo"
     model_output_type: str = "image"
+    default_input_values = DefaultInputValues(
+        height=1024,
+        width=1024,
+        num_inference_steps=9,
+        guidance_scale=0.0,
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(

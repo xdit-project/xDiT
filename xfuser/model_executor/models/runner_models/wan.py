@@ -8,6 +8,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
+    DefaultInputValues,
 )
 from xfuser.core.distributed import (
     get_world_group,
@@ -27,6 +28,14 @@ class xFuserWanI2VModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_inference_steps=40,
+        num_frames=81,
+        negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
+        guidance_scale=3.5,
     )
 
     def __init__(self, config: xFuserArgs) -> None:
@@ -75,6 +84,7 @@ class xFuserWanI2VModel(xFuserModel):
             height=input_args["height"],
             width=input_args["width"],
             prompt=str(input_args["prompt"]),
+            negative_prompt=input_args["negative_prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
@@ -123,6 +133,14 @@ class xFuserWanT2VModel(xFuserModel):
         ring_degree=True,
         use_fp8_gemms=True,
     )
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_inference_steps=40,
+        num_frames=81,
+        negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
+        guidance_scale=3.5,
+    )
 
 
     def __init__(self, config: xFuserArgs) -> None:
@@ -163,8 +181,6 @@ class xFuserWanT2VModel(xFuserModel):
                 transformer_2=transformer_2,
             )
 
-        local_rank = get_world_group().local_rank
-        pipe = pipe.to(f"cuda:{local_rank}")
         return pipe
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -180,6 +196,7 @@ class xFuserWanT2VModel(xFuserModel):
             height=input_args["height"],
             width=input_args["width"],
             prompt=str(input_args["prompt"]),
+            negative_prompt=str(input_args["negative_prompt"]),
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],

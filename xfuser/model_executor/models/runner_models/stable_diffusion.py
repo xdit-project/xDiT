@@ -5,7 +5,9 @@ from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
-    ModelCapabilities
+    ModelCapabilities,
+    DefaultInputValues,
+
 )
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
@@ -21,6 +23,12 @@ class xFuserStableDiffusionModel(xFuserModel):
         ring_degree=True,
         pipefusion_parallel_degree=True,
         use_cfg_parallel=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=1024,
+        width=1024,
+        num_inference_steps=28,
+        guidance_scale=3.5,
     )
 
     def _load_model(self) -> DiffusionPipeline:

@@ -8,6 +8,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
+    DefaultInputValues,
 )
 from xfuser.core.distributed import (
     get_world_group,
@@ -26,7 +27,13 @@ class xFuserFluxModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        pipefusion_parallel_degree=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=1024,
+        width=1024,
+        num_inference_steps=50,
+        guidance_scale=3.5,
+        max_sequence_length=512,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -54,12 +61,6 @@ class xFuserFluxModel(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        get_runtime_state().set_input_parameters(
-            batch_size=1,
-            num_inference_steps=self.config.num_inference_steps,
-            max_condition_sequence_length=self.config.max_sequence_length,
-            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
-        )
         device = self.pipe.device
         if self.config.use_fp8_gemms:
             self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
@@ -68,6 +69,12 @@ class xFuserFluxModel(xFuserModel):
 
 
     def _run_pipe(self, input_args: dict) -> BaseOutput:
+        get_runtime_state().set_input_parameters(
+            batch_size=1,
+            num_inference_steps=input_args["num_inference_steps"],
+            max_condition_sequence_length=input_args["max_sequence_length"],
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+        )
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -87,9 +94,17 @@ class xFuserFluxKontextModel(xFuserModel):
     mod_value: int = 8 * 2 # TODO: Check if correct
     model_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
     output_name: str = "flux_1_kontext_dev"
+    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=1024,
+        width=1024,
+        num_inference_steps=50,
+        guidance_scale=2.5,
+        max_sequence_length=256,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -138,12 +153,6 @@ class xFuserFluxKontextModel(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        get_runtime_state().set_input_parameters(
-            batch_size=1,
-            num_inference_steps=self.config.num_inference_steps,
-            max_condition_sequence_length=self.config.max_sequence_length,
-            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
-        )
         device = self.pipe.device
         if self.config.use_fp8_gemms:
             self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
@@ -158,9 +167,17 @@ class xFuserFlux2Model(xFuserModel):
     mod_value: int = 8 * 2 # TODO: Check if correct
     model_name: str = "black-forest-labs/FLUX.2-dev"
     output_name: str = "flux_2_dev"
+    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=1024,
+        width=1024,
+        num_inference_steps=28,
+        guidance_scale=4.0,
+        max_sequence_length=256,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -202,12 +219,6 @@ class xFuserFlux2Model(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        get_runtime_state().set_input_parameters(
-            batch_size=1,
-            num_inference_steps=self.config.num_inference_steps,
-            max_condition_sequence_length=self.config.max_sequence_length,
-            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
-        )
         device = self.pipe.device
         if self.config.use_fp8_gemms:
             self._quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)

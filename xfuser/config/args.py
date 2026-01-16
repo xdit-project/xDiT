@@ -405,7 +405,8 @@ class xFuserArgs:
     @staticmethod
     def add_runner_args(parser: FlexibleArgumentParser):
         parser = xFuserArgs.add_cli_args(parser)
-        parser.set_defaults(model=None) # No default model for runner
+        remove_defaults_from = ["model", "prompt", "negative_prompt", "height", "width", "num_frames", "num_inference_steps", "max_sequence_length", "guidance_scale"]
+        parser.set_defaults(**{key: None for key in remove_defaults_from}) # Remove default values, so model specific defaults can be applied
         parser.add_argument(
             "--num_iterations",
             type=int,

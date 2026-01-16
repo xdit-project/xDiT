@@ -48,12 +48,22 @@ class ModelCapabilities:
     enable_tiling: bool = False
     use_fp8_gemms: bool = False
 
-
+@dataclass
+class DefaultInputValues:
+    """ Class to define model specific default input values """
+    height: Optional[int] = None
+    width: Optional[int] = None
+    num_frames: Optional[int] = None
+    negative_prompt: Optional[str] = None
+    num_inference_steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
+    max_sequence_length: Optional[int] = None
 
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    default_input_values: DefaultInputValues = DefaultInputValues()
     valid_tasks: list = []
     model_output_type: str = ""
     fps: int = 24
@@ -186,6 +196,15 @@ class xFuserModel(abc.ABC):
     def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """
         args = copy.deepcopy(input_args)
+
+        # Apply model specific default input values
+        for default_key, _ in DefaultInputValues.__annotations__.items():
+            if args.get(default_key, None) is None:
+                default_value = getattr(self.default_input_values, default_key)
+                if default_value is not None:
+                    args[default_key] = default_value
+                    log(f"Parameter '{default_key}' not specified. Using model-specific default value: {default_value}")
+
         args = self._preprocess_args_images(args)
         return args
 

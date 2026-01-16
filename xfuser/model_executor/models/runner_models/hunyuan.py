@@ -10,6 +10,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
     ModelCapabilities,
+    DefaultInputValues,
 )
 from xfuser.core.distributed import (
     get_world_group,
@@ -19,6 +20,9 @@ from xfuser.core.distributed import (
 @register_model("Hunyuanvideo")
 class xFuserHunyuanvideoModel(xFuserModel):
 
+    model_name: str = "tencent/HunyuanVideo"
+    output_name: str = "hunyuan_video"
+    model_output_type: str = "video"
     fps = 24
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -26,10 +30,13 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
     )
-
-    model_name: str = "tencent/HunyuanVideo"
-    output_name: str = "hunyuan_video"
-    model_output_type: str = "video"
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_frames=129,
+        num_inference_steps=50,
+        guidance_scale=6.0,
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
@@ -77,6 +84,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
 
+    valid_tasks = ["i2v", "t2v"]
+    output_name: str = "hunyuan_video_1_5"
+    model_output_type: str = "video"
     fps = 24
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -84,10 +94,13 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
     )
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_frames=121,
+        num_inference_steps=50,
+    )
 
-    valid_tasks = ["i2v", "t2v"]
-    output_name: str = "hunyuan_video_1_5"
-    model_output_type: str = "video"
 
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)

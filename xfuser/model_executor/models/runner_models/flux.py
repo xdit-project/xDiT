@@ -1,7 +1,6 @@
 import torch
 from diffusers import FluxPipeline, FluxKontextPipeline, Flux2Pipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import BaseOutput
 from xfuser.model_executor.models.transformers.transformer_flux import xFuserFlux1Transformer2DWrapper
 from xfuser.model_executor.models.transformers.transformer_flux2 import xFuserFlux2Transformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (

@@ -4,15 +4,16 @@ import copy
 import argparse
 import json
 from PIL.Image import Image
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 from dataclasses import dataclass
 from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.utils import load_image, export_to_video, BaseOutput
+from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
 from xfuser.core.utils.runner_utils import (
     log,
+    load_dataset_prompts,
 )
 
 from xfuser.core.distributed import (
@@ -129,6 +130,9 @@ class xFuserModel(abc.ABC):
         if not possible_task and self.valid_tasks:
             raise ValueError(f"Model {self.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
 
+        if config.dataset_path and not config.batch_size:
+            raise ValueError(f"Dataset path specified without batch size. Please specify batch size for dataset inference.")
+
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
@@ -141,20 +145,47 @@ class xFuserModel(abc.ABC):
         self._run_timed_pipe(compile_args)
 
 
-    def run(self, input_args: dict) -> Tuple[BaseOutput, list]:
+    def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """ Run the model with given input arguments and return output and timings """
         self._validate_args(input_args)
         timings = []
+        output: DiffusionOutput = None
 
         self._run_warmup_calls(input_args)
         for iteration in range(self.config.num_iterations):
             log(f"Running iteration {iteration + 1}/{self.config.num_iterations}")
-            out, timing = self._run_timed_pipe(input_args)
-            timings.append(timing)
-            log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
+
+            if self.config.batch_size: # Run in batched mode
+                output, batch_timings = self._run_pipe_batched(input_args)
+                timings += batch_timings
+            else: # Run all in one go
+                output, timing = self._run_timed_pipe(input_args)
+                timings.append(timing)
+                log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
 
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
-        return out, timings
+        return output, timings
+
+    def _run_pipe_batched(self, input_args: dict) -> Tuple[List[DiffusionOutput], list]:
+        """ Run the pipeline in batches """
+        batch_size = self.config.batch_size
+        all_prompts = input_args["prompt"]
+        timings = []
+        all_outputs = []
+        batch_count = len(all_prompts) // batch_size + (1 if len(all_prompts) % batch_size != 0 else 0)
+
+        for batch_index in range(0, batch_count):
+            batch_args = copy.deepcopy(input_args)
+            prompts = batch_args["prompt"][batch_index*batch_size:(batch_index+1)*batch_size]
+            batch_args["prompt"] = prompts
+
+            log(f"Processing batch {batch_index} with prompts {batch_index*batch_size} to {(batch_index+1)*batch_size}")
+            output, timing = self._run_timed_pipe(batch_args)
+            timings.append(timing)
+            all_outputs.append(output)
+            log(f"Batch {batch_index} completed in {timing:.2f}s")
+
+        return DiffusionOutput.from_outputs(all_outputs), timings
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         """ Run initial warmup calls if specified """
@@ -165,7 +196,7 @@ class xFuserModel(abc.ABC):
                 self._run_timed_pipe(input_args)
             log(f"Warmup complete.")
 
-    def profile(self, input_args: dict) -> Tuple[BaseOutput, list, torch.profiler.profiler.profile]:
+    def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
         self._validate_args(input_args)
 

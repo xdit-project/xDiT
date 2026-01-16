@@ -132,6 +132,8 @@ class xFuserArgs:
     input_images: Optional[List[str]] = None
     resize_input_images: bool = False
     task: Optional[str] = None
+    batch_size: Optional[int] = None
+    dataset_path: Optional[str] = None
 
 
     @staticmethod
@@ -471,6 +473,17 @@ class xFuserArgs:
             "--task",
             default=None,
             help="Task to perform. Only applicable if the model supports multiple tasks."
+        )
+        parser.add_argument(
+            "--batch_size",
+            default=None,
+            type=int,
+            help="Batch size for inference. If not specified, defaults to 1.",
+        )
+        parser.add_argument(
+            "--dataset_path",
+            default=None,
+            help="Path to a csv dataset file containing prompts. If specified, prompts will be loaded from the dataset. Consider using --batch_size accordingly.",
         )
         return parser
 

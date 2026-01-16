@@ -1,4 +1,5 @@
 import os
+import csv
 import logging
 import torch
 import numpy as np
@@ -42,8 +43,7 @@ def resize_image_to_max_area(image: Image, input_height: int, input_width: int, 
     width = round(np.sqrt(max_area /aspect_ratio)) // mod_value * mod_value
 
     image = image.resize((width, height))
-    if is_first_process():
-        log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
+    log(f"Resized image to {image.width}x{image.height} to fit within max area {width}x{height}")
     return image
 
 def resize_and_crop_image(image: Image, target_height: int, target_width: int, mod_value: int) -> Image:
@@ -52,11 +52,10 @@ def resize_and_crop_image(image: Image, target_height: int, target_width: int, m
         target_height_aligned = target_height // mod_value * mod_value
         target_width_aligned = target_width // mod_value * mod_value
 
-        if is_first_process():
-            print("Force output size mode enabled.")
-            print(f"Input image resolution: {image.height}x{image.width}")
-            print(f"Requested output resolution: {target_height}x{target_width}")
-            print(f"Aligned output resolution (multiple of {mod_value}): {target_height_aligned}x{target_width_aligned}")
+        log("Force output size mode enabled.")
+        log(f"Input image resolution: {image.height}x{image.width}")
+        log(f"Requested output resolution: {target_height}x{target_width}")
+        log(f"Aligned output resolution (multiple of {mod_value}): {target_height_aligned}x{target_width_aligned}")
 
         # Step 1: Resize image maintaining aspect ratio so both dimensions >= target
         img_width, img_height = image.size
@@ -71,16 +70,14 @@ def resize_and_crop_image(image: Image, target_height: int, target_width: int, m
         new_height = int(img_height * scale)
         image = image.resize((new_width, new_height))
 
-        if is_first_process():
-            print(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
+        log(f"Resized image to: {new_height}x{new_width} (maintaining aspect ratio)")
 
         # Step 2: Crop from center to get exact target dimensions
         left = (new_width - target_width_aligned) // 2
         top = (new_height - target_height_aligned) // 2
         image = image.crop((left, top, left + target_width_aligned, top + target_height_aligned))
 
-        if is_first_process():
-            print(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
+        log(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
         return image
 
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
@@ -100,3 +97,14 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
             quantize_(module, config=config, filter_fn=filter_fn, device=device)
     else:
         raise ValueError(f"Failed to quantize linear layers. Invalid module type: {type(module_or_module_list_to_quantize)}, expected torch.nn.Module or torch.nn.ModuleList")
+
+
+def load_dataset_prompts(dataset_path: str) -> list[str]:
+    """ load prompts from a csv dataset file """
+    prompts = []
+    with open(dataset_path, 'r', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            prompts.append(row['prompt'])
+    log(f"Loaded {len(prompts)} prompts from dataset at {dataset_path}")
+    return prompts

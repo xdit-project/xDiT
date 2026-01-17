@@ -33,6 +33,8 @@ if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
 if env_info["has_flash_attn_4"]:
     from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4
+if env_info["has_npu_flash_attn"]:
+    import torch_npu
 
 class AttentionBackendType(Enum):
     SDPA = "SDPA"
@@ -46,6 +48,7 @@ class AttentionBackendType(Enum):
     FLASH_4 = "Flash Attention V4"
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
+    NPU = "NPU"
 
 def register_attention_function(backend_type):
     """
@@ -305,3 +308,27 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal):
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
+
+@register_attention_function(AttentionBackendType.NPU)
+def npu_flash_attn_call(query, key, value, dropout_p, is_causal):
+    """
+    Performs the necessary tensor transpose and
+    then calls attention through npu_fused_infer_attention_score
+    """
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+    head_num = query.shape[2]
+    softmax_scale = query.shape[-1] ** -0.5
+    block_out, block_lse = torch_npu.npu_fused_infer_attention_score(query, key, value,
+                                                                     num_heads=head_num,
+                                                                     input_layout="BSND",
+                                                                     scale=softmax_scale,
+                                                                     softmax_lse_flag=True,
+                                                                     pre_tokens=65535,
+                                                                     next_tokens=65535
+                                                                     )
+    block_out = block_out.transpose(1, 2)
+    block_lse = block_lse.squeeze(-1)
+    return block_out, block_lse
+

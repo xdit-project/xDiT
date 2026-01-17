@@ -6,8 +6,9 @@ from torch.nn import functional as F
 import torch.distributed._functional_collectives as ft_c
 
 from torch.distributed.tensor.experimental._attention import _templated_ring_attention
+import xfuser.envs as envs
 
-if torch.cuda.is_available():
+if torch.cuda.is_available() or envs._is_npu():
     from yunchang.globals import PROCESS_GROUP
 else:
     PROCESS_GROUP = None

@@ -145,6 +145,8 @@ class RuntimeState(metaclass=ABCMeta):
             backend = AttentionBackendType.CUDNN
         elif env_info["has_flash_attn"]:
             backend = AttentionBackendType.FLASH
+        elif env_info["has_npu_flash_attn"]:
+            backend = AttentionBackendType.NPU
         else:
             backend = AttentionBackendType.SDPA
 

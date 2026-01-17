@@ -318,7 +318,7 @@ def npu_flash_attn_call(query, key, value, dropout_p, is_causal):
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
-    head_num = query.shape[3]
+    head_num = query.shape[2]
     softmax_scale = query.shape[-1] ** -0.5
     block_out, block_lse = torch_npu.npu_fused_infer_attention_score(query, key, value,
                                                                      num_heads=head_num,

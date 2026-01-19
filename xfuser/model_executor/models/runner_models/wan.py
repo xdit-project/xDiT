@@ -17,12 +17,13 @@ from xfuser.core.utils.runner_utils import (
 )
 
 
-@register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
-@register_model("Wan2.2-I2V")
 @register_model("Wan2.1-I2V")
-class xFuserWanI2VModel(xFuserModel):
+class xFuserWan21I2VModel(xFuserModel):
 
+    model_name: str = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+    output_name: str = "wan2.1_i2v"
+    model_output_type: str = "video"
     mod_value = 16 # vae_scale_factor_spatial * patch_size[1] = 8
     fps = 16
     capabilities = ModelCapabilities(
@@ -39,45 +40,18 @@ class xFuserWanI2VModel(xFuserModel):
         guidance_scale=3.5,
     )
 
-    def __init__(self, config: xFuserArgs) -> None:
-        self.is_wan_2_2 = "2.2" in config.model
-        if self.is_wan_2_2:
-            self.model_name: str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
-            self.output_name: str = "wan2.2_i2v"
-        else:
-            self.model_name: str = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
-            self.output_name = "wan2.1_i2v"
-        self.model_output_type: str = "video"
-        super().__init__(config)
-
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-
-        if self.is_wan_2_2:
-            transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer_2",
-            )
-            pipe = WanImageToVideoPipeline.from_pretrained(
+        pipe = WanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
-                transformer_2=transformer_2,
-            )
-        else:
-            pipe = WanImageToVideoPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
-                torch_dtype=torch.bfloat16,
-                transformer=transformer,
-                transformer_2=transformer_2,
-            )
+        )
         return pipe
-
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
@@ -120,15 +94,50 @@ class xFuserWanI2VModel(xFuserModel):
             if self.is_wan_2_2:
                 quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
 
+@register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
+@register_model("Wan2.2-I2V")
+class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
-@register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
+    model_name: str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    output_name: str = "wan2.2_i2v"
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer_2",
+        )
+        pipe = WanImageToVideoPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+                transformer_2=transformer_2,
+        )
+        return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
+
+
+
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
-@register_model("Wan2.2-T2V")
 @register_model("Wan2.1-T2V")
-class xFuserWanT2VModel(xFuserModel):
+class xFuserWan21T2VModel(xFuserModel):
 
     mod_value = 8 # vae_scale_factor_spatial * patch_size[1] = 8
     fps = 16
+    model_output_type: str = "video"
+    model_name: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+    output_name = "wan2.1_t2v"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -143,45 +152,17 @@ class xFuserWanT2VModel(xFuserModel):
         guidance_scale=3.5,
     )
 
-
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
-        self.is_wan_2_2 = "2.2" in config.model
-        if self.is_wan_2_2:
-            self.model_name: str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
-            self.output_name: str = "wan2.2_t2v"
-        else:
-            self.model_name: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
-            self.output_name = "wan2.1_t2v"
-        self.model_output_type: str = "video"
-
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-
-        if self.is_wan_2_2:
-            transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer_2",
-            )
-            pipe = WanPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
-                torch_dtype=torch.bfloat16,
-                transformer=transformer,
-                transformer_2=transformer_2,
-            )
-        else:
-            pipe = WanPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
-                torch_dtype=torch.bfloat16,
-                transformer=transformer,
-                transformer_2=transformer_2,
-            )
-
+        pipe = WanPipeline.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            transformer=transformer,
+        )
         return pipe
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -189,8 +170,6 @@ class xFuserWanT2VModel(xFuserModel):
         device = self.pipe.device
         if self.config.use_fp8_gemms:
             quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
-            if self.is_wan_2_2:
-                quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
@@ -205,3 +184,35 @@ class xFuserWanT2VModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, used_inputs=input_args)
 
+
+@register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
+@register_model("Wan2.2-T2V")
+class xFuserWan22T2VModel(xFuserModel):
+    model_name: str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+    output_name: str = "wan2.2_t2v"
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer_2",
+        )
+        pipe = WanPipeline.from_pretrained(
+            pretrained_model_name_or_path=self.model_name,
+            torch_dtype=torch.bfloat16,
+            transformer=transformer,
+            transformer_2=transformer_2,
+        )
+        return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        device = self.pipe.device
+        if self.config.use_fp8_gemms:
+            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+            quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)

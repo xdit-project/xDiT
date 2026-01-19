@@ -57,4 +57,4 @@ class xFuserStableDiffusionModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, input_args=input_args)
+        return DiffusionOutput(images=output.images, used_inputs=input_args)

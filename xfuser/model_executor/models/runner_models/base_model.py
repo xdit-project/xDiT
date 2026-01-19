@@ -4,7 +4,7 @@ import copy
 import argparse
 import json
 from PIL.Image import Image
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass
 from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -24,7 +24,7 @@ from xfuser.core.distributed import (
 
 MODEL_REGISTRY = {}
 
-def register_model(name: str) -> callable:
+def register_model(name: str) -> Callable:
     """ Decorator to register a model in the registry. """
     def decorator(cls):
         MODEL_REGISTRY[name] = cls
@@ -58,16 +58,18 @@ class DefaultInputValues:
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
-    def __init__(self, images: list[Image] = None, videos: list[np.ndarray]|np.ndarray = None, input_args: list[dict]|dict = []) -> None:
+    def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, used_inputs: List[dict]|dict = []) -> None:
         if images and videos:
             raise ValueError("DiffusionOutput can only contain either images or videos, not both.")
+        if not images and not videos:
+            raise ValueError("DiffusionOutput must contain at least images or videos.")
         self.images = images
-        if type(videos) != list:
+        if not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
-        if type(input_args) != list:
-            input_args = [input_args]
-        self.input_args = input_args
+        if not isinstance(used_inputs, list):
+            used_inputs = [used_inputs]
+        self.used_inputs = used_inputs
 
     @classmethod
     def from_outputs(cls, outputs: List["DiffusionOutput"], output_type: str) -> None:
@@ -76,18 +78,26 @@ class DiffusionOutput:
             all_images = []
             for out in outputs:
                 all_images.extend(out.images)
-                args_list.extend(out.input_args)
-            return DiffusionOutput(images=all_images, input_args=args_list)
+                args_list.extend(out.used_inputs)
+            return DiffusionOutput(images=all_images, used_inputs=args_list)
         elif output_type == "video":
             all_videos = []
             args_list = []
             for out in outputs:
                 all_videos.extend(out.videos)
-                args_list.extend(out.input_args)
-            return DiffusionOutput(videos=all_videos, input_args=args_list)
+                args_list.extend(out.used_inputs)
+            return DiffusionOutput(videos=all_videos, used_inputs=args_list)
         else:
             raise NotImplementedError(f"DiffusionOutput does not support output type: {output_type}")
 
+    def get_outputs(self) -> Generator[Tuple[Image|np.ndarray, dict], None, None]:
+        """ Returns a generator that yields output items along with their used input arguments """
+        if self.images:
+            for image, used_input in zip(self.images, self.used_inputs):
+                yield (image, used_input)
+        elif self.videos:
+            for video, used_input in zip(self.videos, self.used_inputs):
+                yield (video, used_input)
 
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
@@ -108,7 +118,7 @@ class xFuserModel(abc.ABC):
         # These initialize some internal states as a side-effect ...
 
         if not torch.distributed.is_initialized():
-            log("Initializing distributed environment.. .")
+            log("Initializing distributed environment...")
             init_distributed_environment()
 
         log("Loading model pipeline...")
@@ -147,10 +157,10 @@ class xFuserModel(abc.ABC):
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key)
-            if type(config_value) == int:
+            if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.model_name} does not support {key}.")
-            if type(config_value) == bool:
+            if isinstance(config_value, bool):
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.model_name} does not support {key}.")
 
@@ -284,17 +294,16 @@ class xFuserModel(abc.ABC):
         """ Saves the output based on its type """
         # Assumes output only has images or videos, not both
         if output.images:
-            images = output.images
-            for image_index, image in enumerate(images):
-                output_name = self.get_output_name()
+            for image_index, (image, used_input) in enumerate(output.get_outputs()):
+                output_name = self.get_output_name(used_input)
                 output_path = f"{self.config.output_directory}/{output_name}_{image_index}.png"
                 image.save(output_path)
                 log(f"Output image saved to {output_path}")
         elif output.videos:
             videos = output.videos
-            for video_index, video in enumerate(videos):
+            for video_index, (video, used_input) in enumerate(output.get_outputs()):
                 video = video[0]
-                output_name = self.get_output_name()
+                output_name = self.get_output_name(used_input)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.fps)
                 log(f"Output video saved to {output_path}")
@@ -302,9 +311,9 @@ class xFuserModel(abc.ABC):
             raise NotImplementedError(f"No output to save.")
 
     def save_timings(self, timings: list) -> None:
-        timing_file = open(f"{self.config.output_directory}/timings.json", "w")
-        json.dump(timings, timing_file, indent=2)
-        timing_file.close()
+        timing_file_name = f"{self.config.output_directory}/timings.json"
+        with open(timing_file_name, "w") as timing_file:
+            json.dump(timings, timing_file, indent=2)
         log(f"Timings saved to {self.config.output_directory}/timings.json")
 
     def save_profile(self, profile: torch.profiler.profiler.profile) -> None:
@@ -327,13 +336,13 @@ class xFuserModel(abc.ABC):
         elapsed_time = events["start"].elapsed_time(events["end"]) / 1000  # Convert to seconds
         return out, elapsed_time
 
-    def get_output_name(self) -> str:
+    def get_output_name(self, input_args) -> str:
         """ Generate a unique output name based on model and config """
         use_compile = self.config.use_torch_compile
         ulysses_degree = self.config.ulysses_degree or 1
         ring_degree = self.config.ring_degree or 1
-        height = self.config.height
-        width = self.config.width
+        height = input_args["height"]
+        width = input_args["width"]
         name = f"{self.output_name}_u{ulysses_degree}r{ring_degree}_tc_{use_compile}_{height}x{width}"
         if self.config.task:
             name += f"_{self.config.task}"

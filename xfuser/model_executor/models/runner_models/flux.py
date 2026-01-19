@@ -87,7 +87,7 @@ class xFuserFluxModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, input_args=input_args)
+        return DiffusionOutput(images=output.images, used_inputs=input_args)
 
 
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
@@ -135,7 +135,7 @@ class xFuserFluxKontextModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, input_args=input_args)
+        return DiffusionOutput(images=output.images, used_inputs=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if necessary based on task and other args """
@@ -218,7 +218,7 @@ class xFuserFlux2Model(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, input_args=input_args)
+        return DiffusionOutput(images=output.images, used_inputs=input_args)
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)

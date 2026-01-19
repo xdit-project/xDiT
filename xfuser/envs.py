@@ -285,7 +285,13 @@ class PackagesEnvChecker:
         return version.parse(version.parse(diffusers.__version__).base_version)
 
     def check_npu_flash_attn(self):
-        return _is_npu()
+        if not _is_npu():
+            return False
+        try:
+            import torch_npu
+            return hasattr(torch_npu, "npu_fused_infer_attention_score")
+        except ImportError:
+            return False
 
     def get_packages_info(self):
         return self.packages_info

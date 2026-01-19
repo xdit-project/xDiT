@@ -9,11 +9,6 @@ from torchao.quantization.granularity import PerTensor
 from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 from torchao.quantization.quantize_.common import KernelPreference
 
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-)
 logger = logging.getLogger(__name__)
 
 def log(message: str, debug=False) -> None:

@@ -114,7 +114,6 @@ class xFuserModel(abc.ABC):
 
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
-        # These initialize some internal states as a side-effect ...
 
         if not torch.distributed.is_initialized():
             log("Initializing distributed environment...")

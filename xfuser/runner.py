@@ -1,8 +1,13 @@
 import torch
 import os
 import gc
+import logging
 from typing import Tuple, Any
 
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+    )
 
 # Allow single-GPU runs to work without torchrun, debugging
 if not os.environ.get("RANK"):
@@ -103,6 +108,7 @@ class xFuserModelRunner:
 
 
 if __name__ == "__main__":
+    setup_logging()
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     xfuser_args = xFuserRunnerArgs.add_runner_args(parser).parse_args()
     args = vars(xfuser_args)

@@ -191,6 +191,7 @@ class PackagesEnvChecker:
         packages_info["has_flash_attn_4"] = self._check_flash_attn_4()
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
+        packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
         self.packages_info = packages_info
 
     def check_aiter(self):
@@ -282,6 +283,15 @@ class PackagesEnvChecker:
                 f"please upgrade to version > 0.30.0"
             )
         return version.parse(version.parse(diffusers.__version__).base_version)
+
+    def check_npu_flash_attn(self):
+        if not _is_npu():
+            return False
+        try:
+            import torch_npu
+            return hasattr(torch_npu, "npu_fused_infer_attention_score")
+        except ImportError:
+            return False
 
     def get_packages_info(self):
         return self.packages_info

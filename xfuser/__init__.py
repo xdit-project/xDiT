@@ -11,7 +11,7 @@ from xfuser.model_executor.pipelines import (
     xFuserSanaPipeline,
     xFuserSanaSprintPipeline,
 )
-from xfuser.config import xFuserArgs, EngineConfig
+from xfuser.config import xFuserArgs, EngineConfig, xFuserRunnerArgs
 from xfuser.parallel import xDiTParallel
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "xFuserSanaPipeline",
     "xFuserSanaSprintPipeline",
     "xFuserArgs",
+    "xFuserRunnerArgs",
     "EngineConfig",
     "xDiTParallel",
 ]

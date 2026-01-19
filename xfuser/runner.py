@@ -22,7 +22,7 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 from xfuser.core.utils.runner_utils import log, is_first_process
-from xfuser import xFuserArgs
+from xfuser import xFuserArgs, xFuserRunnerArgs
 
 
 class xFuserModelRunner:
@@ -104,7 +104,7 @@ class xFuserModelRunner:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="xFuser Arguments")
-    xfuser_args = xFuserArgs.add_runner_args(parser).parse_args()
+    xfuser_args = xFuserRunnerArgs.add_runner_args(parser).parse_args()
     args = vars(xfuser_args)
     runner = xFuserModelRunner(args)
     runner.print_args(args)

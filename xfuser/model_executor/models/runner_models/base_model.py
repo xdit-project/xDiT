@@ -28,7 +28,6 @@ def register_model(name: str) -> Callable:
     """ Decorator to register a model in the registry. """
     def decorator(cls):
         MODEL_REGISTRY[name] = cls
-        log(f"Registered model: {name}", debug=True)
         return cls
     return decorator
 

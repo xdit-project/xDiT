@@ -72,8 +72,9 @@ class xFuserFluxModel(xFuserModel):
 
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        batch_size = self.config.batch_size if self.config.batch_size else 1
         get_runtime_state().set_input_parameters(
-            batch_size=1,
+            batch_size=batch_size,
             num_inference_steps=input_args["num_inference_steps"],
             max_condition_sequence_length=input_args["max_sequence_length"],
             split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,

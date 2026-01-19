@@ -38,6 +38,7 @@ class xFuserModelRunner:
         # Runs the config through argument parsing and validation - not the cleanest solution but has to be done inside the runner
         engine_config, input_config = xfuser_config.create_config()
 
+
         self.config = xfuser_config
         self.model = self._select_model(xfuser_config.model, xfuser_config)
         self.is_initialized = False
@@ -88,10 +89,10 @@ class xFuserModelRunner:
 
     def cleanup(self) -> None:
         """ Cleanup resources after model execution """
-        get_runtime_state().destroy_distributed_env()
         del self.model.pipe
         gc.collect()
         torch.cuda.empty_cache()
+        get_runtime_state().destroy_distributed_env()
         log("Cleaned up resources.")
 
     def save(self, output: DiffusionOutput = None, timings: list = None, profile: torch.profiler.profiler.profile = None, save_once: bool = True) -> None:

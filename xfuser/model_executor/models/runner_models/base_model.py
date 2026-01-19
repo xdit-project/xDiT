@@ -31,20 +31,24 @@ def register_model(name: str) -> Callable:
         return cls
     return decorator
 
-@dataclass
+@dataclass(frozen=True)
 class ModelCapabilities:
     """ Class to define model capabilities """
+    # Parallelization
     ulysses_degree: bool = True  # All xDiT models support these
     ring_degree: bool = True
     pipefusion_parallel_degree: bool = False
+    data_parallel_degree: bool = False
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
+    # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
+    # Other features
     use_fp8_gemms: bool = False
 
-@dataclass
+@dataclass(frozen=True)
 class DefaultInputValues:
     """ Class to define model specific default input values """
     height: Optional[int] = None
@@ -54,6 +58,7 @@ class DefaultInputValues:
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
+    negative_prompt: Optional[str] = None
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -207,6 +212,8 @@ class xFuserModel(abc.ABC):
                 timings.append(timing)
                 log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
 
+        if len(timings) > 1:
+            timings.pop(0) # Remove first timing for more accurate average # TODO: fix
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
         return output, timings
 
@@ -325,16 +332,16 @@ class xFuserModel(abc.ABC):
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
-        events = {
-            "start": torch.cuda.Event(enable_timing=True),
-            "end": torch.cuda.Event(enable_timing=True),
-        }
+        start = torch.cuda.Event(enable_timing=True),
+        end = torch.cuda.Event(enable_timing=True),
         torch.cuda.synchronize()
-        events["start"].record()
+
+        start.record()
         out = self._run_pipe(input_args)
-        events["end"].record()
+        end.record()
+
         torch.cuda.synchronize()
-        elapsed_time = events["start"].elapsed_time(events["end"]) / 1000  # Convert to seconds
+        elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
         return out, elapsed_time
 
     def get_output_name(self, input_args) -> str:

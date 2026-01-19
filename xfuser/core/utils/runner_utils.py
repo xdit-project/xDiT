@@ -22,10 +22,7 @@ def log(message: str, debug=False) -> None:
 def is_first_process() -> bool:
     """ Checks based on env rank and world size if this is last process in """
     rank = int(os.environ.get("RANK"))
-    world_size = int(os.environ.get("WORLD_SIZE"))
-    if rank == world_size - 1:
-        return True
-    return False
+    return rank == 0
 
 def resize_image_to_max_area(image: Image, input_height: int, input_width: int, mod_value: int) -> Image:
     """ Resize image to fit within max area while retaining aspect ratio """

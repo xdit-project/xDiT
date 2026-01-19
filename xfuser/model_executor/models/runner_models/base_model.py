@@ -106,7 +106,7 @@ class xFuserModel(abc.ABC):
     default_input_values: DefaultInputValues = DefaultInputValues()
     valid_tasks: list = []
     model_output_type: str = ""
-    fps: int = 24
+    fps: int = 0
 
     def __init__(self, config: xFuserArgs) -> None:
         self._validate_config(config)
@@ -175,6 +175,9 @@ class xFuserModel(abc.ABC):
 
         if config.dataset_path and not config.batch_size:
             raise ValueError(f"Dataset path specified without batch size. Please specify batch size for dataset inference.")
+
+        if self.model_output_type == "video" and not self.fps:
+            raise ValueError(f"Model {self.model_name} produces video output but fps is not set.")
 
 
     def _compile_model(self, input_args: dict) -> None:

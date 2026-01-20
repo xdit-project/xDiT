@@ -69,6 +69,7 @@ class xFuserRunnerArgs:
     ring_degree: Optional[int] = 1
     tensor_parallel_degree: int = 1
     pipefusion_parallel_degree: int = 1
+    use_fsdp: bool = False
     # Input arguments
     height: int|None = None
     width: int|None = None
@@ -118,6 +119,11 @@ class xFuserRunnerArgs:
             "--use_torch_compile",
             action="store_true",
             help="Enable torch.compile to accelerate inference in a single card",
+        )
+        parser.add_argument(
+            "--use_fsdp",
+            action="store_true",
+            help="Enable FSDP to save memory. May have an impact on performance.",
         )
         parser.add_argument(
             "--attention_backend",
@@ -390,6 +396,7 @@ class xFuserArgs:
     task: Optional[str] = None
     batch_size: Optional[int] = None
     dataset_path: Optional[str] = None
+    use_fsdp: bool = False
 
 
     @staticmethod

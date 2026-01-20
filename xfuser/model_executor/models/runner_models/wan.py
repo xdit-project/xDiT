@@ -4,6 +4,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
+    ModelSettings,
     xFuserModel,
     register_model,
     ModelCapabilities,
@@ -13,7 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     resize_image_to_max_area,
-    quantize_linear_layers_to_fp8
+    quantize_linear_layers_to_fp8,
 )
 
 
@@ -21,11 +22,6 @@ from xfuser.core.utils.runner_utils import (
 @register_model("Wan2.1-I2V")
 class xFuserWan21I2VModel(xFuserModel):
 
-    model_name: str = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
-    output_name: str = "wan2.1_i2v"
-    model_output_type: str = "video"
-    mod_value = 16 # vae_scale_factor_spatial * patch_size[1] = 8
-    fps = 16
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -38,6 +34,36 @@ class xFuserWan21I2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
+    )
+    settings = ModelSettings(
+        model_name = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+        output_name = "wan2.1_i2v",
+        model_output_type = "video",
+        mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
+        fps = 16,
+        fsdp_strategy={
+            "transformer": {
+                "block_attr": "blocks",
+                "dtype": torch.bfloat16,
+                "children_to_device": [{
+                    "submodule_key": "",
+                    "exclude_keys": ["blocks"]
+                }]
+            },
+            "text_encoder": {
+                "block_attr": "block",
+                "shard_submodule_key": "encoder",
+                "children_to_device": [
+                    {
+                        "submodule_key": "encoder",
+                        "exclude_keys": ["block"]
+                    },
+                    {
+                        "exclude_keys": ["encoder"]
+                    }
+                ],
+            }
+        }
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -91,8 +117,7 @@ class xFuserWan21I2VModel(xFuserModel):
         device = self.pipe.device
         if self.config.use_fp8_gemms:
             quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
-            if self.is_wan_2_2:
-                quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
+
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan2.2-I2V")

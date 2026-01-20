@@ -11,16 +11,20 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
+from xfuser.core.distributed.parallel_state import get_sp_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
+    shard_module_with_fsdp,
 )
 
 from xfuser.core.distributed import (
     get_world_group,
     initialize_runtime_state,
     init_distributed_environment,
+    children_to_device,
 )
+
 
 MODEL_REGISTRY = {}
 
@@ -42,6 +46,7 @@ class ModelCapabilities:
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
+    use_fsdp: bool = False
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
@@ -59,6 +64,22 @@ class DefaultInputValues:
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
     negative_prompt: Optional[str] = None
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """ Class to define model options """
+    fp8_gemm_module_list: List[str] = None
+    fsdp_strategy: dict = {
+        "": { # name, e.g. transformer
+            "shard_submodule_key": None, # submodule to shard, e.g encoder -> transformer.encoder will be sharded
+            "block_attr": None, # attribute name of blocks to shard, e.g. blocks
+            "dtype": None, # Target dtype to convert the model to before sharding
+            "children_to_device": [{ # Move other children to device
+                "submodule_key": "", # e.g "encoder" -> children of transformer.encoder
+                "exclude_keys": ["blocks"] # exclude these children from being moved
+            }]
+        }
+    }
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -108,6 +129,7 @@ class xFuserModel(abc.ABC):
 
     capabilities: ModelCapabilities = ModelCapabilities()
     default_input_values: DefaultInputValues = DefaultInputValues()
+    settings: ModelSettings = ModelSettings()
     valid_tasks: list = []
     model_output_type: str = ""
     fps: int = 0
@@ -355,10 +377,57 @@ class xFuserModel(abc.ABC):
             name += f"_{self.config.task}"
         return name
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+    def _post_load_and_state_initialization(self, input_args: dict) -> None: ##TODO: should this be renamed?
         """ Hook for any post model-load and state initialization """
+        if self.config.use_fsdp:
+            self._shard_model_with_fsdp()
+        else:
+            local_rank = get_world_group().local_rank
+            self.pipe = self.pipe.to(f"cuda:{local_rank}")
+
+    def _shard_model_with_fsdp(self) -> None:
+        """ Shard the model with FSDP based on settings """
         local_rank = get_world_group().local_rank
-        self.pipe = self.pipe.to(f"cuda:{local_rank}")
+        sp_local_rank = get_sp_group().local_rank
+        sp_device_group = get_sp_group().device_group
+        sp_device = f"cuda:{sp_local_rank}"
+        for component_name, component in self.pipe.components.items():
+            if component_name in self.settings.fsdp_strategy:
+                strategy = self.settings.fsdp_strategy[component_name]
+                log(f"Wrapping {component_name} with FSDP...")
+                for child in strategy.get("children_to_device", []): # Children to device
+                    submodule_key = child.get("submodule_key", None)
+                    exclude_keys = child.get("exclude_keys", [])
+                    if submodule_key:
+                        pass
+                        children_to_device(getattr(component, submodule_key), sp_device, exclude_keys)
+                        log(f"Moving children of {component_name}.{submodule_key} to device, excluding {exclude_keys}...")
+                    else:
+                        log(f"Moving children of {component_name} to device, excluding {exclude_keys}...")
+                        children_to_device(component, sp_device, exclude_keys)
+
+                self.pipe.components[component_name] = shard_module_with_fsdp(component, sp_local_rank, sp_device_group, block_attr=block_attr)
+
+                # FSDP
+                submodule_key = strategy.get("shard_submodule_key", None)
+                block_attr = strategy.get("block_attr", None)
+                dtype = strategy.get("dtype", None)
+                shard_obj = component if not submodule_key else getattr(component, submodule_key)
+                log(f"Sharding {component_name} submodule {submodule_key} with block attribute {block_attr} to dtype {dtype}...")
+                fsdp_object = shard_transformer_blocks(
+                    shard_obj,
+                    block_attr=block_attr,
+                    device_id=sp_local_rank,
+                    dtype=dtype
+                    process_group=sp_device_group,
+                    use_orig_params=True,
+                    sync_module_states=True,
+                    forward_prefetch=True,
+                )
+                self.pipe.components[component_name] = fsdp_object
+            else:
+                log(f"Skipping FSDP wrapping for {component_name}...")
+                self.pipe.components[component_name] = component.to(f"cuda:{local_rank}")
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

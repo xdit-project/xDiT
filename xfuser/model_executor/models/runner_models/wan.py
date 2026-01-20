@@ -124,22 +124,33 @@ class xFuserWan21I2VModel(xFuserModel):
 @register_model("Wan2.2-I2V")
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
-    model_name: str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
-    output_name: str = "wan2.2_i2v"
+    def __init__(self, config: xFuserArgs) -> None:
+        super().__init__(config)
+        self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+        self.settings.output_name = "wan2.2_i2v"
+        self.settings.fsdp_strategy["transformer_2"] = {
+                "block_attr": "blocks",
+                "dtype": torch.bfloat16,
+                "children_to_device": [{
+                    "submodule_key": "",
+                    "exclude_keys": ["blocks"]
+                }]
+        }
+
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer_2",
         )
         pipe = WanImageToVideoPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
+                pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
                 transformer_2=transformer_2,
@@ -159,11 +170,6 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 @register_model("Wan2.1-T2V")
 class xFuserWan21T2VModel(xFuserModel):
 
-    mod_value = 8 # vae_scale_factor_spatial * patch_size[1] = 8
-    fps = 16
-    model_output_type: str = "video"
-    model_name: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
-    output_name = "wan2.1_t2v"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -176,6 +182,36 @@ class xFuserWan21T2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
+    )
+    settings = ModelSettings(
+        mod_value=8,
+        fps=16,
+        model_output_type="video",
+        model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
+        output_name="wan2.1_t2v",
+        fsdp_strategy={
+            "transformer": {
+                "block_attr": "blocks",
+                "dtype": torch.bfloat16,
+                "children_to_device": [{
+                    "submodule_key": "",
+                    "exclude_keys": ["blocks"]
+                }]
+            },
+            "text_encoder": {
+                "block_attr": "block",
+                "shard_submodule_key": "encoder",
+                "children_to_device": [
+                    {
+                        "submodule_key": "encoder",
+                        "exclude_keys": ["block"]
+                    },
+                    {
+                        "exclude_keys": ["encoder"]
+                    }
+                ],
+            }
+        }
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -213,9 +249,20 @@ class xFuserWan21T2VModel(xFuserModel):
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
-class xFuserWan22T2VModel(xFuserModel):
-    model_name: str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
-    output_name: str = "wan2.2_t2v"
+class xFuserWan22T2VModel(xFuserWan21T2VModel):
+
+    def __init__(self, config: xFuserArgs) -> None:
+        super().__init__(config)
+        self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+        self.settings.output_name = "wan2.2_t2v"
+        self.settings.fsdp_strategy["transformer_2"] = {
+                "block_attr": "blocks",
+                "dtype": torch.bfloat16,
+                "children_to_device": [{
+                    "submodule_key": "",
+                    "exclude_keys": ["blocks"]
+                }]
+        }
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

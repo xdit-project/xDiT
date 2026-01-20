@@ -5,7 +5,7 @@ import argparse
 import json
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
@@ -15,7 +15,6 @@ from xfuser.core.distributed.parallel_state import get_sp_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
-    shard_module_with_fsdp,
 )
 
 from xfuser.core.distributed import (
@@ -23,6 +22,7 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     init_distributed_environment,
     children_to_device,
+    shard_transformer_blocks,
 )
 
 
@@ -68,18 +68,23 @@ class DefaultInputValues:
 @dataclass(frozen=True)
 class ModelSettings:
     """ Class to define model options """
+    model_name: Optional[str] = None
+    output_name: Optional[str] = None
+    model_output_type: Optional[str] = None
+    mod_value: Optional[int] = None
+    fps: Optional[int] = None
     fp8_gemm_module_list: List[str] = None
-    fsdp_strategy: dict = {
+    fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
             "shard_submodule_key": None, # submodule to shard, e.g encoder -> transformer.encoder will be sharded
             "block_attr": None, # attribute name of blocks to shard, e.g. blocks
             "dtype": None, # Target dtype to convert the model to before sharding
             "children_to_device": [{ # Move other children to device
-                "submodule_key": "", # e.g "encoder" -> children of transformer.encoder
-                "exclude_keys": ["blocks"] # exclude these children from being moved
+                "submodule_key": None, # e.g "encoder" -> children of transformer.encoder
+                "exclude_keys": [] # exclude these children from being moved
             }]
         }
-    }
+    })
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -395,18 +400,16 @@ class xFuserModel(abc.ABC):
             if component_name in self.settings.fsdp_strategy:
                 strategy = self.settings.fsdp_strategy[component_name]
                 log(f"Wrapping {component_name} with FSDP...")
+                # Moving non FSPD'd children to device
                 for child in strategy.get("children_to_device", []): # Children to device
                     submodule_key = child.get("submodule_key", None)
                     exclude_keys = child.get("exclude_keys", [])
                     if submodule_key:
-                        pass
-                        children_to_device(getattr(component, submodule_key), sp_device, exclude_keys)
                         log(f"Moving children of {component_name}.{submodule_key} to device, excluding {exclude_keys}...")
+                        children_to_device(getattr(component, submodule_key), sp_device, exclude_keys)
                     else:
                         log(f"Moving children of {component_name} to device, excluding {exclude_keys}...")
                         children_to_device(component, sp_device, exclude_keys)
-
-                self.pipe.components[component_name] = shard_module_with_fsdp(component, sp_local_rank, sp_device_group, block_attr=block_attr)
 
                 # FSDP
                 submodule_key = strategy.get("shard_submodule_key", None)
@@ -418,16 +421,24 @@ class xFuserModel(abc.ABC):
                     shard_obj,
                     block_attr=block_attr,
                     device_id=sp_local_rank,
-                    dtype=dtype
+                    dtype=dtype,
                     process_group=sp_device_group,
                     use_orig_params=True,
                     sync_module_states=True,
                     forward_prefetch=True,
                 )
-                self.pipe.components[component_name] = fsdp_object
+                setattr(self.pipe, component_name, fsdp_object)
             else:
+
                 log(f"Skipping FSDP wrapping for {component_name}...")
-                self.pipe.components[component_name] = component.to(f"cuda:{local_rank}")
+                try:
+                    self.pipe.components[component_name] = component.to(f"cuda:{local_rank}")
+                except AttributeError as e:
+                    if "has no attribute" in str(e):
+                        pass
+                        #log(f"Component {component_name} has no .to() method, skipping device move.")
+                    else:
+                        raise AttributeError(e)
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

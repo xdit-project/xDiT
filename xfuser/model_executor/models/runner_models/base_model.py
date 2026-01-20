@@ -258,7 +258,7 @@ class xFuserModel(abc.ABC):
             all_outputs.append(output)
             log(f"Batch {batch_index} completed in {timing:.2f}s")
 
-        return DiffusionOutput.from_outputs(all_outputs), timings
+        return DiffusionOutput.from_outputs(all_outputs, self.settings.model_output_type), timings
 
     def _run_warmup_calls(self, input_args: dict) -> None:
         """ Run initial warmup calls if specified """

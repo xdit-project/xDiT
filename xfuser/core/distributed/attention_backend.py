@@ -254,7 +254,6 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal):
                 "k_descale": k_descale,
                 "v_descale": v_descale,
             }
-    torch._dynamo.graph_break()
     output = aiter.flash_attn_fp8_pertensor_func(
         quant_q, quant_k, quant_v,
         causal=is_causal,

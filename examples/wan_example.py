@@ -240,6 +240,8 @@ def shard_model_wan(
         pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
     else:
         pipe.text_encoder.to(f"cuda:{local_rank}")
+    if pipe.image_encoder is not None:
+        pipe.image_encoder.to(f"cuda:{local_rank}")
     pipe.vae.to(f"cuda:{local_rank}")
 
 

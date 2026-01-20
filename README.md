@@ -250,7 +250,7 @@ Several different attention backends are supported:
 
 xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3` (on _hopper_ GPUs) or `FAv4` (on _blackwell_ GPUs).
-On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note, that if using `AITER FP8` as the attention backend, make sure to use latest version of `AITER` when combining with `torch.compile`, as otherwise, it risks triggering a fake tensor related bug, which will cause a run time error.
+On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use the latest version of `AITER`, as older versions may trigger a fake tensor-related bug, resulting in a runtime error.
 
 
 

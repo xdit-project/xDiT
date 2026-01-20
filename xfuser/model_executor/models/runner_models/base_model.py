@@ -308,7 +308,6 @@ class xFuserModel(abc.ABC):
                 image.save(output_path)
                 log(f"Output image saved to {output_path}")
         elif output.videos:
-            videos = output.videos
             for video_index, (video, used_input) in enumerate(output.get_outputs()):
                 video = video[0]
                 output_name = self.get_output_name(used_input)
@@ -332,8 +331,8 @@ class xFuserModel(abc.ABC):
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
-        start = torch.cuda.Event(enable_timing=True),
-        end = torch.cuda.Event(enable_timing=True),
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()
 
         start.record()

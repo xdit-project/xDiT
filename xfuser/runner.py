@@ -111,7 +111,7 @@ class xFuserModelRunner:
 if __name__ == "__main__":
     setup_logging()
     parser = FlexibleArgumentParser(description="xFuser Arguments")
-    xfuser_args = xFuserRunnerArgs.add_runner_args(parser).parse_args()
+    xfuser_args = xFuserArgs.add_runner_args(parser).parse_args()
     args = vars(xfuser_args)
     runner = xFuserModelRunner(args)
     runner.print_args(args)

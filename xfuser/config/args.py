@@ -240,12 +240,6 @@ class xFuserRunnerArgs:
             help="Number of iterations to run the model."
         )
         parser.add_argument(
-            "--repetition_sleep_duration",
-            type=int,
-            default=None,
-            help="The duration to sleep in between different pipe calls in seconds."
-        )
-        parser.add_argument(
             "--profile",
             default=False,
             action="store_true",
@@ -310,6 +304,11 @@ class xFuserRunnerArgs:
             help="Path to a csv dataset file containing prompts. If specified, prompts will be loaded from the dataset. Consider using --batch_size accordingly.",
         )
         return parser
+
+    @classmethod
+    def from_runner_args(cls, args: dict):
+        engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items()})
+        return engine_args
 
 @dataclass
 class xFuserArgs:
@@ -661,22 +660,148 @@ class xFuserArgs:
 
         return parser
 
+
     @staticmethod
     def add_runner_args(parser: FlexibleArgumentParser):
-        parser = xFuserArgs.add_cli_args(parser)
-        remove_defaults_from = ["model", "prompt", "negative_prompt", "height", "width", "num_frames", "num_inference_steps", "max_sequence_length", "guidance_scale"]
-        parser.set_defaults(**{key: None for key in remove_defaults_from}) # Remove default values, so model specific defaults can be applied
+        parser.add_argument(
+            "--model",
+            type=str,
+            help="Name or path of the huggingface model to use.",
+            required=True,
+        )
+        parser.add_argument(
+            "--use_parallel_vae",
+            help="Enable parallel VAE.",
+            action="store_true")
+        parser.add_argument(
+            "--use_torch_compile",
+            action="store_true",
+            help="Enable torch.compile to accelerate inference in a single card",
+        )
+        parser.add_argument(
+            "--use_fsdp",
+            action="store_true",
+            help="Enable FSDP to save memory. May have an impact on performance.",
+        )
+        parser.add_argument(
+            "--attention_backend",
+            type=str,
+            default=None,
+            help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
+        )
+
+
+        parser.add_argument(
+            "--use_cfg_parallel",
+            action="store_true",
+            help="Use split batch in classifier_free_guidance. cfg_degree will be 2 if set",
+        )
+        parser.add_argument(
+            "--data_parallel_degree", type=int, default=1, help="Data parallel degree."
+        )
+        parser.add_argument(
+            "--ulysses_degree",
+            type=int,
+            default=1,
+            help="Ulysses sequence parallel degree. Used in attention layer.",
+        )
+        parser.add_argument(
+            "--ring_degree",
+            type=int,
+            default=1,
+            help="Ring sequence parallel degree. Used in attention layer.",
+        )
+        parser.add_argument(
+            "--pipefusion_parallel_degree",
+            type=int,
+            default=1,
+            help="Pipefusion parallel degree. Indicates the number of pipeline stages.",
+        )
+        parser.add_argument(
+            "--tensor_parallel_degree",
+            type=int,
+            default=1,
+            help="Tensor parallel degree.",
+        )
+        parser.add_argument(
+            "--height",
+            type=int,
+            help="The height of image",
+        )
+        parser.add_argument(
+            "--width",
+            type=int,
+            help="The width of image",
+        )
+        parser.add_argument(
+            "--num_frames",
+            type=int,
+            help="The frames of video",
+        )
+        parser.add_argument(
+            "--prompt",
+            type=str,
+            nargs="*",
+            required=True,
+            help="Prompt for the model.",
+        )
+        parser.add_argument(
+            "--negative_prompt", type=str,
+            nargs="*",
+            help="Negative prompt for the model.",
+        )
+        parser.add_argument(
+            "--num_inference_steps",
+            type=int,
+            help="Number of inference steps.",
+        )
+        parser.add_argument(
+            "--max_sequence_length",
+            type=int,
+            help="Max sequencen length of prompt",
+        )
+        parser.add_argument(
+            "--seed",
+            type=int,
+            default=42,
+            help="Random seed for operations."
+        )
+        parser.add_argument(
+            "--guidance_scale",
+            type=float,
+            help="Guidance scale for classifier free guidance.",
+        )
+        parser.add_argument(
+            "--enable_sequential_cpu_offload",
+            action="store_true",
+            help="Offloading the weights to the CPU.",
+        )
+        parser.add_argument(
+            "--enable_model_cpu_offload",
+            action="store_true",
+            help="Offloading the weights to the CPU.",
+        )
+        parser.add_argument(
+            "--enable_tiling",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
+        parser.add_argument(
+            "--enable_slicing",
+            action="store_true",
+            help="Making VAE decode a tile at a time to save GPU memory.",
+        )
+        parser.add_argument(
+            "--use_fp8_gemms",
+            action="store_true",
+            help="Quantize the transformer linear layers (selected models only).",
+        )
+
         parser.add_argument(
             "--num_iterations",
             type=int,
             default=1,
             help="Number of iterations to run the model."
-        )
-        parser.add_argument(
-            "--repetition_sleep_duration",
-            type=int,
-            default=None,
-            help="The duration to sleep in between different pipe calls in seconds."
         )
         parser.add_argument(
             "--profile",

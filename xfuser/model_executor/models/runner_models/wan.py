@@ -26,6 +26,7 @@ class xFuserWan21I2VModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fsdp=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -68,12 +69,12 @@ class xFuserWan21I2VModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         pipe = WanImageToVideoPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
+                pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
         )
@@ -98,9 +99,9 @@ class xFuserWan21I2VModel(xFuserModel):
         image = input_args["input_images"][0]
         width, height = input_args["width"], input_args["height"]
         if input_args.get("resize_input_images", False):
-            image = resize_and_crop_image(image, width, height, self.mod_value)
+            image = resize_and_crop_image(image, width, height, self.settings.mod_value)
         else:
-            image = resize_image_to_max_area(image, height, width, self.mod_value)
+            image = resize_image_to_max_area(image, height, width, self.settings.mod_value)
         input_args["height"] = image.height
         input_args["width"] = image.width
         input_args["image"] = image

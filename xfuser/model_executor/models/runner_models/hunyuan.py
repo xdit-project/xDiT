@@ -11,6 +11,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
     DiffusionOutput,
+    ModelSettings,
 )
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -20,10 +21,6 @@ from xfuser.core.utils.runner_utils import (
 @register_model("Hunyuanvideo")
 class xFuserHunyuanvideoModel(xFuserModel):
 
-    model_name: str = "tencent/HunyuanVideo"
-    output_name: str = "hunyuan_video"
-    model_output_type: str = "video"
-    fps = 24
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -37,16 +34,22 @@ class xFuserHunyuanvideoModel(xFuserModel):
         num_inference_steps=50,
         guidance_scale=6.0,
     )
+    settings = ModelSettings(
+        model_name="tencent/HunyuanVideo",
+        output_name="hunyuan_video",
+        model_output_type="video",
+        fps=24,
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
-            self.model_name,
+            self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
             revision="refs/pr/18",
         )
         pipe = HunyuanVideoPipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
             revision="refs/pr/18",
@@ -85,9 +88,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
 class xFuserHunyuanvideo15Model(xFuserModel):
 
     valid_tasks = ["i2v", "t2v"]
-    output_name: str = "hunyuan_video_1_5"
-    model_output_type: str = "video"
-    fps = 24
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -100,26 +100,32 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         num_frames=121,
         num_inference_steps=50,
     )
+    settings = ModelSettings(
+        output_name="hunyuan_video_1_5",
+        model_output_type="video",
+        fps=24,
+        mod_value=16,
+    )
 
 
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
         if self.config.task == "i2v": # TODO: different model for 480p
-            self.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
+            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
         else:
-            self.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
+            self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
 
 
     def _load_model(self) -> DiffusionPipeline:
         task = self.config.task
         pipeline = HunyuanVideo15Pipeline if task == "t2v" else HunyuanVideo15ImageToVideoPipeline
         transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
-            self.model_name,
+            self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         pipe = pipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
@@ -147,7 +153,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         if self.config.task == "i2v":
             image = input_args["input_images"][0]
             if input_args.get("resize_input_images", False):
-                image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
+                image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value)
             input_args["image"] = image
         return input_args
 

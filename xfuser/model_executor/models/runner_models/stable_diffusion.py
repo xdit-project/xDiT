@@ -7,6 +7,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
     DiffusionOutput,
+    ModelSettings,
 )
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
@@ -14,9 +15,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
 @register_model("SD3.5")
 class xFuserStableDiffusionModel(xFuserModel):
 
-    model_name: str = "stabilityai/stable-diffusion-3.5-large"
-    output_name: str = "stable_diffusion_3_5_large"
-    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -29,13 +27,18 @@ class xFuserStableDiffusionModel(xFuserModel):
         num_inference_steps=28,
         guidance_scale=3.5,
     )
+    settings = ModelSettings(
+        model_name="stabilityai/stable-diffusion-3.5-large",
+        output_name="stable_diffusion_3_5_large",
+        model_output_type="image",
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
         engine_args = xFuserArgs.from_cli_args(self.config)
         engine_config, _ = engine_args.create_config()
         pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             engine_config=engine_config,
             torch_dtype=dtype,
         )

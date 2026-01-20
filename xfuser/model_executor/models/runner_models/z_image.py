@@ -7,30 +7,33 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     DefaultInputValues,
     DiffusionOutput,
+    ModelSettings,
 )
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
 class xFuserZImageTurboModel(xFuserModel):
 
-    model_name: str = "Tongyi-MAI/Z-Image-Turbo"
-    output_name: str = "z_image_turbo"
-    model_output_type: str = "image"
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
         num_inference_steps=9,
         guidance_scale=0.0,
     )
+    settings = ModelSettings(
+        model_name="Tongyi-MAI/Z-Image-Turbo",
+        output_name="z_image_turbo",
+        model_output_type="image",
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
-            self.model_name,
+            self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         pipe = ZImagePipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )

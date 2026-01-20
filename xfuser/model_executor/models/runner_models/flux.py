@@ -9,6 +9,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
     DiffusionOutput,
+    ModelSettings,
 )
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
@@ -24,9 +25,6 @@ from xfuser import xFuserFluxPipeline, xFuserArgs
 @register_model("FLUX.1-dev")
 class xFuserFluxModel(xFuserModel):
 
-    model_name: str = "black-forest-labs/FLUX.1-dev"
-    output_name: str = "flux_1_dev"
-    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -38,24 +36,29 @@ class xFuserFluxModel(xFuserModel):
         guidance_scale=3.5,
         max_sequence_length=512,
     )
+    settings = ModelSettings(
+        model_name="black-forest-labs/FLUX.1-dev",
+        output_name="flux_1_dev",
+        model_output_type="image",
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
             engine_args = xFuserArgs.from_cli_args(self.config) # Models using the xFuser pipeline require these
             engine_config, _ = engine_args.create_config()
             pipe = xFuserFluxPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
+                pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.float16,
                 engine_config=engine_config
             )
         else:
             transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
+                pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 subfolder="transformer",
             )
             pipe = FluxPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.model_name,
+                pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
             )
@@ -95,10 +98,6 @@ class xFuserFluxModel(xFuserModel):
 @register_model("FLUX.1-Kontext-dev")
 class xFuserFluxKontextModel(xFuserModel):
 
-    mod_value: int = 8 * 2 # TODO: Check if correct
-    model_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
-    output_name: str = "flux_1_kontext_dev"
-    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -109,6 +108,12 @@ class xFuserFluxKontextModel(xFuserModel):
         num_inference_steps=50,
         guidance_scale=2.5,
         max_sequence_length=256,
+    )
+    settings = ModelSettings(
+        model_name="black-forest-labs/FLUX.1-Kontext-dev",
+        output_name="flux_1_kontext_dev",
+        model_output_type="image",
+        mod_value=16,
     )
 
     def _load_model(self) -> DiffusionPipeline:

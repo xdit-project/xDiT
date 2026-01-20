@@ -89,10 +89,6 @@ class ModelSettings:
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
     def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, used_inputs: List[dict]|dict = []) -> None:
-        if images and videos:
-            raise ValueError("DiffusionOutput can only contain either images or videos, not both.")
-        if not images and not videos:
-            raise ValueError("DiffusionOutput must contain at least images or videos.")
         self.images = images
         if not isinstance(videos, list):
             videos = [videos]
@@ -189,25 +185,24 @@ class xFuserModel(abc.ABC):
             config_value = getattr(config, key)
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
-                    raise ValueError(f"Model {self.model_name} does not support {key}.")
+                    raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             if isinstance(config_value, bool):
                 if config_value and not getattr(self.capabilities, key):
-                    raise ValueError(f"Model {self.model_name} does not support {key}.")
+                    raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.valid_tasks:
             if possible_task not in self.valid_tasks:
-                raise ValueError(f"Model {self.model_name} does not support task '{possible_task}'. Supported tasks: {self.valid_tasks}")
+                raise ValueError(f"Model {self.settings.model_name} does not support task '{possible_task}'. Supported tasks: {self.valid_tasks}")
         if possible_task and not self.valid_tasks:
-            raise ValueError(f"Model {self.model_name} does not support multiple tasks, but task '{possible_task}' was specified.")
+            raise ValueError(f"Model {self.settings.model_name} does not support multiple tasks, but task '{possible_task}' was specified.")
         if not possible_task and self.valid_tasks:
-            raise ValueError(f"Model {self.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
-
+            raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
         if config.dataset_path and not config.batch_size:
             raise ValueError(f"Dataset path specified without batch size. Please specify batch size for dataset inference.")
 
         if self.model_output_type == "video" and not self.fps:
-            raise ValueError(f"Model {self.model_name} produces video output but fps is not set.")
+            raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
 
     def _compile_model(self, input_args: dict) -> None:
@@ -339,7 +334,7 @@ class xFuserModel(abc.ABC):
                 video = video[0]
                 output_name = self.get_output_name(used_input)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
-                export_to_video(video, output_path, fps=self.fps)
+                export_to_video(video, output_path, fps=self.settings.fps)
                 log(f"Output video saved to {output_path}")
         else:
             raise NotImplementedError(f"No output to save.")
@@ -377,7 +372,7 @@ class xFuserModel(abc.ABC):
         ring_degree = self.config.ring_degree or 1
         height = input_args["height"]
         width = input_args["width"]
-        name = f"{self.output_name}_u{ulysses_degree}r{ring_degree}_tc_{use_compile}_{height}x{width}"
+        name = f"{self.settings.output_name}_u{ulysses_degree}r{ring_degree}_tc_{use_compile}_{height}x{width}"
         if self.config.task:
             name += f"_{self.config.task}"
         return name

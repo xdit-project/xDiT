@@ -79,20 +79,19 @@ def resize_and_crop_image(image: Image, target_height: int, target_width: int, m
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Callable[[torch.nn.Module, str], bool] = _is_linear,
     device: Optional[torch.device] = None) -> None:
+    """Quantize all linear layers in the given module or module list to FP8."""
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
                 kernel_preference=KernelPreference.AUTO
         )
-    """Quantize all linear layers in the given module or module list to FP8."""
-    log("Quantizing linear layers to FP8...")
-    if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
-        quantize_(module_or_module_list_to_quantize, config=config, filter_fn=filter_fn, device=device)
-    elif isinstance(module_or_module_list_to_quantize, torch.nn.ModuleList):
-        for module in module_or_module_list_to_quantize:
-            quantize_(module, config=config, filter_fn=filter_fn, device=device)
-    else:
-        raise ValueError(f"Failed to quantize linear layers. Invalid module type: {type(module_or_module_list_to_quantize)}, expected torch.nn.Module or torch.nn.ModuleList")
+    for module in module_or_module_list_to_quantize:
+        quantize_(
+            module,
+            config=config,
+            filter_fn=filter_fn,
+            device=device
+        )
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:
@@ -104,3 +103,12 @@ def load_dataset_prompts(dataset_path: str) -> list[str]:
             prompts.append(row['prompt'])
     log(f"Loaded {len(prompts)} prompts from dataset at {dataset_path}")
     return prompts
+
+def rsetattr(obj: object, attr: str, value: object) -> None:
+    """ Recursive setattr to set nested attributes """
+    pre, _, post = attr.rpartition('.')
+    return setattr(rgetattr(obj, pre) if pre else obj, post, value)
+
+def rgetattr(obj: object, attr: str) -> object:
+    """ Recursive getattr to get nested attributes """
+    return functools.reduce(getattr, [obj] + attr.split("."))

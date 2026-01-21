@@ -66,7 +66,7 @@ class DefaultInputValues:
     max_sequence_length: Optional[int] = None
     negative_prompt: Optional[str] = None
 
-@dataclass(frozen=True)
+@dataclass
 class ModelSettings:
     """ Class to define model options """
     model_name: Optional[str] = None
@@ -332,7 +332,7 @@ class xFuserModel(abc.ABC):
                 log(f"Output image saved to {output_path}")
         elif output.videos:
             for video_index, (video, used_input) in enumerate(output.get_outputs()):
-                video = video[0]
+                #video = video[0]
                 output_name = self.get_output_name(used_input)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.settings.fps)

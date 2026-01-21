@@ -84,7 +84,8 @@ class xFuserFluxModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, used_inputs=input_args)
+        images = output.images if output else [] # For legacy pipelines
+        return DiffusionOutput(images=images, used_inputs=input_args)
 
 
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
@@ -112,18 +113,25 @@ class xFuserFluxKontextModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         pipe = FluxKontextPipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
         )
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        batch_size = self.config.batch_size if self.config.batch_size else 1
+        get_runtime_state().set_input_parameters(
+            batch_size=batch_size,
+            num_inference_steps=input_args["num_inference_steps"],
+            max_condition_sequence_length=input_args["max_sequence_length"],
+            split_text_embed_in_sp=get_pipeline_parallel_world_size() == 1,
+        )
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -142,7 +150,7 @@ class xFuserFluxKontextModel(xFuserModel):
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
         if input_args.get("resize_input_images", False):
-            image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value)
+            image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value)
             input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
         input_args["max_area"] = input_args["height"] * input_args["width"]
@@ -160,10 +168,6 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
 
-    mod_value: int = 8 * 2 # TODO: Check if correct
-    model_name: str = "black-forest-labs/FLUX.2-dev"
-    output_name: str = "flux_2_dev"
-    model_output_type: str = "image"
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -185,12 +189,12 @@ class xFuserFlux2Model(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         pipe = Flux2Pipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
         )
@@ -203,7 +207,7 @@ class xFuserFlux2Model(xFuserModel):
         if not images:
             images = None
         elif input_args.get("resize_input_images", False):
-            images = [self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.mod_value) for image in images]
+            images = [self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value) for image in images]
         input_args["images"] = images
         return input_args
 

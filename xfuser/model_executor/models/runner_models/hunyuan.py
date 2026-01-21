@@ -163,3 +163,13 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             images = input_args.get("input_images", [])
             if len(images) != 1:
                 raise ValueError("Exactly one input image is required for HunyuanVideo-1.5 model when task is 'i2v'.")
+
+    def _compile_model(self, input_args: dict) -> None:
+        """ Compile the model using torch.compile """
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+
+        # two steps to warmup the torch compiler
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = 2
+        self._run_timed_pipe(compile_args)

@@ -118,7 +118,7 @@ Individual model classes that inherit from `xFuserModel`:
 
 ### Input Parameters
 
-| Argument | Description | Default value |
+| Argument | Description | Default |
 |----------|-------------|---------------|
 | `--prompt` | Text prompt(s) for generation | - |
 | `--negative_prompt` | Negative prompt(s) | - |
@@ -133,15 +133,15 @@ Individual model classes that inherit from `xFuserModel`:
 
 ### Optimization Options
 
-| Argument | Description |
-|----------|-------------|
-| `--use_torch_compile` | Enable torch.compile acceleration |
-| `--use_fp8_gemms` | Enable FP8 GEMM quantization |
-| `--enable_tiling` | Enable VAE tiling |
-| `--enable_slicing` | Enable VAE slicing |
-| `--enable_model_cpu_offload` | Enable model CPU offload |
-| `--enable_sequential_cpu_offload` | Enable sequential CPU offload |
-| `--attention_backend` | Attention backend selection |
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--use_torch_compile` | Enable torch.compile acceleration | False |
+| `--use_fp8_gemms` | Enable FP8 GEMM quantization | False |
+| `--enable_tiling` | Enable VAE tiling | False |
+| `--enable_slicing` | Enable VAE slicing | False |
+| `--enable_model_cpu_offload` | Enable model CPU offload | False |
+| `--enable_sequential_cpu_offload` | Enable sequential CPU offload | False |
+| `--attention_backend` | Attention backend selection | None |
 
 ### Benchmarking
 

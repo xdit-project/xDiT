@@ -1,4 +1,4 @@
-from .args import FlexibleArgumentParser, xFuserArgs, xFuserRunnerArgs
+from .args import FlexibleArgumentParser, xFuserArgs
 from .config import (
     EngineConfig,
     ParallelConfig,
@@ -14,7 +14,6 @@ from .config import (
 __all__ = [
     "FlexibleArgumentParser",
     "xFuserArgs",
-    "xFuserRunnerArgs",
     "EngineConfig",
     "ParallelConfig",
     "TensorParallelConfig",

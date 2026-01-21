@@ -26,8 +26,8 @@ from xfuser.config import FlexibleArgumentParser
 from xfuser.core.distributed import (
     get_runtime_state,
 )
-from xfuser.core.utils.runner_utils import log, is_first_process
-from xfuser import xFuserArgs, xFuserRunnerArgs
+from xfuser.core.utils.runner_utils import log, is_last_process
+from xfuser import xFuserArgs
 
 
 class xFuserModelRunner:
@@ -98,7 +98,7 @@ class xFuserModelRunner:
     def save(self, output: DiffusionOutput = None, timings: list = None, profile: torch.profiler.profiler.profile = None, save_once: bool = True) -> None:
         """ Save model output, timings and profiles to file, if applicable """
         if save_once: # TODO: add rank info to file names so this can even make sense
-            if not is_first_process():
+            if not is_last_process():
                 return
         if output:
             self.model.save_output(output) # Handle different output types

@@ -13,16 +13,21 @@ logger = logging.getLogger(__name__)
 
 def log(message: str, debug=False) -> None:
     """Log message only from the last process to avoid duplicates."""
-    if is_first_process():
+    if is_last_process():
         if debug:
             logger.debug(message)
         else:
             logger.info(message)
 
-def is_first_process() -> bool:
-    """ Checks based on env rank and world size if this is last process in """
+def is_last_process() -> bool:
+    """
+    Checks based on env rank and world size if this is last process in
+    Has to be the last process, as legacy xDiT models only produce the
+    output on the last GPU.
+    """
     rank = int(os.environ.get("RANK"))
-    return rank == 0
+    world_size = int(os.environ.get("WORLD_SIZE"))
+    return rank == world_size - 1
 
 def resize_image_to_max_area(image: Image, input_height: int, input_width: int, mod_value: int) -> Image:
     """ Resize image to fit within max area while retaining aspect ratio """

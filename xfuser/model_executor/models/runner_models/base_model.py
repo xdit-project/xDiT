@@ -318,6 +318,7 @@ class xFuserModel(abc.ABC):
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess image inputs if necessary """
+        self._validate_args(input_args)
         images = [load_image(path) for path in input_args.get("input_images", [])]
         input_args["input_images"] = images
         return input_args
@@ -333,7 +334,8 @@ class xFuserModel(abc.ABC):
                 log(f"Output image saved to {output_path}")
         elif output.videos:
             for video_index, (video, used_input) in enumerate(output.get_outputs()):
-                #video = video[0]
+                if isinstance(video, np.ndarray):
+                    video = video[0] # Remove batch dimension
                 output_name = self.get_output_name(used_input)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.settings.fps)
@@ -381,6 +383,7 @@ class xFuserModel(abc.ABC):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None: ##TODO: should this be renamed?
         """ Hook for any post model-load and state initialization """
+
         if self.config.use_fsdp:
             self._shard_model_with_fsdp()
         else:
@@ -404,7 +407,7 @@ class xFuserModel(abc.ABC):
                 strategy = self.settings.fsdp_strategy[component_name]
                 log(f"Wrapping {component_name} with FSDP...")
                 # Moving non FSPD'd children to device
-                for child in strategy.get("children_to_device", []): # Children to device
+                for child in strategy.get("children_to_device", []): # Iterate over list of children to move to device
                     submodule_key = child.get("submodule_key", None)
                     exclude_keys = child.get("exclude_keys", [])
                     if submodule_key:

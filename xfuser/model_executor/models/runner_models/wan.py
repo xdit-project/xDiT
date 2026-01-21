@@ -1,3 +1,4 @@
+import copy
 import torch
 from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -114,11 +115,12 @@ class xFuserWan21I2VModel(xFuserModel):
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
+    def _compile_model(self, input_args):
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        # two steps to warmup the torch compiler
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = 2
+        self._run_timed_pipe(compile_args)
 
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
@@ -158,6 +160,14 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 transformer_2=transformer_2,
         )
         return pipe
+
+    def _compile_model(self, input_args):
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
+        # two steps to warmup the torch compiler
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = 2
+        self._run_timed_pipe(compile_args)
 
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
@@ -241,6 +251,13 @@ class xFuserWan21T2VModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, used_inputs=input_args)
 
+    def _compile_model(self, input_args):
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        # two steps to warmup the torch compiler
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = 2
+        self._run_timed_pipe(compile_args)
+
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
@@ -278,3 +295,11 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             transformer_2=transformer_2,
         )
         return pipe
+
+    def _compile_model(self, input_args):
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
+        # two steps to warmup the torch compiler
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = 2
+        self._run_timed_pipe(compile_args)

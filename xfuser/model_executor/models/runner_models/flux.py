@@ -40,6 +40,7 @@ class xFuserFluxModel(xFuserModel):
         model_name="black-forest-labs/FLUX.1-dev",
         output_name="flux_1_dev",
         model_output_type="image",
+        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -64,14 +65,6 @@ class xFuserFluxModel(xFuserModel):
             )
 
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
-            quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
-
 
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -114,6 +107,7 @@ class xFuserFluxKontextModel(xFuserModel):
         output_name="flux_1_kontext_dev",
         model_output_type="image",
         mod_value=16,
+        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -160,13 +154,6 @@ class xFuserFluxKontextModel(xFuserModel):
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
-            quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)
-
 
 
 @register_model("black-forest-labs/FLUX.2-dev")
@@ -187,6 +174,13 @@ class xFuserFlux2Model(xFuserModel):
         num_inference_steps=28,
         guidance_scale=4.0,
         max_sequence_length=256,
+    )
+    settings = ModelSettings(
+        model_name="black-forest-labs/FLUX.2-dev",
+        output_name="flux_2_dev",
+        model_output_type="image",
+        mod_value=16,
+        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -225,10 +219,3 @@ class xFuserFlux2Model(xFuserModel):
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
         return DiffusionOutput(images=output.images, used_inputs=input_args)
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.transformer_blocks, device=device)
-            quantize_linear_layers_to_fp8(self.pipe.transformer.single_transformer_blocks, device=device)

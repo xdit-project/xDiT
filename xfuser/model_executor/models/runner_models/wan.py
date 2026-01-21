@@ -42,6 +42,7 @@ class xFuserWan21I2VModel(xFuserModel):
         model_output_type = "video",
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
+        fp8_gemm_module_list=["transformer.blocks"],
         fsdp_strategy={
             "transformer": {
                 "block_attr": "blocks",
@@ -136,6 +137,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                     "exclude_keys": ["blocks"]
                 }]
         }
+        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
 
 
     def _load_model(self) -> DiffusionPipeline:
@@ -156,14 +158,6 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 transformer_2=transformer_2,
         )
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
-            quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)
-
 
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
@@ -189,6 +183,7 @@ class xFuserWan21T2VModel(xFuserModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
+        fp8_gemm_module_list=["transformer.blocks"],
         fsdp_strategy={
             "transformer": {
                 "block_attr": "blocks",
@@ -263,6 +258,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                     "exclude_keys": ["blocks"]
                 }]
         }
+        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -282,10 +278,3 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             transformer_2=transformer_2,
         )
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
-            quantize_linear_layers_to_fp8(self.pipe.transformer_2.blocks, device=device)

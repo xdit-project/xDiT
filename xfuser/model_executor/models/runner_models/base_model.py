@@ -15,6 +15,7 @@ from xfuser.core.distributed.parallel_state import get_sp_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
+    quantize_linear_layers_to_fp8,
 )
 
 from xfuser.core.distributed import (
@@ -384,6 +385,12 @@ class xFuserModel(abc.ABC):
         else:
             local_rank = get_world_group().local_rank
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
+
+        if self.config.use_fp8_gemms:
+            for module_name in self.settings.fp8_gemm_module_list:
+                log(f"Quantizing linear layers in {module_name} to FP8...")
+                module = getattr(self.pipe, module_name)
+                quantize_linear_layers_to_fp8(module, device=self.pipe.device)
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """

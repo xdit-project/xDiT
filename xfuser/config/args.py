@@ -882,7 +882,7 @@ class xFuserArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)})
         return engine_args
 
     @classmethod

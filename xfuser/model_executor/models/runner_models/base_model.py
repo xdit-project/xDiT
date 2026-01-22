@@ -100,7 +100,7 @@ class DiffusionOutput:
         self.pipe_args = pipe_args
 
     @classmethod
-    def from_outputs(cls, outputs: List["DiffusionOutput"], output_type: str) -> None:
+    def from_outputs(cls, outputs: List["DiffusionOutput"], output_type: str) -> "DiffusionOutput":
         if output_type == "image":
             args_list = []
             all_images = []

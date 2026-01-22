@@ -157,8 +157,9 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             input_args["image"] = image
         return input_args
 
-    def validate_args(self, input_args: dict) -> None:
+    def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments """
+        super()._validate_args(input_args)
         if self.config.task == "i2v":
             images = input_args.get("input_images", [])
             if len(images) != 1:

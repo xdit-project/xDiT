@@ -486,7 +486,6 @@ class xFuserArgs:
             "--prompt",
             type=str,
             nargs="*",
-            required=True,
             help="Prompt for the model.",
         )
         parser.add_argument(
@@ -528,12 +527,12 @@ class xFuserArgs:
         parser.add_argument(
             "--enable_tiling",
             action="store_true",
-            help="Making VAE decode a tile at a time to save GPU memory.",
+            help="Enable VAE tiling to save GPU memory.",
         )
         parser.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Making VAE decode a tile at a time to save GPU memory.",
+            help="Enable VAE slicing to save GPU memory.",
         )
         parser.add_argument(
             "--use_fp8_gemms",
@@ -624,7 +623,8 @@ class xFuserArgs:
 
     @classmethod
     def from_runner_args(cls, args: dict):
-        engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items()})
+        attrs = [attr.name for attr in dataclasses.fields(cls)]
+        engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items() if arg_name in attrs})
         return engine_args
 
 

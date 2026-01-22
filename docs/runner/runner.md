@@ -93,7 +93,7 @@ Individual model classes that inherit from `xFuserModel`:
 | HunyuanVideo-1.5 | `HunyuanVideo-1.5`, `tencent/HunyuanVideo-1.5` |
 | Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
 | Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
-| Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3-medium-diffusers` |
+| Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3.5-large` |
 | Z-Image-Turbo | `Z-Image-Turbo`, `Tongyi-MAI/Z-Image-Turbo` |
 
 

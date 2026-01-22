@@ -35,11 +35,9 @@ class xFuserStableDiffusionModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
-        engine_args = xFuserArgs.from_cli_args(self.config)
-        engine_config, _ = engine_args.create_config()
         pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
-            engine_config=engine_config,
+            engine_config=self.engine_config,
             torch_dtype=dtype,
         )
         return pipe

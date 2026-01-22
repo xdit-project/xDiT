@@ -111,6 +111,7 @@ class xFuserWan21I2VModel(xFuserModel):
 
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments """
+        super()._validate_args(input_args)
         images = input_args.get("input_images", [])
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")

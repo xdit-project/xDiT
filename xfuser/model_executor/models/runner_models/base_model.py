@@ -65,7 +65,6 @@ class DefaultInputValues:
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
-    negative_prompt: Optional[str] = None
 
 @dataclass
 class ModelSettings:
@@ -150,11 +149,11 @@ class xFuserModel(abc.ABC):
             log("Initializing distributed environment...")
             init_distributed_environment()
 
+        self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
         self.pipe = self._load_model()
 
         log("Initializing runtime state...")
-        self.engine_config, _ = self.config.create_config()
         initialize_runtime_state(self.pipe, self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
@@ -286,8 +285,8 @@ class xFuserModel(abc.ABC):
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=schedule,
-            record_shapes=True, #TODO: make configurable
-            with_stack=False, #TODO: experimental config necessary?
+            record_shapes=True,
+            with_stack=False,
         ) as profile_object:
             for iteration in range(num_repetitions):
                 log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
@@ -385,10 +384,10 @@ class xFuserModel(abc.ABC):
     def _post_load_and_state_initialization(self, input_args: dict) -> None: ##TODO: should this be renamed?
         """ Hook for any post model-load and state initialization """
 
+        local_rank = get_world_group().local_rank
         if self.config.use_fsdp:
             self._shard_model_with_fsdp()
         else:
-            local_rank = get_world_group().local_rank
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
         if self.config.use_fp8_gemms:
@@ -445,7 +444,7 @@ class xFuserModel(abc.ABC):
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        """ Execute the pipeline. Muyst be implemented by subclasses. """
+        """ Execute the pipeline. Must be implemented by subclasses. """
         pass
 
     @abc.abstractmethod
@@ -455,4 +454,5 @@ class xFuserModel(abc.ABC):
 
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments. Can be overridden by subclasses. """
-        pass
+        if input_args["prompt"] is None and input_args["dataset_path"] is None:
+            raise ValueError("Either 'prompt' or 'dataset_path' must be provided in input arguments.")

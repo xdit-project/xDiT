@@ -2,6 +2,7 @@ import os
 import csv
 import logging
 import torch
+import functools
 import numpy as np
 from PIL.Image import Image
 from typing import Callable, Optional

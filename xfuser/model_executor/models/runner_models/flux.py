@@ -45,12 +45,10 @@ class xFuserFluxModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
-            engine_args = xFuserArgs.from_cli_args(self.config) # Models using the xFuser pipeline require these
-            engine_config, _ = engine_args.create_config()
             pipe = xFuserFluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.float16,
-                engine_config=engine_config
+                engine_config=self.engine_config
             )
         else:
             transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
@@ -158,6 +156,7 @@ class xFuserFluxKontextModel(xFuserModel):
 
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments """
+        super()._validate_args(input_args)
         images = input_args.get("input_images", [])
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")

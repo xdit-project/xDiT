@@ -61,4 +61,4 @@ class xFuserStableDiffusionModel(xFuserModel):
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
         images = output.images if output else []
-        return DiffusionOutput(images=images, used_inputs=input_args)
+        return DiffusionOutput(images=images, pipe_args=input_args)

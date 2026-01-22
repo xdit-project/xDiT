@@ -49,4 +49,4 @@ class xFuserZImageTurboModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, used_inputs=input_args)
+        return DiffusionOutput(images=output.images, pipe_args=input_args)

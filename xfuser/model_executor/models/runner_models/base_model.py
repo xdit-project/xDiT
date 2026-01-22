@@ -90,14 +90,14 @@ class ModelSettings:
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
-    def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, used_inputs: List[dict]|dict = []) -> None:
+    def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, pipe_args: List[dict]|dict = []) -> None:
         self.images = images
         if not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
-        if not isinstance(used_inputs, list):
-            used_inputs = [used_inputs]
-        self.used_inputs = used_inputs
+        if not isinstance(pipe_args, list):
+            pipe_args = [pipe_args]
+        self.pipe_args = pipe_args
 
     @classmethod
     def from_outputs(cls, outputs: List["DiffusionOutput"], output_type: str) -> None:
@@ -106,27 +106,26 @@ class DiffusionOutput:
             all_images = []
             for out in outputs:
                 all_images.extend(out.images)
-                args_list.extend(out.used_inputs)
-            return DiffusionOutput(images=all_images, used_inputs=args_list)
+                args_list.extend(out.pipe_args)
+            return DiffusionOutput(images=all_images, pipe_args=args_list)
         elif output_type == "video":
             all_videos = []
             args_list = []
             for out in outputs:
                 all_videos.extend(out.videos)
-                args_list.extend(out.used_inputs)
-            return DiffusionOutput(videos=all_videos, used_inputs=args_list)
+                args_list.extend(out.pipe_args)
+            return DiffusionOutput(videos=all_videos, pipe_args=args_list)
         else:
             raise NotImplementedError(f"DiffusionOutput does not support output type: {output_type}")
 
     def get_outputs(self) -> Generator[Tuple[Image|np.ndarray, dict], None, None]:
         """ Returns a generator that yields output items along with their used input arguments """
         if self.images:
-            for image, used_input in zip(self.images, self.used_inputs):
-                yield (image, used_input)
+            for image, single_pipe_args in zip(self.images, self.pipe_args):
+                yield (image, single_pipe_args)
         elif self.videos:
-            for video, used_input in zip(self.videos, self.used_inputs):
-                yield (video, used_input)
-
+            for video, single_pipe_args in zip(self.videos, self.pipe_args):
+                yield (video, single_pipe_args)
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
@@ -327,16 +326,16 @@ class xFuserModel(abc.ABC):
         """ Saves the output based on its type """
         # Assumes output only has images or videos, not both
         if output.images:
-            for image_index, (image, used_input) in enumerate(output.get_outputs()):
-                output_name = self.get_output_name(used_input)
+            for image_index, (image, pipe_args) in enumerate(output.get_outputs()):
+                output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{image_index}.png"
                 image.save(output_path)
                 log(f"Output image saved to {output_path}")
         elif output.videos:
-            for video_index, (video, used_input) in enumerate(output.get_outputs()):
+            for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
                 if isinstance(video, np.ndarray):
                     video = video[0] # Remove batch dimension
-                output_name = self.get_output_name(used_input)
+                output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.settings.fps)
                 log(f"Output video saved to {output_path}")

@@ -66,7 +66,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(videos=output.frames, used_inputs=input_args)
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
@@ -145,7 +145,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             kwargs["width"] = input_args["width"]
 
         output = self.pipe(**kwargs)
-        return DiffusionOutput(videos=output.frames, used_inputs=input_args)
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         """ Preprocess input images if necessary based on task and other args """

@@ -94,7 +94,7 @@ class xFuserWan21I2VModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(videos=output.frames, used_inputs=input_args)
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)
@@ -249,7 +249,7 @@ class xFuserWan21T2VModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(videos=output.frames, used_inputs=input_args)
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")

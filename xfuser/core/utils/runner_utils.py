@@ -85,6 +85,8 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
                 set_inductor_config=False,
                 kernel_preference=KernelPreference.AUTO
         )
+    if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
+        module_or_module_list_to_quantize = [module_or_module_list_to_quantize]
     for module in module_or_module_list_to_quantize:
         quantize_(
             module,

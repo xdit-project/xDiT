@@ -276,7 +276,8 @@ class InputConfig:
     def __post_init__(self):
         if isinstance(self.prompt, list):
             assert (
-                len(self.prompt) == len(self.negative_prompt)
+                not self.negative_prompt
+                or len(self.prompt) == len(self.negative_prompt)
                 or len(self.negative_prompt) == 0
             ), "prompts and negative_prompts must have the same quantities"
             self.batch_size = self.batch_size or len(self.prompt)

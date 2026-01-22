@@ -108,11 +108,47 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
 
     def __init__(
         self,
-        **kwargs
+        in_channels: int = 65,
+        out_channels: int = 32,
+        num_attention_heads: int = 16,
+        attention_head_dim: int = 128,
+        num_layers: int = 54,
+        num_refiner_layers: int = 2,
+        mlp_ratio: float = 4.0,
+        patch_size: int = 1,
+        patch_size_t: int = 1,
+        qk_norm: str = "rms_norm",
+        text_embed_dim: int = 3584,
+        text_embed_2_dim: int = 1472,
+        image_embed_dim: int = 1152,
+        rope_theta: float = 256.0,
+        rope_axes_dim: Tuple[int, ...] = (16, 56, 56),
+        # YiYi Notes: config based on target_size_config https://github.com/yiyixuxu/hy15/blob/main/hyvideo/pipelines/hunyuan_video_pipeline.py#L205
+        target_size: int = 640,  # did not name sample_size since it is in pixel spaces
+        task_type: str = "i2v",
+        use_meanflow: bool = False,
     ):
         super().__init__(
-            **kwargs
+            in_channels=in_channels,
+            out_channels=out_channels,
+            num_attention_heads=num_attention_heads,
+            attention_head_dim=attention_head_dim,
+            num_layers=num_layers,
+            num_refiner_layers=num_refiner_layers,
+            mlp_ratio=mlp_ratio,
+            patch_size=patch_size,
+            patch_size_t=patch_size_t,
+            qk_norm=qk_norm,
+            text_embed_dim=text_embed_dim,
+            text_embed_2_dim=text_embed_2_dim,
+            image_embed_dim=image_embed_dim,
+            rope_theta=rope_theta,
+            rope_axes_dim=rope_axes_dim,
+            target_size=target_size,
+            task_type=task_type,
+            use_meanflow=use_meanflow,
         )
+
         for block in self.transformer_blocks:
             block.attn.processor = xFuserHunyuanVideo15AttnProcessor()
 

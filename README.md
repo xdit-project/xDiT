@@ -191,6 +191,21 @@ We provide a docker image for developers to develop with xDiT. The docker image 
 
 ### 4. Usage
 
+#### Using model runner
+
+The xDiT Model Runner provides a single entry point for running all supported diffusion models with proper benchmarking and profiling support. To use it, simply run:
+
+```bash
+torchrun --nproc_per_node=8 xfuser/runner.py \
+    --model FLUX.1-dev \
+    --prompt "A cat running in a garden" \
+    --ulysses_degree 8
+```
+
+The runner does not support olders models. For those we have the example scripts below. More information on how to run the model runner are available [here](docs/runner/runner.md).
+
+#### Using example scripts
+
 We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory.
 You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
 

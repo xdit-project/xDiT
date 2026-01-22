@@ -164,10 +164,8 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
     def _compile_model(self, input_args):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
-        # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
+        # Full cycle to warmup the torch compiler
+        self._run_timed_pipe(input_args)
 
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
@@ -221,22 +219,16 @@ class xFuserWan21T2VModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         pipe = WanPipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
         )
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        device = self.pipe.device
-        if self.config.use_fp8_gemms:
-            quantize_linear_layers_to_fp8(self.pipe.transformer.blocks, device=device)
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
@@ -279,17 +271,17 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
         transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder="transformer_2",
         )
         pipe = WanPipeline.from_pretrained(
-            pretrained_model_name_or_path=self.model_name,
+            pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
             transformer_2=transformer_2,
@@ -299,7 +291,5 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     def _compile_model(self, input_args):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
-        # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
+        # Full cycle to warmup the torch compiler
+        self._run_timed_pipe(input_args)

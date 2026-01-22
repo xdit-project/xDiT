@@ -42,9 +42,12 @@ The main entry point that users interact with. It handles:
 - Execution flow (initialization → run/profile → save → cleanup)
 
 ```python
+# api_example.py
+# Usage: torchrun --nproc_per_node=4 api_example.py
+
 from xfuser.runner import xFuserModelRunner
 
-# Programmatic usage, still requires torchrun
+# Programmatic usage
 config = {
     "model": "FLUX.1-dev",
     "prompt": "A cat running",

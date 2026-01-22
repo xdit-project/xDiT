@@ -152,7 +152,7 @@ Individual model classes that inherit from `xFuserModel`:
 | `--num_iterations` | Number of benchmark iterations | 1 |
 | `--warmup_calls` | Warmup iterations before timing | 0 |
 | `--batch_size` | Batch size for dataset inference | None |
-| `--dataset_path` | Path to prompt dataset | None |
+| `--dataset_path` | Path to prompt dataset csv | None |
 | `--output_directory` | Output save directory | `.` |
 
 ### Profiling
@@ -227,7 +227,7 @@ torchrun --nproc_per_node=4 xfuser/runner.py \
 ```bash
 torchrun --nproc_per_node=8 xfuser/runner.py \
     --model FLUX.1-dev \
-    --dataset_path ./prompts.txt \
+    --dataset_path ./prompts.csv \  # CSV file with at least column "prompt"
     --batch_size 4 \
     --ulysses_degree 8 \
     --output_directory ./dataset_outputs

@@ -76,6 +76,7 @@ class ModelSettings:
     mod_value: Optional[int] = None
     fps: Optional[int] = None
     fp8_gemm_module_list: List[str] = None
+    # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
             "shard_submodule_key": None, # submodule to shard, e.g encoder -> transformer.encoder will be sharded
@@ -126,6 +127,7 @@ class DiffusionOutput:
         elif self.videos:
             for video, single_pipe_args in zip(self.videos, self.pipe_args):
                 yield (video, single_pipe_args)
+
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
@@ -434,16 +436,12 @@ class xFuserModel(abc.ABC):
                 )
                 setattr(self.pipe, component_name, fsdp_object)
             else:
-
                 log(f"Skipping FSDP wrapping for {component_name}...")
-                try:
-                    self.pipe.components[component_name] = component.to(f"cuda:{local_rank}")
-                except AttributeError as e:
-                    if "has no attribute" in str(e):
-                        pass
-                        #log(f"Component {component_name} has no .to() method, skipping device move.")
-                    else:
-                        raise AttributeError(e)
+                if hasattr(component, "to"):
+                    component.to(f"cuda:{local_rank}")
+                else:
+                    log(f"Component {component_name} has no .to() method, skipping device move.")
+                    pass
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

@@ -3,13 +3,6 @@ import os
 import gc
 import logging
 from typing import Tuple, Any
-if torch.version.hip:
-    try:
-        from opt_groupnorm import OPTGroupNorm
-        torch.nn.GroupNorm = OPTGroupNorm
-        print("Using OPTGroupNorm as torch.nn.GroupNorm")
-    except ImportError:
-        print("Using torch.nn.GroupNorm")
 
 def setup_logging():
     logging.basicConfig(

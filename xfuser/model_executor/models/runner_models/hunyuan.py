@@ -18,7 +18,7 @@ from xfuser.core.utils.runner_utils import (
 )
 
 @register_model("tencent/HunyuanVideo")
-@register_model("Hunyuanvideo")
+@register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -26,6 +26,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
+        use_hybrid_fp8_attn=True
     )
     default_input_values = DefaultInputValues(
         height=720,

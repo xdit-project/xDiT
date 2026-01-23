@@ -22,6 +22,7 @@ from xfuser.core.utils.runner_utils import (
 from xfuser.core.distributed import (
     get_world_group,
     initialize_runtime_state,
+    get_runtime_state,
     init_distributed_environment,
     children_to_device,
     shard_transformer_blocks,
@@ -54,6 +55,7 @@ class ModelCapabilities:
     enable_tiling: bool = False
     # Other features
     use_fp8_gemms: bool = False
+    use_hybrid_fp8_attn: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -136,6 +138,9 @@ class xFuserModel(abc.ABC):
     valid_tasks: list = []
     model_output_type: str = ""
     fps: int = 0
+
+    def do_classifier_free_guidance(self, args: dict=None) -> bool:
+        return False
 
     def __init__(self, config: xFuserArgs) -> None:
         self._validate_config(config)
@@ -396,6 +401,9 @@ class xFuserModel(abc.ABC):
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
 
+        if self.config.use_hybrid_fp8_attn:
+            self._setup_hybrid_fp8_attn(input_args)
+
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
         local_rank = get_world_group().local_rank
@@ -441,6 +449,18 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
+
+    def _setup_hybrid_fp8_attn(self, input_args: dict) -> None:
+        number_of_initial_and_final_bf16_attn_steps = input_args["num_hybrid_bf16_attn_steps"] # Number of initial and final steps to use bf16 attention for stability
+        multiplier = 2 if self.do_classifier_free_guidance(input_args) else 1 # # CFG is switched on in this case and double the transformers are called
+        fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps * multiplier
+        total_steps = input_args["num_inference_steps"] * multiplier # Total number of transformer calls during the denoising process
+        # Create a boolean vector indicating which steps should use fp8 attention
+        fp8_decision_vector = torch.tensor(
+        [i >= fp8_steps_threshold and i < (total_steps - fp8_steps_threshold)
+            for i in range(total_steps)], dtype=torch.bool
+        )
+        get_runtime_state().set_hybrid_attn_parameters(fp8_decision_vector)
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

@@ -134,6 +134,8 @@ class xFuserArgs:
     batch_size: Optional[int] = None
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
+    use_hybrid_fp8_attn: bool = False
+    num_hybrid_bf16_attn_steps: int = 5
 
 
     @staticmethod
@@ -501,7 +503,7 @@ class xFuserArgs:
         parser.add_argument(
             "--max_sequence_length",
             type=int,
-            help="Max sequencen length of prompt",
+            help="Max sequence length of prompt",
         )
         parser.add_argument(
             "--seed",
@@ -609,6 +611,18 @@ class xFuserArgs:
             "--dataset_path",
             default=None,
             help="Path to a csv dataset file containing prompts. If specified, prompts will be loaded from the dataset. Consider using --batch_size accordingly.",
+        )
+        parser.add_argument(
+            "--use_hybrid_fp8_attn",
+            action="store_true",
+            default=False,
+            help="Enable hybrid FP8 attention for faster inference and improved quality."
+        )
+        parser.add_argument(
+            "--num_hybrid_bf16_attn_steps",
+            type=int,
+            default=5,
+            help="Number of steps to use BF16 attention."
         )
         return parser
 

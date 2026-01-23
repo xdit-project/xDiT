@@ -23,11 +23,19 @@ from xfuser.core.utils.runner_utils import (
 @register_model("Wan2.1-I2V")
 class xFuserWan21I2VModel(xFuserModel):
 
+    def do_classifier_free_guidance(self, args: dict) -> bool:
+        guidance_scale = args.get("guidance_scale", None)
+        if guidance_scale is not None:
+            print("Guidance scale from arg:", guidance_scale)
+            return guidance_scale > 1.0
+        return False
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
         use_fsdp=True,
+        use_hybrid_fp8_attn=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -173,10 +181,18 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 @register_model("Wan2.1-T2V")
 class xFuserWan21T2VModel(xFuserModel):
 
+    def do_classifier_free_guidance(self, args):
+        guidance_scale = args.get("guidance_scale", None)
+        if guidance_scale is not None:
+            print("Guidance scale from arg:", guidance_scale)
+            return guidance_scale > 1.0
+        return False
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_hybrid_fp8_attn=True,
     )
     default_input_values = DefaultInputValues(
         height=720,

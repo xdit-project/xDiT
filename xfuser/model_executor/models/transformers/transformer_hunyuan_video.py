@@ -204,6 +204,8 @@ class xFuserHunyuanVideoTransformer3DWrapper(HunyuanVideoTransformer3DModel):
         else:
             lora_scale = 1.0
 
+        get_runtime_state().increment_step_counter()
+
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
 
         assert batch_size % get_classifier_free_guidance_world_size(

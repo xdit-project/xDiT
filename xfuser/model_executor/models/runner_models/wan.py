@@ -126,9 +126,11 @@ class xFuserWan21I2VModel(xFuserModel):
 
     def _compile_model(self, input_args):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
+        if self.config.use_hybrid_fp8_attn:
+            compile_args["num_inference_steps"] = compile_args["num_hybrid_bf16_attn_steps"] + 1  # Need more steps to cover both bf16 and fp8 attention
+        else:
+            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
 
@@ -262,9 +264,11 @@ class xFuserWan21T2VModel(xFuserModel):
 
     def _compile_model(self, input_args):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
+        if self.config.use_hybrid_fp8_attn:
+            compile_args["num_inference_steps"] = compile_args["num_hybrid_bf16_attn_steps"] + 1  # Need more steps to cover both bf16 and fp8 attention
+        else:
+            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup # TODO: make this more generic
         self._run_timed_pipe(compile_args)
 
 

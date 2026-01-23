@@ -621,7 +621,7 @@ class xFuserArgs:
         parser.add_argument(
             "--num_hybrid_bf16_attn_steps",
             type=int,
-            default=5,
+            default=None,
             help="Number of steps to use BF16 attention."
         )
         return parser

@@ -67,6 +67,7 @@ class DefaultInputValues:
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
+    num_hybrid_bf16_attn_steps: Optional[int] = None
 
 @dataclass
 class ModelSettings:
@@ -138,9 +139,6 @@ class xFuserModel(abc.ABC):
     valid_tasks: list = []
     model_output_type: str = ""
     fps: int = 0
-
-    def do_classifier_free_guidance(self, args: dict=None) -> bool:
-        return False
 
     def __init__(self, config: xFuserArgs) -> None:
         self._validate_config(config)
@@ -449,10 +447,20 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
+    
+    def _calculate_hybyrid_attention_step_multiplier(self, input_args: dict) -> int:
+        return 1
 
     def _setup_hybrid_fp8_attn(self, input_args: dict) -> None:
+        """
+        Setup hybrid FP8 attention, where initial and final attention steps use bf16 for stability,
+        and middle steps use FP8 for performance. To keep track of which steps to use which attention,
+        a boolean decision vector is created and stored in the runtime state. We keep track of the current
+        step during inference in the transformer forward pass, and when CFG is used, the transformer is called
+        twice per denoising step, so we need to account for that in the decision vector.
+        """
         number_of_initial_and_final_bf16_attn_steps = input_args["num_hybrid_bf16_attn_steps"] # Number of initial and final steps to use bf16 attention for stability
-        multiplier = 2 if self.do_classifier_free_guidance(input_args) else 1 # # CFG is switched on in this case and double the transformers are called
+        multiplier = self._calculate_hybyrid_attention_step_multiplier(input_args) # If CFG is switched on, double the transformers are called
         fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps * multiplier
         total_steps = input_args["num_inference_steps"] * multiplier # Total number of transformer calls during the denoising process
         # Create a boolean vector indicating which steps should use fp8 attention

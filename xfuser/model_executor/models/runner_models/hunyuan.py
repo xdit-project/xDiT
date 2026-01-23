@@ -34,6 +34,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         num_frames=129,
         num_inference_steps=50,
         guidance_scale=6.0,
+        num_hybrid_bf16_attn_steps = 5,
     )
     settings = ModelSettings(
         model_name="tencent/HunyuanVideo",
@@ -75,6 +76,8 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
+        # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
+        # to trigger both bf16 and fp8 attention paths. Reduce steps for warmup if not using hybrid attention.
         if not self.config.use_hybrid_fp8_attn:
             compile_args["num_inference_steps"] = 2 # Reduce steps for warmup # TODO: make this more generic
         self._run_timed_pipe(compile_args)

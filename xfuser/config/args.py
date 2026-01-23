@@ -135,7 +135,7 @@ class xFuserArgs:
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
     use_hybrid_fp8_attn: bool = False
-    num_hybrid_bf16_attn_steps: int = 5
+    num_hybrid_bf16_attn_steps: Optional[int] = None
 
 
     @staticmethod

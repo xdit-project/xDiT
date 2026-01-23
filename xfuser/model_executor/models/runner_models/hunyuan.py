@@ -75,9 +75,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        if self.config.use_hybrid_fp8_attn:
-            compile_args["num_inference_steps"] = compile_args["num_hybrid_bf16_attn_steps"] + 1  # Need more steps to cover both bf16 and fp8 attention
-        else:
+        if not self.config.use_hybrid_fp8_attn:
             compile_args["num_inference_steps"] = 2 # Reduce steps for warmup # TODO: make this more generic
         self._run_timed_pipe(compile_args)
 

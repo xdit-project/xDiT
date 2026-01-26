@@ -5,8 +5,6 @@ This module provides a console script that launches xDiT with distributed
 training support, equivalent to:
     torchrun --nproc_per_node=N xfuser/runner.py <args>
 
-Wraps torchrun as a subprocess with proper signal handling to kill all
-processes on Ctrl+C.
 """
 
 import math
@@ -29,30 +27,16 @@ TORCHRUN_ARGS = {
 def get_nproc_from_args(args: List[str]) -> int:
     """
     Infer the number of processes from the command line arguments.
-
-    TODO: Implement proper inference based on:
-    - ulysses_degree
-    - ring_degree
-    - pipefusion_parallel_degree
-    - data_parallel_degree
-    - tensor_parallel_degree
-
-    For now, returns a default of 8.
     """
-    # Placeholder: In the future, parse args to determine optimal nproc
-    # For example: nproc = ulysses_degree * ring_degree * pipefusion_parallel_degree * ...
-
-    # Check if --nproc is explicitly passed
     degree_args = ["ulysses", "tensor_parallel", "ring", "pipefusion_parallel", "data_parallel"]
-    degree_args = [f"--{arg}_degree" for arg in degree_args]
+    degree_args = [f"--{arg}_degree" for arg in degree_args] + [f"--{arg}-degree" for arg in degree_args]
     degrees = []
     for i, arg in enumerate(args):
         if arg in degree_args and i + 1 < len(args):
             degrees.append(int(args[i + 1]))
-        elif any(arg.startswith(f"{d}=") for d in degree_args):
-            for d in degree_args:
-                if arg.startswith(f"{d}="):
-                    degrees.append(int(arg.split("=")[1]))
+        for d in degree_args:
+            if arg.startswith(f"{d}="):
+                degrees.append(int(arg.split("=")[1]))
         if arg == "--use_cfg_parallel" or arg == "--use_cfg_parallel=True":
             degrees.append(2)  # Assume 2 for cfg parallel if enabled
 
@@ -99,7 +83,6 @@ def main(args: Optional[List[str]] = None) -> None:
     Main entry point for the xdit CLI.
 
     Launches distributed training by wrapping torchrun as a subprocess.
-    Handles Ctrl+C gracefully by killing all child processes.
     """
     if args is None:
         args = sys.argv[1:]
@@ -111,7 +94,6 @@ def main(args: Optional[List[str]] = None) -> None:
     if torchrun_values["--nproc_per_node"] is None:
         torchrun_values["--nproc_per_node"] = str(get_nproc_from_args(runner_args))
 
-    # Get the runner module
     runner_module = "xfuser.runner"
 
     # Build the torchrun command

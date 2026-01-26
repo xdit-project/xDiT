@@ -7,7 +7,8 @@ from xfuser.envs import PACKAGES_CHECKER, environment_variables
 ATTENTION_FUNCTION_REGISTRY = {}
 AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
 try:
-    AITER_FP8_STATIC_SCALE_WITH_DESCALE = float(AITER_FP8_STATIC_SCALE_WITH_DESCALE)
+    scale = float(AITER_FP8_STATIC_SCALE_WITH_DESCALE)
+    AITER_FP8_STATIC_SCALE_WITH_DESCALE = scale if scale > 0 else None
 except (TypeError, ValueError):
     AITER_FP8_STATIC_SCALE_WITH_DESCALE = None
 AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale vectors are not used.

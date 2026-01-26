@@ -448,7 +448,7 @@ class xFuserModel(abc.ABC):
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
     
-    def _calculate_hybyrid_attention_step_multiplier(self, input_args: dict) -> int:
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1
 
     def _setup_hybrid_fp8_attn(self, input_args: dict) -> None:

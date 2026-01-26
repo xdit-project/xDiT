@@ -23,7 +23,7 @@ from xfuser.core.utils.runner_utils import (
 @register_model("Wan2.1-I2V")
 class xFuserWan21I2VModel(xFuserModel):
 
-    def _calculate_hybyrid_attention_step_multiplier(self, input_args: dict) -> int:
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
         if do_cfg:
             return 2
@@ -183,7 +183,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 @register_model("Wan2.1-T2V")
 class xFuserWan21T2VModel(xFuserModel):
 
-    def _calculate_hybyrid_attention_step_multiplier(self, input_args: dict) -> int:
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
         if do_cfg:
             return 2

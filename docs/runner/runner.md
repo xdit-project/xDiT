@@ -95,6 +95,7 @@ Individual model classes that inherit from `xFuserModel`:
 | Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 | Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3.5-large` |
 | Z-Image-Turbo | `Z-Image-Turbo`, `Tongyi-MAI/Z-Image-Turbo` |
+| LTX-2 | `LTX-2`, `Lightricks/LTX-2` |
 
 
 ## CLI Arguments

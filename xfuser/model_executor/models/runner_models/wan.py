@@ -125,6 +125,7 @@ class xFuserWan21I2VModel(xFuserModel):
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
@@ -173,6 +174,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         return pipe
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
@@ -263,6 +265,7 @@ class xFuserWan21T2VModel(xFuserModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
@@ -310,6 +313,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         return pipe
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler

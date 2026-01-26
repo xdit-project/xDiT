@@ -90,7 +90,7 @@ class ModelSettings:
             }]
         }
     })
-    valid_tasks: list = field(default_factory=list)
+    valid_tasks: List[str] = field(default_factory=list)
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -447,7 +447,7 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
-    
+
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1
 

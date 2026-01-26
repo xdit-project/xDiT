@@ -6,6 +6,10 @@ from xfuser.envs import PACKAGES_CHECKER, environment_variables
 
 ATTENTION_FUNCTION_REGISTRY = {}
 AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
+try:
+    AITER_FP8_STATIC_SCALE_WITH_DESCALE = float(AITER_FP8_STATIC_SCALE_WITH_DESCALE)
+except (TypeError, ValueError):
+    AITER_FP8_STATIC_SCALE_WITH_DESCALE = None
 AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale vectors are not used.
 
 aten = torch.ops.aten
@@ -229,23 +233,30 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal):
 
     softmax_lse = None
     quant_dtype = aiter.dtypes.fp8
+    dtypeMax = torch.finfo(quant_dtype).max
     if AITER_FP8_HAS_DESCALE:
-        # Skip calling .max() every attention call, but take height for relatively large values,
-        # to avoid overflows and possible NaNs in attention computation.
-        scale=torch.tensor(AITER_FP8_STATIC_SCALE_WITH_DESCALE, dtype=torch.float32, device=query.device)
-        # TODO: Is it possible to improve dynamic scaling perf?
+        # If AITER_FP8_STATIC_SCALE_WITH_DESCALE is not set, use dynamic scaling.
+        # Set the environment variable XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE
+        # to a float value (i.e 2.5) to use static scaling.
+        if AITER_FP8_STATIC_SCALE_WITH_DESCALE is None:
+            scale = None
+        else:
+            scale=torch.tensor(AITER_FP8_STATIC_SCALE_WITH_DESCALE, dtype=torch.float32, device=query.device)
     else:
         # Use static scale of 1.0, since descale is not available.
         scale = torch.tensor(AITER_FP8_STATIC_SCALE_NO_DESCALE, dtype=torch.float32, device=query.device)
     quant_q, q_descale = aiter.per_tensor_quant(query,
                                                 scale=scale,
-                                                quant_dtype=quant_dtype)
+                                                quant_dtype=quant_dtype,
+                                                dtypeMax=dtypeMax)
     quant_k, k_descale = aiter.per_tensor_quant(key,
                                                 scale=scale,
-                                                quant_dtype=quant_dtype)
+                                                quant_dtype=quant_dtype,
+                                                dtypeMax=dtypeMax)
     quant_v, v_descale = aiter.per_tensor_quant(value,
                                                 scale=scale,
-                                                quant_dtype=quant_dtype)
+                                                quant_dtype=quant_dtype,
+                                                dtypeMax=dtypeMax)
 
     attn_kwargs = {}
     if AITER_FP8_HAS_DESCALE:

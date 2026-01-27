@@ -200,6 +200,15 @@ class PackagesEnvChecker:
         """
         try:
             import aiter
+            try:
+                from aiter.ops.groupnorm import GroupNorm
+                torch.nn.GroupNorm = GroupNorm
+                logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
+            except ImportError:
+                logger.warning(
+                    f'Using AITER but AITER GroupNorm is not available, please update AITER. '
+                    'Defaulting to torch GroupNorm implementation'
+                )
             return True
         except:
             if _is_hip():

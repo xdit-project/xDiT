@@ -26,12 +26,19 @@ from xfuser.core.utils.runner_utils import (
 @register_model("Wan2.1-I2V")
 class xFuserWan21I2VModel(xFuserModel):
 
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
+        do_cfg = input_args["guidance_scale"] > 1.0
+        if do_cfg:
+            return 2
+        return 1
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
         use_fsdp=True,
         use_cfg_parallel=True,
+        use_hybrid_fp8_attn=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -40,6 +47,7 @@ class xFuserWan21I2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
+        num_hybrid_bf16_attn_steps = 5,
     )
     settings = ModelSettings(
         model_name = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
@@ -121,10 +129,13 @@ class xFuserWan21I2VModel(xFuserModel):
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
+        # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
+        # to trigger both bf16 and fp8 attention paths. Reduce steps for warmup if not using hybrid attention.
+        if not self.config.use_hybrid_fp8_attn:
+            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
 
@@ -167,6 +178,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         return pipe
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
@@ -177,10 +189,17 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 @register_model("Wan2.1-T2V")
 class xFuserWan21T2VModel(xFuserModel):
 
+    def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
+        do_cfg = input_args["guidance_scale"] > 1.0
+        if do_cfg:
+            return 2
+        return 1
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_hybrid_fp8_attn=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -189,6 +208,7 @@ class xFuserWan21T2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
+        num_hybrid_bf16_attn_steps = 5,
     )
     settings = ModelSettings(
         mod_value=8,
@@ -249,10 +269,13 @@ class xFuserWan21T2VModel(xFuserModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
+        # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
+        # to trigger both bf16 and fp8 attention paths. Reduce steps for warmup if not using hybrid attention.
+        if not self.config.use_hybrid_fp8_attn:
+            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup # TODO: make this more generic
         self._run_timed_pipe(compile_args)
 
 
@@ -294,6 +317,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         return pipe
 
     def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler

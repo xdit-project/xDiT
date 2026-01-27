@@ -213,7 +213,7 @@ def main():
         help="Whether to use hybrid FP8 attention."
     )
     parser.add_argument(
-        "--number_of_bf16_attn_steps",
+        "--num_hybrid_bf16_attn_steps",
         type=int,
         default=10,
         help="Number of steps to use BF16 attention."
@@ -280,7 +280,7 @@ def main():
         device=f"cuda:{local_rank}")
 
     if args.use_hybrid_fp8_attn:
-        number_of_initial_and_final_bf16_attn_steps = args.number_of_bf16_attn_steps # Number of initial and final steps to use bf16 attention for stability
+        number_of_initial_and_final_bf16_attn_steps = args.num_hybrid_bf16_attn_steps # Number of initial and final steps to use bf16 attention for stability
         fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps
         total_steps = input_config.num_inference_steps # Total number of transformer calls during the denoising process
         # Create a boolean vector indicating which steps should use fp8 attention

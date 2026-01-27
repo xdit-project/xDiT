@@ -240,6 +240,8 @@ def shard_model_wan(
         pipe.text_encoder = shard_t5_encoder(pipe.text_encoder, local_rank, get_world_group().device_group)
     else:
         pipe.text_encoder.to(f"cuda:{local_rank}")
+    if pipe.image_encoder is not None:
+        pipe.image_encoder.to(f"cuda:{local_rank}")
     pipe.vae.to(f"cuda:{local_rank}")
 
 
@@ -259,7 +261,7 @@ def main():
         help="Whether to use hybrid FP8 attention."
     )
     parser.add_argument(
-        "--number_of_bf16_attn_steps",
+        "--num_hybrid_bf16_attn_steps",
         type=int,
         default=10,
         help="Number of steps to use BF16 attention."
@@ -351,7 +353,7 @@ def main():
             )
     
     if args.use_hybrid_fp8_attn:
-        number_of_initial_and_final_bf16_attn_steps = args.number_of_bf16_attn_steps # Number of initial and final steps to use bf16 attention for stability
+        number_of_initial_and_final_bf16_attn_steps = args.num_hybrid_bf16_attn_steps # Number of initial and final steps to use bf16 attention for stability
         guidance_scale = input_config.guidance_scale
         multiplier = 2 if guidance_scale > 1.0 else 1 # CFG is switched on in this case and double the transformers are called
         fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps * multiplier

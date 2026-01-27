@@ -44,7 +44,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "XDIT_LOGGING_LEVEL": lambda: os.getenv("XDIT_LOGGING_LEVEL", "INFO"),
     # this is used to set the static scale for AITER FP8 attention when descale vectors are used
     "AITER_FP8_STATIC_SCALE_WITH_DESCALE": lambda: os.environ.get(
-                "XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", 2.5
+                "XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", None
             )
 }
 

@@ -18,6 +18,30 @@ from xfuser.core.utils.runner_utils import (
     quantize_linear_layers_to_fp8,
 )
 
+COMMON_FSDP_STRATEGY = {
+    "transformer": {
+        "block_attr": "blocks",
+        "dtype": torch.bfloat16,
+        "children_to_device": [{
+            "submodule_key": "",
+            "exclude_keys": ["blocks"]
+        }]
+    },
+    "text_encoder": {
+        "block_attr": "block",
+        "shard_submodule_key": "encoder",
+        "children_to_device": [
+            {
+                "submodule_key": "encoder",
+                "exclude_keys": ["block"]
+            },
+            {
+                "exclude_keys": ["encoder"]
+            }
+        ],
+    }
+}
+
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
@@ -52,29 +76,7 @@ class xFuserWan21I2VModel(xFuserModel):
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
         fp8_gemm_module_list=["transformer.blocks"],
-        fsdp_strategy={
-            "transformer": {
-                "block_attr": "blocks",
-                "dtype": torch.bfloat16,
-                "children_to_device": [{
-                    "submodule_key": "",
-                    "exclude_keys": ["blocks"]
-                }]
-            },
-            "text_encoder": {
-                "block_attr": "block",
-                "shard_submodule_key": "encoder",
-                "children_to_device": [
-                    {
-                        "submodule_key": "encoder",
-                        "exclude_keys": ["block"]
-                    },
-                    {
-                        "exclude_keys": ["encoder"]
-                    }
-                ],
-            }
-        }
+        fsdp_strategy=COMMON_FSDP_STRATEGY,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -213,29 +215,7 @@ class xFuserWan21T2VModel(xFuserModel):
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
         fp8_gemm_module_list=["transformer.blocks"],
-        fsdp_strategy={
-            "transformer": {
-                "block_attr": "blocks",
-                "dtype": torch.bfloat16,
-                "children_to_device": [{
-                    "submodule_key": "",
-                    "exclude_keys": ["blocks"]
-                }]
-            },
-            "text_encoder": {
-                "block_attr": "block",
-                "shard_submodule_key": "encoder",
-                "children_to_device": [
-                    {
-                        "submodule_key": "encoder",
-                        "exclude_keys": ["block"]
-                    },
-                    {
-                        "exclude_keys": ["encoder"]
-                    }
-                ],
-            }
-        }
+        fsdp_strategy=COMMON_FSDP_STRATEGY,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -330,15 +310,25 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_fp8_gemms=True,
         use_fsdp=True,
     )
-
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
-        self.settings.model_name = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
-        self.settings.output_name = "wan2.2_ti2v"
-        self.settings.fps = 24
-        self.mod_value = 16
-        self.settings.fp8_gemm_module_list=["transformer.blocks"]
-        self.settings.valid_tasks = ["i2v", "t2v"]
+    default_input_values = DefaultInputValues(
+        height=736,
+        width=1280,
+        num_inference_steps=50,
+        num_frames=121,
+        negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
+        guidance_scale=5.0,
+        num_hybrid_bf16_attn_steps=5,
+    )
+    settings = ModelSettings(
+        mod_value=32,
+        fps=24,
+        model_output_type="video",
+        model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        output_name="wan2.2_ti2v",
+        fp8_gemm_module_list=["transformer.blocks"],
+        fsdp_strategy=COMMON_FSDP_STRATEGY,
+        valid_tasks=["i2v", "t2v"],
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         torch.set_float32_matmul_precision('high')

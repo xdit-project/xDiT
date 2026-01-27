@@ -460,7 +460,7 @@ class xFuserModel(abc.ABC):
         twice per denoising step, so we need to account for that in the decision vector.
         """
         number_of_initial_and_final_bf16_attn_steps = input_args["num_hybrid_bf16_attn_steps"] # Number of initial and final steps to use bf16 attention for stability
-        multiplier = self._calculate_hybyrid_attention_step_multiplier(input_args) # If CFG is switched on, double the transformers are called
+        multiplier = self._calculate_hybrid_attention_step_multiplier(input_args) # If CFG is switched on, double the transformers are called
         fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps * multiplier
         total_steps = input_args["num_inference_steps"] * multiplier # Total number of transformer calls during the denoising process
         # Create a boolean vector indicating which steps should use fp8 attention

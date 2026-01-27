@@ -299,6 +299,20 @@ class PackagesEnvChecker:
 
 PACKAGES_CHECKER = PackagesEnvChecker()
 
+def _setup_rocm_libraries():
+    if PACKAGES_CHECKER.packages_info.get("has_aiter", False):
+        try:
+            from aiter.ops.groupnorm import GroupNorm
+            torch.nn.GroupNorm = GroupNorm
+            logger.info("Using AITER GroupNorm as torch.nn.GroupNorm")
+        except ImportError:
+            logger.warning(
+                f'Using AITER but AITER GroupNorm is not available, please update AITER. '
+                'Defaulting to torch GroupNorm implementation'
+            )
+
+if _is_hip():
+    _setup_rocm_libraries()
 
 def __getattr__(name):
     # lazy evaluation of environment variables

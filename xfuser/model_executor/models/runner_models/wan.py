@@ -318,3 +318,87 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
         self._run_timed_pipe(input_args)
+
+
+@register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
+@register_model("Wan2.2-TI2V")
+class xFuserWan22TI2VModel(xFuserWan21T2VModel):
+
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        use_fp8_gemms=True,
+        use_fsdp=True,
+    )
+
+    def __init__(self, config: xFuserArgs) -> None:
+        super().__init__(config)
+        self.settings.model_name = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+        self.settings.output_name = "wan2.2_ti2v"
+        self.settings.fps = 24
+        self.mod_value = 16
+        self.settings.fp8_gemm_module_list=["transformer.blocks"]
+        self.settings.valid_tasks = ["i2v", "t2v"]
+
+    def _load_model(self) -> DiffusionPipeline:
+        torch.set_float32_matmul_precision('high')
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+        pipe_class = WanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
+        pipe = pipe_class.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+        )
+        return pipe
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        kwargs = {
+            "height": input_args["height"],
+            "width": input_args["width"],
+            "prompt": str(input_args["prompt"]),
+            "negative_prompt": str(input_args["negative_prompt"]),
+            "num_inference_steps": input_args["num_inference_steps"],
+            "num_frames": input_args["num_frames"],
+            "guidance_scale": input_args["guidance_scale"],
+            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        }
+        if self.config.task == "i2v":
+            kwargs["image"] = input_args["image"]
+        output = self.pipe(**kwargs)
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
+
+    def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self._run_timed_pipe(input_args)
+
+    def _preprocess_args_images(self, input_args: dict) -> dict:
+        input_args = super()._preprocess_args_images(input_args)
+        if self.config.task != "i2v":
+            return input_args
+
+        image = input_args["input_images"][0]
+        width, height = input_args["width"], input_args["height"]
+        if input_args.get("resize_input_images", False):
+            image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+        else:
+            image = resize_image_to_max_area(image, height, width, self.settings.mod_value)
+        input_args["height"] = image.height
+        input_args["width"] = image.width
+        input_args["image"] = image
+        return input_args
+
+    def _validate_args(self, input_args: dict) -> None:
+        """ Validate input arguments """
+        super()._validate_args(input_args)
+        images = input_args.get("input_images", [])
+        if self.config.task == "i2v":
+            if len(images) != 1:
+                raise ValueError("Exactly one input image is required for Wan TI2V model when using i2v task.")
+        else:
+            if len(images) != 0:
+                raise ValueError("No input images should be provided for Wan TI2V model when using t2v task.")

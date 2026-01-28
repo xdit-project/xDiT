@@ -91,7 +91,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
 
-    valid_tasks = ["i2v", "t2v"]
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -109,6 +108,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         model_output_type="video",
         fps=24,
         mod_value=16,
+        valid_tasks=["i2v", "t2v"],
     )
 
 

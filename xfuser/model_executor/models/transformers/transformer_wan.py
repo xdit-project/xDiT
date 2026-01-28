@@ -208,6 +208,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         else:
             lora_scale = 1.0
 
+
         get_runtime_state().increment_step_counter()
 
         sp_world_rank = get_sequence_parallel_rank()

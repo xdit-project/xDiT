@@ -90,6 +90,7 @@ class ModelSettings:
             }]
         }
     })
+    valid_tasks: list = field(default_factory=list)
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -136,7 +137,6 @@ class xFuserModel(abc.ABC):
     capabilities: ModelCapabilities = ModelCapabilities()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
-    valid_tasks: list = []
     model_output_type: str = ""
     fps: int = 0
 
@@ -196,13 +196,13 @@ class xFuserModel(abc.ABC):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 
         possible_task = getattr(config, "task", None)
-        if possible_task and self.valid_tasks:
-            if possible_task not in self.valid_tasks:
-                raise ValueError(f"Model {self.settings.model_name} does not support task '{possible_task}'. Supported tasks: {self.valid_tasks}")
-        if possible_task and not self.valid_tasks:
+        if possible_task and self.settings.valid_tasks:
+            if possible_task not in self.settings.valid_tasks:
+                raise ValueError(f"Model {self.settings.model_name} does not support task '{possible_task}'. Supported tasks: {self.settings.valid_tasks}")
+        if possible_task and not self.settings.valid_tasks:
             raise ValueError(f"Model {self.settings.model_name} does not support multiple tasks, but task '{possible_task}' was specified.")
-        if not possible_task and self.valid_tasks:
-            raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.valid_tasks}")
+        if not possible_task and self.settings.valid_tasks:
+            raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.settings.valid_tasks}")
         if config.dataset_path and not config.batch_size:
             raise ValueError(f"Dataset path specified without batch size. Please specify batch size for dataset inference.")
 

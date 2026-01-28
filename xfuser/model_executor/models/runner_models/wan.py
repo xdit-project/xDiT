@@ -18,6 +18,30 @@ from xfuser.core.utils.runner_utils import (
     quantize_linear_layers_to_fp8,
 )
 
+COMMON_FSDP_STRATEGY = {
+    "transformer": {
+        "block_attr": "blocks",
+        "dtype": torch.bfloat16,
+        "children_to_device": [{
+            "submodule_key": "",
+            "exclude_keys": ["blocks"]
+        }]
+    },
+    "text_encoder": {
+        "block_attr": "block",
+        "shard_submodule_key": "encoder",
+        "children_to_device": [
+            {
+                "submodule_key": "encoder",
+                "exclude_keys": ["block"]
+            },
+            {
+                "exclude_keys": ["encoder"]
+            }
+        ],
+    }
+}
+
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
@@ -52,29 +76,7 @@ class xFuserWan21I2VModel(xFuserModel):
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
         fp8_gemm_module_list=["transformer.blocks"],
-        fsdp_strategy={
-            "transformer": {
-                "block_attr": "blocks",
-                "dtype": torch.bfloat16,
-                "children_to_device": [{
-                    "submodule_key": "",
-                    "exclude_keys": ["blocks"]
-                }]
-            },
-            "text_encoder": {
-                "block_attr": "block",
-                "shard_submodule_key": "encoder",
-                "children_to_device": [
-                    {
-                        "submodule_key": "encoder",
-                        "exclude_keys": ["block"]
-                    },
-                    {
-                        "exclude_keys": ["encoder"]
-                    }
-                ],
-            }
-        }
+        fsdp_strategy=COMMON_FSDP_STRATEGY,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -213,29 +215,7 @@ class xFuserWan21T2VModel(xFuserModel):
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
         fp8_gemm_module_list=["transformer.blocks"],
-        fsdp_strategy={
-            "transformer": {
-                "block_attr": "blocks",
-                "dtype": torch.bfloat16,
-                "children_to_device": [{
-                    "submodule_key": "",
-                    "exclude_keys": ["blocks"]
-                }]
-            },
-            "text_encoder": {
-                "block_attr": "block",
-                "shard_submodule_key": "encoder",
-                "children_to_device": [
-                    {
-                        "submodule_key": "encoder",
-                        "exclude_keys": ["block"]
-                    },
-                    {
-                        "exclude_keys": ["encoder"]
-                    }
-                ],
-            }
-        }
+        fsdp_strategy=COMMON_FSDP_STRATEGY,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -318,3 +298,97 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
         self._run_timed_pipe(input_args)
+
+
+@register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
+@register_model("Wan2.2-TI2V")
+class xFuserWan22TI2VModel(xFuserWan21T2VModel):
+
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        use_fp8_gemms=True,
+        use_fsdp=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=736,
+        width=1280,
+        num_inference_steps=50,
+        num_frames=121,
+        negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
+        guidance_scale=5.0,
+        num_hybrid_bf16_attn_steps=5,
+    )
+    settings = ModelSettings(
+        mod_value=32,
+        fps=24,
+        model_output_type="video",
+        model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        output_name="wan2.2_ti2v",
+        fp8_gemm_module_list=["transformer.blocks"],
+        fsdp_strategy=COMMON_FSDP_STRATEGY,
+        valid_tasks=["i2v", "t2v"],
+    )
+
+    def _load_model(self) -> DiffusionPipeline:
+        torch.set_float32_matmul_precision('high')
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+        pipe_class = WanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
+        pipe = pipe_class.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+        )
+        return pipe
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        kwargs = {
+            "height": input_args["height"],
+            "width": input_args["width"],
+            "prompt": str(input_args["prompt"]),
+            "negative_prompt": str(input_args["negative_prompt"]),
+            "num_inference_steps": input_args["num_inference_steps"],
+            "num_frames": input_args["num_frames"],
+            "guidance_scale": input_args["guidance_scale"],
+            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        }
+        if self.config.task == "i2v":
+            kwargs["image"] = input_args["image"]
+        output = self.pipe(**kwargs)
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
+
+    def _compile_model(self, input_args):
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self._run_timed_pipe(input_args)
+
+    def _preprocess_args_images(self, input_args: dict) -> dict:
+        input_args = super()._preprocess_args_images(input_args)
+        if self.config.task != "i2v":
+            return input_args
+
+        image = input_args["input_images"][0]
+        width, height = input_args["width"], input_args["height"]
+        if input_args.get("resize_input_images", False):
+            image = resize_and_crop_image(image, width, height, self.settings.mod_value)
+        else:
+            image = resize_image_to_max_area(image, height, width, self.settings.mod_value)
+        input_args["height"] = image.height
+        input_args["width"] = image.width
+        input_args["image"] = image
+        return input_args
+
+    def _validate_args(self, input_args: dict) -> None:
+        """ Validate input arguments """
+        super()._validate_args(input_args)
+        images = input_args.get("input_images", [])
+        if self.config.task == "i2v":
+            if len(images) != 1:
+                raise ValueError("Exactly one input image is required for Wan TI2V model when using i2v task.")
+        else:
+            if len(images) != 0:
+                raise ValueError("No input images should be provided for Wan TI2V model when using t2v task.")

@@ -24,7 +24,7 @@ else:
 
 logger = logging.get_logger(__name__)
 
-class WanImageToVideoPipelineWrapper(WanImageToVideoPipeline):
+class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):
     """Direct subclass of the diffusers pipeline."""
 
     @torch.no_grad()

@@ -5,7 +5,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
-    WanImageToVideoPipelineWrapper,
+    xFuserWanImageToVideoPipeline,
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
@@ -87,7 +87,7 @@ class xFuserWan21I2VModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-        pipe = WanImageToVideoPipelineWrapper.from_pretrained(
+        pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
@@ -169,7 +169,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer_2",
         )
-        pipe = WanImageToVideoPipelineWrapper.from_pretrained(
+        pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,

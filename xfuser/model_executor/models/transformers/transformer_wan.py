@@ -30,7 +30,10 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
     def __init__(self, use_parallel_attention: bool = True) -> None:
         super().__init__()
-        self.use_parallel_attention = use_parallel_attention
+        if use_parallel_attention:
+            self.attention_function = USP
+        else:
+            self.attention_function = attention
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention
@@ -111,18 +114,12 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             key_img = key_img.unflatten(2, (attn.heads, -1))
             value_img = value_img.unflatten(2, (attn.heads, -1))
 
-            if self.use_parallel_attention:
-                hidden_states_img = USP(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)).transpose(1, 2)
-            else:
-                hidden_states_img = attention(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)).transpose(1, 2)
+            hidden_states_img = self.attention_function(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 
 
-        if self.use_parallel_attention:
-            hidden_states = USP(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)).transpose(1, 2)
-        else:
-            hidden_states = attention(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)).transpose(1, 2)
+        hidden_states = self.attention_function(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)).transpose(1, 2)
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)

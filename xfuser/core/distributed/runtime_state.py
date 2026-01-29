@@ -203,6 +203,13 @@ class DiTRuntimeState(RuntimeState):
         self._check_model_and_parallel_config(
             pipeline=pipeline, parallel_config=config.parallel_config
         )
+        try:
+            self._check_pipeline_class_name(pipeline, config)
+        except Exception:
+            # Keeps backward compatatability with existing pipeline classes.
+            pass
+
+    def _check_pipeline_class_name(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.cogvideox = False
         self.consisid = False
         self.hunyuan_video = False
@@ -781,6 +788,7 @@ class DiTRuntimeState(RuntimeState):
             patches_shape_list=patches_shape,
             feature_map_shape=feature_map_shape,
         )
+
 
 
 class ExternalRuntimeState(RuntimeState):

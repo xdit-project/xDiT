@@ -1,9 +1,12 @@
 import copy
 import torch
-from diffusers import WanImageToVideoPipeline, WanPipeline
+from diffusers import WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
+from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
+    xFuserWanImageToVideoPipeline,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
     xFuserModel,
@@ -58,6 +61,7 @@ class xFuserWan21I2VModel(xFuserModel):
         ring_degree=True,
         use_fp8_gemms=True,
         use_fsdp=True,
+        use_cfg_parallel=True,
         use_hybrid_fp8_attn=True,
     )
     default_input_values = DefaultInputValues(
@@ -85,7 +89,7 @@ class xFuserWan21I2VModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-        pipe = WanImageToVideoPipeline.from_pretrained(
+        pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
@@ -142,9 +146,9 @@ class xFuserWan21I2VModel(xFuserModel):
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
     def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
         self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_i2v"
+        super().__init__(config)
         self.settings.fsdp_strategy["transformer_2"] = {
                 "block_attr": "blocks",
                 "dtype": torch.bfloat16,
@@ -167,7 +171,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer_2",
         )
-        pipe = WanImageToVideoPipeline.from_pretrained(
+        pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,

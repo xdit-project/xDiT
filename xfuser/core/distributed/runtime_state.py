@@ -206,8 +206,7 @@ class DiTRuntimeState(RuntimeState):
         try:
             self._check_pipeline_class_name(pipeline, config)
         except Exception:
-            # Keeps backward compatatability with legacy pipeline classes
-            # while allowing new pipelines not dependent on xFuser base wrapper.
+            # Keeps backward compatatability with existing pipeline classes.
             pass
 
     def _check_pipeline_class_name(self, pipeline: DiffusionPipeline, config: EngineConfig):

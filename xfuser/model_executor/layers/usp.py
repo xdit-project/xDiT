@@ -286,3 +286,24 @@ def USP(
     return out
 
 
+def attention(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        dropout_p: float = 0.0,
+        is_causal: bool = False,
+    ):
+    """
+    Runs attention call without any parallelism.
+    This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
+    """
+    attention_function = _get_attention_function()
+    out, _ = attention_function(
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
+    )
+    return out
+

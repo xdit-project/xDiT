@@ -341,7 +341,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-        pipe_class = WanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
+        pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
         pipe = pipe_class.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,

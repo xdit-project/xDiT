@@ -37,7 +37,6 @@ class xFuserLTX2VideoModel(xFuserModel):
         output_name="ltx_2_video",
         model_output_type="video",
         fps=24,
-        valid_tasks=["i2v", "t2v"]
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -50,19 +49,11 @@ class xFuserLTX2VideoModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-        if self.config.task == "i2v":
-            pipe = LTX2ImageToVideoPipeline.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                transformer=transformer,
-                torch_dtype=torch.bfloat16,
-            )
-        else:
-            pipe = LTX2Pipeline.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                transformer=transformer,
-                torch_dtype=torch.bfloat16,
-            )
-
+        pipe = LTX2Pipeline.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+        )
         latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
             self.settings.model_name,
             subfolder="latent_upsampler",
@@ -71,49 +62,45 @@ class xFuserLTX2VideoModel(xFuserModel):
         upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
         self.upsample_pipe = upsample_pipe
 
-        self.second_scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+        self.first_scheduler = self.pipe.scheduler
+        self.second_scheduler = FlowMatchEulerDiscreteScheduler.from_config( # Scheduler for the 2nd stage
             pipe.scheduler.config, use_dynamic_shifting=False, shift_terminal=None
         )
+
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        kwargs = {
-            "prompt": input_args["prompt"],
-            "negative_prompt": input_args["negative_prompt"],
-            "height": input_args["height"] // 2,
-            "width": input_args["width"] // 2,
-            "num_frames": input_args["num_frames"],
-            "frame_rate": self.settings.fps,
-            "sigmas": None,
-            "num_inference_steps": input_args["num_inference_steps"],
-            "guidance_scale": input_args["guidance_scale"],
-            "output_type": "latent",
-            "return_dict": False,
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
-        }
-        if self.config.task == "i2v":
-            kwargs["image"] = input_args["input_images"][0]
-        video_latent, audio_latent = self.pipe(**kwargs)
+        video_latent, audio_latent = self.pipe(
+            prompt=input_args["prompt"],
+            negative_prompt=input_args["negative_prompt"],
+            height=input_args["height"] // 2,
+            width=input_args["width"] // 2,
+            num_frames=input_args["num_frames"],
+            frame_rate=self.settings.fps,
+            sigmas=None,
+            num_inference_steps=input_args["num_inference_steps"],
+            guidance_scale=input_args["guidance_scale"],
+            output_type="latent",
+            return_dict=False,
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        )
 
         video_latent = self.upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
-        old_scheduler = self.pipe.scheduler
+
         self.pipe.scheduler = self.second_scheduler
-
-        kwargs = {
-            "latents": video_latent,
-            "audio_latents": audio_latent,
-            "prompt": input_args["prompt"],
-            "negative_prompt": input_args["negative_prompt"],
-            "num_inference_steps": 3,
-            "guidance_scale": 1.0,
-            "noise_scale": STAGE_2_DISTILLED_SIGMA_VALUES[0],
-            "sigmas": STAGE_2_DISTILLED_SIGMA_VALUES,
-            "output_type": "np",
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
-        }
-
-        output = self.pipe(**kwargs)
-        self.pipe.scheduler = old_scheduler
+        output = self.pipe(
+            latents=video_latent,
+            audio_latents=audio_latent,
+            prompt=input_args["prompt"],
+            negative_prompt=input_args["negative_prompt"],
+            num_inference_steps=3,
+            guidance_scale=1.0,
+            noise_scale=STAGE_2_DISTILLED_SIGMA_VALUES[0],
+            sigmas=STAGE_2_DISTILLED_SIGMA_VALUES,
+            output_type="np",
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        )
+        self.pipe.scheduler = self.first_scheduler
 
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
@@ -129,16 +116,6 @@ class xFuserLTX2VideoModel(xFuserModel):
             output_path = f"{self.config.output_directory}/{output_name}_{i}.mp4"
             encode_video(video[0], audio=audio[0].float().cpu(), audio_sample_rate=24000, fps=self.settings.fps, output_path=output_path)
             log(f"Output video saved to {output_path}")
-
-    def _validate_args(self, input_args: dict) -> None:
-        """ Validate input arguments """
-        super()._validate_args(input_args)
-        images = input_args.get("input_images", [])
-        if self.config.task == "i2v" and len(images) != 1:
-            raise ValueError("Exactly one input image is required for LTX-2 I2V task.")
-        elif self.config.task == "t2v" and len(images) != 0:
-            raise ValueError("Input images are not supported for LTX-2 T2V task.")
-        return input_args
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)

@@ -22,12 +22,12 @@ from xfuser.core.distributed import (
 
 class xFuserLTX2AudioVideoAttnProcessor:
 
-    def __init__(self, use_parallel_attention: bool = True, gather=False):
+    def __init__(self, use_parallel_attention: bool = True, gather_kv=False):
         if use_parallel_attention:
             self.attention_method = USP
         else:
             self.attention_method = attention
-        self.gather = gather
+        self.gather_kv = gather_kv
 
     def __call__(
         self,
@@ -42,7 +42,7 @@ class xFuserLTX2AudioVideoAttnProcessor:
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
-        if self.gather:
+        if self.gather_kv:
             encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
             key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
@@ -175,7 +175,7 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
             block.audio_attn1.processor = xFuserLTX2AudioVideoAttnProcessor(use_parallel_attention=False)
             block.audio_attn2.processor = xFuserLTX2AudioVideoAttnProcessor(use_parallel_attention=False)
             block.audio_to_video_attn.processor = xFuserLTX2AudioVideoAttnProcessor(use_parallel_attention=False)
-            block.video_to_audio_attn.processor = xFuserLTX2AudioVideoAttnProcessor(use_parallel_attention=False, gather=True)
+            block.video_to_audio_attn.processor = xFuserLTX2AudioVideoAttnProcessor(use_parallel_attention=False, gather_kv=True)
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
@@ -291,25 +291,10 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         sp_world_size = get_sequence_parallel_world_size()
 
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        #audio_pad_amount  = (sp_world_size - (audio_hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        #encoder_pad_amount = (sp_world_size - (encoder_hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        #audio_encoder_pad_amount = (sp_world_size - (audio_encoder_hidden_states.shape[1] % sp_world_size)) % sp_world_size
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
-        #audio_hidden_states = self._chunk_and_pad_sequence(audio_hidden_states, sp_world_rank, sp_world_size, audio_pad_amount, dim=1)
-        #encoder_hidden_states = self._chunk_and_pad_sequence(encoder_hidden_states, sp_world_rank, sp_world_size, encoder_pad_amount, dim=1)
-        #audio_encoder_hidden_states = self._chunk_and_pad_sequence(audio_encoder_hidden_states, sp_world_rank, sp_world_size, audio_encoder_pad_amount, dim=1)
-        #encoder_attention_mask = self._chunk_and_pad_sequence(encoder_attention_mask, sp_world_rank, sp_world_size, encoder_pad_amount, dim=1) if encoder_attention_mask is not None else None
-        #audio_encoder_attention_mask = self._chunk_and_pad_sequence(audio_encoder_attention_mask, sp_world_rank, sp_world_size, audio_encoder_pad_amount, dim=1) if audio_encoder_attention_mask is not None else None
 
         # Determine timestep for audio.
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
-
-        # if len(timestep.shape) == 2:
-        #     timestep = self._chunk_and_pad_sequence(timestep, sp_world_rank, sp_world_size, pad_amount, dim=1)
-
-        # if len(audio_timestep.shape) == 2:
-        #     print(audio_timestep.shape)
-        #     audio_timestep = self._chunk_and_pad_sequence(audio_timestep, sp_world_rank, sp_world_size, audio_pad_amount, dim=1)
 
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
         if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
@@ -334,10 +319,8 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
 
         video_coords = self._chunk_and_pad_sequence(video_coords, sp_world_rank, sp_world_size, pad_amount, dim=2)
-        #audio_coords = self._chunk_and_pad_sequence(audio_coords, sp_world_rank, sp_world_size, audio_pad_amount, dim=2)
 
         video_rotary_emb = self.rope(video_coords, device=hidden_states.device)
-        #video_rotary_emb = [self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=2) for x in video_rotary_emb]
 
         audio_rotary_emb = self.audio_rope(audio_coords, device=audio_hidden_states.device)
 
@@ -475,8 +458,6 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         audio_hidden_states = self.audio_norm_out(audio_hidden_states)
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
         audio_output = self.audio_proj_out(audio_hidden_states)
-
-        #audio_output = self._gather_and_unpad(audio_output, audio_pad_amount, dim=1)
 
         if not return_dict:
             return (output, audio_output)

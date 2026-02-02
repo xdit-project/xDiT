@@ -7,6 +7,12 @@ from diffusers.models.transformers.transformer_ltx2 import (
     AudioVisualModelOutput,
 )
 
+from diffusers.utils import (
+    USE_PEFT_BACKEND,
+    scale_lora_layers,
+    unscale_lora_layers,
+)
+
 
 
 from xfuser.model_executor.layers.usp import (
@@ -287,6 +293,23 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
         """
 
+        if attention_kwargs is not None:
+            attention_kwargs = attention_kwargs.copy()
+            lora_scale = attention_kwargs.pop("scale", 1.0)
+        else:
+            lora_scale = 1.0
+
+        if USE_PEFT_BACKEND:
+            # weight the lora layers by setting `lora_scale` for each PEFT layer
+            scale_lora_layers(self, lora_scale)
+        else:
+            if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
+                logger.warning(
+                    "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
+                )
+
+
+
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
 
@@ -458,6 +481,10 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         audio_hidden_states = self.audio_norm_out(audio_hidden_states)
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
         audio_output = self.audio_proj_out(audio_hidden_states)
+
+        if USE_PEFT_BACKEND:
+            # remove `lora_scale` from each PEFT layer
+            unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output, audio_output)

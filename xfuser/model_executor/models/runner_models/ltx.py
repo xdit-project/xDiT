@@ -69,18 +69,26 @@ class xFuserLTX2VideoModel(xFuserModel):
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
+        second_pipe = LTX2Pipeline.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+        )
+        second_pipe.load_lora_weights(
+            self.settings.model_name, adapter_name="stage_2_distilled", weight_name="ltx-2-19b-distilled-lora-384.safetensors"
+        )
         latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
             self.settings.model_name,
             subfolder="latent_upsampler",
             torch_dtype=torch.bfloat16,
         )
         upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
-        self.upsample_pipe = upsample_pipe
 
-        self.first_scheduler = self.pipe.scheduler
-        self.second_scheduler = FlowMatchEulerDiscreteScheduler.from_config( # Scheduler for the 2nd stage
+        second_pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config( # Scheduler for the 2nd stage
             pipe.scheduler.config, use_dynamic_shifting=False, shift_terminal=None
         )
+        self.second_pipe = second_pipe
+        self.upsample_pipe = upsample_pipe
 
         return pipe
 
@@ -102,8 +110,7 @@ class xFuserLTX2VideoModel(xFuserModel):
 
         video_latent = self.upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
 
-        self.pipe.scheduler = self.second_scheduler
-        output = self.pipe(
+        output = self.second_pipe(
             latents=video_latent,
             audio_latents=audio_latent,
             prompt=input_args["prompt"],
@@ -115,8 +122,6 @@ class xFuserLTX2VideoModel(xFuserModel):
             output_type="np",
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        self.pipe.scheduler = self.first_scheduler
-
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
 
@@ -135,3 +140,4 @@ class xFuserLTX2VideoModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         self.upsample_pipe.to(self.pipe.device)
+        self.second_pipe.to(self.pipe.device)

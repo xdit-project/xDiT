@@ -31,6 +31,11 @@ if env_info["has_aiter"]:
         AITER_FP8_HAS_DESCALE = inspect.signature(aiter.flash_attn_fp8_pertensor_func).parameters.get("q_descale") is not None
     except (AttributeError, TypeError):
         AITER_FP8_HAS_DESCALE = False
+    
+    try:
+        from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
+    except ImportError:
+        pass # Error is rasied in runtime_state.py if AITER_SAGE is not available.
 
 if env_info["has_flash_attn"]:
     from flash_attn import flash_attn_func as flash_attn_func_2
@@ -54,6 +59,7 @@ class AttentionBackendType(Enum):
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
     NPU = "NPU"
+    AITER_SAGE = "AITER Sage"
 
 def register_attention_function(backend_type):
     """
@@ -342,4 +348,12 @@ def npu_flash_attn_call(query, key, value, dropout_p, is_causal):
     block_out = block_out.transpose(1, 2)
     block_lse = block_lse.squeeze(-1)
     return block_out, block_lse
+
+@register_attention_function(AttentionBackendType.AITER_SAGE)
+def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
+    # Pass layout="bhsd" to avoid permutation
+    softmax_lse = None
+    attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
+    output = attn_fn(query, key, value)
+    return output, softmax_lse
 

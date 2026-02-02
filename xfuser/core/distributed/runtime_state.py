@@ -156,7 +156,11 @@ class RuntimeState(metaclass=ABCMeta):
         """
         Check if the selected attention backend is compatible with the current configuration.
         """
-        if attention_backend in [AttentionBackendType.SDPA, AttentionBackendType.SDPA_MATH, AttentionBackendType.FLASH_4, AttentionBackendType.AITER_FP8]:
+        if attention_backend in [AttentionBackendType.SDPA,
+                                 AttentionBackendType.SDPA_MATH,
+                                 AttentionBackendType.FLASH_4,
+                                 AttentionBackendType.AITER_FP8,
+                                 AttentionBackendType.AITER_SAGE]:
             if self.parallel_config.ring_degree > 1:
                 raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:
@@ -164,6 +168,12 @@ class RuntimeState(metaclass=ABCMeta):
                 from aiter import flash_attn_fp8_pertensor_func
             except ImportError:
                 raise RuntimeError("AITER fp8 flash attention is not available, please update AITER")
+        elif attention_backend == AttentionBackendType.AITER_SAGE:
+            try:
+                import aiter.ops.triton.attention
+                from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
+            except ImportError:
+                raise RuntimeError("AITER Sage attention is not available, please update AITER") from None
 
 
 

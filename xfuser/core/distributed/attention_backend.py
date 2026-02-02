@@ -58,8 +58,8 @@ class AttentionBackendType(Enum):
     FLASH_4 = "Flash Attention V4"
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
-    NPU = "NPU"
     AITER_SAGE = "AITER Sage"
+    NPU = "NPU"
 
 def register_attention_function(backend_type):
     """

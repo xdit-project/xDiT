@@ -1,5 +1,8 @@
 import torch
-from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler
+from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline, LTX2LatentUpsamplePipeline
+from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.ltx2.export_utils import encode_video
 from xfuser.model_executor.models.transformers.transformer_ltx2 import xFuserLTX2VideoTransformer3DWrapper
@@ -22,7 +25,7 @@ class xFuserLTX2VideoModel(xFuserModel):
 
     default_input_values = DefaultInputValues(
         height=1024,
-        width=1024,
+        width=1536,
         num_frames=121,
         num_inference_steps=40,
         guidance_scale=3.0,
@@ -59,23 +62,59 @@ class xFuserLTX2VideoModel(xFuserModel):
                 transformer=transformer,
                 torch_dtype=torch.bfloat16,
             )
+
+        latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
+            self.settings.model_name,
+            subfolder="latent_upsampler",
+            torch_dtype=torch.bfloat16,
+        )
+        upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
+        self.upsample_pipe = upsample_pipe
+
+        self.second_scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            pipe.scheduler.config, use_dynamic_shifting=False, shift_terminal=None
+        )
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         kwargs = {
             "prompt": input_args["prompt"],
-            "height": input_args["height"],
-            "width": input_args["width"],
+            "negative_prompt": input_args["negative_prompt"],
+            "height": input_args["height"] // 2,
+            "width": input_args["width"] // 2,
             "num_frames": input_args["num_frames"],
             "frame_rate": self.settings.fps,
+            "sigmas": None,
             "num_inference_steps": input_args["num_inference_steps"],
             "guidance_scale": input_args["guidance_scale"],
-            "output_type": "np",
+            "output_type": "latent",
+            "return_dict": False,
             "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         }
         if self.config.task == "i2v":
             kwargs["image"] = input_args["input_images"][0]
+        video_latent, audio_latent = self.pipe(**kwargs)
+
+        video_latent = self.upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
+        old_scheduler = self.pipe.scheduler
+        self.pipe.scheduler = self.second_scheduler
+
+        kwargs = {
+            "latents": video_latent,
+            "audio_latents": audio_latent,
+            "prompt": input_args["prompt"],
+            "negative_prompt": input_args["negative_prompt"],
+            "num_inference_steps": 3,
+            "guidance_scale": 1.0,
+            "noise_scale": STAGE_2_DISTILLED_SIGMA_VALUES[0],
+            "sigmas": STAGE_2_DISTILLED_SIGMA_VALUES,
+            "output_type": "np",
+            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        }
+
         output = self.pipe(**kwargs)
+        self.pipe.scheduler = old_scheduler
+
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
 
@@ -91,7 +130,6 @@ class xFuserLTX2VideoModel(xFuserModel):
             encode_video(video[0], audio=audio[0].float().cpu(), audio_sample_rate=24000, fps=self.settings.fps, output_path=output_path)
             log(f"Output video saved to {output_path}")
 
-
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments """
         super()._validate_args(input_args)
@@ -101,3 +139,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         elif self.config.task == "t2v" and len(images) != 0:
             raise ValueError("Input images are not supported for LTX-2 T2V task.")
         return input_args
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        self.upsample_pipe.to(self.pipe.device)

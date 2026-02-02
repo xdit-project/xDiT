@@ -19,6 +19,21 @@ from xfuser.core.utils.runner_utils import (
     log,
 )
 
+DEFAULT_NEGATIVE_PROMPT = "" \
+"blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, " \
+"grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, " \
+"deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, " \
+"wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of " \
+"field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent " \
+"lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny " \
+"valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, " \
+"mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, " \
+"off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward " \
+"pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, " \
+"inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts."
+
+
+
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
 class xFuserLTX2VideoModel(xFuserModel):
@@ -28,9 +43,8 @@ class xFuserLTX2VideoModel(xFuserModel):
         width=1536,
         num_frames=121,
         num_inference_steps=40,
-        guidance_scale=3.0,
-        negative_prompt="shaky, glitchy, low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly, transition, static."
-
+        guidance_scale=4.0,
+        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
     )
     settings = ModelSettings(
         model_name="Lightricks/LTX-2",

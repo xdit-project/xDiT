@@ -35,6 +35,7 @@ if __name__ == "__main__":
             "yunchang>=0.6.0",
             "einops",
             "diffusers>=0.33.0",
+            "av", # For LTX-2 model
         ],
         extras_require={
             "flash-attn": [

@@ -37,6 +37,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         output_name="ltx_2_video",
         model_output_type="video",
         fps=24,
+        resolution_divisor=64,
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,

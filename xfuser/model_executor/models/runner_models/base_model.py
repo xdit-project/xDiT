@@ -91,6 +91,7 @@ class ModelSettings:
         }
     })
     valid_tasks: List[str] = field(default_factory=list)
+    resolution_divisor: Optional[int] = None
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -208,6 +209,9 @@ class xFuserModel(abc.ABC):
 
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
+
+        if self.settings.resolution_divisor and (config.height % self.settings.resolution_divisor != 0 or config.width % self.settings.resolution_divisor != 0):
+            raise ValueError(f"Model {self.settings.model_name} requires height and width to be divisible by {self.settings.resolution_divisor}.")
 
 
     def _compile_model(self, input_args: dict) -> None:

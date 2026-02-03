@@ -223,7 +223,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             block.attn.processor = xFuserFlux2ParallelSelfAttnProcessor()
 
 
-    def pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
+    def _pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding =  torch.zeros(
             *tensor.shape[:dim], padding_length, *tensor.shape[dim + 1 :], dtype=tensor.dtype, device=tensor.device
         )
@@ -246,7 +246,7 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         padding_length = (sp_world_size - (sequence_length % sp_world_size)) % sp_world_size
         if padding_length > 0:
             hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
-            img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=0)
+            img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=1)
         assert (
             hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0
         ), f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
@@ -263,26 +263,12 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
             timestep = torch.chunk(
                 timestep, get_classifier_free_guidance_world_size(), dim=0
             )[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(
-            hidden_states, get_classifier_free_guidance_world_size(), dim=0
-        )[get_classifier_free_guidance_rank()]
-        hidden_states = torch.chunk(
-            hidden_states, get_sequence_parallel_world_size(), dim=-2
-        )[get_sequence_parallel_rank()]
-        encoder_hidden_states = torch.chunk(
-            encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0
-        )[get_classifier_free_guidance_rank()]
-        if get_runtime_state().split_text_embed_in_sp:
-            encoder_hidden_states = torch.chunk(
-                encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2
-            )[get_sequence_parallel_rank()]
-        img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[
-            get_sequence_parallel_rank()
-        ]
-        if get_runtime_state().split_text_embed_in_sp:
-            txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[
-                get_sequence_parallel_rank()
-            ]
+        hidden_states = torch.chunk(hidden_states, get_classifier_free_guidance_world_size(), dim=0)[get_classifier_free_guidance_rank()]
+        hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_classifier_free_guidance_world_size(), dim=0)[get_classifier_free_guidance_rank()]
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        img_ids = torch.chunk(img_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
+        txt_ids = torch.chunk(txt_ids, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
 
         output = super().forward(
             hidden_states,

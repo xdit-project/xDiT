@@ -247,13 +247,6 @@ class xFuserFlux2Transformer2DWrapper(Flux2Transformer2DModel):
         if padding_length > 0:
             hidden_states = self._pad_to_sp_divisible(hidden_states, padding_length, dim=1)
             img_ids = self._pad_to_sp_divisible(img_ids, padding_length, dim=1)
-        assert (
-            hidden_states.shape[0] % get_classifier_free_guidance_world_size() == 0
-        ), f"Cannot split dim 0 of hidden_states ({hidden_states.shape[0]}) into {get_classifier_free_guidance_world_size()} parts."
-        if encoder_hidden_states.shape[-2] % get_sequence_parallel_world_size() != 0:
-            get_runtime_state().split_text_embed_in_sp = False
-        else:
-            get_runtime_state().split_text_embed_in_sp = True
 
         if (
             isinstance(timestep, torch.Tensor)

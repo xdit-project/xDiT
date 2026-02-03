@@ -118,6 +118,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | NA |
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/hunyuandit.md) |
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | NA |
+| [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | NA |
 | [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | NA |
 | [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | [Report](./docs/performance/flux.md) |
 | [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | NA |

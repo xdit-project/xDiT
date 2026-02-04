@@ -28,6 +28,7 @@ class xFuserFluxModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -93,6 +94,7 @@ class xFuserFluxKontextModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -170,6 +172,7 @@ class xFuserFlux2Model(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,

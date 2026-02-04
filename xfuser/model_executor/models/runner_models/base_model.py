@@ -11,7 +11,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.core.distributed.parallel_state import get_sp_group
+from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -49,7 +49,7 @@ class ModelCapabilities:
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
-    use_fsdp: bool = False
+    fully_sharded_degree: bool = False
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
@@ -392,7 +392,7 @@ class xFuserModel(abc.ABC):
         """ Hook for any post model-load and state initialization """
 
         local_rank = get_world_group().local_rank
-        if self.config.use_fsdp:
+        if self.config.fully_sharded_degree:
             self._shard_model_with_fsdp()
         else:
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
@@ -409,9 +409,9 @@ class xFuserModel(abc.ABC):
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
         local_rank = get_world_group().local_rank
-        sp_local_rank = get_sp_group().local_rank
-        sp_device_group = get_sp_group().device_group
-        sp_device = f"cuda:{sp_local_rank}"
+        fs_local_rank = get_fs_group().local_rank
+        device_group = get_fs_group().device_group
+        fs_device = f"cuda:{local_rank}"
         for component_name, component in self.pipe.components.items():
             if component_name in self.settings.fsdp_strategy:
                 strategy = self.settings.fsdp_strategy[component_name]
@@ -422,10 +422,10 @@ class xFuserModel(abc.ABC):
                     exclude_keys = child.get("exclude_keys", [])
                     if submodule_key:
                         log(f"Moving children of {component_name}.{submodule_key} to device, excluding {exclude_keys}...")
-                        children_to_device(getattr(component, submodule_key), sp_device, exclude_keys)
+                        children_to_device(getattr(component, submodule_key), fs_device, exclude_keys)
                     else:
                         log(f"Moving children of {component_name} to device, excluding {exclude_keys}...")
-                        children_to_device(component, sp_device, exclude_keys)
+                        children_to_device(component, fs_device, exclude_keys)
 
                 # FSDP
                 submodule_key = strategy.get("shard_submodule_key", None)
@@ -436,9 +436,9 @@ class xFuserModel(abc.ABC):
                 fsdp_object = shard_transformer_blocks(
                     shard_obj,
                     block_attr=block_attr,
-                    device_id=sp_local_rank,
+                    device_id=fs_local_rank,
                     dtype=dtype,
-                    process_group=sp_device_group,
+                    process_group=device_group,
                     use_orig_params=True,
                     sync_module_states=True,
                     forward_prefetch=True,

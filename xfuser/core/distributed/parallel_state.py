@@ -14,6 +14,7 @@ from .group_coordinator import (
     GroupCoordinator,
     PipelineGroupCoordinator,
     SequenceParallelGroupCoordinator,
+    FullyShardedGroupCoordinator,
 )
 
 try:
@@ -42,6 +43,7 @@ _SP: Optional[SequenceParallelGroupCoordinator] = None
 _PP: Optional[PipelineGroupCoordinator] = None
 _CFG: Optional[GroupCoordinator] = None
 _DP: Optional[GroupCoordinator] = None
+_FS: Optional[GroupCoordinator] = None
 _DIT: Optional[GroupCoordinator] = None
 _VAE: Optional[GroupCoordinator] = None
 
@@ -158,6 +160,21 @@ def get_data_parallel_world_size():
 def get_data_parallel_rank():
     """Return my rank for the data parallel group."""
     return get_dp_group().rank_in_group
+
+# FS (Fully Sharded)
+def get_fs_group() -> GroupCoordinator:
+    assert _FS is not None, "fully sharded group is not initialized"
+    return _FS
+
+
+def get_fully_sharded_world_size():
+    """Return world size for the fully sharded group."""
+    return get_fs_group().world_size
+
+
+def get_fully_sharded_rank():
+    """Return my rank for the fully sharded group."""
+    return get_fs_group().rank_in_group
 
 
 def is_dp_last_group():
@@ -284,6 +301,7 @@ def init_model_parallel_group(
         "tensor",
         "sequence",
         "classifier_free_guidance",
+        "fully_sharded",
     ], f"parallel_mode {parallel_mode} is not supported"
     if parallel_mode == "pipeline":
         return PipelineGroupCoordinator(
@@ -341,6 +359,7 @@ def initialize_model_parallel(
     ring_degree: int = 1,
     tensor_parallel_degree: int = 1,
     pipeline_parallel_degree: int = 1,
+    fully_sharded_degree: int = 1,
     vae_parallel_size: int = 0,
     backend: Optional[str] = None,
 ) -> None:
@@ -431,6 +450,7 @@ def initialize_model_parallel(
         pipeline_parallel_degree,
         classifier_free_guidance_degree,
         data_parallel_degree,
+        fully_sharded_degree,
         "tp-sp-pp-cfg-dp",
     )
     global _DP
@@ -499,6 +519,14 @@ def initialize_model_parallel(
         parallel_mode="tensor",
     )
 
+    global _FS
+    assert _FS is None, "fully sharded group is already initialized"
+    _FS = init_model_parallel_group(
+        group_ranks=rank_generator.get_ranks("fs", independent_ranks=True),
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="fully_sharded",
+    )
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     init_dit_group(dit_parallel_size, backend)
@@ -530,6 +558,11 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
+
+    global _FS
+    if _FS:
+        _FS.destroy()
+    _FS = None
 
     global _VAE
     if _VAE:

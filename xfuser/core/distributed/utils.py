@@ -109,6 +109,26 @@ def generate_masked_orthogonal_rank_groups(
         ranks.append(rank)
     return ranks
 
+def generate_independent_rank_groups(world_size: int, parallel_size: int) -> List[List[int]]:
+    """
+    Generate independent rank groups.
+
+    Arguments:
+        world_size (int): world size
+        parallel_size (int): parallel size
+
+    Returns:
+        List[List[int]]: list of rank groups
+
+    Example:
+        If world_size = 8 and parallel_size = 2, then the ranks will be:
+        [[0, 1], [2, 3], [4, 5], [6, 7]]
+    """
+    assert world_size % parallel_size == 0, "world_size must be divisible by parallel_size"
+    num_of_groups = world_size // parallel_size
+    ranks = [list(range(i * parallel_size, (i + 1) * parallel_size)) for i in range(num_of_groups)]
+    return ranks
+
 
 class RankGenerator(object):
     def __init__(
@@ -118,6 +138,7 @@ class RankGenerator(object):
         pp: int,
         cfg: int,
         dp: int,
+        fs: int,
         order: str,
         rank_offset: int = 0,
     ) -> None:
@@ -126,6 +147,7 @@ class RankGenerator(object):
         self.pp = pp
         self.cfg = cfg
         self.dp = dp
+        self.fs = fs
         self.rank_offset = rank_offset
         self.world_size = tp * sp * pp * cfg * dp
 
@@ -160,7 +182,7 @@ class RankGenerator(object):
             mask[ordered_token.index(t)] = True
         return mask
 
-    def get_ranks(self, token):
+    def get_ranks(self, token, independent_ranks: bool = False):
         """Get rank group by input token.
 
         Arguments:
@@ -170,17 +192,21 @@ class RankGenerator(object):
                 '-' to separate them. For example, if we want to obtain
                 the TP_DP group, the token should be 'tp-dp'.
 
-            independent_ep (bool: True):
-                This flag controls whether we treat EP and DP independently.
-                EP shares ranks with DP, if we want to get ranks related to
-                EP, we should set the flag. For example, get_ranks('dp', True)
-                will get DP modulo EP group, and get_ranks('dp', False) will
-                get full DP group.
+            independent_ranks (bool: False):
+                This flag controls whether we treat ranks independently. If we
+                don't want to get orhthogonal ranks, we should set the flag to True.
         """
-        mask = self.get_mask(self.order, token)
-        ranks = generate_masked_orthogonal_rank_groups(
-            self.world_size, self.ordered_size, mask
-        )
+        if independent_ranks:
+            token_degree = getattr(self, token)
+            ranks = generate_independent_rank_groups(
+                self.world_size, token_degree
+            )
+        else:
+            mask = self.get_mask(self.order, token)
+            ranks = generate_masked_orthogonal_rank_groups(
+                self.world_size, self.ordered_size, mask
+            )
+
         if self.rank_offset > 0:
             for rank_group in ranks:
                 for i in range(len(rank_group)):

@@ -155,6 +155,17 @@ class TensorParallelConfig:
 
 
 @dataclass
+class FullyShardedConfig:
+    fs_degree: int = 1
+    dit_parallel_size: int = 1
+
+    def __post_init__(self):
+        assert self.fs_degree >= 1, "fs_degree must greater than 1"
+        assert (
+            self.fs_degree <= self.dit_parallel_size
+        ), "fs_degree must be less than or equal to dit_parallel_size"
+
+@dataclass
 class PipeFusionParallelConfig:
     pp_degree: int = 1
     num_pipeline_patch: Optional[int] = None
@@ -197,6 +208,7 @@ class ParallelConfig:
     sp_config: SequenceParallelConfig
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
+    fs_config: FullyShardedConfig
     world_size: int = 1 # FIXME: remove this
     dit_parallel_size: int = 1
     vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
@@ -236,6 +248,7 @@ class ParallelConfig:
         self.sp_degree = self.sp_config.sp_degree
         self.pp_degree = self.pp_config.pp_degree
         self.tp_degree = self.tp_config.tp_degree
+        self.fs_degree = self.fs_config.fs_degree
 
         self.ulysses_degree = self.sp_config.ulysses_degree
         self.ring_degree = self.sp_config.ring_degree

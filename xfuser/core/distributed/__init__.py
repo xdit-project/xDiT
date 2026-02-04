@@ -76,6 +76,6 @@ __all__ = [
     "get_dit_group",
     "shard_dit",
     "shard_t5_encoder",
-    "shard_transformer_blocks",
     "children_to_device",
+    "shard_component",
 ]

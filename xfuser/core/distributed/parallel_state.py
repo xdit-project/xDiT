@@ -14,7 +14,6 @@ from .group_coordinator import (
     GroupCoordinator,
     PipelineGroupCoordinator,
     SequenceParallelGroupCoordinator,
-    FullyShardedGroupCoordinator,
 )
 
 try:

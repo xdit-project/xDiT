@@ -19,7 +19,9 @@ from functools import partial
 from typing import Iterable, Optional, Any
 
 import torch
+import functools
 from torch.distributed.fsdp import (
+    MixedPrecision,
     ShardingStrategy,
     FullyShardedDataParallel as FSDP,
 )
@@ -171,25 +173,27 @@ def shard_t5_encoder(
     return transformer
 
 
-def shard_transformer_blocks(
-    model: torch.nn.Module,
-    block_attr='blocks',
+def shard_component(
+    component: torch.nn.Module,
+    wrap_attrs: list[str],
     process_group: Optional[torch.distributed.ProcessGroup] = None,
     device_id: Optional[int] = None,
     dtype: Optional[torch.dtype] = None,
-    **fsdp_kwargs: Any
+    use_orig_params: bool = True,
+    sync_module_states: bool = True,
+    forward_prefetch: bool = True,
 ) -> torch.nn.Module:
     """
-    Wrap a transformer model with FSDP, treating each block as a separate FSDP unit.
+    Wrap a component with FSDP, treating each block as a separate FSDP unit.
 
     This function applies Fully Sharded Data Parallel (FSDP) to a transformer model,
     automatically wrapping each transformer block separately for optimal memory
     distribution. Parameters and buffers are converted to the specified dtype.
 
     Args:
-        model (nn.Module): The transformer model to wrap with FSDP.
-        block_attr (str, optional): Name of the model attribute containing transformer
-            blocks. Defaults to 'blocks'.
+        component (nn.Module): The transformer model to wrap with FSDP.
+        wrap_attrs (list[str]): Name of the model attributes containing elements
+            to wrap in individual FSDP units.
         process_group (ProcessGroup, optional): PyTorch distributed process group for
             FSDP communication. If None, uses the default process group.
             **Important**: Pass `group.device_group` if using a GroupCoordinator wrapper
@@ -198,22 +202,26 @@ def shard_transformer_blocks(
             uses the current CUDA device.
         dtype (torch.dtype, optional): Target dtype to convert the model to before
             wrapping. If None, keeps the original dtype.
-        **fsdp_kwargs: Additional keyword arguments to pass to the FSDP constructor,
-            such as 'sync_module_states', 'forward_prefetch', 'use_orig_params', etc.
+        use_orig_params (bool, optional): Whether to use the original parameters.
+            Defaults to True.
+        sync_module_states (bool, optional): Whether to sync module states.
+            Defaults to True.
+        forward_prefetch (bool, optional): Whether to use forward prefetch.
+            Defaults to True.
 
     Returns:
-        nn.Module: The FSDP-wrapped model.
+        nn.Module: The FSDP-wrapped component.
 
     Raises:
-        ValueError: If the model does not have the specified block_attr attribute.
+        ValueError: If the component does not have the specified wrap_attrs attributes.
 
     Example:
         >>> from xfuser.core.distributed import get_sp_group
         >>> model = Transformer(...)
         >>> # Correct: extract device_group from coordinator
-        >>> fsdp_model = shard_transformer_blocks(
+        >>> fsdp_model = shard_component(
         ...     model,
-        ...     block_attr='blocks',
+        ...     wrap_attrs=['blocks'],
         ...     device_id=0,
         ...     process_group=get_sp_group().device_group,  # NOT get_sp_group()
         ...     dtype=torch.bfloat16,
@@ -223,7 +231,7 @@ def shard_transformer_blocks(
 
     Note:
         - Uses FULL_SHARD strategy for maximum memory savings
-        - Each block in 'block_attr' becomes a separate FSDP unit
+        - Each element in 'wrap_attrs' becomes a separate FSDP unit
         - Requires PyTorch distributed to be initialized before calling
         - When passing a GroupCoordinator from get_sp_group() or get_world_group(),
           extract the ProcessGroup with `.device_group` attribute
@@ -235,19 +243,26 @@ def shard_transformer_blocks(
         else:
             device_id = None  # CPU mode
 
-    if not hasattr(model, block_attr):
-        raise ValueError(f"Model does not have attribute '{block_attr}'")
+    wrapped_elements = []
+    for wrap_attr in wrap_attrs:
+        wrapped_elements.extend(rgetattr(component, wrap_attr))
 
-    blocks = getattr(model, block_attr)
+    if dtype:
+        component = component.to(dtype)
 
-    model = model.to(dtype) if dtype is not None else model
-    model = FSDP(
-        model,
+    component = FSDP(
+        component,
         process_group=process_group,
         device_id=device_id,
-        auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=lambda module: module in blocks),
+        auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=lambda module: module in wrapped_elements),
         sharding_strategy=ShardingStrategy.FULL_SHARD,
-        **fsdp_kwargs
+        sync_module_states=sync_module_states,
+        use_orig_params=use_orig_params,
+        forward_prefetch=forward_prefetch,
     )
 
-    return model
+    return component
+
+def rgetattr(obj: object, attr: str) -> object:
+    """ Recursive getattr to get nested attributes """
+    return functools.reduce(getattr, [obj] + attr.split("."))

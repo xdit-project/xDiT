@@ -24,8 +24,7 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
-    children_to_device,
-    shard_transformer_blocks,
+    shard_component,
 )
 
 
@@ -411,38 +410,13 @@ class xFuserModel(abc.ABC):
         local_rank = get_world_group().local_rank
         fs_local_rank = get_fs_group().local_rank
         device_group = get_fs_group().device_group
-        fs_device = f"cuda:{local_rank}"
         for component_name, component in self.pipe.components.items():
             if component_name in self.settings.fsdp_strategy:
+                log(f"Sharding {component_name} with FSDP...")
                 strategy = self.settings.fsdp_strategy[component_name]
-                log(f"Wrapping {component_name} with FSDP...")
-                # Moving non FSPD'd children to device
-                for child in strategy.get("children_to_device", []): # Iterate over list of children to move to device
-                    submodule_key = child.get("submodule_key", None)
-                    exclude_keys = child.get("exclude_keys", [])
-                    if submodule_key:
-                        log(f"Moving children of {component_name}.{submodule_key} to device, excluding {exclude_keys}...")
-                        children_to_device(getattr(component, submodule_key), fs_device, exclude_keys)
-                    else:
-                        log(f"Moving children of {component_name} to device, excluding {exclude_keys}...")
-                        children_to_device(component, fs_device, exclude_keys)
-
-                # FSDP
-                submodule_key = strategy.get("shard_submodule_key", None)
-                block_attr = strategy.get("block_attr", None)
+                wrap_attrs = strategy.get("wrap_attrs", [])
                 dtype = strategy.get("dtype", None)
-                shard_obj = component if not submodule_key else getattr(component, submodule_key)
-                log(f"Sharding {component_name} submodule {submodule_key} with block attribute {block_attr} to dtype {dtype}...")
-                fsdp_object = shard_transformer_blocks(
-                    shard_obj,
-                    block_attr=block_attr,
-                    device_id=fs_local_rank,
-                    dtype=dtype,
-                    process_group=device_group,
-                    use_orig_params=True,
-                    sync_module_states=True,
-                    forward_prefetch=True,
-                )
+                fsdp_object = shard_component(component, wrap_attrs, device_group, fs_local_rank, dtype)
                 setattr(self.pipe, component_name, fsdp_object)
             else:
                 log(f"Skipping FSDP wrapping for {component_name}...")

@@ -247,7 +247,7 @@ class DiTRuntimeState(RuntimeState):
                 * pipeline.transformer.config.axes_dims[-1]
             )
         else:
-            vae_scale_factor = pipeline.vae_scale_factor
+            vae_scale_factor = getattr(pipeline, "vae_scale_factor", 0)
             if pipeline.__class__.__name__.startswith("Flux") and diffusers.__version__ >= '0.32':
                 vae_scale_factor *= 2
             self._set_model_parameters(

@@ -1,4 +1,5 @@
 import torch
+import copy
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline, LTX2LatentUpsamplePipeline
 from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
@@ -124,6 +125,15 @@ class xFuserLTX2VideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
+    def _compile_model(self, input_args: dict) -> None:
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self.second_pipe.transformer = torch.compile(self.second_pipe.transformer, mode="default")
+
+        # two steps to warmup the torch compiler
+        compile_args = copy.deepcopy(input_args)
+        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
         pipe_args = output.pipe_args

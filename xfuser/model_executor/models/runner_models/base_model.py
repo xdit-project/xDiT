@@ -48,7 +48,7 @@ class ModelCapabilities:
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
-    fully_sharded_degree: bool = False
+    fully_shard_degree: bool = False
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
@@ -391,7 +391,7 @@ class xFuserModel(abc.ABC):
         """ Hook for any post model-load and state initialization """
 
         local_rank = get_world_group().local_rank
-        if self.config.fully_sharded_degree:
+        if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
             self.pipe = self.pipe.to(f"cuda:{local_rank}")

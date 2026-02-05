@@ -17,7 +17,7 @@ from xfuser.config.config import (
     PipeFusionParallelConfig,
     SequenceParallelConfig,
     DataParallelConfig,
-    FullyShardedConfig,
+    FullyShardConfig,
     ModelConfig,
     InputConfig,
     RuntimeConfig,
@@ -137,7 +137,7 @@ class xFuserArgs:
     use_fsdp: bool = False
     use_hybrid_fp8_attn: bool = False
     num_hybrid_bf16_attn_steps: Optional[int] = None
-    fully_sharded_degree: int = 1
+    fully_shard_degree: int = 1
 
 
     @staticmethod
@@ -472,10 +472,10 @@ class xFuserArgs:
             help="Tensor parallel degree.",
         )
         parser.add_argument(
-            "--fully_sharded_degree",
+            "--fully_shard_degree",
             type=int,
             default=1,
-            help="Fully sharded degree."
+            help="Fully sharding (sharding) degree."
         )
         parser.add_argument(
             "--height",
@@ -707,8 +707,8 @@ class xFuserArgs:
                 attn_layer_num_for_pp=self.attn_layer_num_for_pp,
                 dit_parallel_size=self.dit_parallel_size,
             ),
-            fs_config=FullyShardedConfig(
-                fs_degree=self.fully_sharded_degree,
+            fs_config=FullyShardConfig(
+                fs_degree=self.fully_shard_degree,
                 dit_parallel_size=self.dit_parallel_size,
             ),
             world_size=self.world_size,

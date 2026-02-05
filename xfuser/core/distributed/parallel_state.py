@@ -160,19 +160,19 @@ def get_data_parallel_rank():
     """Return my rank for the data parallel group."""
     return get_dp_group().rank_in_group
 
-# FS (Fully Sharded)
+# FS (Fully Shard)
 def get_fs_group() -> GroupCoordinator:
-    assert _FS is not None, "fully sharded group is not initialized"
+    assert _FS is not None, "fully sharding group is not initialized"
     return _FS
 
 
-def get_fully_sharded_world_size():
-    """Return world size for the fully sharded group."""
+def get_fully_shard_world_size():
+    """Return world size for the fully shard group."""
     return get_fs_group().world_size
 
 
-def get_fully_sharded_rank():
-    """Return my rank for the fully sharded group."""
+def get_fully_shard_rank():
+    """Return my rank for the fully shard group."""
     return get_fs_group().rank_in_group
 
 
@@ -300,7 +300,7 @@ def init_model_parallel_group(
         "tensor",
         "sequence",
         "classifier_free_guidance",
-        "fully_sharded",
+        "fully_shard",
     ], f"parallel_mode {parallel_mode} is not supported"
     if parallel_mode == "pipeline":
         return PipelineGroupCoordinator(
@@ -358,7 +358,7 @@ def initialize_model_parallel(
     ring_degree: int = 1,
     tensor_parallel_degree: int = 1,
     pipeline_parallel_degree: int = 1,
-    fully_sharded_degree: int = 1,
+    fully_shard_degree: int = 1,
     vae_parallel_size: int = 0,
     backend: Optional[str] = None,
 ) -> None:
@@ -449,7 +449,7 @@ def initialize_model_parallel(
         pipeline_parallel_degree,
         classifier_free_guidance_degree,
         data_parallel_degree,
-        fully_sharded_degree,
+        fully_shard_degree,
         "tp-sp-pp-cfg-dp",
     )
     global _DP
@@ -519,12 +519,12 @@ def initialize_model_parallel(
     )
 
     global _FS
-    assert _FS is None, "fully sharded group is already initialized"
+    assert _FS is None, "fully sharding group is already initialized"
     _FS = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("fs", independent_ranks=True),
         local_rank=get_world_group().local_rank,
         backend=backend,
-        parallel_mode="fully_sharded",
+        parallel_mode="fully_shard",
     )
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)

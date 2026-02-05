@@ -44,7 +44,7 @@ class xFuserWan21I2VModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        fully_sharded_degree=True,
+        fully_shard_degree=True,
         use_fp8_gemms=True,
         use_cfg_parallel=True,
         use_hybrid_fp8_attn=True,
@@ -181,7 +181,7 @@ class xFuserWan21T2VModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        fully_sharded_degree=True,
+        fully_shard_degree=True,
         use_fp8_gemms=True,
         use_hybrid_fp8_attn=True,
     )
@@ -289,7 +289,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
-        fully_sharded_degree=True,
+        fully_shard_degree=True,
         use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(

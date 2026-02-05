@@ -212,9 +212,6 @@ def shard_component(
     Returns:
         nn.Module: The FSDP-wrapped component.
 
-    Raises:
-        ValueError: If the component does not have the specified wrap_attrs attributes.
-
     Example:
         >>> from xfuser.core.distributed import get_sp_group
         >>> model = Transformer(...)

@@ -148,7 +148,7 @@ class TensorParallelConfig:
     dit_parallel_size: int = 1
 
     def __post_init__(self):
-        assert self.tp_degree >= 1, "tp_degree must greater than 1"
+        assert self.tp_degree >= 1, "tp_degree must be greater than or equal to 1"
         assert (
             self.tp_degree <= self.dit_parallel_size
         ), "tp_degree must be less than or equal to dit_parallel_size"
@@ -160,7 +160,7 @@ class FullyShardConfig:
     dit_parallel_size: int = 1
 
     def __post_init__(self):
-        assert self.fs_degree >= 1, "fully_shard_degree must greater than 1"
+        assert self.fs_degree >= 1, "fully_shard_degree must be greater than or equal to 1"
         assert (
             self.fs_degree <= self.dit_parallel_size
         ), "fully_shard_degree must be less than or equal to dit_parallel_size"

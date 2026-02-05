@@ -173,6 +173,7 @@ class xFuserFlux2Model(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -187,6 +188,11 @@ class xFuserFlux2Model(xFuserModel):
         model_output_type="image",
         mod_value=16,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        }
     )
 
     def _load_model(self) -> DiffusionPipeline:

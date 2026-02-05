@@ -11,7 +11,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.core.distributed.parallel_state import get_sp_group
+from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -24,8 +24,7 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
-    children_to_device,
-    shard_transformer_blocks,
+    shard_component,
 )
 
 
@@ -49,7 +48,7 @@ class ModelCapabilities:
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
-    use_fsdp: bool = False
+    fully_shard_degree: bool = False
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
@@ -392,7 +391,7 @@ class xFuserModel(abc.ABC):
         """ Hook for any post model-load and state initialization """
 
         local_rank = get_world_group().local_rank
-        if self.config.use_fsdp:
+        if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
@@ -409,40 +408,15 @@ class xFuserModel(abc.ABC):
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
         local_rank = get_world_group().local_rank
-        sp_local_rank = get_sp_group().local_rank
-        sp_device_group = get_sp_group().device_group
-        sp_device = f"cuda:{sp_local_rank}"
+        fs_local_rank = get_fs_group().local_rank
+        device_group = get_fs_group().device_group
         for component_name, component in self.pipe.components.items():
             if component_name in self.settings.fsdp_strategy:
+                log(f"Sharding {component_name} with FSDP...")
                 strategy = self.settings.fsdp_strategy[component_name]
-                log(f"Wrapping {component_name} with FSDP...")
-                # Moving non FSPD'd children to device
-                for child in strategy.get("children_to_device", []): # Iterate over list of children to move to device
-                    submodule_key = child.get("submodule_key", None)
-                    exclude_keys = child.get("exclude_keys", [])
-                    if submodule_key:
-                        log(f"Moving children of {component_name}.{submodule_key} to device, excluding {exclude_keys}...")
-                        children_to_device(getattr(component, submodule_key), sp_device, exclude_keys)
-                    else:
-                        log(f"Moving children of {component_name} to device, excluding {exclude_keys}...")
-                        children_to_device(component, sp_device, exclude_keys)
-
-                # FSDP
-                submodule_key = strategy.get("shard_submodule_key", None)
-                block_attr = strategy.get("block_attr", None)
+                wrap_attrs = strategy.get("wrap_attrs", [])
                 dtype = strategy.get("dtype", None)
-                shard_obj = component if not submodule_key else getattr(component, submodule_key)
-                log(f"Sharding {component_name} submodule {submodule_key} with block attribute {block_attr} to dtype {dtype}...")
-                fsdp_object = shard_transformer_blocks(
-                    shard_obj,
-                    block_attr=block_attr,
-                    device_id=sp_local_rank,
-                    dtype=dtype,
-                    process_group=sp_device_group,
-                    use_orig_params=True,
-                    sync_module_states=True,
-                    forward_prefetch=True,
-                )
+                fsdp_object = shard_component(component, wrap_attrs, device_group, fs_local_rank, dtype)
                 setattr(self.pipe, component_name, fsdp_object)
             else:
                 log(f"Skipping FSDP wrapping for {component_name}...")

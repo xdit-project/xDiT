@@ -36,7 +36,7 @@ from .runtime_state import (
     runtime_state_is_initialized,
     initialize_runtime_state,
 )
-from .sharding import shard_dit, shard_t5_encoder, shard_transformer_blocks, children_to_device
+from .sharding import shard_dit, shard_t5_encoder, shard_component, children_to_device
 
 
 __all__ = [
@@ -76,6 +76,6 @@ __all__ = [
     "get_dit_group",
     "shard_dit",
     "shard_t5_encoder",
-    "shard_transformer_blocks",
     "children_to_device",
+    "shard_component",
 ]

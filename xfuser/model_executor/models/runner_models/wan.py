@@ -18,30 +18,15 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     resize_image_to_max_area,
-    quantize_linear_layers_to_fp8,
 )
 
 COMMON_FSDP_STRATEGY = {
     "transformer": {
-        "block_attr": "blocks",
+        "wrap_attrs": ["blocks"],
         "dtype": torch.bfloat16,
-        "children_to_device": [{
-            "submodule_key": "",
-            "exclude_keys": ["blocks"]
-        }]
     },
     "text_encoder": {
-        "block_attr": "block",
-        "shard_submodule_key": "encoder",
-        "children_to_device": [
-            {
-                "submodule_key": "encoder",
-                "exclude_keys": ["block"]
-            },
-            {
-                "exclude_keys": ["encoder"]
-            }
-        ],
+        "wrap_attrs": ["encoder.block"],
     }
 }
 
@@ -59,8 +44,8 @@ class xFuserWan21I2VModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        fully_shard_degree=True,
         use_fp8_gemms=True,
-        use_fsdp=True,
         use_cfg_parallel=True,
         use_hybrid_fp8_attn=True,
     )
@@ -150,12 +135,8 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         self.settings.output_name = "wan2.2_i2v"
         super().__init__(config)
         self.settings.fsdp_strategy["transformer_2"] = {
-                "block_attr": "blocks",
+                "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
-                "children_to_device": [{
-                    "submodule_key": "",
-                    "exclude_keys": ["blocks"]
-                }]
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
 
@@ -200,6 +181,7 @@ class xFuserWan21T2VModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        fully_shard_degree=True,
         use_fp8_gemms=True,
         use_hybrid_fp8_attn=True,
     )
@@ -268,12 +250,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_t2v"
         self.settings.fsdp_strategy["transformer_2"] = {
-                "block_attr": "blocks",
+                "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
-                "children_to_device": [{
-                    "submodule_key": "",
-                    "exclude_keys": ["blocks"]
-                }]
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
 
@@ -311,8 +289,8 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        fully_shard_degree=True,
         use_fp8_gemms=True,
-        use_fsdp=True,
     )
     default_input_values = DefaultInputValues(
         height=736,

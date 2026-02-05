@@ -157,6 +157,7 @@ class TensorParallelConfig:
 @dataclass
 class FullyShardConfig:
     fs_degree: int = 1
+    tp_degree: int = 1
     dit_parallel_size: int = 1
 
     def __post_init__(self):
@@ -164,6 +165,9 @@ class FullyShardConfig:
         assert (
             self.fs_degree <= self.dit_parallel_size
         ), "fully_shard_degree must be less than or equal to dit_parallel_size"
+        assert (
+            self.tp_degree == 1 or self.fs_degree == 1
+        ), "Tensor parellelism and fully sharding cannot be used together"
 
 @dataclass
 class PipeFusionParallelConfig:

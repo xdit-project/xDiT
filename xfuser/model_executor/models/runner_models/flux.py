@@ -1,5 +1,5 @@
 import torch
-from diffusers import FluxPipeline, FluxKontextPipeline, Flux2Pipeline
+from diffusers import FluxPipeline, FluxKontextPipeline, Flux2Pipeline, Flux2KleinPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.models.transformers.transformer_flux import xFuserFlux1Transformer2DWrapper
 from xfuser.model_executor.models.transformers.transformer_flux2 import xFuserFlux2Transformer2DWrapper
@@ -222,3 +222,75 @@ class xFuserFlux2Model(xFuserModel):
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
         return DiffusionOutput(images=output.images, pipe_args=input_args)
+
+
+@register_model("black-forest-labs/FLUX.2-klein-9B")
+@register_model("FLUX.2-klein-9B")
+class xFuserFlux2Klein9BModel(xFuserModel):
+
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        use_fp8_gemms=True,
+    )
+
+    default_input_values = DefaultInputValues(
+        height=2048,
+        width=2048,
+        num_inference_steps=9,
+        guidance_scale=1.0,
+    )
+    settings = ModelSettings(
+        model_name="black-forest-labs/FLUX.2-klein-9B",
+        output_name="flux_2_klein_9b",
+        model_output_type="image",
+        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+    )
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+        pipe = Flux2KleinPipeline.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            transformer=transformer,
+        )
+        return pipe
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        output = self.pipe(
+            height=input_args["height"],
+            width=input_args["width"],
+            prompt=input_args["prompt"],
+            image=input_args["images"],
+            num_inference_steps=input_args["num_inference_steps"],
+            guidance_scale=input_args["guidance_scale"],
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        )
+        return DiffusionOutput(images=output.images, pipe_args=input_args)
+
+    def _preprocess_args_images(self, input_args: dict) -> dict:
+        """ Preprocess input images if provided """
+        input_args = super()._preprocess_args_images(input_args)
+        images = input_args["input_images"]
+        if not images:
+            images = None
+        elif input_args.get("resize_input_images", False):
+            images = [self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value) for image in images]
+        input_args["images"] = images
+        return input_args
+
+
+@register_model("black-forest-labs/FLUX.2-klein-4B")
+@register_model("FLUX.2-klein-4B")
+class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
+
+    settings = ModelSettings(
+        model_name="black-forest-labs/FLUX.2-klein-4B",
+        output_name="flux_2_klein_4b",
+        model_output_type="image",
+        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+    )

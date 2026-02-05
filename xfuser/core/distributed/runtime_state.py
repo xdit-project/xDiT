@@ -93,7 +93,7 @@ class RuntimeState(metaclass=ABCMeta):
                 ring_degree=parallel_config.ring_degree,
                 tensor_parallel_degree=parallel_config.tp_degree,
                 pipeline_parallel_degree=parallel_config.pp_degree,
-                fully_sharded_degree=parallel_config.fs_degree,
+                fully_shard_degree=parallel_config.fs_degree,
                 vae_parallel_size=parallel_config.vae_parallel_size,
             )
 

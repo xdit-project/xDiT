@@ -102,9 +102,9 @@ def shard_dit(
     device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
     children_to_device(transformer, device, [block_attr])
 
-    transformer = shard_transformer_blocks(
+    transformer = shard_component(
         transformer,
-        block_attr=block_attr,
+        wrap_attrs=[block_attr],
         device_id=local_rank,
         process_group=process_group,
         dtype=torch.bfloat16,
@@ -159,9 +159,9 @@ def shard_t5_encoder(
     children_to_device(transformer.encoder, device, [block_attr])
     children_to_device(transformer, device, ["encoder"])
 
-    transformer.encoder = shard_transformer_blocks(
+    transformer.encoder = shard_component(
         transformer.encoder,
-        block_attr=block_attr,
+        wrap_attrs=[block_attr],
         device_id=local_rank,
         process_group=process_group,
         use_orig_params=True,

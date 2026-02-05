@@ -133,8 +133,8 @@ class DiffusionOutput:
     def get_outputs(self) -> Generator[Tuple[Image|np.ndarray, dict], None, None]:
         """ Returns a generator that yields output items along with their used input arguments """
         if self.images:
-            for image, single_pipe_args in zip(self.images, self.pipe_args):
-                yield (image, single_pipe_args)
+            for image in self.images:
+                yield (image, self.pipe_args[0])
         elif self.videos:
             for video, single_pipe_args in zip(self.videos, self.pipe_args):
                 yield (video, single_pipe_args)
@@ -230,6 +230,10 @@ class xFuserModel(abc.ABC):
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
         compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+
+        if self.config.batch_size:
+            compile_args["prompt"] = compile_args["prompt"][:self.config.batch_size]
+
         self._run_timed_pipe(compile_args)
 
 
@@ -281,9 +285,12 @@ class xFuserModel(abc.ABC):
         """ Run initial warmup calls if specified """
         if self.config.warmup_calls:
             log(f"Warming up model with {self.config.warmup_calls} calls...")
+            warmup_args = copy.deepcopy(input_args)
+            if self.config.batch_size:
+                warmup_args["prompt"] = warmup_args["prompt"][:self.config.batch_size]
             for iteration in range(self.config.warmup_calls):
                 log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
-                self._run_timed_pipe(input_args)
+                self._run_timed_pipe(warmup_args)
             log(f"Warmup complete.")
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:

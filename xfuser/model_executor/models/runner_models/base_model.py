@@ -210,9 +210,6 @@ class xFuserModel(abc.ABC):
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
-        if self.settings.resolution_divisor and (config.height % self.settings.resolution_divisor != 0 or config.width % self.settings.resolution_divisor != 0):
-            raise ValueError(f"Model {self.settings.model_name} requires height and width to be divisible by {self.settings.resolution_divisor}.")
-
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
@@ -488,3 +485,7 @@ class xFuserModel(abc.ABC):
         """ Validate input arguments. Can be overridden by subclasses. """
         if input_args["prompt"] is None and input_args["dataset_path"] is None:
             raise ValueError("Either 'prompt' or 'dataset_path' must be provided in input arguments.")
+
+        if self.settings.resolution_divisor:
+            if (input_args["height"] % self.settings.resolution_divisor != 0 or input_args["width"] % self.settings.resolution_divisor != 0):
+                raise ValueError(f"Model {self.settings.model_name} requires height and width to be divisible by {self.settings.resolution_divisor}.")

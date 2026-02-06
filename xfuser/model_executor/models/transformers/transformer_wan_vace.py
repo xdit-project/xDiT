@@ -1,5 +1,4 @@
 import torch
-import math
 from typing import Optional, Union, Dict, Any, Tuple, List
 
 from diffusers.models.transformers.transformer_wan_vace import WanVACETransformer3DModel
@@ -8,17 +7,8 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
-    get_sp_group,
     get_runtime_state,
 )
-from xfuser.model_executor.layers.attention_processor import (
-    xFuserAttentionProcessorRegister
-)
-from xfuser.envs import PACKAGES_CHECKER
-
-env_info = PACKAGES_CHECKER.get_packages_info()
-HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
-
 
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanAttnProcessor
 from xfuser.model_executor.models.transformers.transformers_utils import (
@@ -91,20 +81,6 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
 
-        # if attention_kwargs is not None:
-        #     attention_kwargs = attention_kwargs.copy()
-        #     lora_scale = attention_kwargs.pop("scale", 1.0)
-        # else:
-        #     lora_scale = 1.0
-
-        # if USE_PEFT_BACKEND:
-        #     # weight the lora layers by setting `lora_scale` for each PEFT layer
-        #     scale_lora_layers(self, lora_scale)
-        # else:
-        #     if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
-        #         logger.warning(
-        #             "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
-        #         )
 
         get_runtime_state().increment_step_counter()
 
@@ -211,10 +187,6 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
         )
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
         output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
-
-        # if USE_PEFT_BACKEND:
-        #     # remove `lora_scale` from each PEFT layer
-        #     unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)

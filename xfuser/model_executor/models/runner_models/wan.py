@@ -453,7 +453,7 @@ class xFuserWan21VACEModel(xFuserModel):
         pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p
         return pipe
 
-    def _prepare_video_and_mask(self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _prepare_video_and_mask(self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int) -> tuple[List[Image.Image], List[Image.Image]]:
         """ Prepare video and mask for Wan VACE model """
         first_img = first_img.resize((width, height))
         last_img = last_img.resize((width, height))

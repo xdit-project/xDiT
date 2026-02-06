@@ -416,8 +416,8 @@ class xFuserWan21VACEModel(xFuserModel):
     )
 
     default_input_values = DefaultInputValues(
-        height=512,
-        width=512,
+        height=720,
+        width=1280,
         num_inference_steps=30,
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
@@ -440,11 +440,6 @@ class xFuserWan21VACEModel(xFuserModel):
             self.settings.output_name = "wan.2.1_vace_1.3b"
 
     def _load_model(self) -> DiffusionPipeline:
-        vae = AutoencoderKLWan.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.float32,
-            subfolder="vae",
-        )
         transformer = xFuserWanVACETransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -453,7 +448,6 @@ class xFuserWan21VACEModel(xFuserModel):
         pipe = WanVACEPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
-            vae=vae,
             transformer=transformer,
         )
         pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p

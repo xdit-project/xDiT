@@ -130,7 +130,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [⚫ SANA Sprint](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md#sana-sprint) | NA | ✔️ | ❎ | ❎ | ❎ | NA |
 | [🟣 SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | ✔️ | ❎ | ❎ | ❎ | ❎ | NA |
 
-*MR = Model is runnable via the model runner. If not, its runnable via the provided example scripts.
+MR* = Model is runnable via the model runner. If not, it's runnable via the provided example scripts.
 
 </div>
 
@@ -206,7 +206,7 @@ xdit xfuser/runner.py \
     --ulysses_degree 8
 ```
 
-The runner does not support all olders models. For those we have the example scripts below. More information on how to run the model runner is available [here](docs/runner/runner.md).
+The runner does not support all older models. For those we have the example scripts below. More information on how to run the model runner is available [here](docs/runner/runner.md).
 
 #### Using example scripts
 

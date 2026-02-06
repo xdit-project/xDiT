@@ -104,36 +104,38 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 
 <div align="center">
 
-| Model Name | CFG | SP | PipeFusion | TP | Performance Report Link |
-| --- | --- | --- | --- | --- | --- |
-| [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ | [Report](./docs/performance/stepvideo.md) |
-| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuanvideo.md) |
-| [🎬 HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/consisid.md) |
-| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
-| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ | [Report](https://github.com/xdit-project/mochi-xdit) |
-| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
-| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
-| [🎬 Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/hunyuandit.md) |
-| [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | NA |
-| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | [Report](./docs/performance/flux.md) |
-| [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | NA |
-| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
-| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
-| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/sd3.md) |
-| [🟤 SANA](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md) | ✔️ | ✔️ | ✔️ | ❎ | [Report](./docs/performance/sana.md) |
-| [⚫ SANA Sprint](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md#sana-sprint) | NA | ✔️ | ❎ | ❎ | NA |
-| [🟣 SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | ✔️ | ❎ | ❎ | ❎ | NA |
+| Model Name | CFG | SP | PipeFusion | TP | MR* | Performance Report Link |
+| --- | --- | --- | --- | --- | --- | --- |
+| [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ | ❎ | [Report](./docs/performance/stepvideo.md) |
+| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | ✔️ | [Report](./docs/performance/hunyuanvideo.md) |
+| [🎬 HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/consisid.md) |
+| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
+| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](https://github.com/xdit-project/mochi-xdit) |
+| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
+| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
+| [🎬 Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuandit.md) |
+| [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
+| [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |
+| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
+| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
+| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/sd3.md) |
+| [🟤 SANA](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/sana.md) |
+| [⚫ SANA Sprint](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md#sana-sprint) | NA | ✔️ | ❎ | ❎ | ❎ | NA |
+| [🟣 SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | ✔️ | ❎ | ❎ | ❎ | ❎ | NA |
+
+*MR = Model is runnable via the model runner. If not, its runnable via the provided example scripts.
 
 </div>
 
 
-[🔴 DiT-XL](https://huggingface.co/facebook/DiT-XL-2-256) is supported by legacy version only, including DistriFusion and Tensor Parallel as the standalone parallel strategies:
+
 
 
 
@@ -195,16 +197,16 @@ We provide a docker image for developers to develop with xDiT. The docker image 
 
 #### Using model runner
 
-The xDiT Model Runner provides a single entry point for running all supported diffusion models with proper benchmarking and profiling support. To use it, simply run:
+The xDiT Model Runner provides a single entry point for running most supported diffusion models with proper benchmarking and profiling support. To use it, simply run:
 
 ```bash
-torchrun --nproc_per_node=8 xfuser/runner.py \
+xdit xfuser/runner.py \
     --model FLUX.1-dev \
     --prompt "A cat running in a garden" \
     --ulysses_degree 8
 ```
 
-The runner does not support olders models. For those we have the example scripts below. More information on how to run the model runner are available [here](docs/runner/runner.md).
+The runner does not support all olders models. For those we have the example scripts below. More information on how to run the model runner is available [here](docs/runner/runner.md).
 
 #### Using example scripts
 

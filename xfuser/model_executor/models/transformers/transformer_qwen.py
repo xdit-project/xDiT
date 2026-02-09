@@ -28,8 +28,6 @@ class xFuserQwenDoubleStreamAttnProcessor:
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
-        if encoder_hidden_states is None:
-            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
 
         seq_txt = encoder_hidden_states.shape[1]
 

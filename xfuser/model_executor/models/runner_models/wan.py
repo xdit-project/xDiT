@@ -1,9 +1,13 @@
 import copy
 import torch
+from PIL import Image
 from diffusers import WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers import AutoencoderKLWan, WanVACEPipeline
+from diffusers.utils import load_image
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
+from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
     xFuserWanImageToVideoPipeline,
 )
@@ -374,3 +378,102 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         else:
             if len(images) != 0:
                 raise ValueError("No input images should be provided for Wan TI2V model when using t2v task.")
+
+
+
+@register_model("Wan-AI/Wan2.1-VACE-14B-diffusers")
+@register_model("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
+@register_model("Wan2.1-VACE-14B")
+@register_model("Wan2.1-VACE-1.3B")
+class xFuserWan21VACEModel(xFuserModel):
+
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        use_fp8_gemms=True,
+    )
+
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_inference_steps=30,
+        num_frames=81,
+        negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
+        guidance_scale=5.0,
+    )
+
+    settings = ModelSettings(
+        fps=16,
+        model_output_type="video",
+        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
+    )
+
+    def __init__(self, config: xFuserArgs) -> None:
+        super().__init__(config)
+        if "14B" in config.model:
+            self.settings.model_name = "Wan-AI/Wan2.1-VACE-14B-diffusers"
+            self.settings.output_name = "wan.2.1_vace_14b"
+        else:
+            self.settings.model_name = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
+            self.settings.output_name = "wan.2.1_vace_1.3b"
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = xFuserWanVACETransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+        )
+        pipe = WanVACEPipeline.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            transformer=transformer,
+        )
+        pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p
+        return pipe
+
+    def _prepare_video_and_mask(self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int) -> tuple[List[Image.Image], List[Image.Image]]:
+        """ Prepare video and mask for Wan VACE model """
+        first_img = first_img.resize((width, height))
+        last_img = last_img.resize((width, height))
+        frames = []
+        frames.append(first_img)
+        # Ideally, this should be 127.5 to match original code, but they perform computation on numpy arrays
+        # whereas we are passing PIL images. If you choose to pass numpy arrays, you can set it to 127.5 to
+        # match the original code.
+        frames.extend([Image.new("RGB", (width, height), (128, 128, 128))] * (num_frames - 2))
+        frames.append(last_img)
+        mask_black = Image.new("L", (width, height), 0)
+        mask_white = Image.new("L", (width, height), 255)
+        mask = [mask_black, *[mask_white] * (num_frames - 2), mask_black]
+        return frames, mask
+
+    def _preprocess_args_images(self, input_args: dict) -> dict:
+        """ Preprocess image inputs if necessary """
+        self._validate_args(input_args)
+        images = [load_image(path) for path in input_args.get("input_images", [])]
+        video, mask = self._prepare_video_and_mask(images[0], images[1], input_args["height"], input_args["width"], input_args["num_frames"])
+        input_args["video"] = video
+        input_args["mask"] = mask
+        return input_args
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        output = self.pipe(
+            height=input_args["height"],
+            width=input_args["width"],
+            prompt=str(input_args["prompt"]),
+            negative_prompt=str(input_args["negative_prompt"]),
+            num_inference_steps=input_args["num_inference_steps"],
+            num_frames=input_args["num_frames"],
+            guidance_scale=input_args["guidance_scale"],
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            video=input_args["video"],
+            mask=input_args["mask"],
+        )
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
+
+    def _validate_args(self, input_args: dict) -> None:
+        """ Validate input arguments """
+        super()._validate_args(input_args)
+        images = input_args.get("input_images", [])
+        if len(images) != 2:
+            raise ValueError("Exactly two input images are required for Wan VACE model (first frame and last frame).")

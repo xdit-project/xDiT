@@ -1,6 +1,7 @@
 import copy
 import torch
 from PIL import Image
+from typing import List
 from diffusers import WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers import AutoencoderKLWan, WanVACEPipeline

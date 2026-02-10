@@ -172,7 +172,10 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
-            self._compile_model(input_args)
+            compile_input_args = copy.deepcopy(input_args)
+            if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
+                compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
+            self._compile_model(compile_input_args)
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
@@ -223,18 +226,12 @@ class xFuserModel(abc.ABC):
 
 
     def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile """
+        """ Compile the model using torch.compile."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default") # TODO: Configurable
-
         # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
-
-        if self.config.batch_size:
-            compile_args["prompt"] = compile_args["prompt"][:self.config.batch_size]
-
-        self._run_timed_pipe(compile_args)
+        input_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        self._run_timed_pipe(input_args)
 
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
@@ -243,7 +240,11 @@ class xFuserModel(abc.ABC):
         timings = []
         output: DiffusionOutput = None
 
-        self._run_warmup_calls(input_args)
+        if self.config.warmup_calls:
+            warmup_args = copy.deepcopy(input_args)
+            if self.config.batch_size and isinstance(warmup_args.get("prompt"), list):
+                warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
+            self._run_warmup_calls(warmup_args)
         for iteration in range(self.config.num_iterations):
             log(f"Running iteration {iteration + 1}/{self.config.num_iterations}")
 
@@ -285,12 +286,9 @@ class xFuserModel(abc.ABC):
         """ Run initial warmup calls if specified """
         if self.config.warmup_calls:
             log(f"Warming up model with {self.config.warmup_calls} calls...")
-            warmup_args = copy.deepcopy(input_args)
-            if self.config.batch_size:
-                warmup_args["prompt"] = warmup_args["prompt"][:self.config.batch_size]
             for iteration in range(self.config.warmup_calls):
                 log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
-                self._run_timed_pipe(warmup_args)
+                self._run_timed_pipe(input_args)
             log(f"Warmup complete.")
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:

@@ -414,7 +414,7 @@ class xFuserModel(abc.ABC):
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp4(module, fp8_layers=self.settings.fp8_precision_overrides)
             # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
-            # will be quantized to fp8, this is specially benefitial for MoE models like Wan2.2, 
+            # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2, 
             # where the low-noise transformer should use FP8 quantization.
             # This transformer generates fine details and requires higher precision to maintain quality.
             for module_name in self.settings.fp8_gemm_module_list:

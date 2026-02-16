@@ -104,21 +104,6 @@ class xFuserQwenDoubleStreamAttnProcessor:
 
 
 class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
-    # Make CP plan compatible with https://github.com/huggingface/diffusers/pull/12702
-    # _cp_plan = {
-    #     "transformer_blocks.0": {
-    #         "hidden_states": ContextParallelInput(split_dim=1, expected_dims=3, split_output=False),
-    #         "encoder_hidden_states": ContextParallelInput(split_dim=1, expected_dims=3, split_output=False),
-    #     },
-    #     "transformer_blocks.*": {
-    #         "modulate_index": ContextParallelInput(split_dim=1, expected_dims=2, split_output=False),
-    #     },
-    #     "pos_embed": {
-    #         0: ContextParallelInput(split_dim=0, expected_dims=2, split_output=True),
-    #         1: ContextParallelInput(split_dim=0, expected_dims=2, split_output=True),
-    #     },
-    #     "proj_out": ContextParallelOutput(gather_dim=1, expected_dims=3),
-    # }
 
     def __init__(
         self,

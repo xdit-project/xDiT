@@ -24,6 +24,7 @@ if envs._is_npu():
     from torch.npu import manual_seed_all as device_manual_seed_all
 
 from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_schedule import AttentionSchedule
 from xfuser.config.config import (
     ParallelConfig,
     RuntimeConfig,
@@ -207,7 +208,9 @@ class DiTRuntimeState(RuntimeState):
     split_text_embed_in_sp: bool
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
-        self.use_hybrid_fp8_attn = False
+        self.attention_schedule: Optional[AttentionSchedule] = None
+        self.schedule_total_steps: Optional[torch.Tensor] = None
+        self.step_counter: Optional[torch.Tensor] = None
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
@@ -259,39 +262,36 @@ class DiTRuntimeState(RuntimeState):
                 * pipeline.transformer.config.attention_head_dim,
             )
 
+    def has_attention_schedule(self) -> bool:
+        """True if a per-step attention schedule is active (e.g. for warmup/compile logic)."""
+        return self.attention_schedule is not None
+
     def increment_step_counter(self):
         """
-        Keep track of the current denoising step, and set fp8 flag based on the current step.
-        Used for hybrid fp8 attention, when toggling between bf16 and fp8 is needed.
+        Advance the denoising step and set attention backend from the schedule when one is active.
         When the entire denoising process is over, the step counter is reset to 0.
         """
-        if self.use_hybrid_fp8_attn:
-            self.attention_backend = self.fp8_decision_vector[self.step_counter]
+        if self.attention_schedule is not None and self.schedule_total_steps is not None and self.step_counter is not None:
+            self.attention_backend = self.attention_schedule.get_backend(
+                self.step_counter
+            )
             self.step_counter = self.step_counter + 1
-            if self.step_counter >= self.total_steps:
+            if self.step_counter >= self.schedule_total_steps:
                 self.step_counter = torch.tensor(0, dtype=torch.int)
 
-    def set_hybrid_attn_parameters(self, fp8_decision_vector: torch.Tensor):
+    def set_attention_schedule(
+        self,
+        attention_schedule: AttentionSchedule,
+        total_steps: int,
+    ) -> None:
         """
-        Set the parameters for hybrid fp8 attention.
-        fp8_decision_vector: A boolean tensor of length equal to the total number of denoising steps.
-        Each element indicates whether to use fp8 attention (True) or bf16 attention (False).
+        Set a per-step attention schedule (programmatic API).
+        When set, increment_step_counter() will use the attention_schedule to set attention_backend each step.
         """
-        # Hybrid attention does not neccessarily set fp8 as the first attention backend.
-        # Thus, we need to check fp8 availability in advance if hybrid attention is enabled.
-        if envs.PACKAGES_CHECKER.packages_info["has_aiter"]:
-            self._check_if_backend_compatible_with_current_configuration(AttentionBackendType.AITER_FP8)
-            self.fp8_decision_vector = [AttentionBackendType.AITER_FP8 if use_fp8 else AttentionBackendType.AITER for use_fp8 in fp8_decision_vector]
-        elif envs.PACKAGES_CHECKER.packages_info["has_flash_attn_3"]:
-            self._check_if_backend_compatible_with_current_configuration(AttentionBackendType.FLASH_3_FP8)
-            self.fp8_decision_vector = [AttentionBackendType.FLASH_3_FP8 if use_fp8 else AttentionBackendType.FLASH_3 for use_fp8 in fp8_decision_vector]
-        else:
-            raise RuntimeError("Hybrid fp8 attention is currently only supported for AITER and FlashAttention v3 backends.")
-
-        # The below needs to be torch tensors to avoid recompilations with torch.compile.
-        self.total_steps = torch.tensor(len(fp8_decision_vector), dtype=torch.int)
+        self.attention_schedule = attention_schedule
+        self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        self.use_hybrid_fp8_attn = torch.tensor(True, dtype=torch.bool)
+        logger.warning("Per-step attention schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(
         self,

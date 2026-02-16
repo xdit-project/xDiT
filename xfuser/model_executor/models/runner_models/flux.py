@@ -173,6 +173,7 @@ class xFuserFlux2Model(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fp4_gemms=True,
         fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
@@ -188,6 +189,7 @@ class xFuserFlux2Model(xFuserModel):
         model_output_type="image",
         mod_value=16,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp4_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],

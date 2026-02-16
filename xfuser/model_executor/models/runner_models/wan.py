@@ -1,5 +1,6 @@
 import copy
 import torch
+from typing import List
 from PIL import Image
 from diffusers import WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -52,6 +53,7 @@ class xFuserWan21I2VModel(xFuserModel):
         use_fp8_gemms=True,
         use_cfg_parallel=True,
         use_hybrid_fp8_attn=True,
+        use_fp4_gemms=True
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -69,6 +71,8 @@ class xFuserWan21I2VModel(xFuserModel):
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
         fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
+        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.","35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
     )
 
@@ -143,6 +147,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_precision_overrides=None
 
 
     def _load_model(self) -> DiffusionPipeline:
@@ -187,6 +192,7 @@ class xFuserWan21T2VModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp4_gemms=True,
         use_hybrid_fp8_attn=True,
     )
     default_input_values = DefaultInputValues(
@@ -205,6 +211,8 @@ class xFuserWan21T2VModel(xFuserModel):
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
         fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
+        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.","35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
     )
 
@@ -258,6 +266,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                 "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

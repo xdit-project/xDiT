@@ -9,6 +9,7 @@ from typing import Callable, Optional
 from torchao.quantization.granularity import PerTensor
 from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 from torchao.quantization.quantize_.common import KernelPreference
+from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
 
 logger = logging.getLogger(__name__)
 
@@ -115,3 +116,38 @@ def rsetattr(obj: object, attr: str, value: object) -> None:
 def rgetattr(obj: object, attr: str) -> object:
     """ Recursive getattr to get nested attributes """
     return functools.reduce(getattr, [obj] + attr.split("."))
+
+def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None):
+    for name, module in list(model.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+
+        if isinstance(module, torch.nn.Linear):
+            if fp8_layers and full_name.startswith(fp8_layers):
+                quantize_(
+                      module,
+                      config=Float8DynamicActivationFloat8WeightConfig(
+                          granularity=PerTensor(),
+                          set_inductor_config=False,
+                          kernel_preference=KernelPreference.AUTO
+                    )
+                )
+            else:
+                # Create replacement
+                new_layer = xFuserMXFP4Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=(module.bias is not None),
+                    device=module.weight.device,
+                    dtype=module.weight.dtype
+                )
+                
+                # Copy weights
+                with torch.no_grad():
+                    new_layer.load_and_quantize_weights(module.weight, module.bias)
+                
+                # Replace
+                setattr(model, name, new_layer)
+            
+        elif len(list(module.children())) > 0:
+            # Recurse into submodules
+            quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers)

@@ -16,6 +16,7 @@ from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
+    quantize_linear_layers_to_fp4,
     rgetattr,
 )
 
@@ -54,6 +55,7 @@ class ModelCapabilities:
     enable_tiling: bool = False
     # Other features
     use_fp8_gemms: bool = False
+    use_fp4_gemms: bool = False
     use_hybrid_fp8_attn: bool = False
 
 @dataclass(frozen=True)
@@ -77,6 +79,8 @@ class ModelSettings:
     mod_value: Optional[int] = None
     fps: Optional[int] = None
     fp8_gemm_module_list: List[str] = None
+    fp4_gemm_module_list: List[str] = None
+    fp8_precision_overrides: Tuple[str] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
@@ -395,6 +399,27 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_fp8_gemms:
             for module_name in self.settings.fp8_gemm_module_list:
+                log(f"Quantizing linear layers in {module_name} to FP8...")
+                module = rgetattr(self.pipe, module_name)
+                quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+        
+        if self.config.use_fp4_gemms:
+            for module_name in self.settings.fp4_gemm_module_list:
+                # Certain models benefit from a hybrid quantization strategy: applying FP8 to
+                # a number of transformer blocks while using FP4 for others. This mixed-precision
+                # approach balances performance and output quality better than uniform quantization.
+                log(f"Quantizing linear layers in {module_name} to FP4...")
+                if self.settings.fp8_precision_overrides:
+                    log(f"The following blocks will be quantized to FP8, to maintain output quality: {self.settings.fp8_precision_overrides}")
+                module = rgetattr(self.pipe, module_name)
+                quantize_linear_layers_to_fp4(module, fp8_layers=self.settings.fp8_precision_overrides)
+            # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
+            # will be quantized to fp8, this is specially benefitial for MoE models like Wan2.2, 
+            # where the low-noise transformer should use FP8 quantization.
+            # This transformer generates fine details and requires higher precision to maintain quality.
+            for module_name in self.settings.fp8_gemm_module_list:
+                if module_name in self.settings.fp4_gemm_module_list:
+                    continue
                 log(f"Quantizing linear layers in {module_name} to FP8...")
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")

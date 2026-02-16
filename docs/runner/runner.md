@@ -98,6 +98,8 @@ Individual model classes that inherit from `xFuserModel`:
 | Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3.5-large` |
 | Z-Image-Turbo | `Z-Image-Turbo`, `Tongyi-MAI/Z-Image-Turbo` |
 | LTX-2 | `LTX-2`, `Lightricks/LTX-2` |
+| Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
+| Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
 
 
 

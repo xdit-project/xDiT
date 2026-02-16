@@ -427,18 +427,11 @@ class xFuserArgs:
             help="Enable torch.compile to accelerate inference in a single card",
         )
         parser.add_argument(
-            "--use_fsdp",
-            action="store_true",
-            help="Enable FSDP to save memory. May have an impact on performance.",
-        )
-        parser.add_argument(
             "--attention_backend",
             type=str,
             default=None,
             help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
         )
-
-
         parser.add_argument(
             "--use_cfg_parallel",
             action="store_true",

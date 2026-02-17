@@ -285,9 +285,11 @@ class DiTRuntimeState(RuntimeState):
         total_steps: int,
     ) -> None:
         """
-        Set a per-step attention schedule (programmatic API).
+        Set a per-step attention schedule.
         When set, increment_step_counter() will use the attention_schedule to set attention_backend each step.
         """
+        for backend in set(attention_schedule.backends):
+            self._check_if_backend_compatible_with_current_configuration(backend)
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)

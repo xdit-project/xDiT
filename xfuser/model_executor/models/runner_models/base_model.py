@@ -440,7 +440,7 @@ class xFuserModel(abc.ABC):
             if attention_schedule.total_steps != total_steps:
                 raise ValueError(f"Hybrid attention schedule total steps {attention_schedule.total_steps} does not match input steps {total_steps} (input_args['num_inference_steps']={input_args['num_inference_steps']}, multiplier={multiplier}).")
         else:
-            num_high_precision_steps = input_args["num_hybrid_attn_high_precision_steps"]
+            num_high_precision_steps = input_args["num_hybrid_attn_high_precision_steps"] * multiplier
             low_precision_backend = AttentionBackendType[self.config.hybrid_attn_low_precision_backend.upper()]
             high_precision_backend = AttentionBackendType[self.config.hybrid_attn_high_precision_backend.upper()]
             attention_schedule = create_hybrid_attn_schedule(

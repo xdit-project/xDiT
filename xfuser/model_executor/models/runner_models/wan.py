@@ -54,7 +54,7 @@ class xFuserWan21I2VModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_cfg_parallel=True,
-        use_fp4_gemms=True
+        use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
     )
     default_input_values = DefaultInputValues(
@@ -237,8 +237,8 @@ class xFuserWan21T2VModel(xFuserModel):
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+        )
         pipe.scheduler.config.flow_shift = self.settings.flow_shift
-        pipe.scheduler.config.flow_shit = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

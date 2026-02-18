@@ -72,7 +72,10 @@ class xFuserWan21I2VModel(xFuserModel):
         fps = 16,
         fp8_gemm_module_list=["transformer.blocks"],
         fp4_gemm_module_list=["transformer.blocks"],
-        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.","35.", "36.", "37.", "38.", "39."),
+        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
+                                 "5.", "6.", "7.", "8.", "9.",
+                                 "30.", "31.", "32.", "33.", "34.",
+                                 "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         flow_shift=5,
     )
@@ -215,7 +218,10 @@ class xFuserWan21T2VModel(xFuserModel):
         output_name="wan2.1_t2v",
         fp8_gemm_module_list=["transformer.blocks"],
         fp4_gemm_module_list=["transformer.blocks"],
-        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.","35.", "36.", "37.", "38.", "39."),
+        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
+                                 "5.", "6.", "7.", "8.", "9.",
+                                 "30.", "31.", "32.", "33.", "34.",
+                                 "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         flow_shift=12,
     )

@@ -1,8 +1,11 @@
 import torch
 import torch.nn as nn
 import math
-import aiter
-from aiter.ops.shuffle import shuffle_weight
+try:
+    import aiter
+    from aiter.ops.shuffle import shuffle_weight
+except ImportError:
+    pass # Error will be thrown in base_model.py, if mxfp4 gemms are enabled but AITER is not available.
 from typing import Optional
 
 
@@ -16,7 +19,7 @@ def _mxfp4_gemm(a: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor, b
 @_mxfp4_gemm.register_fake
 def _(a: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
-    Fake implementation for torch. compile shape inference
+    Fake implementation for torch.compile shape inference
     """
     M, _ = a.shape
     N, _ = w_quant.shape
@@ -36,9 +39,6 @@ class xFuserMXFP4Linear(nn.Module):
         
         self.in_features = in_features
         self.out_features = out_features
-
-        self.weight_shuffle = None
-        self.weight_scale = None
         
         self.weight = nn.Parameter(
             torch.empty((out_features, in_features), **factory_kwargs)
@@ -62,20 +62,57 @@ class xFuserMXFP4Linear(nn.Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
     
-    def load_and_quantize_weights(self, weights: torch.Tensor, bias: Optional[torch.Tensor] = None) -> None:
+    def load_and_quantize_weights(
+        self, 
+        weights: torch.Tensor, 
+        bias: Optional[torch.Tensor] = None
+    ) -> None:
+        """
+        Load pre-trained weights and quantize them.
+        
+        Args:
+            weights: Full-precision weight tensor [out_features, in_features]
+            bias: Optional bias tensor [out_features]
+        """
         with torch.no_grad():
+            # Temporarily restore weight parameter if it was deleted
+            if self.weight is None:
+                self.weight = nn.Parameter(
+                    torch.empty_like(weights, device=weights.device, dtype=weights.dtype)
+                )
+            
             self.weight.data.copy_(weights.data)
-            if bias is not None:
+            if bias is not None and self.bias is not None:
                 self.bias.data.copy_(bias.data)
+        
         self._quantize_weights()
-
+    
     def _quantize_weights(self) -> None:
+        """
+        Quantize weights to FP4 and register quantized tensors as buffers.
+        
+        This ensures proper device movement with .to(), .cuda(), CPU offload,
+        and distributed training frameworks (FSDP, DDP).
+        """
+        if self.weight is None:
+            raise RuntimeError(
+                "Cannot quantize: weight parameter is None."
+                "Call load_and_quantize_weights() or reset_parameters() first."
+            )
+        
         quant_func = aiter.get_hip_quant(aiter.QuantType.per_1x32)
-        weight_quant, self.weight_scale = quant_func(self.weight, shuffle=True)
-        self.weight_shuffle = shuffle_weight(weight_quant, layout=(16, 16))
-
-        del self.weight
-        self.weight = None
+        weight_quant, weight_scale = quant_func(self.weight, shuffle=True)
+        weight_shuffle = shuffle_weight(weight_quant, layout=(16, 16))
+        
+        # Register quantized tensors as buffers for proper state management
+        # persistent=True ensures they're saved in state_dict
+        self.register_buffer('weight_shuffle', weight_shuffle, persistent=True)
+        self.register_buffer('weight_scale', weight_scale, persistent=True)
+        
+        # Properly remove the original weight parameter to save memory
+        # This maintains module structure while freeing memory
+        delattr(self, 'weight')
+        self.register_parameter('weight', None)
 
     def _run_mxfp4_gemm(self, a: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         return torch.ops.mylib.mxfp4_gemm(a, w_quant, w_scale, bias)

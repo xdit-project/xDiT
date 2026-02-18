@@ -369,11 +369,6 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
         )
-        runtime_group.add_argument(
-            "--use_fp4_gemms",
-            action="store_true",
-            help="Quantize the transformer linear layers (selected models only).",
-        )
 
         # DiTFastAttn arguments
         fast_attn_group = parser.add_argument_group("DiTFastAttn Options")

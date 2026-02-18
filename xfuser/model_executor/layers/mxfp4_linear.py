@@ -122,7 +122,7 @@ class xFuserMXFP4Linear(nn.Module):
         Forward pass using MXFP4 GEMM
         """
 
-        if self.weight_shuffle is None:
+        if not hasattr(self, "weight_shuffle"):
             self._quantize_weights()
 
         # Save original shape

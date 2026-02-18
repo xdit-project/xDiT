@@ -237,7 +237,7 @@ class xFuserWan21T2VModel(xFuserModel):
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
-        )
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         pipe.scheduler.config.flow_shit = self.settings.flow_shift
         return pipe
 
@@ -296,7 +296,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             transformer=transformer,
             transformer_2=transformer_2,
         )
-        pipe.scheduler.config.flow_shit = self.settings.flow_shift
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _compile_model(self, input_args):
@@ -351,7 +351,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
         )
-        pipe.scheduler.config.flow_shit = self.settings.flow_shift
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

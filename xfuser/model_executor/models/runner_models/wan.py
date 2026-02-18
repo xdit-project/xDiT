@@ -20,6 +20,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     resize_image_to_max_area,
@@ -52,7 +53,7 @@ class xFuserWan21I2VModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_cfg_parallel=True,
-        use_hybrid_fp8_attn=True,
+        use_hybrid_attn_schedule=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -61,7 +62,7 @@ class xFuserWan21I2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
-        num_hybrid_bf16_attn_steps = 5,
+        num_hybrid_attn_high_precision_steps = 5,
     )
     settings = ModelSettings(
         model_name = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
@@ -124,9 +125,8 @@ class xFuserWan21I2VModel(xFuserModel):
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
-        # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
-        # to trigger both bf16 and fp8 attention paths. Reduce steps for warmup if not using hybrid attention.
-        if not self.config.use_hybrid_fp8_attn:
+        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
+        if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
@@ -188,7 +188,7 @@ class xFuserWan21T2VModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
-        use_hybrid_fp8_attn=True,
+        use_hybrid_attn_schedule=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -197,7 +197,7 @@ class xFuserWan21T2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
-        num_hybrid_bf16_attn_steps = 5,
+        num_hybrid_attn_high_precision_steps = 5,
     )
     settings = ModelSettings(
         mod_value=8,
@@ -239,10 +239,9 @@ class xFuserWan21T2VModel(xFuserModel):
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
-        # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
-        # to trigger both bf16 and fp8 attention paths. Reduce steps for warmup if not using hybrid attention.
-        if not self.config.use_hybrid_fp8_attn:
-            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup # TODO: make this more generic
+        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
+        if not get_runtime_state().has_attention_schedule():
+            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
 
@@ -304,7 +303,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         num_frames=121,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=5.0,
-        num_hybrid_bf16_attn_steps=5,
+        num_hybrid_attn_high_precision_steps=5,
     )
     settings = ModelSettings(
         mod_value=32,

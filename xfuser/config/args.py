@@ -135,9 +135,13 @@ class xFuserArgs:
     batch_size: Optional[int] = None
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
-    use_hybrid_fp8_attn: bool = False
-    num_hybrid_bf16_attn_steps: Optional[int] = None
     fully_shard_degree: int = 1
+    # Hybrid attention schedule
+    use_hybrid_attn_schedule: bool = False
+    hybrid_attn_low_precision_backend: Optional[str] = None
+    hybrid_attn_high_precision_backend: Optional[str] = None
+    num_hybrid_attn_high_precision_steps: Optional[int] = None
+    hybrid_attn_schedule: Optional[str] = None
 
 
     @staticmethod
@@ -614,16 +618,34 @@ class xFuserArgs:
             help="Path to a csv dataset file containing prompts. If specified, prompts will be loaded from the dataset. Consider using --batch_size accordingly.",
         )
         parser.add_argument(
-            "--use_hybrid_fp8_attn",
+            "--use_hybrid_attn_schedule",
             action="store_true",
             default=False,
-            help="Enable hybrid FP8 attention for faster inference and improved quality."
+            help="Enable hybrid attention schedule for faster inference and improved quality."
         )
         parser.add_argument(
-            "--num_hybrid_bf16_attn_steps",
+            "--hybrid_attn_low_precision_backend",
+            type=nullable_str,
+            default=None,
+            help="Low-precision attention backend for hybrid schedule. If set, high-precision backend must also be set.",
+        )
+        parser.add_argument(
+            "--hybrid_attn_high_precision_backend",
+            type=nullable_str,
+            default=None,
+            help="High-precision attention backend for hybrid schedule. If set, low-precision backend must also be set.",
+        )
+        parser.add_argument(
+            "--num_hybrid_attn_high_precision_steps",
             type=int,
             default=None,
-            help="Number of BF16 steps to use with hybrid attention attention."
+            help="Number of high-precision attention steps in hybrid schedule.",
+        )
+        parser.add_argument(
+            "--hybrid_attn_schedule",
+            type=str,
+            default=None,
+            help="An explicit comma-delimited string of attention backend names for the hybrid schedule. Example: 'FLASH_3,FLASH_3_FP8,FLASH_3_FP8,FLASH_3'. Use only if both low-precision and high-precision backends are not set.",
         )
         return parser
 
@@ -660,6 +682,22 @@ class xFuserArgs:
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size
         assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
+
+        # Hybrid attention schedule validation
+        if self.use_hybrid_attn_schedule:
+            if self.attention_backend is not None:
+                raise ValueError(
+                    "When use_hybrid_attn_schedule is True, attention_backend must not be set."
+                )
+            if self.hybrid_attn_schedule is not None:
+                if self.hybrid_attn_low_precision_backend is not None or self.hybrid_attn_high_precision_backend is not None:
+                    raise ValueError("When an explicit hybrid attention schedule is provided, neither hybrid_attn_low_precision_backend nor hybrid_attn_high_precision_backend may be set.")
+            elif self.hybrid_attn_low_precision_backend is None or self.hybrid_attn_high_precision_backend is None:
+                raise ValueError(
+                    "When use_hybrid_attn_schedule is True, both hybrid_attn_low_precision_backend and "
+                    "hybrid_attn_high_precision_backend must be set."
+                )
+
         model_config = ModelConfig(
             model=self.model,
             download_dir=self.download_dir,

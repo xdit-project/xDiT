@@ -26,6 +26,8 @@ from xfuser.core.distributed import (
     init_distributed_environment,
     shard_component,
 )
+from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule
 
 
 MODEL_REGISTRY = {}
@@ -54,7 +56,7 @@ class ModelCapabilities:
     enable_tiling: bool = False
     # Other features
     use_fp8_gemms: bool = False
-    use_hybrid_fp8_attn: bool = False
+    use_hybrid_attn_schedule: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -66,7 +68,7 @@ class DefaultInputValues:
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
-    num_hybrid_bf16_attn_steps: Optional[int] = None
+    num_hybrid_attn_high_precision_steps: Optional[int] = None
 
 @dataclass
 class ModelSettings:
@@ -399,8 +401,8 @@ class xFuserModel(abc.ABC):
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
 
-        if self.config.use_hybrid_fp8_attn:
-            self._setup_hybrid_fp8_attn(input_args)
+        if self.config.use_hybrid_attn_schedule:
+            self._setup_hybrid_attn_schedule(input_args)
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
@@ -426,24 +428,32 @@ class xFuserModel(abc.ABC):
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1
 
-    def _setup_hybrid_fp8_attn(self, input_args: dict) -> None:
+    def _setup_hybrid_attn_schedule(self, input_args: dict) -> None:
         """
-        Setup hybrid FP8 attention, where initial and final attention steps use bf16 for stability,
-        and middle steps use FP8 for performance. To keep track of which steps to use which attention,
-        a boolean decision vector is created and stored in the runtime state. We keep track of the current
-        step during inference in the transformer forward pass, and when CFG is used, the transformer is called
-        twice per denoising step, so we need to account for that in the decision vector.
+        Setup hybrid attention schedule: high precision backend at start/end, low precision backend in the middle,
+        or a custom schedule provided by the user.
         """
-        number_of_initial_and_final_bf16_attn_steps = input_args["num_hybrid_bf16_attn_steps"] # Number of initial and final steps to use bf16 attention for stability
-        multiplier = self._calculate_hybrid_attention_step_multiplier(input_args) # If CFG is switched on, double the transformers are called
-        fp8_steps_threshold = number_of_initial_and_final_bf16_attn_steps * multiplier
-        total_steps = input_args["num_inference_steps"] * multiplier # Total number of transformer calls during the denoising process
-        # Create a boolean vector indicating which steps should use fp8 attention
-        fp8_decision_vector = torch.tensor(
-        [i >= fp8_steps_threshold and i < (total_steps - fp8_steps_threshold)
-            for i in range(total_steps)], dtype=torch.bool
-        )
-        get_runtime_state().set_hybrid_attn_parameters(fp8_decision_vector)
+        multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
+        total_steps = input_args["num_inference_steps"] * multiplier
+        if self.config.hybrid_attn_low_precision_backend is None or self.config.hybrid_attn_high_precision_backend is None:
+            attention_schedule = AttentionSchedule.from_comma_delimited_string(self.config.hybrid_attn_schedule)
+            if attention_schedule.total_steps != total_steps:
+                raise ValueError(f"Hybrid attention schedule total steps {attention_schedule.total_steps} does not match input steps {total_steps} (input_args['num_inference_steps']={input_args['num_inference_steps']}, multiplier={multiplier}).")
+        else:
+            num_high_precision_steps = input_args["num_hybrid_attn_high_precision_steps"] * multiplier
+            low_precision_backend = AttentionBackendType[self.config.hybrid_attn_low_precision_backend.upper()]
+            high_precision_backend = AttentionBackendType[self.config.hybrid_attn_high_precision_backend.upper()]
+            attention_schedule = create_hybrid_attn_schedule(
+                num_high_precision_steps=num_high_precision_steps,
+                low_precision_backend=low_precision_backend,
+                high_precision_backend=high_precision_backend,
+                total_steps=total_steps,
+                check_compat=get_runtime_state()._check_if_backend_compatible_with_current_configuration,
+            )
+
+        log("Enabling hybrid attention schedule")
+        log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
+        get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

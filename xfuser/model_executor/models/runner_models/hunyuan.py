@@ -13,6 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
 )
@@ -26,7 +27,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
-        use_hybrid_fp8_attn=True
+        use_hybrid_attn_schedule=True
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -34,7 +35,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         num_frames=129,
         num_inference_steps=50,
         guidance_scale=6.0,
-        num_hybrid_bf16_attn_steps = 5,
+        num_hybrid_attn_high_precision_steps = 5,
     )
     settings = ModelSettings(
         model_name="tencent/HunyuanVideo",
@@ -76,10 +77,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
-        # If hybrid attention is being used, we need to do a full cycle to warmup the compiler
-        # to trigger both bf16 and fp8 attention paths. Reduce steps for warmup if not using hybrid attention.
-        if not self.config.use_hybrid_fp8_attn:
-            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup # TODO: make this more generic
+        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
+        if not get_runtime_state().has_attention_schedule():
+            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
 

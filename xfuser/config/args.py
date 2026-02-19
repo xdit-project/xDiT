@@ -121,6 +121,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     use_fp8_gemms: bool = False
+    use_fp4_gemms: bool = False
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
@@ -543,6 +544,11 @@ class xFuserArgs:
         )
         parser.add_argument(
             "--use_fp8_gemms",
+            action="store_true",
+            help="Quantize the transformer linear layers (selected models only).",
+        )
+        parser.add_argument(
+            "--use_fp4_gemms",
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
         )

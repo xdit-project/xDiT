@@ -5,6 +5,7 @@ from .attention_processor import xFuserAttentionBaseWrapper
 from .conv import xFuserConv2dWrapper
 from .embeddings import xFuserPatchEmbedWrapper
 from .feedforward import xFuserFeedForwardWrapper
+from .mxfp4_linear import xFuserMXFP4Linear
 
 __all__ = [
     "xFuserLayerWrappersRegister",
@@ -14,4 +15,5 @@ __all__ = [
     "xFuserConv2dWrapper",
     "xFuserPatchEmbedWrapper",
     "xFuserFeedForwardWrapper",
+    "xFuserMXFP4Linear"
 ]

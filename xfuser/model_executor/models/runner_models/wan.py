@@ -1,5 +1,6 @@
 import copy
 import torch
+from typing import List
 from PIL import Image
 from typing import List
 from diffusers import WanPipeline
@@ -53,6 +54,7 @@ class xFuserWan21I2VModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_cfg_parallel=True,
+        use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
     )
     default_input_values = DefaultInputValues(
@@ -71,7 +73,13 @@ class xFuserWan21I2VModel(xFuserModel):
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
         fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
+        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
+                                 "5.", "6.", "7.", "8.", "9.",
+                                 "30.", "31.", "32.", "33.", "34.",
+                                 "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
+        flow_shift=5,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -85,6 +93,7 @@ class xFuserWan21I2VModel(xFuserModel):
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
         )
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -144,6 +153,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_precision_overrides=None
 
 
     def _load_model(self) -> DiffusionPipeline:
@@ -163,6 +173,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 transformer=transformer,
                 transformer_2=transformer_2,
         )
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _compile_model(self, input_args):
@@ -188,6 +199,7 @@ class xFuserWan21T2VModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
     )
     default_input_values = DefaultInputValues(
@@ -206,7 +218,13 @@ class xFuserWan21T2VModel(xFuserModel):
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
         fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
+        fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
+                                 "5.", "6.", "7.", "8.", "9.",
+                                 "30.", "31.", "32.", "33.", "34.",
+                                 "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
+        flow_shift=12,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -220,6 +238,7 @@ class xFuserWan21T2VModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             transformer=transformer,
         )
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -258,6 +277,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                 "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -276,6 +296,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             transformer=transformer,
             transformer_2=transformer_2,
         )
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _compile_model(self, input_args):
@@ -314,6 +335,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         fp8_gemm_module_list=["transformer.blocks"],
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
+        flow_shift=5,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -329,6 +351,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
         )
+        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

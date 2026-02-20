@@ -365,7 +365,7 @@ class xFuserModel(abc.ABC):
         log(f"Timings saved to {self.config.output_directory}/timings.json")
 
     def save_profile(self, profile: torch.profiler.profiler.profile) -> None:
-        profile_file = f"{self.config.output_directory}/profile_trace_rank_{get_world_group().rank}.json"
+        profile_file = f"{self.config.output_directory}/profile_trace_rank_{get_world_group().rank}.json.gz"
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}")
 

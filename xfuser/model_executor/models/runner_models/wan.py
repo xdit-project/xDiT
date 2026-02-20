@@ -316,6 +316,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_hybrid_attn_schedule=True,
     )
     default_input_values = DefaultInputValues(
         height=736,

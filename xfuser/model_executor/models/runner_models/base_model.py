@@ -62,6 +62,7 @@ class ModelCapabilities:
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
+    use_vae_channels_last_format: bool = True
     # Other features
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
@@ -430,6 +431,7 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
 
+<<<<<<< HEAD
         if self.config.use_parallel_vae:
             self._setup_parallel_vae()
 
@@ -439,6 +441,9 @@ class xFuserModel(abc.ABC):
         """ Enable platform specific options """
         platform = get_platform()
         if platform == "rocm":
+=======
+        if self.config.use_vae_channels_last_format:
+>>>>>>> 4bb208a (Remove platform specific behaviour, add cli argument)
             self.convert_vae_to_channels_last()
 
 
@@ -529,23 +534,23 @@ class xFuserModel(abc.ABC):
         """ Convert the VAE to channels last """
         convert_model_convs_to_channels_last(self.pipe.vae)
 
-        original_prepare_latents = self.pipe.prepare_latents
+        original_decode = self.pipe.vae.decode
         memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
 
-        @functools.wraps(self.pipe.prepare_latents)
-        def prepare_latents_wrapper(*args, **kwargs):
-            torch.distributed.breakpoint(0)
-            output = original_prepare_latents(*args, **kwargs)
-            if isinstance(output, tuple):
-                output, *rest = output
-                output = output.to(memory_format=memory_format)
-                return (output, *rest)
-            else:
-                output = output.to(memory_format=memory_format)
-                return output
+        @functools.wraps(original_decode)
+        def decode_wrapper(*args, **kwargs):
+            args = list(args)
+            args[0] = args[0].to(memory_format=memory_format)
+            args = tuple(args)
+            output = original_decode(*args, **kwargs)
+            return output
 
+<<<<<<< HEAD
         self.pipe.prepare_latents = prepare_latents_wrapper
 >>>>>>> eb88540 (Add initial vae convs channels last for amd)
+=======
+        self.pipe.vae.decode = decode_wrapper
+>>>>>>> 4bb208a (Remove platform specific behaviour, add cli argument)
 
 
     @abc.abstractmethod

@@ -192,6 +192,7 @@ class PackagesEnvChecker:
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
+        packages_info["has_distvae"] = self.check_distvae()
         self.packages_info = packages_info
 
     def check_aiter(self):
@@ -290,6 +291,13 @@ class PackagesEnvChecker:
         try:
             import torch_npu
             return hasattr(torch_npu, "npu_fused_infer_attention_score")
+        except ImportError:
+            return False
+
+    def check_distvae(self):
+        try:
+            from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+            return True
         except ImportError:
             return False
 

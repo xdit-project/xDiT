@@ -9,7 +9,7 @@ from typing import Callable, Optional
 from torchao.quantization.granularity import PerTensor
 from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 from torchao.quantization.quantize_.common import KernelPreference
-from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear
+from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ def rgetattr(obj: object, attr: str) -> object:
     """ Recursive getattr to get nested attributes """
     return functools.reduce(getattr, [obj] + attr.split("."))
 
-def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None):
+def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hybrid_schedule: bool = False, device: Optional[torch.device] = None):
     for name, module in list(model.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
 
@@ -129,25 +129,54 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None):
                           granularity=PerTensor(),
                           set_inductor_config=False,
                           kernel_preference=KernelPreference.AUTO
-                    )
+                    ),
+                    device=device,
                 )
             else:
-                # Create replacement
-                new_layer = xFuserMXFP4Linear(
+                # Create low-precision MXFP4 replacement
+                low_precision_layer = xFuserMXFP4Linear(
                     module.in_features,
                     module.out_features,
                     bias=(module.bias is not None),
                     device=module.weight.device,
                     dtype=module.weight.dtype
                 )
-                
+
                 # Copy weights
                 with torch.no_grad():
-                    new_layer.load_and_quantize_weights(module.weight, module.bias)
-                
+                    low_precision_layer.load_and_quantize_weights(module.weight, module.bias)
+
+                if use_hybrid_schedule:
+                    high_precision_layer = torch.nn.Linear(
+                        module.in_features,
+                        module.out_features,
+                        bias=(module.bias is not None),
+                        device=module.weight.device,
+                        dtype=module.weight.dtype,
+                    )
+                    with torch.no_grad():
+                        high_precision_layer.weight.copy_(module.weight)
+                        if module.bias is not None:
+                            high_precision_layer.bias.copy_(module.bias)
+                    quantize_(
+                        high_precision_layer,
+                        config=Float8DynamicActivationFloat8WeightConfig(
+                            granularity=PerTensor(),
+                            set_inductor_config=False,
+                            kernel_preference=KernelPreference.AUTO,
+                        ),
+                        device=device,
+                    )
+                    new_layer = xFuserHybridMXFP4Linear(
+                        high_precision_linear=high_precision_layer,
+                        low_precision_linear=low_precision_layer,
+                    )
+                else:
+                    new_layer = low_precision_layer
+
                 # Replace
                 setattr(model, name, new_layer)
             
         elif len(list(module.children())) > 0:
             # Recurse into submodules
-            quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers)
+            quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers, use_hybrid_schedule=use_hybrid_schedule, device=device)

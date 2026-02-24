@@ -75,3 +75,41 @@ def create_hybrid_attn_schedule(
         + [high_precision_backend] * num_high_precision_steps
     )
     return AttentionSchedule(backends)
+
+
+class GemmPrecisionSchedule:
+    """
+    Per-step GEMM precision schedule defined by an explicit list of booleans.
+    use_high_precision[i] indicates whether step i should use high precision GEMM.
+    """
+
+    def __init__(self, use_high_precision: List[bool]):
+        if not use_high_precision:
+            raise ValueError("GemmPrecisionSchedule requires at least one step.")
+        self.use_high_precision = list(use_high_precision)
+        self.total_steps = len(self.use_high_precision)
+
+    def is_high_precision(self, step: int) -> bool:
+        if step < 0 or step >= len(self.use_high_precision):
+            raise IndexError(f"Step {step} out of range [0, {len(self.use_high_precision)}).")
+        return self.use_high_precision[step]
+
+
+def create_hybrid_gemm_schedule(
+    num_high_precision_steps: int,
+    total_steps: int,
+) -> GemmPrecisionSchedule:
+    """
+    Create a hybrid GEMM schedule: high-precision GEMM at start/end, low-precision GEMM in the middle.
+    """
+    num_low_precision_steps = total_steps - 2 * num_high_precision_steps
+    if num_low_precision_steps < 0:
+        raise ValueError(
+            f"total_steps ({total_steps}) must be >= 2 * num_high_precision_steps ({2 * num_high_precision_steps})."
+        )
+    schedule = (
+        [True] * num_high_precision_steps
+        + [False] * num_low_precision_steps
+        + [True] * num_high_precision_steps
+    )
+    return GemmPrecisionSchedule(schedule)

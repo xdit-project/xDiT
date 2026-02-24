@@ -24,7 +24,7 @@ if envs._is_npu():
     from torch.npu import manual_seed_all as device_manual_seed_all
 
 from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed.attention_schedule import AttentionSchedule
+from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.config.config import (
     ParallelConfig,
     RuntimeConfig,
@@ -215,8 +215,11 @@ class DiTRuntimeState(RuntimeState):
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
-        self.schedule_total_steps: Optional[torch.Tensor] = None
-        self.step_counter: Optional[torch.Tensor] = None
+        self.schedule_total_steps: Optional[int] = None
+        self.gemm_schedule: Optional[GemmPrecisionSchedule] = None
+        self.gemm_schedule_total_steps: Optional[int] = None
+        self.use_high_precision_gemm: bool = True
+        self.step_counter: Optional[int] = None
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
@@ -272,18 +275,43 @@ class DiTRuntimeState(RuntimeState):
         """True if a per-step attention schedule is active (e.g. for warmup/compile logic)."""
         return self.attention_schedule is not None
 
+    def has_gemm_schedule(self) -> bool:
+        """True if a per-step GEMM precision schedule is active (e.g. for warmup/compile logic)."""
+        return self.gemm_schedule is not None
+
+    def _get_active_total_steps(self) -> Optional[int]:
+        if self.schedule_total_steps is not None and self.gemm_schedule_total_steps is not None:
+            if self.schedule_total_steps != self.gemm_schedule_total_steps:
+                raise RuntimeError(
+                    f"Attention and GEMM schedules must use the same total steps; got {self.schedule_total_steps} and {self.gemm_schedule_total_steps}."
+                )
+            return self.schedule_total_steps
+        if self.schedule_total_steps is not None:
+            return self.schedule_total_steps
+        return self.gemm_schedule_total_steps
+
+    @torch._dynamo.disable
     def increment_step_counter(self):
         """
-        Advance the denoising step and set attention backend from the schedule when one is active.
+        Advance the denoising step and set per-step scheduled backends/modes when active.
         When the entire denoising process is over, the step counter is reset to 0.
         """
-        if self.attention_schedule is not None and self.schedule_total_steps is not None and self.step_counter is not None:
-            self.attention_backend = self.attention_schedule.get_backend(
-                self.step_counter
-            )
-            self.step_counter = self.step_counter + 1
-            if self.step_counter >= self.schedule_total_steps:
-                self.step_counter = torch.tensor(0, dtype=torch.int)
+        if self.step_counter is None:
+            return
+
+        active_total_steps = self._get_active_total_steps()
+        if active_total_steps is None:
+            return
+
+        current_step = self.step_counter
+        if self.attention_schedule is not None:
+            self.attention_backend = self.attention_schedule.get_backend(current_step)
+        if self.gemm_schedule is not None:
+            self.use_high_precision_gemm = self.gemm_schedule.is_high_precision(current_step)
+
+        self.step_counter = self.step_counter + 1
+        if self.step_counter >= active_total_steps:
+            self.step_counter = 0
 
     def set_attention_schedule(
         self,
@@ -297,9 +325,23 @@ class DiTRuntimeState(RuntimeState):
         for backend in set(attention_schedule.backends):
             self._check_if_backend_compatible_with_current_configuration(backend)
         self.attention_schedule = attention_schedule
-        self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
-        self.step_counter = torch.tensor(0, dtype=torch.int)
+        self.schedule_total_steps = total_steps
+        self.step_counter = 0
         logger.warning("Per-step attention schedule enabled (total_steps=%d).", total_steps)
+
+    def set_gemm_schedule(
+        self,
+        gemm_schedule: GemmPrecisionSchedule,
+        total_steps: int,
+    ) -> None:
+        """
+        Set a per-step GEMM precision schedule.
+        When set, increment_step_counter() will update use_high_precision_gemm each step.
+        """
+        self.gemm_schedule = gemm_schedule
+        self.gemm_schedule_total_steps = total_steps
+        self.step_counter = 0
+        logger.warning("Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(
         self,

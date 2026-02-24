@@ -135,7 +135,7 @@ class xFuserWan21I2VModel(xFuserModel):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
-        if not get_runtime_state().has_attention_schedule():
+        if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
             compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
@@ -259,7 +259,7 @@ class xFuserWan21T2VModel(xFuserModel):
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
-        if not get_runtime_state().has_attention_schedule():
+        if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
             compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
         self._run_timed_pipe(compile_args)
 
@@ -316,7 +316,9 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
+        use_hybrid_gemm_schedule=True,
     )
     default_input_values = DefaultInputValues(
         height=736,
@@ -326,6 +328,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=5.0,
         num_hybrid_attn_high_precision_steps=5,
+        num_hybrid_gemm_high_precision_steps=5,
     )
     settings = ModelSettings(
         mod_value=32,
@@ -334,6 +337,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         output_name="wan2.2_ti2v",
         fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
         flow_shift=5,

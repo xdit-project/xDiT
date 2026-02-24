@@ -138,6 +138,20 @@ def get_torch_distributed_backend() -> str:
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
         )
 
+def get_platform() -> str:
+    if _is_cuda():
+        return "cuda"
+    elif _is_hip():
+        return "rocm"
+    elif _is_musa():
+        return "musa"
+    elif _is_mps():
+        return "mps"
+    elif _is_npu():
+        return "npu"
+    else:
+        return "cpu"
+
 
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================

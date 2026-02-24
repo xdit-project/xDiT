@@ -539,9 +539,12 @@ class xFuserModel(abc.ABC):
 
         @functools.wraps(original_decode)
         def decode_wrapper(*args, **kwargs):
-            args = list(args)
-            args[0] = args[0].to(memory_format=memory_format)
-            args = tuple(args)
+            if args:
+                args = list(args)
+                args[0] = args[0].to(memory_format=memory_format)
+                args = tuple(args)
+            elif "z" in kwargs:
+                kwargs["z"] = kwargs["z"].to(memory_format=memory_format)
             output = original_decode(*args, **kwargs)
             return output
 

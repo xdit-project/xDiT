@@ -31,6 +31,12 @@ from xfuser.core.distributed import (
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule
 
+try:
+    from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+    HAS_DISTVAE = True
+except ImportError:
+    HAS_DISTVAE = False
+
 
 MODEL_REGISTRY = {}
 
@@ -410,12 +416,15 @@ class xFuserModel(abc.ABC):
                 log(f"Quantizing linear layers in {module_name} to FP8...")
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
-        
+
         if self.config.use_fp4_gemms:
             self._setup_mxfp4_gemms(local_rank=local_rank)
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
+
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
@@ -488,6 +497,18 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid attention schedule")
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
+
+    def _setup_parallel_vae(self) -> None:
+        """ Parallalizes the VAE using distvae """
+        if not HAS_DISTVAE:
+            raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
+
+        vae = self.pipe.vae
+        patched_vae = DecoderAdapter(vae.decoder).to(vae.device)
+        self.pipe.vae.decoder = patched_vae
+
+        print("Parallel vae", self.pipe.vae)
+
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

@@ -36,6 +36,12 @@ if env_info["has_aiter"]:
         from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SAGE is not available.
+    try:
+        from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import (
+            fav3_sage_mxfp4_wrapper,
+        )
+    except ImportError:
+        pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.   
 
 if env_info["has_flash_attn"]:
     from flash_attn import flash_attn_func as flash_attn_func_2
@@ -59,6 +65,7 @@ class AttentionBackendType(Enum):
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
     AITER_SAGE = "AITER Sage"
+    AITER_SAGE_V2 = "AITER Sage V2"
     NPU = "NPU"
 
 def register_attention_function(backend_type):
@@ -355,5 +362,13 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
     softmax_lse = None
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
     output = attn_fn(query, key, value)
+    return output, softmax_lse
+
+@register_attention_function(AttentionBackendType.AITER_SAGE_V2)
+def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
+    # Pass layout="bhsd" to avoid permutation
+    softmax_lse = None
+    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd")
+    output = attn_fn(query, key, value, causal=is_causal)
     return output, softmax_lse
 

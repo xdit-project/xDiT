@@ -7,8 +7,9 @@ from diffusers.models.transformers.transformer_z_image import ZImageTransformer2
 from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
-
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.register import xFuserTransformerWrappersRegister
+from xfuser.model_executor.models.transformers.base_transformer import xFuserTransformerBaseWrapper
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -94,16 +95,19 @@ class xFuserZSingleStreamAttnProcessor:
 
         return output
 
-class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
+@xFuserTransformerWrappersRegister.register(ZImageTransformer2DModel)
+class xFuserZImageTransformer2DWrapper(xFuserTransformerBaseWrapper):
 
-    def __init__(
-        self,
-        **kwargs
-    ):
+    def __init__(self, transformer: ZImageTransformer2DModel):
         super().__init__(
-            **kwargs
+            transformer=transformer,
+            submodule_classes_to_wrap=[],
+            submodule_name_to_wrap=[],
+            transformer_blocks_name=[],
         )
-        for layer in self.layers:
+        # Patch the unified-stream layers with USP-aware attention processor.
+        # self.layers delegates to self.module.layers via __getattr__.
+        for layer in self.module.layers:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
 
 

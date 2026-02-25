@@ -10,6 +10,7 @@ from .pipeline_hunyuandit import xFuserHunyuanDiTPipeline
 from .pipeline_stable_diffusion_xl import xFuserStableDiffusionXLPipeline
 from .pipeline_sana import xFuserSanaPipeline
 from .pipeline_sana_sprint import xFuserSanaSprintPipeline
+from .pipeline_zimage import xFuserZImagePipeline
 
 __all__ = [
     "xFuserPipelineBaseWrapper",
@@ -24,4 +25,5 @@ __all__ = [
     "xFuserStableDiffusionXLPipeline",
     "xFuserSanaPipeline",
     "xFuserSanaSprintPipeline",
+    "xFuserZImagePipeline",
 ]

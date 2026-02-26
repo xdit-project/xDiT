@@ -180,7 +180,6 @@ class RuntimeState(metaclass=ABCMeta):
         elif attention_backend == AttentionBackendType.AITER_SAGE_V2:
             try:
                 from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
-                from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
             except ImportError:
                 raise RuntimeError("AITER Sage V2 attention is not available, please update AITER") from None
 

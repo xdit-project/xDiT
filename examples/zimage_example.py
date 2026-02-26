@@ -37,9 +37,18 @@ def main():
         quantize(text_encoder, weights=qfloat8)
         freeze(text_encoder)
 
+    cache_args = {
+        "use_teacache": engine_args.use_teacache,
+        "use_fbcache": engine_args.use_fbcache,
+        "rel_l1_thresh": 0.15,
+        "num_steps": input_config.num_inference_steps,
+        "warn_turbo": False,  # user has explicitly opted in via CLI flag
+    }
+
     pipe = xFuserZImagePipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
+        cache_args=cache_args,
         torch_dtype=torch.bfloat16,
         text_encoder=text_encoder,
     ).to(f"cuda:{local_rank}")

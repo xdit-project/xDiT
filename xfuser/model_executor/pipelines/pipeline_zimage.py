@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import torch
 from diffusers import ZImagePipeline
@@ -31,6 +31,7 @@ class xFuserZImagePipeline(xFuserPipelineBaseWrapper):
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
         engine_config: EngineConfig,
+        cache_args: Dict = {},
         return_org_pipeline: bool = False,
         **kwargs,
     ):
@@ -39,7 +40,7 @@ class xFuserZImagePipeline(xFuserPipelineBaseWrapper):
         )
         if return_org_pipeline:
             return pipeline
-        return cls(pipeline, engine_config)
+        return cls(pipeline, engine_config, cache_args)
 
     def prepare_run(
         self,

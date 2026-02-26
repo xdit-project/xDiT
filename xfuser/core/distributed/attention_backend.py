@@ -367,8 +367,11 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
 def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
     # Pass layout="bhsd" to avoid permutation
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
     softmax_lse = None
-    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd")
+    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True)
     output = attn_fn(query, key, value, causal=is_causal)
     return output, softmax_lse
 

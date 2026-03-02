@@ -104,7 +104,9 @@ class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
     def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, pipe_args: List[dict]|dict = []) -> None:
         self.images = images
-        if not isinstance(videos, list):
+        if isinstance(videos, np.ndarray) and videos.ndim == 5:
+            videos = [videos[i] for i in range(videos.shape[0])]
+        elif not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
         if not isinstance(pipe_args, list):
@@ -357,8 +359,6 @@ class xFuserModel(abc.ABC):
                 log(f"Output image saved to {output_path}")
         elif output.videos:
             for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
-                if isinstance(video, np.ndarray):
-                    video = video[0] # Remove batch dimension
                 output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.settings.fps)

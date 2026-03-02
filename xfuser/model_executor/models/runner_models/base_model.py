@@ -109,6 +109,9 @@ class DiffusionOutput:
         self.videos = videos
         if not isinstance(pipe_args, list):
             pipe_args = [pipe_args]
+        output_count = len(self.images or self.videos or [])
+        if len(pipe_args) == 1 and output_count > 1:
+            pipe_args = pipe_args * output_count
         self.pipe_args = pipe_args
 
     @classmethod
@@ -133,8 +136,8 @@ class DiffusionOutput:
     def get_outputs(self) -> Generator[Tuple[Image|np.ndarray, dict], None, None]:
         """ Returns a generator that yields output items along with their used input arguments """
         if self.images:
-            for image in self.images:
-                yield (image, self.pipe_args[0])
+            for image, single_pipe_args in zip(self.images, self.pipe_args):
+                yield (image, single_pipe_args)
         elif self.videos:
             for video, single_pipe_args in zip(self.videos, self.pipe_args):
                 yield (video, single_pipe_args)

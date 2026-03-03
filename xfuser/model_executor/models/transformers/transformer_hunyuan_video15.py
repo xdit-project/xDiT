@@ -8,9 +8,15 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed import (
+    get_runtime_state,
+    get_classifier_free_guidance_world_size,
+    get_classifier_free_guidance_rank,
+    get_cfg_group,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
+    get_sequence_parallel_world_size,
+    get_pipeline_parallel_world_size
 )
 
 class xFuserHunyuanVideo15AttnProcessor:
@@ -60,31 +66,51 @@ class xFuserHunyuanVideo15AttnProcessor:
             key = torch.cat([key, encoder_key], dim=1)
             value = torch.cat([value, encoder_value], dim=1)
 
-        batch_size, seq_len, heads, dim = query.shape
-        attention_mask = F.pad(attention_mask, (seq_len - attention_mask.shape[1], 0), value=True)
-        attention_mask = attention_mask.bool()
-        self_attn_mask_1 = attention_mask.view(batch_size, 1, 1, seq_len).repeat(1, 1, seq_len, 1)
-        self_attn_mask_2 = self_attn_mask_1.transpose(2, 3)
-        attention_mask = (self_attn_mask_1 & self_attn_mask_2).bool()
-
-        # Transpose for attention computation
-
+        if encoder_hidden_states is not None:
+            num_encoder_hidden_states_tokens = encoder_hidden_states.shape[1]
+            num_query_tokens = query.shape[1] - num_encoder_hidden_states_tokens
+        else:
+            num_encoder_hidden_states_tokens = (
+                get_runtime_state().max_condition_sequence_length
+            )
+            num_query_tokens = query.shape[1] - num_encoder_hidden_states_tokens
+        
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        # 5. Attention
-        hidden_states = USP(
-            query,
-            key,
-            value,
-            dropout_p=0.0,
-            is_causal=False,
-        )
-
+        #! ---------------------------------------- ATTENTION ---------------------------------------- 
+        if get_sequence_parallel_world_size() > 1:
+            if get_runtime_state().split_text_embed_in_sp:
+                hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
+            else:
+                query, encoder_query = query.split(
+                    [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
+                )
+                key, encoder_key = key.split(
+                    [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
+                )
+                value, encoder_value = value.split(
+                    [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
+                )
+            
+                hidden_states = USP(
+                    query,
+                    key,
+                    value,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    joint_query=encoder_query,
+                    joint_key=encoder_key,
+                    joint_value=encoder_value,
+                    joint_strategy="rear",
+                )
+        else:
+            hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
+        
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
-
+  
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
@@ -151,28 +177,6 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
 
         for block in self.transformer_blocks:
             block.attn.processor = xFuserHunyuanVideo15AttnProcessor()
-
-    def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
-        if pad_amount > 0:
-            if dim < 0:
-                dim = x.ndim + dim
-            pad_shape = list(x.shape)
-            pad_shape[dim] = pad_amount
-            x = torch.cat([x,
-                        torch.zeros(
-                            pad_shape,
-                            dtype=x.dtype,
-                            device=x.device,
-                        )], dim=dim)
-        x = torch.chunk(x,
-                        sp_world_size,
-                        dim=dim)[sp_world_rank]
-        return x
-
-    def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
-        x = get_sp_group().all_gather(x, dim=dim)
-        size = x.size(dim)
-        return x.narrow(dim=dim, start=0, length=size - pad_amount)
 
     def forward(
         self,
@@ -296,19 +300,31 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_hidden_states = torch.stack(new_encoder_hidden_states)
         encoder_attention_mask = torch.stack(new_encoder_attention_mask)
 
+        # sequence parallel
+        hidden_states = torch.chunk(hidden_states, sp_world_size, dim=1)[sp_world_rank]
 
-        hidden_states_pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=1)
-        cos, sin = image_rotary_emb
-        cos = self._chunk_and_pad_sequence(cos, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
-        sin = self._chunk_and_pad_sequence(sin, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
-        image_rotary_emb = (cos, sin)
+        encoder_attention_mask = encoder_attention_mask[0].to(torch.bool)
+        encoder_hidden_states_indices = torch.arange(
+            encoder_hidden_states.shape[1],
+            device=encoder_hidden_states.device)
+        encoder_hidden_states_indices = encoder_hidden_states_indices[
+            encoder_attention_mask]
+        encoder_hidden_states = encoder_hidden_states[
+            ..., encoder_hidden_states_indices, :]
+    
+        if encoder_hidden_states.shape[1] % sp_world_size!= 0:
+            get_runtime_state().split_text_embed_in_sp = False
+        else:
+            get_runtime_state().split_text_embed_in_sp = True
+            encoder_hidden_states = torch.chunk(
+                encoder_hidden_states, 
+                sp_world_size, 
+                dim=1)[sp_world_rank]
 
-
-        encoder_hidden_states_pad_amount = (sp_world_size - (encoder_hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        encoder_hidden_states = self._chunk_and_pad_sequence(encoder_hidden_states, sp_world_rank, sp_world_size, encoder_hidden_states_pad_amount, dim=1)
-        encoder_attention_mask = self._chunk_and_pad_sequence(encoder_attention_mask, sp_world_rank, sp_world_size, encoder_hidden_states_pad_amount, dim=1)
-
+        freqs_cos, freqs_sin = image_rotary_emb
+        freqs_cos = torch.chunk(freqs_cos, sp_world_size, dim=0)[sp_world_rank]
+        freqs_sin = torch.chunk(freqs_sin, sp_world_size, dim=0)[sp_world_rank]
+        image_rotary_emb = (freqs_cos, freqs_sin)
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -318,7 +334,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    None,
                     image_rotary_emb,
                 )
 
@@ -328,7 +344,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    encoder_attention_mask,
+                    None,
                     image_rotary_emb,
                 )
 
@@ -336,7 +352,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
-        hidden_states = self._gather_and_unpad(hidden_states, hidden_states_pad_amount, dim=1)
+        hidden_states = get_sp_group().all_gather(hidden_states, dim=1)
 
         hidden_states = hidden_states.reshape(
             batch_size, post_patch_num_frames, post_patch_height, post_patch_width, -1, p_t, p_h, p_w

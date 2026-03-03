@@ -45,7 +45,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # this is used to set the static scale for AITER FP8 attention when descale vectors are used
     "AITER_FP8_STATIC_SCALE_WITH_DESCALE": lambda: os.environ.get(
                 "XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", None
-            )
+            ),
+    "FAV3_SAGE_MXFP4_BLOCK_R": lambda: os.environ.get("XFUSER_FAV3_SAGE_MXFP4_BLOCK_R", "128"),
 }
 
 

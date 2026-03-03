@@ -13,6 +13,13 @@ except (TypeError, ValueError):
     AITER_FP8_STATIC_SCALE_WITH_DESCALE = None
 AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale vectors are not used.
 
+FAV3_SAGE_MXFP4_BLOCK_R = environment_variables["FAV3_SAGE_MXFP4_BLOCK_R"]()
+try:
+    block_r = int(FAV3_SAGE_MXFP4_BLOCK_R)
+    FAV3_SAGE_MXFP4_BLOCK_R = block_r if block_r in [32, 128] else 128
+except (TypeError, ValueError):
+    FAV3_SAGE_MXFP4_BLOCK_R = 128
+
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
 if env_info["has_aiter"]:
@@ -40,6 +47,30 @@ if env_info["has_aiter"]:
         from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import (
             fav3_sage_mxfp4_wrapper,
         )
+        from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
+            create_hadamard_matrix,
+        )
+        # Check if fav3_sage_mxfp4_wrapper accepts BLOCK_R parameter
+        import inspect
+        FAV3_SAGE_MXFP4_HAS_BLOCK_R = False
+        try:
+            sig = inspect.signature(fav3_sage_mxfp4_wrapper)
+            if 'BLOCK_R' in sig.parameters:
+                FAV3_SAGE_MXFP4_HAS_BLOCK_R = True
+        except Exception:
+            FAV3_SAGE_MXFP4_HAS_BLOCK_R = False
+        # Create the hadamard_matrix and replicate it on each available GPU
+        _hadamard = create_hadamard_matrix(FAV3_SAGE_MXFP4_BLOCK_R) / (FAV3_SAGE_MXFP4_BLOCK_R ** 0.5)
+        hadamard_matrix = {}
+
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                device = torch.device(f"cuda:{i}")
+                hadamard_matrix[device] = _hadamard.to(device)
+        else:
+            # Fallback to CPU or current device
+            device = torch.device("cpu")
+            hadamard_matrix[device] = _hadamard.to(device)
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.   
 
@@ -366,12 +397,15 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
 def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
-    # Pass layout="bhsd" to avoid permutation
-    query = query.contiguous()
-    key = key.contiguous()
-    value = value.contiguous()
+    # BLOCK_R has nothing to do with contiguous in reality, but a fix for the contiguous 
+    # was merged into AITER together with BLOCK_R. Thus, we can use it to check if the contiguous
+    # is needed.
+    if not FAV3_SAGE_MXFP4_HAS_BLOCK_R: 
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
     softmax_lse = None
-    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True)
+    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=hadamard_matrix[query.device])
     output = attn_fn(query, key, value, causal=is_causal)
     return output, softmax_lse
 

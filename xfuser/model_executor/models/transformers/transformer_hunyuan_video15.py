@@ -9,14 +9,9 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed import (
     get_runtime_state,
-    get_classifier_free_guidance_world_size,
-    get_classifier_free_guidance_rank,
-    get_cfg_group,
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
-    get_sequence_parallel_world_size,
-    get_pipeline_parallel_world_size
 )
 
 class xFuserHunyuanVideo15AttnProcessor:
@@ -312,7 +307,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_hidden_states = encoder_hidden_states[
             ..., encoder_hidden_states_indices, :]
     
-        if encoder_hidden_states.shape[1] % sp_world_size!= 0:
+        if encoder_hidden_states.shape[1] % sp_world_size != 0:
             get_runtime_state().split_text_embed_in_sp = False
         else:
             get_runtime_state().split_text_embed_in_sp = True

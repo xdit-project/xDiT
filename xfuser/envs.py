@@ -197,17 +197,26 @@ class PackagesEnvChecker:
     def check_aiter(self):
         """
         Checks whether ROCm AITER library is installed
+        Because AITER hasn't been enabled on AMD Radeon GPU officially, it returns False directly.
         """
-        try:
-            import aiter
-            return True
-        except:
-            if _is_hip():
-                logger.warning(
-                    f'Using AMD GPUs, but library "aiter" is not installed, '
-                    'defaulting to other attention mechanisms'
-                )
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name().strip()
+            if "Radeon" in gpu_name :
+                return False
+        
+            try:
+                import aiter
+                return True
+            except:
+                if _is_hip():
+                    logger.warning(
+                        f'Using AMD GPUs, but library "aiter" is not installed, '
+                        'defaulting to other attention mechanisms'
+                    )
+                return False
+        else:
             return False
+        
 
 
     def check_flash_attn(self):

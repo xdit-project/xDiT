@@ -431,20 +431,11 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
 
-<<<<<<< HEAD
         if self.config.use_parallel_vae:
             self._setup_parallel_vae()
 
-        self._enable_platform_specific_options()
-
-    def _enable_platform_specific_options(self) -> None:
-        """ Enable platform specific options """
-        platform = get_platform()
-        if platform == "rocm":
-=======
         if self.config.use_vae_channels_last_format:
->>>>>>> 4bb208a (Remove platform specific behaviour, add cli argument)
-            self.convert_vae_to_channels_last()
+            self._convert_vae_to_channels_last()
 
 
     def _shard_model_with_fsdp(self) -> None:
@@ -519,7 +510,6 @@ class xFuserModel(abc.ABC):
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
 
-<<<<<<< HEAD
     def _setup_parallel_vae(self) -> None:
         """ Parallalizes the VAE decoder using distvae """
         try:
@@ -529,8 +519,7 @@ class xFuserModel(abc.ABC):
         except:
             raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
 
-=======
-    def convert_vae_to_channels_last(self) -> None:
+    def _convert_vae_to_channels_last(self) -> None:
         """ Convert the VAE to channels last """
         convert_model_convs_to_channels_last(self.pipe.vae)
 
@@ -548,13 +537,7 @@ class xFuserModel(abc.ABC):
             output = original_decode(*args, **kwargs)
             return output
 
-<<<<<<< HEAD
-        self.pipe.prepare_latents = prepare_latents_wrapper
->>>>>>> eb88540 (Add initial vae convs channels last for amd)
-=======
         self.pipe.vae.decode = decode_wrapper
->>>>>>> 4bb208a (Remove platform specific behaviour, add cli argument)
-
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

@@ -21,11 +21,7 @@ class CacheContext(Module):
         super().__init__()
         self.register_buffer("default_coef", torch.tensor([1.0, 0.0]).to(get_device(0)))
         self.register_buffer("flux_coef", torch.tensor([498.651651, -283.781631, 55.8554382, -3.82021401, 0.264230861]).to(get_device(0)))
-        # ZImage coefficients: placeholder identity poly until profiling data is available.
-        # To calibrate: run ZImage inference without cache, record l1_distance(modulated_t, modulated_{t-1})
-        # at each step, fit a polynomial to map raw L1 → accumulated distance scale.
-        self.register_buffer("z_image_coef", torch.tensor([1.0, 0.0]).to(get_device(0)))
-        
+        self.register_buffer("z_image_coef", torch.tensor([206.98745922, -246.10876704, 93.45470090, -12.74629885, 0.59814871]).to(get_device(0)))
         self.register_buffer("original_hidden_states", None, persistent=False)
         self.register_buffer("original_encoder_hidden_states", None, persistent=False)
         self.register_buffer("hidden_states_residual", None, persistent=False)
@@ -335,7 +331,7 @@ class SingleStreamCachedBlocks(torch.nn.Module, ABC):
 
 class SingleStreamFBCachedBlocks(SingleStreamCachedBlocks):
     """
-    First-Block cache for single-stream models (e.g. ZImage).
+    First-Block cache for single-stream models (ZImage).
     Runs blocks[0] every step, compares its output residual to the previous step's.
     If similar, skips blocks[1:] and reuses the cached residual.
     """

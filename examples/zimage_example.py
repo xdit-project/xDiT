@@ -23,8 +23,6 @@ def main():
     engine_config.runtime_config.dtype = torch.bfloat16
     local_rank = get_world_group().local_rank
 
-    # Z-Image uses a Qwen3 model as text encoder (not T5).
-    # Pre-load it so we can optionally quantize before the pipe is built.
     text_encoder = AutoModel.from_pretrained(
         engine_config.model_config.model,
         subfolder="text_encoder",
@@ -55,7 +53,7 @@ def main():
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
-    pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
+    pipe.prepare_run(input_config, steps=3)
 
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()

@@ -137,6 +137,7 @@ class xFuserArgs:
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
     fully_shard_degree: int = 1
+    use_vae_channels_last_format: bool = False
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -652,6 +653,12 @@ class xFuserArgs:
             type=str,
             default=None,
             help="An explicit comma-delimited string of attention backend names for the hybrid schedule. Example: 'FLASH_3,FLASH_3_FP8,FLASH_3_FP8,FLASH_3'. Use only if both low-precision and high-precision backends are not set.",
+        )
+        parser.add_argument(
+            "--use_vae_channels_last_format",
+            action="store_true",
+            default=False,
+            help="Use channels last memory format for the VAE.",
         )
         return parser
 

@@ -140,14 +140,29 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None):
                     device=module.weight.device,
                     dtype=module.weight.dtype
                 )
-                
+
                 # Copy weights
                 with torch.no_grad():
                     new_layer.load_and_quantize_weights(module.weight, module.bias)
-                
+
                 # Replace
                 setattr(model, name, new_layer)
-            
+
         elif len(list(module.children())) > 0:
             # Recurse into submodules
             quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers)
+
+
+def convert_model_convs_to_channels_last(model: torch.nn.Module) -> None:
+    """
+    Manually convert 2D and 3D convolutional layer weights to channels_last format.
+     - Conv3d weights: (out_channels, in_channels, D, H, W) -> channels_last_3d
+     - Conv2d weights: (out_channels, in_channels, H, W) -> channels_last
+     - Biases and non-conv parameters are left unchanged (they are 1D and not affected by memory format)
+     - This is done in-place to avoid unnecessary copying of the entire model and to ensure we only change what is needed.
+    """
+    for param in model.parameters():
+        if param.dim() == 5:
+            param.data = param.data.to(memory_format=torch.channels_last_3d)
+        elif param.dim() == 4:
+            param.data = param.data.to(memory_format=torch.channels_last)

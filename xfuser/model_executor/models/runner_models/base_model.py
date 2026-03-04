@@ -3,6 +3,7 @@ import torch
 import copy
 import argparse
 import json
+import functools
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
@@ -11,13 +12,14 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, get_platform
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
     quantize_linear_layers_to_fp4,
+    convert_model_convs_to_channels_last,
     rgetattr,
 )
 
@@ -60,6 +62,7 @@ class ModelCapabilities:
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
+    use_vae_channels_last_format: bool = True
     # Other features
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
@@ -431,6 +434,10 @@ class xFuserModel(abc.ABC):
         if self.config.use_parallel_vae:
             self._setup_parallel_vae()
 
+        if self.config.use_vae_channels_last_format:
+            self._convert_vae_to_channels_last()
+
+
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
         local_rank = get_world_group().local_rank
@@ -451,7 +458,7 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
-    
+
     def _setup_mxfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:
             # Certain models benefit from a hybrid quantization strategy: applying FP8 to
@@ -463,7 +470,7 @@ class xFuserModel(abc.ABC):
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_fp4(module, fp8_layers=self.settings.fp8_precision_overrides)
         # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
-        # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2, 
+        # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
         # where the low-noise transformer should use FP8 quantization.
         # This transformer generates fine details and requires higher precision to maintain quality.
         for module_name in self.settings.fp8_gemm_module_list:
@@ -512,7 +519,25 @@ class xFuserModel(abc.ABC):
         except:
             raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
 
+    def _convert_vae_to_channels_last(self) -> None:
+        """ Convert the VAE to channels last """
+        convert_model_convs_to_channels_last(self.pipe.vae)
 
+        original_decode = self.pipe.vae.decode
+        memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
+
+        @functools.wraps(original_decode)
+        def decode_wrapper(*args, **kwargs):
+            if args:
+                args = list(args)
+                args[0] = args[0].to(memory_format=memory_format)
+                args = tuple(args)
+            elif "z" in kwargs:
+                kwargs["z"] = kwargs["z"].to(memory_format=memory_format)
+            output = original_decode(*args, **kwargs)
+            return output
+
+        self.pipe.vae.decode = decode_wrapper
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

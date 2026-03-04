@@ -29,6 +29,8 @@ class xFuserFluxModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
+
     )
     default_input_values = DefaultInputValues(
         height=1024,

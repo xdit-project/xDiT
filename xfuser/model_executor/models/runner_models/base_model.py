@@ -31,6 +31,10 @@ from xfuser.core.distributed import (
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule
 
+packages_info = PACKAGES_CHECKER.get_packages_info()
+if packages_info.get("has_distvae", False):
+    from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+
 
 MODEL_REGISTRY = {}
 
@@ -216,10 +220,17 @@ class xFuserModel(abc.ABC):
 
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
-        
+
         if config.use_fp4_gemms:
-            if not PACKAGES_CHECKER.packages_info.get("has_aiter", False):
+            if not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 Gemms only supported with AITER.")
+        if config.use_parallel_vae:
+            if not packages_info.get("has_distvae", False):
+                raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
+            if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
+                raise ValueError("AITER GroupNorm is not supported with parallel VAE.")
+
+
 
 
     def _compile_model(self, input_args: dict) -> None:
@@ -410,12 +421,15 @@ class xFuserModel(abc.ABC):
                 log(f"Quantizing linear layers in {module_name} to FP8...")
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
-        
+
         if self.config.use_fp4_gemms:
             self._setup_mxfp4_gemms(local_rank=local_rank)
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
+
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
@@ -488,6 +502,17 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid attention schedule")
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
+
+    def _setup_parallel_vae(self) -> None:
+        """ Parallalizes the VAE decoder using distvae """
+        try:
+            patched_decoder = DecoderAdapter(self.pipe.vae.decoder).to(self.pipe.vae.device)
+            self.pipe.vae.decoder = patched_decoder
+            log(f"Parallel VAE decoder enabled successfully.")
+        except:
+            raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
+
+
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

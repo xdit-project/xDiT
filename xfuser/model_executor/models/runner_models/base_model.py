@@ -105,7 +105,7 @@ class DiffusionOutput:
     def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, pipe_args: List[dict]|dict = []) -> None:
         self.images = images
         if isinstance(videos, np.ndarray) and videos.ndim == 5:
-            videos = [videos[i] for i in range(videos.shape[0])]
+            videos = list(videos)
         elif not isinstance(videos, list):
             videos = [videos]
         self.videos = videos

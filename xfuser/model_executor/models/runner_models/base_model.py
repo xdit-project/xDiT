@@ -25,6 +25,9 @@ from xfuser.core.utils.runner_utils import (
 
 from xfuser.core.distributed import (
     get_world_group,
+    get_data_parallel_rank,
+    get_data_parallel_world_size,
+    get_sequence_parallel_rank,
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
@@ -54,7 +57,7 @@ class ModelCapabilities:
     ulysses_degree: bool = True  # All xDiT models support these
     ring_degree: bool = True
     pipefusion_parallel_degree: bool = False
-    data_parallel_degree: bool = False
+    data_parallel_degree: bool = True
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
@@ -256,6 +259,7 @@ class xFuserModel(abc.ABC):
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """ Run the model with given input arguments and return output and timings """
         self._validate_args(input_args)
+        input_args = self._split_prompts_for_dp(input_args)
         timings = []
         output: DiffusionOutput = None
 
@@ -264,6 +268,12 @@ class xFuserModel(abc.ABC):
             if self.config.batch_size and isinstance(warmup_args.get("prompt"), list):
                 warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
             self._run_warmup_calls(warmup_args)
+
+        inference_start = torch.cuda.Event(enable_timing=True)
+        inference_end = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+
+        inference_start.record()
         for iteration in range(self.config.num_iterations):
             log(f"Running iteration {iteration + 1}/{self.config.num_iterations}")
 
@@ -275,9 +285,16 @@ class xFuserModel(abc.ABC):
                 timings.append(timing)
                 log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
 
+        inference_end.record()
+        torch.cuda.synchronize()
+
+        output = self._gather_dp_outputs(output)
+
         if len(timings) > 1:
             timings.pop(0) # Remove first timing for more accurate average # TODO: fix
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
+        log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
+
         return output, timings
 
     def _run_pipe_batched(self, input_args: dict) -> Tuple[List[DiffusionOutput], list]:
@@ -556,6 +573,58 @@ class xFuserModel(abc.ABC):
     def _load_model(self) -> DiffusionPipeline:
         """ Load the model. Must be implemented by subclasses. """
         pass
+
+    def _split_prompts_for_dp(self, input_args: dict) -> dict:
+        """Shard prompts across data-parallel groups so each group processes a subset."""
+        if self.config.data_parallel_degree == 1:
+            return input_args
+
+        dp_world_size = get_data_parallel_world_size()
+        dp_rank = get_data_parallel_rank()
+        prompts = input_args.get("prompt")
+
+        if isinstance(prompts, str):
+            log(f"Single prompt with dp_world_size={dp_world_size}: all DP groups will process the same prompt.")
+            return input_args
+
+        if len(prompts) < dp_world_size:
+            raise ValueError(
+                f"Number of prompts ({len(prompts)}) is less than data_parallel_world_size ({dp_world_size}). "
+            )
+
+        local_prompts = prompts[dp_rank::dp_world_size]
+        log(f"Each DP group will process {len(local_prompts)} prompts out of {len(prompts)} total prompts.")
+
+        split_args = copy.copy(input_args)
+        split_args["prompt"] = local_prompts
+        return split_args
+
+    def _gather_dp_outputs(self, output: DiffusionOutput) -> Optional[DiffusionOutput]:
+        """
+        Gathers DiffusionOutput objects from all DP groups onto the last rank.
+
+        Within each SP group every rank holds an identical copy of the output
+        Only the first rank in the SP group sends the real payload,
+        the other ranks send None to keep the collective valid.
+
+        """
+        if self.config.data_parallel_degree == 1:
+            return output
+
+        world_group = get_world_group()
+        last_rank = world_group.world_size - 1
+
+        is_representative = get_sequence_parallel_rank() == 0
+        send_obj = output if is_representative else None
+
+        gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None
+
+        torch.distributed.gather_object(send_obj, gather_list, dst=last_rank)
+
+        if world_group.rank == last_rank:
+            real_outputs = [o for o in gather_list if o is not None]
+            return DiffusionOutput.from_outputs(real_outputs, self.settings.model_output_type)
+        return None
 
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments. Can be overridden by subclasses. """

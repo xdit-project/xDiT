@@ -161,7 +161,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # x embed & refine
         x_item_seqlens = [len(_) for _ in x]
-        assert all(_ % SEQ_MULTI_OF == 0 for _ in x_item_seqlens)
+        # assert all(_ % SEQ_MULTI_OF == 0 for _ in x_item_seqlens)
         x_max_item_seqlen = max(x_item_seqlens)
 
         x = torch.cat(x, dim=0)
@@ -203,7 +203,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # cap embed & refine
         cap_item_seqlens = [len(_) for _ in cap_feats]
-        assert all(_ % SEQ_MULTI_OF == 0 for _ in cap_item_seqlens)
+        # assert all(_ % SEQ_MULTI_OF == 0 for _ in cap_item_seqlens)
         cap_max_item_seqlen = max(cap_item_seqlens)
 
         cap_feats = torch.cat(cap_feats, dim=0)

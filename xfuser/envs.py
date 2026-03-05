@@ -227,8 +227,6 @@ class PackagesEnvChecker:
                     'defaulting to other attention mechanisms'
                 )
             return False
-        else:
-            return False
 
 
 

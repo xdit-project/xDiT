@@ -104,11 +104,16 @@ class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
     def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, pipe_args: List[dict]|dict = []) -> None:
         self.images = images
-        if not isinstance(videos, list):
+        if isinstance(videos, np.ndarray) and videos.ndim == 5:
+            videos = [videos[i] for i in range(videos.shape[0])]
+        elif not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
         if not isinstance(pipe_args, list):
             pipe_args = [pipe_args]
+        output_count = len(self.images or self.videos or [])
+        if len(pipe_args) == 1 and output_count > 1:
+            pipe_args = pipe_args * output_count
         self.pipe_args = pipe_args
 
     @classmethod
@@ -172,7 +177,10 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
-            self._compile_model(input_args)
+            compile_input_args = copy.deepcopy(input_args)
+            if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
+                compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
+            self._compile_model(compile_input_args)
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
@@ -223,14 +231,12 @@ class xFuserModel(abc.ABC):
 
 
     def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile """
+        """ Compile the model using torch.compile."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default") # TODO: Configurable
-
         # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
-        self._run_timed_pipe(compile_args)
+        input_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        self._run_timed_pipe(input_args)
 
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
@@ -239,7 +245,11 @@ class xFuserModel(abc.ABC):
         timings = []
         output: DiffusionOutput = None
 
-        self._run_warmup_calls(input_args)
+        if self.config.warmup_calls:
+            warmup_args = copy.deepcopy(input_args)
+            if self.config.batch_size and isinstance(warmup_args.get("prompt"), list):
+                warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
+            self._run_warmup_calls(warmup_args)
         for iteration in range(self.config.num_iterations):
             log(f"Running iteration {iteration + 1}/{self.config.num_iterations}")
 
@@ -349,8 +359,6 @@ class xFuserModel(abc.ABC):
                 log(f"Output image saved to {output_path}")
         elif output.videos:
             for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
-                if isinstance(video, np.ndarray):
-                    video = video[0] # Remove batch dimension
                 output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.settings.fps)

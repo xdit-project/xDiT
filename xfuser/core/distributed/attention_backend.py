@@ -287,7 +287,6 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal):
     softmax_lse = None
     quant_dtype = aiter.dtypes.fp8
     dtypeMax = torch.finfo(quant_dtype).max
-    print(AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_FP8_HAS_DESCALE)
     if AITER_FP8_HAS_DESCALE:
         # If AITER_FP8_STATIC_SCALE_WITH_DESCALE is not set, use dynamic scaling.
         # Set the environment variable XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE
@@ -344,7 +343,6 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     }
     if AITER_HAS_ROUND_MODE:
         attn_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-    print(AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT)
     output, softmax_lse = flash_attn_func_aiter(
         query,
         key,

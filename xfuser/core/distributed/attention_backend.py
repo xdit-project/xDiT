@@ -71,7 +71,7 @@ if env_info["has_aiter"]:
         pass # Error is rasied in runtime_state.py if AITER_SAGE is not available.
     try:
         from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import (
-                fav3_sage_mxfp4_wrapper,
+            fav3_sage_mxfp4_wrapper,
         )
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.

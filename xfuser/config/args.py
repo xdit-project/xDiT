@@ -144,6 +144,9 @@ class xFuserArgs:
     hybrid_attn_high_precision_backend: Optional[str] = None
     num_hybrid_attn_high_precision_steps: Optional[int] = None
     hybrid_attn_schedule: Optional[str] = None
+    # Hybrid GEMM schedule (FP8 high precision + FP4 low precision)
+    use_hybrid_gemm_schedule: bool = False
+    num_hybrid_gemm_high_precision_steps: Optional[int] = None
 
 
     @staticmethod
@@ -655,6 +658,18 @@ class xFuserArgs:
             help="An explicit comma-delimited string of attention backend names for the hybrid schedule. Example: 'FLASH_3,FLASH_3_FP8,FLASH_3_FP8,FLASH_3'. Use only if both low-precision and high-precision backends are not set.",
         )
         parser.add_argument(
+            "--use_hybrid_gemm_schedule",
+            action="store_true",
+            default=False,
+            help="Enable hybrid GEMM schedule: FP8 at start/end and MXFP4 in the middle.",
+        )
+        parser.add_argument(
+            "--num_hybrid_gemm_high_precision_steps",
+            type=int,
+            default=None,
+            help="Number of high-precision GEMM steps at both the start and end of denoising.",
+        )
+        parser.add_argument(
             "--use_vae_channels_last_format",
             action="store_true",
             default=False,
@@ -710,6 +725,10 @@ class xFuserArgs:
                     "When use_hybrid_attn_schedule is True, both hybrid_attn_low_precision_backend and "
                     "hybrid_attn_high_precision_backend must be set."
                 )
+
+        if self.use_hybrid_gemm_schedule:
+            if not self.use_fp4_gemms:
+                raise ValueError("When use_hybrid_gemm_schedule is True, use_fp4_gemms must be set.")
 
         model_config = ModelConfig(
             model=self.model,

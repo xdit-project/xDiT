@@ -7,6 +7,7 @@ try:
 except ImportError:
     pass # Error will be thrown in base_model.py, if mxfp4 gemms are enabled but AITER is not available.
 from typing import Optional
+from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
 @torch.library.custom_op("mylib::mxfp4_gemm", mutates_args=())
@@ -149,3 +150,29 @@ class xFuserMXFP4Linear(nn.Module):
     def extra_repr(self):
         """String representation (for print(model))"""
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
+
+
+class xFuserHybridMXFP4Linear(nn.Module):
+    """
+    Hybrid linear layer that switches per diffusion step between
+    high precision (FP8-quantized nn.Linear path) and low precision (MXFP4 GEMM path).
+    """
+
+    def __init__(
+        self,
+        high_precision_linear: nn.Module,
+        low_precision_linear: xFuserMXFP4Linear,
+    ) -> None:
+        super().__init__()
+        self.high_precision_linear = high_precision_linear
+        self.low_precision_linear = low_precision_linear
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        runtime_state = get_runtime_state()
+        use_high_precision = getattr(runtime_state, "use_high_precision_gemm", True)
+        if use_high_precision:
+            return self.high_precision_linear(input)
+        return self.low_precision_linear(input)
+
+    def extra_repr(self):
+        return "hybrid_gemm_schedule=True"

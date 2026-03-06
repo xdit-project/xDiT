@@ -448,6 +448,7 @@ class xFuserModel(abc.ABC):
             # a number of transformer blocks while using FP4 for others. This mixed-precision
             # approach balances performance and output quality better than uniform quantization.
             log(f"Quantizing linear layers in {module_name} to FP4...")
+            print(self.settings.fp8_precision_overrides)
             if self.settings.fp8_precision_overrides:
                 log(f"The following blocks will be quantized to FP8, to maintain output quality: {self.settings.fp8_precision_overrides}")
             module = rgetattr(self.pipe, module_name)
@@ -476,6 +477,8 @@ class xFuserModel(abc.ABC):
         Setup hybrid attention schedule: high precision backend at start/end, low precision backend in the middle,
         or a custom schedule provided by the user.
         """
+        if input_args["num_hybrid_attn_high_precision_steps"] is None:
+            raise ValueError("You must provide 'num_hybrid_attn_high_precision_steps' to use the hybrid attention schedule.")
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
         if self.config.hybrid_attn_low_precision_backend is None or self.config.hybrid_attn_high_precision_backend is None:
@@ -502,6 +505,8 @@ class xFuserModel(abc.ABC):
         """
         Setup hybrid GEMM schedule: high precision FP8 GEMMs at start/end, MXFP4 GEMMs in the middle.
         """
+        if input_args["num_hybrid_gemm_high_precision_steps"] is None:
+            raise ValueError("You must provide 'num_hybrid_gemm_high_precision_steps' to use the hybrid GEMM schedule.")
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
         num_high_precision_steps = input_args["num_hybrid_gemm_high_precision_steps"] * multiplier

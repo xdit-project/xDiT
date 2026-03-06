@@ -720,16 +720,8 @@ class xFuserArgs:
                 )
 
         if self.use_hybrid_gemm_schedule:
-            if not self.use_fp8_gemms:
-                raise ValueError("When use_hybrid_gemm_schedule is True, use_fp8_gemms must be set.")
             if not self.use_fp4_gemms:
                 raise ValueError("When use_hybrid_gemm_schedule is True, use_fp4_gemms must be set.")
-            if self.num_hybrid_gemm_high_precision_steps is None:
-                raise ValueError(
-                    "When use_hybrid_gemm_schedule is True, num_hybrid_gemm_high_precision_steps must be set."
-                )
-            if self.num_hybrid_gemm_high_precision_steps < 0:
-                raise ValueError("num_hybrid_gemm_high_precision_steps must be >= 0.")
 
         model_config = ModelConfig(
             model=self.model,

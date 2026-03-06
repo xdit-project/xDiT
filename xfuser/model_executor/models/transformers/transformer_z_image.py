@@ -14,6 +14,9 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
+    get_classifier_free_guidance_world_size,
+    get_classifier_free_guidance_rank,
+    get_cfg_group,
 )
 
 ADALN_EMBED_DIM = 256
@@ -143,6 +146,15 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
 
+        cfg_world_size = get_classifier_free_guidance_world_size()
+        cfg_rank = get_classifier_free_guidance_rank()
+        do_cfg_parallel = cfg_world_size > 1
+
+        if do_cfg_parallel:
+            B = len(x) // cfg_world_size
+            x = x[cfg_rank * B : (cfg_rank + 1) * B]
+            cap_feats = cap_feats[cfg_rank * B : (cfg_rank + 1) * B]
+            t = t.chunk(cfg_world_size, dim=0)[cfg_rank]
 
         bsz = len(x)
         device = x[0].device
@@ -280,6 +292,11 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
         unified = list(unified.unbind(dim=0))
         x = self.unpatchify(unified, x_size, patch_size, f_patch_size)
+
+        if do_cfg_parallel:
+            x_stacked = torch.stack(x, dim=0)
+            x_stacked = get_cfg_group().all_gather(x_stacked, dim=0)
+            x = list(x_stacked.unbind(dim=0))
 
         if not return_dict:
             return (x,)

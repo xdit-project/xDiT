@@ -46,7 +46,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "AITER_FP8_STATIC_SCALE_WITH_DESCALE": lambda: os.environ.get(
                 "XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", None
             ),
-    "FAV3_SAGE_MXFP4_BLOCK_R": lambda: os.environ.get("XFUSER_FAV3_SAGE_MXFP4_BLOCK_R", "128"),
+    "AITER_SAGE_V2_BLOCK_R": lambda: os.environ.get("XFUSER_AITER_SAGE_V2_BLOCK_R", "128"),
 }
 
 

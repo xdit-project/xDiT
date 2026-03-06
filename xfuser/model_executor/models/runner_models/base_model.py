@@ -448,7 +448,6 @@ class xFuserModel(abc.ABC):
             # a number of transformer blocks while using FP4 for others. This mixed-precision
             # approach balances performance and output quality better than uniform quantization.
             log(f"Quantizing linear layers in {module_name} to FP4...")
-            print(self.settings.fp8_precision_overrides)
             if self.settings.fp8_precision_overrides:
                 log(f"The following blocks will be quantized to FP8, to maintain output quality: {self.settings.fp8_precision_overrides}")
             module = rgetattr(self.pipe, module_name)

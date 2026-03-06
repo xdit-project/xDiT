@@ -338,6 +338,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         output_name="wan2.2_ti2v",
         fp8_gemm_module_list=["transformer.blocks"],
         fp4_gemm_module_list=["transformer.blocks"],
+        fp8_precision_overrides=("0.", "1.", "28.", "29."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
         flow_shift=5,

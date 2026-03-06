@@ -28,8 +28,8 @@ def get_nproc_from_args(args: List[str]) -> int:
     """
     Infer the number of processes from the command line arguments.
     """
-    degree_args = ["ulysses", "tensor_parallel", "ring", "pipefusion_parallel", "data_parallel"]
-    degree_arg_prefixes = [f"--{arg}_degree" for arg in degree_args] + [f"--{arg}-degree" for arg in degree_args]
+    degree_args = ["--ulysses_degree", "--tensor_parallel_degree", "--ring_degree", "--pipefusion_parallel_degree", "--data_parallel_degree"]
+    degree_args = degree_args + [arg.replace("_", "-") for arg in degree_args]
     degrees = []
     i = 0
     while i < len(args):
@@ -37,7 +37,7 @@ def get_nproc_from_args(args: List[str]) -> int:
         matched = False
 
         # Check for --arg=value format
-        for prefix in degree_arg_prefixes:
+        for prefix in degree_args:
             if arg.startswith(f"{prefix}="):
                 degrees.append(int(arg.split("=", 1)[1]))
                 matched = True
@@ -45,7 +45,7 @@ def get_nproc_from_args(args: List[str]) -> int:
 
         if not matched:
             # Check for --arg value format
-            for prefix in degree_arg_prefixes:
+            for prefix in degree_args:
                 if arg == prefix and i + 1 < len(args):
                     degrees.append(int(args[i + 1]))
                     i += 1  # Skip the value

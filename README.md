@@ -202,8 +202,7 @@ We provide a docker image for developers to develop with xDiT. The docker image 
 The xDiT Model Runner provides a single entry point for running most supported diffusion models with proper benchmarking and profiling support. To use it, simply run:
 
 ```bash
-xdit xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --prompt "A cat running in a garden" \
     --ulysses_degree 8
 ```

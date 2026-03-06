@@ -3,6 +3,7 @@ import torch
 import copy
 import argparse
 import json
+import functools
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
@@ -11,18 +12,22 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, get_platform
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
     quantize_linear_layers_to_fp4,
+    convert_model_convs_to_channels_last,
     rgetattr,
 )
 
 from xfuser.core.distributed import (
     get_world_group,
+    get_data_parallel_rank,
+    get_data_parallel_world_size,
+    get_sequence_parallel_rank,
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
@@ -30,6 +35,10 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+
+packages_info = PACKAGES_CHECKER.get_packages_info()
+if packages_info.get("has_distvae", False):
+    from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
 
 
 MODEL_REGISTRY = {}
@@ -48,7 +57,7 @@ class ModelCapabilities:
     ulysses_degree: bool = True  # All xDiT models support these
     ring_degree: bool = True
     pipefusion_parallel_degree: bool = False
-    data_parallel_degree: bool = False
+    data_parallel_degree: bool = True
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
@@ -56,6 +65,7 @@ class ModelCapabilities:
     # Memory optimizations
     enable_slicing: bool = False
     enable_tiling: bool = False
+    use_vae_channels_last_format: bool = True
     # Other features
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
@@ -106,11 +116,16 @@ class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
     def __init__(self, images: List[Image] = None, videos: List[np.ndarray]|np.ndarray = None, pipe_args: List[dict]|dict = []) -> None:
         self.images = images
-        if not isinstance(videos, list):
+        if isinstance(videos, np.ndarray) and videos.ndim == 5:
+            videos = list(videos)
+        elif not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
         if not isinstance(pipe_args, list):
             pipe_args = [pipe_args]
+        output_count = len(self.images or self.videos or [])
+        if len(pipe_args) == 1 and output_count > 1:
+            pipe_args = pipe_args * output_count
         self.pipe_args = pipe_args
 
     @classmethod
@@ -174,7 +189,10 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
-            self._compile_model(input_args)
+            compile_input_args = copy.deepcopy(input_args)
+            if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
+                compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
+            self._compile_model(compile_input_args)
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
@@ -218,30 +236,46 @@ class xFuserModel(abc.ABC):
 
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
-        
+
         if config.use_fp4_gemms:
-            if not PACKAGES_CHECKER.packages_info.get("has_aiter", False):
+            if not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 Gemms only supported with AITER.")
+        if config.use_parallel_vae:
+            if not packages_info.get("has_distvae", False):
+                raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
+            if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
+                raise ValueError("AITER GroupNorm is not supported with parallel VAE.")
+
+
 
 
     def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile """
+        """ Compile the model using torch.compile."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default") # TODO: Configurable
-
         # two steps to warmup the torch compiler
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
-        self._run_timed_pipe(compile_args)
+        input_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        self._run_timed_pipe(input_args)
 
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
         """ Run the model with given input arguments and return output and timings """
         self._validate_args(input_args)
+        input_args = self._split_prompts_for_dp(input_args)
         timings = []
         output: DiffusionOutput = None
 
-        self._run_warmup_calls(input_args)
+        if self.config.warmup_calls:
+            warmup_args = copy.deepcopy(input_args)
+            if self.config.batch_size and isinstance(warmup_args.get("prompt"), list):
+                warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
+            self._run_warmup_calls(warmup_args)
+
+        inference_start = torch.cuda.Event(enable_timing=True)
+        inference_end = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+
+        inference_start.record()
         for iteration in range(self.config.num_iterations):
             log(f"Running iteration {iteration + 1}/{self.config.num_iterations}")
 
@@ -253,9 +287,16 @@ class xFuserModel(abc.ABC):
                 timings.append(timing)
                 log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
 
+        inference_end.record()
+        torch.cuda.synchronize()
+
+        output = self._gather_dp_outputs(output)
+
         if len(timings) > 1:
             timings.pop(0) # Remove first timing for more accurate average # TODO: fix
         log(f"Average time over {self.config.num_iterations} runs: {sum(timings) / len(timings):.2f}s")
+        log(f"Total time spent: {inference_start.elapsed_time(inference_end) / 1000:.2f}s")
+
         return output, timings
 
     def _run_pipe_batched(self, input_args: dict) -> Tuple[List[DiffusionOutput], list]:
@@ -351,8 +392,6 @@ class xFuserModel(abc.ABC):
                 log(f"Output image saved to {output_path}")
         elif output.videos:
             for video_index, (video, pipe_args) in enumerate(output.get_outputs()):
-                if isinstance(video, np.ndarray):
-                    video = video[0] # Remove batch dimension
                 output_name = self.get_output_name(pipe_args)
                 output_path = f"{self.config.output_directory}/{output_name}_{video_index}.mp4"
                 export_to_video(video, output_path, fps=self.settings.fps)
@@ -421,6 +460,13 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
+
+        if self.config.use_vae_channels_last_format:
+            self._convert_vae_to_channels_last()
+
+
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
         local_rank = get_world_group().local_rank
@@ -441,7 +487,7 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
-    
+
     def _setup_mxfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:
             # Certain models benefit from a hybrid quantization strategy: applying FP8 to
@@ -458,7 +504,7 @@ class xFuserModel(abc.ABC):
                 device=f"cuda:{local_rank}",
             )
         # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
-        # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2, 
+        # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
         # where the low-noise transformer should use FP8 quantization.
         # This transformer generates fine details and requires higher precision to maintain quality.
         for module_name in self.settings.fp8_gemm_module_list:
@@ -519,6 +565,35 @@ class xFuserModel(abc.ABC):
         log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision}", debug=True)
         get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
 
+    def _setup_parallel_vae(self) -> None:
+        """ Parallalizes the VAE decoder using distvae """
+        try:
+            patched_decoder = DecoderAdapter(self.pipe.vae.decoder).to(self.pipe.vae.device)
+            self.pipe.vae.decoder = patched_decoder
+            log(f"Parallel VAE decoder enabled successfully.")
+        except:
+            raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
+
+    def _convert_vae_to_channels_last(self) -> None:
+        """ Convert the VAE to channels last """
+        convert_model_convs_to_channels_last(self.pipe.vae)
+
+        original_decode = self.pipe.vae.decode
+        memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
+
+        @functools.wraps(original_decode)
+        def decode_wrapper(*args, **kwargs):
+            if args:
+                args = list(args)
+                args[0] = args[0].to(memory_format=memory_format)
+                args = tuple(args)
+            elif "z" in kwargs:
+                kwargs["z"] = kwargs["z"].to(memory_format=memory_format)
+            output = original_decode(*args, **kwargs)
+            return output
+
+        self.pipe.vae.decode = decode_wrapper
+
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         """ Execute the pipeline. Must be implemented by subclasses. """
@@ -528,6 +603,58 @@ class xFuserModel(abc.ABC):
     def _load_model(self) -> DiffusionPipeline:
         """ Load the model. Must be implemented by subclasses. """
         pass
+
+    def _split_prompts_for_dp(self, input_args: dict) -> dict:
+        """Shard prompts across data-parallel groups so each group processes a subset."""
+        if self.config.data_parallel_degree == 1:
+            return input_args
+
+        dp_world_size = get_data_parallel_world_size()
+        dp_rank = get_data_parallel_rank()
+        prompts = input_args.get("prompt")
+
+        if isinstance(prompts, str):
+            log(f"Single prompt with dp_world_size={dp_world_size}: all DP groups will process the same prompt.")
+            return input_args
+
+        if len(prompts) < dp_world_size:
+            raise ValueError(
+                f"Number of prompts ({len(prompts)}) is less than data_parallel_world_size ({dp_world_size}). "
+            )
+
+        local_prompts = prompts[dp_rank::dp_world_size]
+        log(f"Each DP group will process {len(local_prompts)} prompts out of {len(prompts)} total prompts.")
+
+        split_args = copy.copy(input_args)
+        split_args["prompt"] = local_prompts
+        return split_args
+
+    def _gather_dp_outputs(self, output: DiffusionOutput) -> Optional[DiffusionOutput]:
+        """
+        Gathers DiffusionOutput objects from all DP groups onto the last rank.
+
+        Within each SP group every rank holds an identical copy of the output
+        Only the first rank in the SP group sends the real payload,
+        the other ranks send None to keep the collective valid.
+
+        """
+        if self.config.data_parallel_degree == 1:
+            return output
+
+        world_group = get_world_group()
+        last_rank = world_group.world_size - 1
+
+        is_representative = get_sequence_parallel_rank() == 0
+        send_obj = output if is_representative else None
+
+        gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None
+
+        torch.distributed.gather_object(send_obj, gather_list, dst=last_rank)
+
+        if world_group.rank == last_rank:
+            real_outputs = [o for o in gather_list if o is not None]
+            return DiffusionOutput.from_outputs(real_outputs, self.settings.model_output_type)
+        return None
 
     def _validate_args(self, input_args: dict) -> None:
         """ Validate input arguments. Can be overridden by subclasses. """

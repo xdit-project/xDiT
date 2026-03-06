@@ -138,6 +138,20 @@ def get_torch_distributed_backend() -> str:
             "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
         )
 
+def get_platform() -> str:
+    if _is_cuda():
+        return "cuda"
+    elif _is_hip():
+        return "rocm"
+    elif _is_musa():
+        return "musa"
+    elif _is_mps():
+        return "mps"
+    elif _is_npu():
+        return "npu"
+    else:
+        return "cpu"
+
 
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
@@ -192,12 +206,17 @@ class PackagesEnvChecker:
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
+        packages_info["has_distvae"] = self.check_distvae()
         self.packages_info = packages_info
 
     def check_aiter(self):
         """
         Checks whether ROCm AITER library is installed
         """
+        if not torch.cuda.is_available():
+            return False
+        if not self._on_mi3xx():
+            return False
         try:
             import aiter
             return True
@@ -208,6 +227,7 @@ class PackagesEnvChecker:
                     'defaulting to other attention mechanisms'
                 )
             return False
+
 
 
     def check_flash_attn(self):
@@ -293,8 +313,19 @@ class PackagesEnvChecker:
         except ImportError:
             return False
 
+    def check_distvae(self):
+        try:
+            from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+            return True
+        except ImportError:
+            return False
+
     def get_packages_info(self):
         return self.packages_info
+
+    def _on_mi3xx(self):
+        gcn_arch_name = torch.cuda.get_device_properties().gcnArchName
+        return any(arch in gcn_arch_name for arch in ["gfx950", "gfx942"])
 
 
 PACKAGES_CHECKER = PackagesEnvChecker()

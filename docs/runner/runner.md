@@ -17,11 +17,10 @@ The unified runner provides:
 
 ### Basic Usage
 
-Run any supported model using `torchrun`:
+Run any supported model using `xdit`:
 
 ```bash
-torchrun --nproc_per_node=8 xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --prompt "A cat running in a garden" \
     --ulysses_degree 8
 ```
@@ -178,8 +177,7 @@ Individual model classes that inherit from `xFuserModel`:
 ### Multi-GPU Image Generation
 
 ```bash
-torchrun --nproc_per_node=4 xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --prompt "A majestic mountain landscape at sunset" \
     --height 1024 \
     --width 1024 \
@@ -190,8 +188,7 @@ torchrun --nproc_per_node=4 xfuser/runner.py \
 ### Video Generation
 
 ```bash
-torchrun --nproc_per_node=8 xfuser/runner.py \
-    --model HunyuanVideo \
+xdit --model HunyuanVideo \
     --prompt "A cat playing with a ball" \
     --height 720 \
     --width 1280 \
@@ -202,8 +199,7 @@ torchrun --nproc_per_node=8 xfuser/runner.py \
 ### Benchmarking with Multiple Iterations
 
 ```bash
-torchrun --nproc_per_node=8 xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --prompt "Benchmark test image" \
     --ulysses_degree 8 \
     --num_iterations 5 \
@@ -213,8 +209,7 @@ torchrun --nproc_per_node=8 xfuser/runner.py \
 ### Profiling
 
 ```bash
-torchrun --nproc_per_node=8 xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --prompt "Profile test" \
     --ulysses_degree 8 \
     --profile \
@@ -224,8 +219,7 @@ torchrun --nproc_per_node=8 xfuser/runner.py \
 ### With Torch Compile
 
 ```bash
-torchrun --nproc_per_node=4 xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --prompt "Compiled inference test" \
     --ulysses_degree 4 \
     --use_torch_compile
@@ -234,8 +228,7 @@ torchrun --nproc_per_node=4 xfuser/runner.py \
 ### Dataset Inference
 
 ```bash
-torchrun --nproc_per_node=8 xfuser/runner.py \
-    --model FLUX.1-dev \
+xdit --model FLUX.1-dev \
     --dataset_path ./prompts.csv \  # CSV file with at least column "prompt"
     --batch_size 4 \
     --ulysses_degree 8 \

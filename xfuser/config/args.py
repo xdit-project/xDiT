@@ -137,6 +137,7 @@ class xFuserArgs:
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
     fully_shard_degree: int = 1
+    use_vae_channels_last_format: bool = False
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
     hybrid_attn_low_precision_backend: Optional[str] = None
@@ -667,6 +668,12 @@ class xFuserArgs:
             type=int,
             default=None,
             help="Number of high-precision GEMM steps at both the start and end of denoising.",
+        )
+        parser.add_argument(
+            "--use_vae_channels_last_format",
+            action="store_true",
+            default=False,
+            help="Use channels last memory format for the VAE.",
         )
         return parser
 

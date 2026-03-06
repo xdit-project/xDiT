@@ -16,7 +16,7 @@ AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale 
 FAV3_SAGE_MXFP4_BLOCK_R = environment_variables["FAV3_SAGE_MXFP4_BLOCK_R"]()
 try:
     block_r = int(FAV3_SAGE_MXFP4_BLOCK_R)
-    FAV3_SAGE_MXFP4_BLOCK_R = block_r if block_r in [32, 128] else 128
+    FAV3_SAGE_MXFP4_BLOCK_R = block_r if block_r in [16, 32, 64, 128] else 128
 except (TypeError, ValueError):
     FAV3_SAGE_MXFP4_BLOCK_R = 128
 

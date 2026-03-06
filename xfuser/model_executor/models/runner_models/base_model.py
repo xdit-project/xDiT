@@ -330,6 +330,7 @@ class xFuserModel(abc.ABC):
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
         self._validate_args(input_args)
+        input_args = self._split_prompts_for_dp(input_args)
 
         schedule = torch.profiler.schedule(
             wait=self.config.profile_wait,
@@ -347,11 +348,17 @@ class xFuserModel(abc.ABC):
             for iteration in range(num_repetitions):
                 log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
                 with record_function("model_inference"):
-                    out, timing = self._run_timed_pipe(input_args)
+                    if self.config.batch_size: # Run in batched mode
+                        output, batch_timings = self._run_pipe_batched(input_args)
+                        timing = sum(batch_timings)
+                    else: # Run all in one go
+                        output, timing = self._run_timed_pipe(input_args)
                 profile_object.step()
                 log(f"Profiling iteration {iteration + 1} completed in {timing:.2f}s")
 
-        return out, [], profile_object
+        output = self._gather_dp_outputs(output)
+
+        return output, [], profile_object
 
     def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """

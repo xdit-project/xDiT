@@ -28,6 +28,7 @@ from xfuser.core.distributed import (
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
+    get_classifier_free_guidance_rank,
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
@@ -614,7 +615,7 @@ class xFuserModel(abc.ABC):
         world_group = get_world_group()
         last_rank = world_group.world_size - 1
 
-        is_representative = get_sequence_parallel_rank() == 0
+        is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
         send_obj = output if is_representative else None
 
         gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None

@@ -280,17 +280,14 @@ class DiTRuntimeState(RuntimeState):
         return self.gemm_schedule is not None
 
     def _get_active_total_steps(self) -> Optional[int]:
-        if self.schedule_total_steps is not None and self.gemm_schedule_total_steps is not None:
-            if self.schedule_total_steps != self.gemm_schedule_total_steps:
-                raise RuntimeError(
-                    f"Attention and GEMM schedules must use the same total steps; got {self.schedule_total_steps} and {self.gemm_schedule_total_steps}."
-                )
-            return self.schedule_total_steps
-        if self.schedule_total_steps is not None:
-            return self.schedule_total_steps
-        return self.gemm_schedule_total_steps
+        attn_steps = self.schedule_total_steps
+        gemm_steps = self.gemm_schedule_total_steps
+        if attn_steps is not None and gemm_steps is not None and attn_steps != gemm_steps:
+            raise RuntimeError(
+                f"Attention and GEMM schedules must use the same total steps; got {attn_steps} and {gemm_steps}."
+            )
+        return attn_steps or gemm_steps
 
-    @torch._dynamo.disable
     def increment_step_counter(self):
         """
         Advance the denoising step and set per-step scheduled backends/modes when active.
@@ -325,8 +322,8 @@ class DiTRuntimeState(RuntimeState):
         for backend in set(attention_schedule.backends):
             self._check_if_backend_compatible_with_current_configuration(backend)
         self.attention_schedule = attention_schedule
-        self.schedule_total_steps = total_steps
-        self.step_counter = 0
+        self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
+        self.step_counter = torch.tensor(0, dtype=torch.int)
         logger.warning("Per-step attention schedule enabled (total_steps=%d).", total_steps)
 
     def set_gemm_schedule(
@@ -339,8 +336,8 @@ class DiTRuntimeState(RuntimeState):
         When set, increment_step_counter() will update use_high_precision_gemm each step.
         """
         self.gemm_schedule = gemm_schedule
-        self.gemm_schedule_total_steps = total_steps
-        self.step_counter = 0
+        self.gemm_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
+        self.step_counter = torch.tensor(0, dtype=torch.int)
         logger.warning("Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(

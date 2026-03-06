@@ -83,16 +83,15 @@ class GemmPrecisionSchedule:
     use_high_precision[i] indicates whether step i should use high precision GEMM.
     """
 
-    def __init__(self, use_high_precision: List[bool]):
-        if not use_high_precision:
+    def __init__(self, use_high_precision_schedule: List[bool]):
+        if not use_high_precision_schedule:
             raise ValueError("GemmPrecisionSchedule requires at least one step.")
-        self.use_high_precision = list(use_high_precision)
-        self.total_steps = len(self.use_high_precision)
+        self.use_high_precision_schedule = list(use_high_precision_schedule)
 
     def is_high_precision(self, step: int) -> bool:
-        if step < 0 or step >= len(self.use_high_precision):
-            raise IndexError(f"Step {step} out of range [0, {len(self.use_high_precision)}).")
-        return self.use_high_precision[step]
+        if step < 0 or step >= len(self.use_high_precision_schedule):
+            raise IndexError(f"Step {step} out of range [0, {len(self.use_high_precision_schedule)}).")
+        return self.use_high_precision_schedule[step]
 
 
 def create_hybrid_gemm_schedule(

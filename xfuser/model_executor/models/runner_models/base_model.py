@@ -562,7 +562,7 @@ class xFuserModel(abc.ABC):
         )
 
         log("Enabling hybrid GEMM schedule")
-        log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision}", debug=True)
+        log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision_schedule}", debug=True)
         get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
 
     def _setup_parallel_vae(self) -> None:

@@ -173,6 +173,28 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         for block in self.transformer_blocks:
             block.attn.processor = xFuserHunyuanVideo15AttnProcessor()
 
+    def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
+        if pad_amount > 0:
+            if dim < 0:
+                dim = x.ndim + dim
+            pad_shape = list(x.shape)
+            pad_shape[dim] = pad_amount
+            x = torch.cat([x,
+                        torch.zeros(
+                            pad_shape,
+                            dtype=x.dtype,
+                            device=x.device,
+                        )], dim=dim)
+        x = torch.chunk(x,
+                        sp_world_size,
+                        dim=dim)[sp_world_rank]
+        return x
+
+    def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
+        x = get_sp_group().all_gather(x, dim=dim)
+        size = x.size(dim)
+        return x.narrow(dim=dim, start=0, length=size - pad_amount)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -296,16 +318,15 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_attention_mask = torch.stack(new_encoder_attention_mask)
 
         # sequence parallel
-        hidden_states = torch.chunk(hidden_states, sp_world_size, dim=1)[sp_world_rank]
+        hidden_states_pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=1)
+        cos, sin = image_rotary_emb
+        cos = self._chunk_and_pad_sequence(cos, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
+        sin = self._chunk_and_pad_sequence(sin, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
+        image_rotary_emb = (cos, sin)
 
-        encoder_attention_mask = encoder_attention_mask[0].to(torch.bool)
-        encoder_hidden_states_indices = torch.arange(
-            encoder_hidden_states.shape[1],
-            device=encoder_hidden_states.device)
-        encoder_hidden_states_indices = encoder_hidden_states_indices[
-            encoder_attention_mask]
-        encoder_hidden_states = encoder_hidden_states[
-            ..., encoder_hidden_states_indices, :]
+        encoder_attention_mask = encoder_attention_mask.to(torch.bool).any(dim=0)
+        encoder_hidden_states = encoder_hidden_states[:, encoder_attention_mask, :]
     
         if encoder_hidden_states.shape[1] % sp_world_size != 0:
             get_runtime_state().split_text_embed_in_sp = False
@@ -315,11 +336,6 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                 encoder_hidden_states, 
                 sp_world_size, 
                 dim=1)[sp_world_rank]
-
-        freqs_cos, freqs_sin = image_rotary_emb
-        freqs_cos = torch.chunk(freqs_cos, sp_world_size, dim=0)[sp_world_rank]
-        freqs_sin = torch.chunk(freqs_sin, sp_world_size, dim=0)[sp_world_rank]
-        image_rotary_emb = (freqs_cos, freqs_sin)
 
         # 4. Transformer blocks
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -347,7 +363,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
-        hidden_states = get_sp_group().all_gather(hidden_states, dim=1)
+        hidden_states = self._gather_and_unpad(hidden_states, hidden_states_pad_amount, dim=1)
 
         hidden_states = hidden_states.reshape(
             batch_size, post_patch_num_frames, post_patch_height, post_patch_width, -1, p_t, p_h, p_w

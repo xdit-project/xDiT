@@ -35,7 +35,7 @@ from xfuser.core.distributed import (
     shard_component,
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule
+from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 if packages_info.get("has_distvae", False):
@@ -71,6 +71,7 @@ class ModelCapabilities:
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
     use_hybrid_attn_schedule: bool = False
+    use_hybrid_gemm_schedule: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -83,6 +84,7 @@ class DefaultInputValues:
     guidance_scale: Optional[float] = None
     max_sequence_length: Optional[int] = None
     num_hybrid_attn_high_precision_steps: Optional[int] = None
+    num_hybrid_gemm_high_precision_steps: Optional[int] = None
 
 @dataclass
 class ModelSettings:
@@ -456,17 +458,19 @@ class xFuserModel(abc.ABC):
         else:
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
-        if self.config.use_fp8_gemms:
+        if self.config.use_fp4_gemms:
+            self._setup_mxfp4_gemms(local_rank=local_rank)
+        elif self.config.use_fp8_gemms:
             for module_name in self.settings.fp8_gemm_module_list:
                 log(f"Quantizing linear layers in {module_name} to FP8...")
                 module = rgetattr(self.pipe, module_name)
                 quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
 
-        if self.config.use_fp4_gemms:
-            self._setup_mxfp4_gemms(local_rank=local_rank)
-
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
+
+        if self.config.use_hybrid_gemm_schedule:
+            self._setup_hybrid_gemm_schedule(input_args)
 
         if self.config.use_parallel_vae:
             self._setup_parallel_vae()
@@ -505,7 +509,12 @@ class xFuserModel(abc.ABC):
             if self.settings.fp8_precision_overrides:
                 log(f"The following blocks will be quantized to FP8, to maintain output quality: {self.settings.fp8_precision_overrides}")
             module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp4(module, fp8_layers=self.settings.fp8_precision_overrides)
+            quantize_linear_layers_to_fp4(
+                module,
+                fp8_layers=self.settings.fp8_precision_overrides,
+                use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
+                device=f"cuda:{local_rank}",
+            )
         # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
         # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
         # where the low-noise transformer should use FP8 quantization.
@@ -525,6 +534,8 @@ class xFuserModel(abc.ABC):
         Setup hybrid attention schedule: high precision backend at start/end, low precision backend in the middle,
         or a custom schedule provided by the user.
         """
+        if input_args["num_hybrid_attn_high_precision_steps"] is None:
+            raise ValueError("You must provide 'num_hybrid_attn_high_precision_steps' to use the hybrid attention schedule.")
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
         if self.config.hybrid_attn_low_precision_backend is None or self.config.hybrid_attn_high_precision_backend is None:
@@ -546,6 +557,25 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid attention schedule")
         log(f"Hybrid attention schedule: {attention_schedule.backends}", debug=True)
         get_runtime_state().set_attention_schedule(attention_schedule, total_steps=total_steps)
+
+    def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
+        """
+        Setup hybrid GEMM schedule: high precision FP8 GEMMs at start/end, MXFP4 GEMMs in the middle.
+        """
+        if input_args["num_hybrid_gemm_high_precision_steps"] is None:
+            raise ValueError("You must provide 'num_hybrid_gemm_high_precision_steps' to use the hybrid GEMM schedule.")
+        multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
+        total_steps = input_args["num_inference_steps"] * multiplier
+        num_high_precision_steps = input_args["num_hybrid_gemm_high_precision_steps"] * multiplier
+
+        gemm_schedule = create_hybrid_gemm_schedule(
+            num_high_precision_steps=num_high_precision_steps,
+            total_steps=total_steps,
+        )
+
+        log("Enabling hybrid GEMM schedule")
+        log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision_schedule}", debug=True)
+        get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
 
     def _setup_parallel_vae(self) -> None:
         """ Parallalizes the VAE decoder using distvae """

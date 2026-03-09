@@ -24,6 +24,7 @@ def _setup_aiter_environment_variables():
     return AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R
 
 def _check_aiter_round_mode():
+    HOW_V3_BF16_CVT = None
     try:
         AITER_HAS_ROUND_MODE = inspect.signature(flash_attn_func_aiter).parameters.get("how_v3_bf16_cvt") is not None
     except (AttributeError, TypeError):
@@ -40,13 +41,13 @@ def _check_aiter_fp8_has_descale():
     return AITER_FP8_HAS_DESCALE
 
 def _setup_aiter_sage_v2(block_r):
+    hadamard_matrix = {}
     try:
         from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
             create_hadamard_matrix,
         )
         # Create the hadamard_matrix and replicate it on each available GPU
         _hadamard = create_hadamard_matrix(block_r) / (block_r ** 0.5)
-        hadamard_matrix = {}
 
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
@@ -79,7 +80,7 @@ if env_info["has_aiter"]:
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
-    hadamard_matrix = _setup_aiter_sage_v2(AITER_SAGE_V2_BLOCK_R)
+    HADAMARD_MATRIX = _setup_aiter_sage_v2(AITER_SAGE_V2_BLOCK_R)
     
 
 if env_info["has_flash_attn"]:
@@ -413,7 +414,7 @@ def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
         key = key.contiguous()
         value = value.contiguous()
     softmax_lse = None
-    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=hadamard_matrix[query.device])
+    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
     output = attn_fn(query, key, value, causal=is_causal)
     return output, softmax_lse
 

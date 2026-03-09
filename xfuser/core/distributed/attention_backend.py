@@ -40,7 +40,7 @@ def _check_aiter_fp8_has_descale():
         AITER_FP8_HAS_DESCALE = False
     return AITER_FP8_HAS_DESCALE
 
-def _setup_aiter_sage_v2(block_r):
+def _aiter_sage_v2_hadamard_matrix(block_r):
     hadamard_matrix = {}
     try:
         from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
@@ -58,7 +58,15 @@ def _setup_aiter_sage_v2(block_r):
             device = torch.device("cpu")
             hadamard_matrix[device] = _hadamard.to(device)
     except ImportError:
-        pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.
+        # If create_hadamard_matrix is not available, set the hadamard_matrix to None for all devices.
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                device = torch.device(f"cuda:{i}")
+                hadamard_matrix[device] = None
+        else:
+            # Fallback to CPU or current device
+            device = torch.device("cpu")
+            hadamard_matrix[device] = None
     return hadamard_matrix
 
 aten = torch.ops.aten
@@ -80,7 +88,7 @@ if env_info["has_aiter"]:
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
-    HADAMARD_MATRIX = _setup_aiter_sage_v2(AITER_SAGE_V2_BLOCK_R)
+    HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
     
 
 if env_info["has_flash_attn"]:

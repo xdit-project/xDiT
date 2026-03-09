@@ -1,37 +1,71 @@
 import functools
 import torch
+import inspect
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
 
 ATTENTION_FUNCTION_REGISTRY = {}
-AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
-try:
-    scale = float(AITER_FP8_STATIC_SCALE_WITH_DESCALE)
-    AITER_FP8_STATIC_SCALE_WITH_DESCALE = scale if scale > 1 else None
-except (TypeError, ValueError):
-    AITER_FP8_STATIC_SCALE_WITH_DESCALE = None
-AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale vectors are not used.
+
+def _setup_aiter_environment_variables():
+    AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
+    try:
+        scale = float(AITER_FP8_STATIC_SCALE_WITH_DESCALE)
+        AITER_FP8_STATIC_SCALE_WITH_DESCALE = scale if scale > 1 else None
+    except (TypeError, ValueError):
+        AITER_FP8_STATIC_SCALE_WITH_DESCALE = None
+    AITER_FP8_STATIC_SCALE_NO_DESCALE = 1.0 # This value should be 1.0 when descale vectors are not used.
+    _aiter_sage_v2_block_r = environment_variables["AITER_SAGE_V2_BLOCK_R"]()
+    try:
+        _block_r = int(_aiter_sage_v2_block_r)
+        AITER_SAGE_V2_BLOCK_R = _block_r if _block_r in [16, 32, 64, 128] else 128
+    except (TypeError, ValueError):
+        AITER_SAGE_V2_BLOCK_R = 128
+    return AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R
+
+def _check_aiter_round_mode():
+    HOW_V3_BF16_CVT = None
+    try:
+        AITER_HAS_ROUND_MODE = inspect.signature(flash_attn_func_aiter).parameters.get("how_v3_bf16_cvt") is not None
+    except (AttributeError, TypeError):
+        AITER_HAS_ROUND_MODE = False
+    if AITER_HAS_ROUND_MODE:
+        HOW_V3_BF16_CVT = 2
+    return AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT
+
+def _check_aiter_fp8_has_descale():
+    try:
+        AITER_FP8_HAS_DESCALE = inspect.signature(aiter.flash_attn_fp8_pertensor_func).parameters.get("q_descale") is not None
+    except (AttributeError, TypeError):
+        AITER_FP8_HAS_DESCALE = False
+    return AITER_FP8_HAS_DESCALE
+
+def _aiter_sage_v2_hadamard_matrix(block_r):
+    hadamard_matrix = {}
+    try:
+        from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
+            create_hadamard_matrix,
+        )
+        # Create the hadamard_matrix and replicate it on each available GPU
+        _hadamard = create_hadamard_matrix(block_r) / (block_r ** 0.5)
+    except ImportError:
+        # If create_hadamard_matrix is not available, set the hadamard_matrix to None.
+        _hadamard = None
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            device = torch.device(f"cuda:{i}")
+            hadamard_matrix[device] = _hadamard.to(device) if _hadamard is not None else None
+    else:
+        # Fallback to CPU
+        device = torch.device("cpu")
+        hadamard_matrix[device] = _hadamard.to(device) if _hadamard is not None else None
+    return hadamard_matrix
 
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
 if env_info["has_aiter"]:
     import aiter
     from aiter import flash_attn_func as flash_attn_func_aiter
-    import inspect
-    try:
-        AITER_HAS_ROUND_MODE = inspect.signature(flash_attn_func_aiter).parameters.get("how_v3_bf16_cvt") is not None
-    except (AttributeError, TypeError):
-        AITER_HAS_ROUND_MODE = False
-    if AITER_HAS_ROUND_MODE:
-        import os
-        HOW_V3_BF16_CVT = int(os.environ.get("HOW_V3_BF16_CVT", "2"))
-
-    try:
-        AITER_FP8_HAS_DESCALE = inspect.signature(aiter.flash_attn_fp8_pertensor_func).parameters.get("q_descale") is not None
-    except (AttributeError, TypeError):
-        AITER_FP8_HAS_DESCALE = False
-    
     try:
         from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
     except ImportError:
@@ -41,7 +75,13 @@ if env_info["has_aiter"]:
             fav3_sage_mxfp4_wrapper,
         )
     except ImportError:
-        pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.   
+        pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.
+
+    AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
+    AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
+    AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
+    HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
+    
 
 if env_info["has_flash_attn"]:
     from flash_attn import flash_attn_func as flash_attn_func_2
@@ -366,12 +406,15 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
 def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
-    # Pass layout="bhsd" to avoid permutation
-    query = query.contiguous()
-    key = key.contiguous()
-    value = value.contiguous()
+    # BLOCK_R has nothing to do with contiguous in reality, but a fix for the contiguous 
+    # was merged into AITER together with BLOCK_R. Thus, we can use it to check if the contiguous
+    # is needed.
+    if not AITER_SAGE_V2_BLOCK_R: 
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
     softmax_lse = None
-    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True)
+    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
     output = attn_fn(query, key, value, causal=is_causal)
     return output, softmax_lse
 

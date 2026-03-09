@@ -48,25 +48,17 @@ def _aiter_sage_v2_hadamard_matrix(block_r):
         )
         # Create the hadamard_matrix and replicate it on each available GPU
         _hadamard = create_hadamard_matrix(block_r) / (block_r ** 0.5)
-
-        if torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                device = torch.device(f"cuda:{i}")
-                hadamard_matrix[device] = _hadamard.to(device)
-        else:
-            # Fallback to CPU or current device
-            device = torch.device("cpu")
-            hadamard_matrix[device] = _hadamard.to(device)
     except ImportError:
-        # If create_hadamard_matrix is not available, set the hadamard_matrix to None for all devices.
-        if torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                device = torch.device(f"cuda:{i}")
-                hadamard_matrix[device] = None
-        else:
-            # Fallback to CPU or current device
-            device = torch.device("cpu")
-            hadamard_matrix[device] = None
+        # If create_hadamard_matrix is not available, set the hadamard_matrix to None.
+        _hadamard = None
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            device = torch.device(f"cuda:{i}")
+            hadamard_matrix[device] = _hadamard.to(device) if _hadamard is not None else None
+    else:
+        # Fallback to CPU
+        device = torch.device("cpu")
+        hadamard_matrix[device] = _hadamard.to(device) if _hadamard is not None else None
     return hadamard_matrix
 
 aten = torch.ops.aten

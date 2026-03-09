@@ -376,6 +376,10 @@ class xFuserModel(abc.ABC):
         if input_args.get("dataset_path", None):
             args["prompt"] = load_dataset_prompts(input_args["dataset_path"])
 
+        negative_prompt = args.get("negative_prompt")
+        if negative_prompt and isinstance(negative_prompt, list) and len(negative_prompt) == 1:
+            args["negative_prompt"] = negative_prompt[0]
+
         args = self._preprocess_args_images(args)
         return args
 
@@ -589,6 +593,7 @@ class xFuserModel(abc.ABC):
         dp_world_size = get_data_parallel_world_size()
         dp_rank = get_data_parallel_rank()
         prompts = input_args.get("prompt")
+        negative_prompts = input_args.get("negative_prompt")
 
         if isinstance(prompts, str):
             log(f"Single prompt with dp_world_size={dp_world_size}: all DP groups will process the same prompt.")
@@ -600,10 +605,15 @@ class xFuserModel(abc.ABC):
             )
 
         local_prompts = prompts[dp_rank::dp_world_size]
+        if isinstance(negative_prompts, list) and len(negative_prompts) != 1:
+            local_negative_prompts = negative_prompts[dp_rank::dp_world_size]
+        else:
+            local_negative_prompts = negative_prompts
         log(f"Each DP group will process {len(local_prompts)} prompts out of {len(prompts)} total prompts.")
 
         split_args = copy.copy(input_args)
         split_args["prompt"] = local_prompts
+        split_args["negative_prompt"] = local_negative_prompts
         return split_args
 
     def _gather_dp_outputs(self, output: DiffusionOutput) -> Optional[DiffusionOutput]:

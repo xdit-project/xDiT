@@ -296,7 +296,8 @@ class InputConfig:
                 not self.negative_prompt
                 or len(self.prompt) == len(self.negative_prompt)
                 or len(self.negative_prompt) == 0
-            ), "prompts and negative_prompts must have the same quantities"
+                or len(self.negative_prompt) == 1
+            ), "prompts and negative_prompts must have the same quantities or negative_prompt must be a single string"
             self.batch_size = self.batch_size or len(self.prompt)
         else:
             self.batch_size = self.batch_size or 1

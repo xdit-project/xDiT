@@ -44,7 +44,7 @@ class xFuserZImageModel(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        prompt = list(input_args["prompt"])
+        prompt = list(input_args["prompt"]) if isinstance(input_args["prompt"], list) else prompt
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],

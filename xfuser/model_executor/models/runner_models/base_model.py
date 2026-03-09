@@ -605,7 +605,10 @@ class xFuserModel(abc.ABC):
             )
 
         local_prompts = prompts[dp_rank::dp_world_size]
-        local_negative_prompts = negative_prompts[dp_rank::dp_world_size]
+        if isinstance(negative_prompts, list) and len(negative_prompts) != 1:
+            local_negative_prompts = negative_prompts[dp_rank::dp_world_size]
+        else:
+            local_negative_prompts = negative_prompts
         log(f"Each DP group will process {len(local_prompts)} prompts out of {len(prompts)} total prompts.")
 
         split_args = copy.copy(input_args)

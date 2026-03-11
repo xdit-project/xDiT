@@ -22,6 +22,7 @@ from xfuser.core.distributed import (
     get_vae_parallel_rank,
     get_vae_parallel_world_size,
 )
+from xfuser.core.distributed.group_coordinator import GroupCoordinator
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -33,7 +34,7 @@ else:
 logger = logging.get_logger(__name__)
 
 
-def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: torch.distributed.Group):
+def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: GroupCoordinator):
     def _decode(self, z: torch.Tensor, return_dict: bool = True):
         _, _, num_frame, height, width = z.shape
         tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio

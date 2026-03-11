@@ -40,14 +40,27 @@ def _check_aiter_fp8_has_descale():
         AITER_FP8_HAS_DESCALE = False
     return AITER_FP8_HAS_DESCALE
 
+def _check_aiter_sage_v2_has_block_r():
+    try:
+        from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import (
+            fav3_sage_mxfp4_wrapper,
+        )
+        AITER_SAGE_V2_HAS_BLOCK_R = inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("BLOCK_R") is not None
+    except (AttributeError, TypeError):
+        AITER_SAGE_V2_HAS_BLOCK_R = False
+    return AITER_SAGE_V2_HAS_BLOCK_R
+
 def _aiter_sage_v2_hadamard_matrix(block_r):
     hadamard_matrix = {}
     try:
-        from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
-            create_hadamard_matrix,
-        )
+        try:
+            from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
+                create_hadamard_matrix,
+            )
+        except ImportError:
+            from aiter.ops.triton.quant import create_hadamard_matrix
         # Create the hadamard_matrix and replicate it on each available GPU
-        _hadamard = create_hadamard_matrix(block_r) / (block_r ** 0.5)
+        _hadamard = create_hadamard_matrix(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
     except ImportError:
         # If create_hadamard_matrix is not available, set the hadamard_matrix to None.
         _hadamard = None
@@ -80,6 +93,7 @@ if env_info["has_aiter"]:
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
+    AITER_SAGE_V2_HAS_BLOCK_R = _check_aiter_sage_v2_has_block_r() # Temporarily used to check if contiguous is needed.
     HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
     
 
@@ -409,7 +423,7 @@ def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
     # BLOCK_R has nothing to do with contiguous in reality, but a fix for the contiguous 
     # was merged into AITER together with BLOCK_R. Thus, we can use it to check if the contiguous
     # is needed.
-    if not AITER_SAGE_V2_BLOCK_R: 
+    if not AITER_SAGE_V2_HAS_BLOCK_R: 
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()

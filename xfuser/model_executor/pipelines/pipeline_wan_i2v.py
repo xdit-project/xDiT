@@ -33,7 +33,7 @@ else:
 logger = logging.get_logger(__name__)
 
 
-def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: dist.Group):
+def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: torch.distributed.Group):
     def _decode(self, z: torch.Tensor, return_dict: bool = True):
         _, _, num_frame, height, width = z.shape
         tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio

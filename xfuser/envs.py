@@ -333,6 +333,7 @@ PACKAGES_CHECKER = PackagesEnvChecker()
 
 def _setup_rocm_libraries():
     if PACKAGES_CHECKER.packages_info.get("has_aiter", False):
+        _groupnorm = torch.nn.GroupNorm
         try:
             from aiter.ops.groupnorm import GroupNorm
             torch.nn.GroupNorm = GroupNorm

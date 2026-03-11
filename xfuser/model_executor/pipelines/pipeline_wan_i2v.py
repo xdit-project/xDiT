@@ -352,7 +352,6 @@ class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):
         pipeline.engine_config = engine_config
 
         # Wrap the VAE decoder to support parallel decoding
-        if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0:
-            pipeline.vae = _wrap_wan_vae(pipeline.vae, vae_group=get_vae_parallel_group())
+        pipeline.vae = _wrap_wan_vae(pipeline.vae)
 
         return pipeline

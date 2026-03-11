@@ -12,6 +12,7 @@ from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanT
 from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
     xFuserWanImageToVideoPipeline,
+    _wrap_wan_vae
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,

@@ -32,7 +32,7 @@ else:
 logger = logging.get_logger(__name__)
 
 
-def _wrap_wan_vaedecode(vae: AutoencoderKLWan):
+def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: dist.Group):
     def _decode(self, z: torch.Tensor, return_dict: bool = True):
         _, _, num_frame, height, width = z.shape
         tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
@@ -42,16 +42,25 @@ def _wrap_wan_vaedecode(vae: AutoencoderKLWan):
             return self.tiled_decode(z, return_dict=return_dict)
 
         self.clear_cache()
+        z = self.decoder.patchify(z)
         x = self.post_quant_conv(z)
-        self.decoder.patchify(x)
         for i in range(num_frame):
             self._conv_idx = [0]
             if i == 0:
                 out = self.decoder(
-                    x[:, :, i : i + 1, :, :], feat_cache=self._feat_map, feat_idx=self._conv_idx, first_chunk=True
+                    x[:, :, i : i + 1, :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx,
+                    first_chunk=True,
+                    patchify=False
                 )
             else:
-                out_ = self.decoder(x[:, :, i : i + 1, :, :], feat_cache=self._feat_map, feat_idx=self._conv_idx)
+                out_ = self.decoder(
+                    x[:, :, i : i + 1, :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx,
+                    patchify=False
+                )
                 out = torch.cat([out, out_], 2)
 
         if self.config.patch_size is not None:
@@ -65,8 +74,8 @@ def _wrap_wan_vaedecode(vae: AutoencoderKLWan):
 
         return DecoderOutput(sample=out)
 
+    vae.decoder = WanDecoderAdapter(vae.decoder, vae_group=vae_group)
     vae.post_quant_conv = WanCausalConvAdapter(vae.post_quant_conv)
-    vae.decoder = WanDecoderAdapter(vae.decoder)
     vae.decode = types.MethodType(_decode, vae)
 
     return vae
@@ -339,4 +348,9 @@ class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):
     ):
         pipeline = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
         pipeline.engine_config = engine_config
+
+        # Wrap the VAE decoder to support parallel decoding
+        if get_runtime_state().runtime_config.use_parallel_vae and get_runtime_state().parallel_config.vae_parallel_size > 0:
+            pipeline.vae = _wrap_wan_vae(pipeline.vae, vae_group=get_vae_parallel_group())
+
         return pipeline

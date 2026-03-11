@@ -7,7 +7,7 @@ from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.utils import is_torch_xla_available, logging
-from distvae.modules.adapters.layers.conv_adapters import WanCausalConvAdapter
+from distvae.modules.adapters.layers.conv_adapters import WanCausalConv3dAdapter
 from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
 import torch
 
@@ -75,7 +75,7 @@ def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: dist.Group):
         return DecoderOutput(sample=out)
 
     vae.decoder = WanDecoderAdapter(vae.decoder, vae_group=vae_group)
-    vae.post_quant_conv = WanCausalConvAdapter(vae.post_quant_conv)
+    vae.post_quant_conv = WanCausalConv3dAdapter(vae.post_quant_conv)
     vae.decode = types.MethodType(_decode, vae)
 
     return vae

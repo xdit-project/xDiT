@@ -200,10 +200,6 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 transformer_2=transformer_2,
         )
         pipe.scheduler.config.flow_shift = self.settings.flow_shift
-
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
-
         return pipe
 
     def _compile_model(self, input_args):

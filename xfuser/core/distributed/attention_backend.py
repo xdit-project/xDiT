@@ -58,7 +58,7 @@ def _aiter_sage_v2_hadamard_matrix(block_r):
                 create_hadamard_matrix,
             )
         except ImportError:
-            from aiter.ops.triton.quant import create_hadamard_matrix
+            from aiter.ops.triton.quant.sage_attention_quant_wrappers import create_hadamard_matrix
         # Create the hadamard_matrix and replicate it on each available GPU
         _hadamard = create_hadamard_matrix(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
     except ImportError:

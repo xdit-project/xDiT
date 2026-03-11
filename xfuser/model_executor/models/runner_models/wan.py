@@ -12,7 +12,6 @@ from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanT
 from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
     xFuserWanImageToVideoPipeline,
-    _wrap_wan_vae
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
@@ -57,6 +56,7 @@ class xFuserWan21I2VModel(xFuserModel):
         use_cfg_parallel=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=720,

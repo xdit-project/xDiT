@@ -5,6 +5,7 @@ import os
 from diffusers import WanImageToVideoPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKLWan
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.utils import is_torch_xla_available, logging
 from distvae.modules.adapters.layers.conv_adapters import WanCausalConv3dAdapter

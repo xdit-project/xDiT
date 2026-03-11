@@ -1,4 +1,3 @@
-import types
 from typing import Any, Callable, Dict, List, Optional, Union
 import os
 
@@ -8,8 +7,6 @@ from diffusers.image_processor import PipelineImageInput
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.utils import is_torch_xla_available, logging
-from distvae.modules.adapters.layers.conv_adapters import WanCausalConv3dAdapter
-from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
 import torch
 
 from xfuser.config import EngineConfig
@@ -17,12 +14,7 @@ from xfuser.core.distributed import (
     get_classifier_free_guidance_rank,
     get_classifier_free_guidance_world_size,
     get_cfg_group,
-    get_runtime_state,
-    get_vae_parallel_group,
-    get_vae_parallel_rank,
-    get_vae_parallel_world_size,
 )
-from xfuser.core.distributed.group_coordinator import GroupCoordinator
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -32,55 +24,6 @@ else:
     XLA_AVAILABLE = False
 
 logger = logging.get_logger(__name__)
-
-
-def _wrap_wan_vae(vae: AutoencoderKLWan, vae_group: GroupCoordinator):
-    def _decode(self, z: torch.Tensor, return_dict: bool = True):
-        _, _, num_frame, height, width = z.shape
-        tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
-        tile_latent_min_width = self.tile_sample_min_width // self.spatial_compression_ratio
-
-        if self.use_tiling and (width > tile_latent_min_width or height > tile_latent_min_height):
-            return self.tiled_decode(z, return_dict=return_dict)
-
-        self.clear_cache()
-        z = self.decoder.patchify(z)
-        x = self.post_quant_conv(z)
-        for i in range(num_frame):
-            self._conv_idx = [0]
-            if i == 0:
-                out = self.decoder(
-                    x[:, :, i : i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
-                    first_chunk=True,
-                    patchify=False
-                )
-            else:
-                out_ = self.decoder(
-                    x[:, :, i : i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
-                    patchify=False
-                )
-                out = torch.cat([out, out_], 2)
-
-        if self.config.patch_size is not None:
-            out = unpatchify(out, patch_size=self.config.patch_size)
-
-        out = torch.clamp(out, min=-1.0, max=1.0)
-
-        self.clear_cache()
-        if not return_dict:
-            return (out,)
-
-        return DecoderOutput(sample=out)
-
-    vae.decoder = WanDecoderAdapter(vae.decoder, vae_group=vae_group)
-    vae.post_quant_conv = WanCausalConv3dAdapter(vae.post_quant_conv)
-    vae.decode = types.MethodType(_decode, vae)
-
-    return vae
 
 
 class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):

@@ -7,6 +7,7 @@ from diffusers import WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers import AutoencoderKLWan, WanVACEPipeline
 from diffusers.utils import load_image
+
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
 from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
@@ -26,6 +27,13 @@ from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     resize_image_to_max_area,
 )
+from xfuser.envs import PACKAGES_CHECKER
+
+
+packages_info = PACKAGES_CHECKER.get_packages_info()
+if packages_info.get("has_distvae", False):
+    from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
+
 
 COMMON_FSDP_STRATEGY = {
     "transformer": {
@@ -36,6 +44,18 @@ COMMON_FSDP_STRATEGY = {
         "wrap_attrs": ["encoder.block"],
     }
 }
+
+
+def _setup_parallel_vae(vae) -> None:
+    """ Parallalizes the VAE decoder using distvae """
+    try:
+        patched_decoder = WanDecoderAdapter(
+            vae.decoder, vae_group=get_vae_parallel_group()
+        ).to(vae.device)
+        vae.decoder = patched_decoder
+        log(f"Parallel VAE decoder enabled successfully.")
+    except:
+        raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
 
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
@@ -82,6 +102,11 @@ class xFuserWan21I2VModel(xFuserModel):
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         flow_shift=5,
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -175,6 +200,10 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 transformer_2=transformer_2,
         )
         pipe.scheduler.config.flow_shift = self.settings.flow_shift
+
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
+
         return pipe
 
     def _compile_model(self, input_args):
@@ -202,6 +231,7 @@ class xFuserWan21T2VModel(xFuserModel):
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -227,6 +257,11 @@ class xFuserWan21T2VModel(xFuserModel):
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         flow_shift=12,
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -320,6 +355,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=736,
@@ -344,6 +380,11 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         valid_tasks=["i2v", "t2v"],
         flow_shift=5,
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         torch.set_float32_matmul_precision('high')

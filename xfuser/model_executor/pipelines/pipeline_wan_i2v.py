@@ -294,7 +294,4 @@ class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):
         pipeline = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
         pipeline.engine_config = engine_config
 
-        # Wrap the VAE decoder to support parallel decoding
-        pipeline.vae = _wrap_wan_vae(pipeline.vae)
-
         return pipeline

@@ -36,11 +36,13 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+from xfuser.logger import init_logger
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 if packages_info.get("has_distvae", False):
     from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
 
+logger = init_logger(__name__)
 
 MODEL_REGISTRY = {}
 
@@ -245,9 +247,8 @@ class xFuserModel(abc.ABC):
             if not packages_info.get("has_distvae", False):
                 raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
             if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
-                raise ValueError("AITER GroupNorm is not supported with parallel VAE.")
-
-
+                logger.warning("AITER GroupNorm is not supported with parallel VAE. Reverting to torch GroupNorm.")
+                torch.nn.GroupNorm = torch.nn.GroupNorm
 
 
     def _compile_model(self, input_args: dict) -> None:
@@ -472,9 +473,6 @@ class xFuserModel(abc.ABC):
         if self.config.use_hybrid_gemm_schedule:
             self._setup_hybrid_gemm_schedule(input_args)
 
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
-
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
 
@@ -576,15 +574,6 @@ class xFuserModel(abc.ABC):
         log("Enabling hybrid GEMM schedule")
         log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision_schedule}", debug=True)
         get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
-
-    def _setup_parallel_vae(self) -> None:
-        """ Parallalizes the VAE decoder using distvae """
-        try:
-            patched_decoder = DecoderAdapter(self.pipe.vae.decoder).to(self.pipe.vae.device)
-            self.pipe.vae.decoder = patched_decoder
-            log(f"Parallel VAE decoder enabled successfully.")
-        except:
-            raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
 
     def _convert_vae_to_channels_last(self) -> None:
         """ Convert the VAE to channels last """

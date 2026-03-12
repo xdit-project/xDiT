@@ -530,6 +530,7 @@ def initialize_model_parallel(
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     else:
+        global _DP
         global _VAE
         assert _VAE is None, "VAE parallel group is already initialized"
         _VAE = _DP

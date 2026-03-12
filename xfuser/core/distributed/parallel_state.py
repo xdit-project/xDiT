@@ -547,12 +547,6 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _DP
-    global _VAE
-    if _VAE is not None and _VAE is not _DP:
-        _VAE.destroy()
-    _VAE = None
-
     if _DP:
         _DP.destroy()
     _DP = None
@@ -581,6 +575,11 @@ def destroy_model_parallel():
     if _FS:
         _FS.destroy()
     _FS = None
+
+    global _VAE
+    if _VAE:
+        _VAE.destroy()
+    _VAE = None
 
 
 def destroy_distributed_environment():

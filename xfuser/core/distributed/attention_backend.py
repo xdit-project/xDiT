@@ -409,6 +409,9 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
 def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
+    # Contiguous is needed for Sage v2 in older AITER versions. 
+    # This has been fixed in newer version of AITER, meaning the
+    # contiguous calls can be removed in the future.
     query = query.contiguous()
     key = key.contiguous()
     value = value.contiguous()

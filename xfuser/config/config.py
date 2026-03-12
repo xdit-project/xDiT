@@ -262,7 +262,6 @@ class ParallelConfig:
         self.pp_degree = self.pp_config.pp_degree
         self.tp_degree = self.tp_config.tp_degree
         self.fs_degree = self.fs_config.fs_degree
-        self.vae_degree = self.vae_config.vae_degree
         self.ulysses_degree = self.sp_config.ulysses_degree
         self.ring_degree = self.sp_config.ring_degree
 

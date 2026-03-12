@@ -330,8 +330,7 @@ class PackagesEnvChecker:
 
 
 PACKAGES_CHECKER = PackagesEnvChecker()
-
-_groupnorm = torch.nn.GroupNorm
+_TORCH_GROUPNORM = torch.nn.GroupNorm
 
 def _setup_rocm_libraries():
     if PACKAGES_CHECKER.packages_info.get("has_aiter", False):

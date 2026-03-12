@@ -12,7 +12,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.envs import PACKAGES_CHECKER, get_platform, _groupnorm
+from xfuser.envs import PACKAGES_CHECKER, get_platform, _TORCH_GROUPNORM
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
@@ -37,9 +37,6 @@ from xfuser.core.distributed import (
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
 
-packages_info = PACKAGES_CHECKER.get_packages_info()
-if packages_info.get("has_distvae", False):
-    from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter, WanDecoderAdapter
 
 MODEL_REGISTRY = {}
 
@@ -245,7 +242,7 @@ class xFuserModel(abc.ABC):
                 raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
             if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
                 log("AITER GroupNorm is not supported with parallel VAE. Reverting to torch GroupNorm.")
-                torch.nn.GroupNorm = _groupnorm
+                torch.nn.GroupNorm = _TORCH_GROUPNORM
 
 
     def _compile_model(self, input_args: dict) -> None:

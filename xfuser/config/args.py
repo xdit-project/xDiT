@@ -714,11 +714,6 @@ class xFuserArgs:
             f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
         )
 
-        # Set VAE parallel degree
-        if self.use_parallel_vae:
-            if self.vae_parallel_size == 0:
-                self.vae_parallel_degree = self.data_parallel_degree
-
         # Hybrid attention schedule validation
         if self.use_hybrid_attn_schedule:
             if self.attention_backend is not None:
@@ -783,8 +778,7 @@ class xFuserArgs:
                 dit_parallel_size=self.dit_parallel_size,
             ),
             vae_config=VaeParallelConfig(
-                vae_degree=self.vae_parallel_degree,
-                dit_parallel_size=self.dit_parallel_size,
+                use_parallel_vae=self.use_parallel_vae,
             ),
             world_size=self.world_size,
             dit_parallel_size=self.dit_parallel_size,

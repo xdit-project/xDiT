@@ -96,6 +96,7 @@ class RuntimeState(metaclass=ABCMeta):
                 pipeline_parallel_degree=parallel_config.pp_degree,
                 fully_shard_degree=parallel_config.fs_degree,
                 vae_parallel_size=parallel_config.vae_parallel_size,
+                use_parallel_vae=parallel_config.use_parallel_vae,
             )
 
     def destroy_distributed_env(self):

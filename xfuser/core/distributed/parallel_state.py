@@ -361,6 +361,7 @@ def initialize_model_parallel(
     pipeline_parallel_degree: int = 1,
     fully_shard_degree: int = 1,
     vae_parallel_size: int = 0,
+    use_parallel_vae: bool = False,
     backend: Optional[str] = None,
 ) -> None:
     if backend is None:
@@ -533,12 +534,13 @@ def initialize_model_parallel(
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     else:
-        _VAE =  init_model_parallel_group(
-            group_ranks=rank_generator.get_ranks("tp-sp-pp-cfg"),
-            local_rank=get_world_group().local_rank,
-            backend=backend,
-            parallel_mode="vae"
-        )
+        if use_parallel_vae:
+            _VAE =  init_model_parallel_group(
+                group_ranks=rank_generator.get_ranks("tp-sp-pp-cfg"),
+                local_rank=get_world_group().local_rank,
+                backend=backend,
+                parallel_mode="vae"
+            )
 
     init_dit_group(dit_parallel_size, backend)
 

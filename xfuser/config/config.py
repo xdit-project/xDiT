@@ -172,14 +172,7 @@ class FullyShardConfig:
 
 @dataclass
 class VaeParallelConfig:
-    vae_degree: int = 0
-    dit_parallel_size: int = 1
-
-    def __post_init__(self):
-        assert self.vae_degree >= 0, "vae_degree must be greater than or equal to 0"
-        assert (
-            self.vae_degree <= self.dit_parallel_size
-        ), "vae_degree must be less than or equal to dit_parallel_size"
+    use_parallel_vae: bool = False
 
 
 @dataclass
@@ -262,16 +255,6 @@ class ParallelConfig:
         assert (
             dit_parallel_size % self.tp_config.tp_degree == 0
         ), "dit_parallel_size must be divisible by tp_degree"
-        if self.vae_parallel_size > 0:
-            if self.vae_parallel_degree > 0:
-                raise RuntimeError(
-                    "vae_parallel_degree must not be set when vae_parallel_size > 0"
-                )
-        else:
-            assert self.vae_config.vae_degree > 0, "vae_degree must be set when vae_parallel_size is zero"
-            assert (
-                dit_parallel_size % self.vae_config.vae_degree == 0
-            ), "dit_parallel_size must be divisible by vae_degree"
 
         self.dp_degree = self.dp_config.dp_degree
         self.cfg_degree = self.dp_config.cfg_degree

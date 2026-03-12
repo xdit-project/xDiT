@@ -4,7 +4,6 @@ import os
 from diffusers import WanImageToVideoPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput
-from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.utils import is_torch_xla_available, logging
 import torch
@@ -24,7 +23,6 @@ else:
     XLA_AVAILABLE = False
 
 logger = logging.get_logger(__name__)
-
 
 class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):
     """Direct subclass of the diffusers pipeline."""
@@ -293,5 +291,4 @@ class xFuserWanImageToVideoPipeline(WanImageToVideoPipeline):
     ):
         pipeline = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
         pipeline.engine_config = engine_config
-
         return pipeline

@@ -547,6 +547,7 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    global _DP
     if _DP:
         _DP.destroy()
     _DP = None

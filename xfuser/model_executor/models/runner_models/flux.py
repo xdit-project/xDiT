@@ -34,7 +34,7 @@ def _setup_parallel_vae(vae) -> None:
     """ Parallalizes the VAE decoder using distvae """
     try:
         patched_decoder = DecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group()
+            vae.decoder, vae_group=get_vae_parallel_group().device_group
         ).to(vae.device)
         vae.decoder = patched_decoder
         log(f"Parallel VAE decoder enabled successfully.")

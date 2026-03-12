@@ -18,6 +18,7 @@ from xfuser.config.config import (
     SequenceParallelConfig,
     DataParallelConfig,
     FullyShardConfig,
+    VaeParallelConfig,
     ModelConfig,
     InputConfig,
     RuntimeConfig,
@@ -283,16 +284,16 @@ class xFuserArgs:
             help="Tensor parallel degree.",
         )
         parallel_group.add_argument(
-            "--vae_parallel_size",
-            type=int,
-            default=0,
-            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
-        )
-        parallel_group.add_argument(
             "--split_scheme",
             type=str,
             default="row",
             help="Split scheme for tensor parallel.",
+        )
+        parallel_group.add_argument(
+            "--vae_parallel_size",
+            type=int,
+            default=0,
+            help="Number of processes for VAE parallelization. 0: no seperate process for VAE, 1: run VAE in a separate process, >1: distribute VAE across multiple processes.",
         )
 
         # Input arguments
@@ -709,7 +710,14 @@ class xFuserArgs:
 
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size
-        assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
+        assert self.dit_parallel_size+self.vae_parallel_size == self.world_size, (
+            f"DIT parallel size {self.dit_parallel_size} and VAE parallel size {self.vae_parallel_size} must sum to world size {self.world_size}"
+        )
+
+        # Set VAE parallel degree
+        if self.use_parallel_vae:
+            if self.vae_parallel_size == 0:
+                self.vae_parallel_degree = self.data_parallel_degree
 
         # Hybrid attention schedule validation
         if self.use_hybrid_attn_schedule:
@@ -772,6 +780,10 @@ class xFuserArgs:
             ),
             fs_config=FullyShardConfig(
                 fs_degree=self.fully_shard_degree,
+                dit_parallel_size=self.dit_parallel_size,
+            ),
+            vae_config=VaeParallelConfig(
+                vae_degree=self.vae_parallel_degree,
                 dit_parallel_size=self.dit_parallel_size,
             ),
             world_size=self.world_size,

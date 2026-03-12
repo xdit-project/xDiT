@@ -169,6 +169,19 @@ class FullyShardConfig:
             self.tp_degree == 1 or self.fs_degree == 1
         ), "Tensor parellelism and fully sharding cannot be used together"
 
+
+@dataclass
+class VaeParallelConfig:
+    vae_degree: int = 0
+    dit_parallel_size: int = 1
+
+    def __post_init__(self):
+        assert self.vae_degree >= 0, "vae_degree must be greater than or equal to 0"
+        assert (
+            self.vae_degree <= self.dit_parallel_size
+        ), "vae_degree must be less than or equal to dit_parallel_size"
+
+
 @dataclass
 class PipeFusionParallelConfig:
     pp_degree: int = 1
@@ -213,6 +226,7 @@ class ParallelConfig:
     pp_config: PipeFusionParallelConfig
     tp_config: TensorParallelConfig
     fs_config: FullyShardConfig
+    vae_config: VaeParallelConfig
     world_size: int = 1 # FIXME: remove this
     dit_parallel_size: int = 1
     vae_parallel_size: int = 1 # 0 means the vae is in the same process with diffusion
@@ -223,6 +237,7 @@ class ParallelConfig:
         assert self.dp_config is not None, "dp_config must be set"
         assert self.sp_config is not None, "sp_config must be set"
         assert self.pp_config is not None, "pp_config must be set"
+        assert self.vae_config is not None, "vae_config must be set"
         parallel_world_size = (
             self.dp_config.dp_degree
             * self.dp_config.cfg_degree
@@ -247,13 +262,24 @@ class ParallelConfig:
         assert (
             dit_parallel_size % self.tp_config.tp_degree == 0
         ), "dit_parallel_size must be divisible by tp_degree"
+        if self.vae_parallel_size > 0:
+            if self.vae_parallel_degree > 0:
+                raise RuntimeError(
+                    "vae_parallel_degree must not be set when vae_parallel_size > 0"
+                )
+        else:
+            assert self.vae_config.vae_degree > 0, "vae_degree must be set when vae_parallel_size is zero"
+            assert (
+                dit_parallel_size % self.vae_config.vae_degree == 0
+            ), "dit_parallel_size must be divisible by vae_degree"
+
         self.dp_degree = self.dp_config.dp_degree
         self.cfg_degree = self.dp_config.cfg_degree
         self.sp_degree = self.sp_config.sp_degree
         self.pp_degree = self.pp_config.pp_degree
         self.tp_degree = self.tp_config.tp_degree
         self.fs_degree = self.fs_config.fs_degree
-
+        self.vae_degree = self.vae_config.vae_degree
         self.ulysses_degree = self.sp_config.ulysses_degree
         self.ring_degree = self.sp_config.ring_degree
 

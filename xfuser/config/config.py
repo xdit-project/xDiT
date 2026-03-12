@@ -264,6 +264,7 @@ class ParallelConfig:
         self.fs_degree = self.fs_config.fs_degree
         self.ulysses_degree = self.sp_config.ulysses_degree
         self.ring_degree = self.sp_config.ring_degree
+        self.use_parallel_vae = self.vae_config.use_parallel_vae
 
 
 @dataclass(frozen=True)

@@ -301,6 +301,7 @@ def init_model_parallel_group(
         "sequence",
         "classifier_free_guidance",
         "fully_shard",
+        "vae",
     ], f"parallel_mode {parallel_mode} is not supported"
     if parallel_mode == "pipeline":
         return PipelineGroupCoordinator(
@@ -532,7 +533,12 @@ def initialize_model_parallel(
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     else:
-        _VAE = _DP
+        _VAE =  init_model_parallel_group(
+            group_ranks=rank_generator.get_ranks("tp-sp-pp-cfg"),
+            local_rank=get_world_group().local_rank,
+            backend=backend,
+            parallel_mode="vae"
+        )
 
     init_dit_group(dit_parallel_size, backend)
 

@@ -527,12 +527,11 @@ def initialize_model_parallel(
         parallel_mode="fully_shard",
     )
 
+    global _VAE
+    assert _VAE is None, "VAE parallel group is already initialized"
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     else:
-        global _DP
-        global _VAE
-        assert _VAE is None, "VAE parallel group is already initialized"
         _VAE = _DP
 
     init_dit_group(dit_parallel_size, backend)
@@ -540,12 +539,12 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    global _DP
     global _VAE
     if _VAE is not None and _VAE is not _DP:
         _VAE.destroy()
     _VAE = None
 
-    global _DP
     if _DP:
         _DP.destroy()
     _DP = None

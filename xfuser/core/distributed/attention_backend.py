@@ -43,11 +43,14 @@ def _check_aiter_fp8_has_descale():
 def _aiter_sage_v2_hadamard_matrix(block_r):
     hadamard_matrix = {}
     try:
-        from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
-            create_hadamard_matrix,
-        )
+        try:
+            from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
+                create_hadamard_matrix,
+            )
+        except ImportError:
+            from aiter.ops.triton.quant.sage_attention_quant_wrappers import create_hadamard_matrix
         # Create the hadamard_matrix and replicate it on each available GPU
-        _hadamard = create_hadamard_matrix(block_r) / (block_r ** 0.5)
+        _hadamard = create_hadamard_matrix(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
     except ImportError:
         # If create_hadamard_matrix is not available, set the hadamard_matrix to None.
         _hadamard = None
@@ -406,13 +409,12 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
 def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
-    # BLOCK_R has nothing to do with contiguous in reality, but a fix for the contiguous 
-    # was merged into AITER together with BLOCK_R. Thus, we can use it to check if the contiguous
-    # is needed.
-    if not AITER_SAGE_V2_BLOCK_R: 
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
+    # Contiguous is needed for Sage v2 in older AITER versions. 
+    # This has been fixed in newer version of AITER, meaning the
+    # contiguous calls can be removed in the future.
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
     softmax_lse = None
     attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
     output = attn_fn(query, key, value, causal=is_causal)

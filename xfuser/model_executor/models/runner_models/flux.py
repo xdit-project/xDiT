@@ -1,6 +1,7 @@
 import torch
 from diffusers import FluxPipeline, FluxKontextPipeline, Flux2Pipeline, Flux2KleinPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.transformers.transformer_flux import xFuserFlux1Transformer2DWrapper
 from xfuser.model_executor.models.transformers.transformer_flux2 import xFuserFlux2Transformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -12,6 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
 )
 from xfuser.core.utils.runner_utils import (
+    log,
     resize_and_crop_image,
     quantize_linear_layers_to_fp8
 )
@@ -19,7 +21,26 @@ from xfuser.core.distributed import (
     get_runtime_state,
     get_pipeline_parallel_world_size
 )
+from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser import xFuserFluxPipeline, xFuserArgs
+
+
+packages_info = PACKAGES_CHECKER.get_packages_info()
+if packages_info.get("has_distvae", False):
+    from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+
+
+def _setup_parallel_vae(vae) -> None:
+    """ Parallalizes the VAE decoder using distvae """
+    try:
+        patched_decoder = DecoderAdapter(
+            vae.decoder, vae_group=get_vae_parallel_group().device_group
+        ).to(vae.device)
+        vae.decoder = patched_decoder
+        log(f"Parallel VAE decoder enabled successfully.")
+    except:
+        raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
+
 
 @register_model("black-forest-labs/FLUX.1-dev")
 @register_model("FLUX.1-dev")
@@ -30,7 +51,6 @@ class xFuserFluxModel(xFuserModel):
         ring_degree=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
-
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -45,6 +65,11 @@ class xFuserFluxModel(xFuserModel):
         model_output_type="image",
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:

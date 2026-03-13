@@ -16,3 +16,9 @@ if has_valid_diffusers_version("flux"):
     register_transformer_adapter(FluxTransformer2DModel, "flux")
     register_transformer_adapter(xFuserFluxTransformer2DWrapper, "flux")
 
+if has_valid_diffusers_version("zimage"):
+    from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
+    from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
+    register_transformer_adapter(ZImageTransformer2DModel, "z_image")
+    register_transformer_adapter(xFuserZImageTransformer2DWrapper, "z_image")
+

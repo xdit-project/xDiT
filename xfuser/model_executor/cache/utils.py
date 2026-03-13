@@ -21,7 +21,7 @@ class CacheContext(Module):
         super().__init__()
         self.register_buffer("default_coef", torch.tensor([1.0, 0.0]).to(get_device(0)))
         self.register_buffer("flux_coef", torch.tensor([498.651651, -283.781631, 55.8554382, -3.82021401, 0.264230861]).to(get_device(0)))
-        
+        self.register_buffer("z_image_coef", torch.tensor([206.98745922, -246.10876704, 93.45470090, -12.74629885, 0.59814871]).to(get_device(0)))
         self.register_buffer("original_hidden_states", None, persistent=False)
         self.register_buffer("original_encoder_hidden_states", None, persistent=False)
         self.register_buffer("hidden_states_residual", None, persistent=False)
@@ -248,3 +248,177 @@ class TeaCachedTransformerBlocks(CachedTransformerBlocks):
         prev_modulated = self.cache_context.modulated_inputs
         self.cache_context.modulated_inputs = modulated
         return modulated, prev_modulated, hidden_states, encoder_hidden_states
+
+
+# --------- Single-Stream Cached Blocks (for ZImage and similar architectures) --------- #
+
+class SingleStreamCachedBlocks(torch.nn.Module, ABC):
+    """
+    Base class for caching single-stream transformer blocks (no encoder_hidden_states split).
+    Intended for architectures like ZImage that use a single unified sequence throughout.
+    """
+
+    def __init__(
+        self,
+        blocks: List[Module],
+        *,
+        rel_l1_thresh: float = 0.6,
+        num_steps: int = -1,
+        name: str = "default",
+        callbacks: Optional[List[CacheCallback]] = None,
+    ):
+        super().__init__()
+        self.blocks = torch.nn.ModuleList(blocks)
+        self.register_buffer("cnt", torch.tensor(0).to(get_device(0)))
+        self.register_buffer("accumulated_rel_l1_distance", torch.tensor([0.0]).to(get_device(0)))
+        self.register_buffer("use_cache", torch.tensor(False, dtype=torch.bool).to(get_device(0)))
+
+        self.cache_context = CacheContext()
+        self.callback_handler = CallbackHandler(callbacks)
+
+        self.rel_l1_thresh = torch.tensor(rel_l1_thresh).to(get_device(0))
+        self.num_steps = num_steps
+        self.name = name
+
+    @property
+    def is_parallelized(self) -> bool:
+        return get_sequence_parallel_world_size() > 1
+
+    def all_reduce(self, input_: torch.Tensor, op=torch.distributed.ReduceOp.AVG) -> torch.Tensor:
+        return get_sp_group().all_reduce(input_, op=op) if self.is_parallelized else input_
+
+    def l1_distance(self, t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
+        diff = (t1 - t2).abs().mean()
+        norm = t1.abs().mean()
+        diff, norm = self.all_reduce(diff.unsqueeze(0)), self.all_reduce(norm.unsqueeze(0))
+        return (diff / norm).squeeze()
+
+    @abstractmethod
+    def are_two_similar(self, t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor: pass
+
+    @abstractmethod
+    def get_start_idx(self) -> int: pass
+
+    @abstractmethod
+    def get_modulated_inputs(self, x: torch.Tensor, *args, **kwargs): pass
+
+    def process_blocks(self, start_idx: int, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        for block in self.blocks[start_idx:]:
+            x = block(x, *args, **kwargs)
+        self.cache_context.hidden_states_residual = x - self.cache_context.original_hidden_states
+        return x
+
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        self.callback_handler.trigger_event("on_forward_begin", self)
+
+        modulated, prev_modulated, orig_x = self.get_modulated_inputs(x, *args, **kwargs)
+
+        self.cache_context.original_hidden_states = orig_x
+
+        self.use_cache = self.are_two_similar(prev_modulated, modulated) \
+            if prev_modulated is not None else torch.tensor(False, dtype=torch.bool)
+
+        self.callback_handler.trigger_event("on_forward_remaining_begin", self)
+        if self.use_cache:
+            # x here is the original input; residual bridges to the cached full-pass output
+            x = x + self.cache_context.hidden_states_residual
+        else:
+            x = self.process_blocks(self.get_start_idx(), orig_x, *args, **kwargs)
+
+        self.callback_handler.trigger_event("on_forward_end", self)
+        return x
+
+
+class SingleStreamFBCachedBlocks(SingleStreamCachedBlocks):
+    """
+    First-Block cache for single-stream models (ZImage).
+    Runs blocks[0] every step, compares its output residual to the previous step's.
+    If similar, skips blocks[1:] and reuses the cached residual.
+    """
+
+    def get_start_idx(self) -> int:
+        return 1
+
+    def are_two_similar(self, t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
+        return self.l1_distance(t1, t2) < self.rel_l1_thresh
+
+    def get_modulated_inputs(self, x: torch.Tensor, *args, **kwargs):
+        original_x = x
+        x1 = self.blocks[0](x, *args, **kwargs)
+        first_block_residual = x1 - original_x
+        prev_first_block_residual = self.cache_context.modulated_inputs
+        if not self.use_cache:
+            self.cache_context.modulated_inputs = first_block_residual
+        # orig_x for process_blocks starts from x1 (output of block 0)
+        return first_block_residual, prev_first_block_residual, x1
+
+
+class SingleStreamTeaCachedBlocks(SingleStreamCachedBlocks):
+    """
+    TeaCache for single-stream models (e.g. ZImage).
+    Uses the adaLN-modulated norm output as the caching signal (no full block forward).
+    For blocks without modulation (context_refiner), uses the raw norm1 output.
+
+    The polynomial rescale coefficients are model-specific; use the 'default' identity
+    coefficients until ZImage-specific coefficients are calibrated by profiling.
+    """
+
+    def __init__(
+        self,
+        blocks: List[Module],
+        *,
+        rel_l1_thresh: float = 0.6,
+        num_steps: int = -1,
+        name: str = "default",
+        has_modulation: bool = True,
+        callbacks: Optional[List[CacheCallback]] = None,
+    ):
+        super().__init__(
+            blocks,
+            rel_l1_thresh=rel_l1_thresh,
+            num_steps=num_steps,
+            name=name,
+            callbacks=callbacks,
+        )
+        self.has_modulation = has_modulation
+        self.rescale_func = VectorizedPoly1D(self.cache_context.get_coef(self.name))
+
+    def get_start_idx(self) -> int:
+        return 0
+
+    def are_two_similar(self, t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
+        diff = self.l1_distance(t1, t2)
+        new_accum = self.accumulated_rel_l1_distance + self.rescale_func(diff)
+        reset_mask = (self.cnt == 0) or (self.cnt == self.num_steps - 1)
+        self.use_cache = torch.logical_and(new_accum < self.rel_l1_thresh, torch.logical_not(reset_mask))
+        self.accumulated_rel_l1_distance[0] = torch.where(self.use_cache, new_accum[0], 0.0)
+        self.cnt = torch.where(self.cnt + 1 < self.num_steps, self.cnt + 1, 0)
+        return self.use_cache
+
+    def get_modulated_inputs(self, x: torch.Tensor, *args, **kwargs):
+        """
+        Compute the modulated signal without running a full block forward.
+
+        For blocks with adaLN modulation (noise_refiner, layers):
+          signal = attention_norm1(x) * (1 + scale_msa)
+          where scale_msa comes from adaLN_modulation(adaln_input).
+
+        For blocks without modulation (context_refiner):
+          signal = attention_norm1(x)
+
+        Call convention (positional *args):
+          modulated blocks:   forward(x, attn_mask, freqs_cis, adaln_input, ...)  → adaln_input = args[2]
+          unmodulated blocks: forward(x, attn_mask, freqs_cis, ...)               → no adaln_input
+        """
+        if self.has_modulation:
+            adaln_input = args[2]  # (attn_mask, freqs_cis, adaln_input, ...)
+            mod = self.blocks[0].adaLN_modulation(adaln_input)  # [B, 4*dim]
+            scale_msa, _gate_msa, _scale_mlp, _gate_mlp = mod.unsqueeze(1).chunk(4, dim=2)
+            modulated = self.blocks[0].attention_norm1(x) * (1.0 + scale_msa)
+        else:
+            modulated = self.blocks[0].attention_norm1(x)
+
+        prev_modulated = self.cache_context.modulated_inputs
+        self.cache_context.modulated_inputs = modulated
+        # orig_x = x (all blocks run from scratch on cache miss)
+        return modulated, prev_modulated, x

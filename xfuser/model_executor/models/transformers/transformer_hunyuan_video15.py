@@ -148,7 +148,12 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         target_size: int = 640,  # did not name sample_size since it is in pixel spaces
         task_type: str = "i2v",
         use_meanflow: bool = False,
+        attn_param: Optional[Dict[str, Any]] = None,
     ):
+        if isinstance(patch_size, list):
+            patch_size = 1
+        if "rms" == qk_norm:
+            qk_norm = "rms_norm"
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -169,6 +174,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             task_type=task_type,
             use_meanflow=use_meanflow,
         )
+        self.attn_param = attn_param or {}
 
         for block in self.transformer_blocks:
             block.attn.processor = xFuserHunyuanVideo15AttnProcessor()

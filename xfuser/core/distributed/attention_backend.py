@@ -92,6 +92,8 @@ if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
 if env_info["has_flash_attn_4"]:
     from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4
+if env_info["has_sage"]:
+    from sageattention import sageattn
 if env_info["has_npu_flash_attn"]:
     import torch_npu
 
@@ -105,6 +107,7 @@ class AttentionBackendType(Enum):
     FLASH_3 = "Flash Attention V3"
     FLASH_3_FP8 = "Flash Attention v3 FP8"
     FLASH_4 = "Flash Attention V4"
+    SAGE = "Sage Attention"
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
     AITER_SAGE = "AITER Sage"
@@ -420,3 +423,14 @@ def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal):
     output = attn_fn(query, key, value, causal=is_causal)
     return output, softmax_lse
 
+
+@register_attention_function(AttentionBackendType.SAGE)
+def _sage_attn_call(query, key, value, dropout_p, is_causal):
+    output, softmax_lse = sageattn(
+        query,
+        key,
+        value,
+        is_causal=is_causal,
+        return_lse=True
+    )
+    return output, softmax_lse

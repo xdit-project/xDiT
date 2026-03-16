@@ -28,13 +28,13 @@ HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 @xFuserAttentionProcessorRegister.register(WanAttnProcessor)
 class xFuserWanAttnProcessor(WanAttnProcessor):
 
-    def __init__(self, use_ulysses_parallel_attention: bool = True, cross_attention: bool = False) -> None:
+    def __init__(self, use_ulysses_parallel_attention: bool = True, is_cross_attention: bool = False) -> None:
         super().__init__()
         if use_ulysses_parallel_attention:
             self.attention_function = USP
         else:
             self.attention_function = attention
-        self._cross_attention = cross_attention
+        self.is_cross_attention = is_cross_attention
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention
@@ -73,7 +73,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         backend_override = None
-        if self._cross_attention:
+        if self.is_cross_attention:
             # We allow specifying a different backend for cross-attention than the main attention backend
             # as some backends may have too much overhead for cross-attention.
             backend_override = get_runtime_state().get_cross_attention_backend()
@@ -181,7 +181,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         )
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
-            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, cross_attention=True)
+            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

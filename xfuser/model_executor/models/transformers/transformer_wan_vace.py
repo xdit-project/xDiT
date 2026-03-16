@@ -63,11 +63,11 @@ class xFuserWanVACETransformer3DWrapper(WanVACETransformer3DModel):
 
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
-            block.attn2.processor = xFuserWanAttnProcessor(use_parallel_attention=False)
+            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False)
 
         for block in self.vace_blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
-            block.attn2.processor = xFuserWanAttnProcessor(use_parallel_attention=False)
+            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False)
 
     def forward(
         self,

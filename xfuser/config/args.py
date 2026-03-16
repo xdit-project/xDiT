@@ -121,6 +121,7 @@ class xFuserArgs:
     use_fp8_t5_encoder: bool = False
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
+    cross_attention_backend: Optional[str] = None
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
     # Model runner specific
@@ -208,7 +209,6 @@ class xFuserArgs:
             default=None,
             help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
         )
-
         # Parallel arguments
         parallel_group = parser.add_argument_group("Parallel Processing Options")
         runtime_group.add_argument(
@@ -441,6 +441,12 @@ class xFuserArgs:
             type=str,
             default=None,
             help="Attention backend to use. If not specified, the best available backend will be selected automatically.",
+        )
+        parser.add_argument(
+            "--cross_attention_backend",
+            type=str,
+            default=None,
+            help="Attention backend to use for cross-attention. If not specified, falls back to --attention_backend.",
         )
         parser.add_argument(
             "--use_cfg_parallel",
@@ -720,6 +726,10 @@ class xFuserArgs:
                 raise ValueError(
                     "When use_hybrid_attn_schedule is True, attention_backend must not be set."
                 )
+            if self.cross_attention_backend is not None:
+                raise ValueError(
+                    "When use_hybrid_attn_schedule is True, cross_attention_backend must not be set."
+                )
             if self.hybrid_attn_schedule is not None:
                 if self.hybrid_attn_low_precision_backend is not None or self.hybrid_attn_high_precision_backend is not None:
                     raise ValueError("When an explicit hybrid attention schedule is provided, neither hybrid_attn_low_precision_backend nor hybrid_attn_high_precision_backend may be set.")
@@ -748,6 +758,7 @@ class xFuserArgs:
             # use_profiler=self.use_profiler,
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
+            cross_attention_backend=self.cross_attention_backend,
         )
 
         parallel_config = ParallelConfig(

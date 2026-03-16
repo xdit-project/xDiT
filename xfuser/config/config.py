@@ -63,6 +63,7 @@ class RuntimeConfig:
     use_teacache: bool = False
     use_fbcache: bool = False
     attention_backend: Optional[str] = None
+    cross_attention_backend: Optional[str] = None
 
     def __post_init__(self):
         check_packages()

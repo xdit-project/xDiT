@@ -184,9 +184,7 @@ class RuntimeState(metaclass=ABCMeta):
             except ImportError:
                 raise RuntimeError("AITER Sage V2 attention is not available, please update AITER") from None
         elif attention_backend == AttentionBackendType.SAGE:
-            try:
-                from sageattention import sageattn
-            except ImportError:
+            if not env_info["has_sage"]:
                 raise RuntimeError("SageAttention is not available, please install SageAttention.")
 
 

@@ -11,7 +11,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
-from xfuser.config import args, xFuserArgs  
+from xfuser.config import args, xFuserArgs
 from xfuser.envs import PACKAGES_CHECKER, get_platform, _TORCH_GROUPNORM
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
@@ -219,7 +219,7 @@ class xFuserModel(abc.ABC):
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
-            if isinstance(config_value, bool):
+            else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 

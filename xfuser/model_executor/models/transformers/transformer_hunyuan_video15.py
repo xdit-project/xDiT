@@ -16,6 +16,9 @@ from xfuser.core.distributed import (
 
 class xFuserHunyuanVideo15AttnProcessor:
 
+    def __init__(self, attn_param: Optional[Dict[str, Any]] = None):
+        self.attn_param = attn_param
+
     def __call__(
         self,
         attn: Attention,
@@ -75,9 +78,14 @@ class xFuserHunyuanVideo15AttnProcessor:
         value = value.transpose(1, 2)
 
         #! ---------------------------------------- ATTENTION ---------------------------------------- 
+        attn_kwargs = None
+        if self.attn_param is not None:
+            self.attn_param["encoder_sequence_length"] = num_encoder_hidden_states_tokens
+            self.attn_param["text_mask"] = attention_mask
+            attn_kwargs = {"attn_param": self.attn_param}
         if get_sequence_parallel_world_size() > 1:
             if get_runtime_state().split_text_embed_in_sp:
-                hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
+                hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False, **attn_kwargs)
             else:
                 query, encoder_query = query.split(
                     [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
@@ -99,9 +107,10 @@ class xFuserHunyuanVideo15AttnProcessor:
                     joint_key=encoder_key,
                     joint_value=encoder_value,
                     joint_strategy="rear",
+                    **attn_kwargs,
                 )
         else:
-            hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
+            hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False, **attn_kwargs)
         
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -174,10 +183,9 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
             task_type=task_type,
             use_meanflow=use_meanflow,
         )
-        self.attn_param = attn_param or {}
-
+        self.attn_param = attn_param
         for block in self.transformer_blocks:
-            block.attn.processor = xFuserHunyuanVideo15AttnProcessor()
+            block.attn.processor = xFuserHunyuanVideo15AttnProcessor(attn_param=attn_param)
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
         if pad_amount > 0:
@@ -221,6 +229,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
+        self.attn_param["thw"] = (post_patch_num_frames, post_patch_height, post_patch_width) # Should modify reference in xFuserHunyuanVideo15AttnProcessor.
 
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
@@ -331,8 +340,9 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         sin = self._chunk_and_pad_sequence(sin, sp_world_rank, sp_world_size, hidden_states_pad_amount, dim=0)
         image_rotary_emb = (cos, sin)
 
-        encoder_attention_mask = encoder_attention_mask.to(torch.bool).any(dim=0)
-        encoder_hidden_states = encoder_hidden_states[:, encoder_attention_mask, :]
+        any_valid = encoder_attention_mask.to(torch.bool).any(dim=0)
+        encoder_hidden_states = encoder_hidden_states[:, any_valid, :]
+        encoder_attention_mask = encoder_attention_mask.to(torch.bool)[:, any_valid]
     
         if encoder_hidden_states.shape[1] % sp_world_size != 0:
             get_runtime_state().split_text_embed_in_sp = False
@@ -351,7 +361,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    None,
+                    encoder_attention_mask,
                     image_rotary_emb,
                 )
 
@@ -361,7 +371,7 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
                     hidden_states,
                     encoder_hidden_states,
                     temb,
-                    None,
+                    encoder_attention_mask,
                     image_rotary_emb,
                 )
 

@@ -4,6 +4,7 @@ import inspect
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
+from xfuser.core.distributed.ssta_attention import ssta_3d_attention
 
 ATTENTION_FUNCTION_REGISTRY = {}
 
@@ -111,6 +112,7 @@ class AttentionBackendType(Enum):
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
     AITER_SAGE = "AITER Sage"
+    AITER_SPARSE_SAGE = "AITER Sparse Sage"
     AITER_SAGE_V2 = "AITER Sage V2"
     NPU = "NPU"
 
@@ -434,3 +436,71 @@ def _sage_attn_call(query, key, value, dropout_p, is_causal):
         return_lse=True
     )
     return output, softmax_lse
+
+
+@register_attention_function(AttentionBackendType.AITER_SPARSE_SAGE)
+def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None):
+    if attn_param is None:
+        raise ValueError("attn_param must be provided for AITER_SPARSE_SAGE attention.")
+    softmax_lse = None
+    sparse_type = attn_param["attn_sparse_type"]  # sta/block_attn/ssta
+    ssta_threshold = attn_param["ssta_threshold"]
+    ssta_lambda = attn_param["ssta_lambda"]
+    ssta_sampling_type = attn_param["ssta_sampling_type"]
+    ssta_adaptive_pool = attn_param["ssta_adaptive_pool"]
+
+    attn_pad_type = attn_param["attn_pad_type"]  # repeat/zero
+    attn_use_text_mask = attn_param["attn_use_text_mask"]
+    text_mask = attn_param["text_mask"]
+    attn_mask_share_within_head = attn_param["attn_mask_share_within_head"]
+    encoder_sequence_length = attn_param["encoder_sequence_length"]
+
+    ssta_topk = attn_param["ssta_topk"]
+    thw = attn_param["thw"]
+    tile_size = attn_param["tile_size"]
+    win_size = attn_param["win_size"][0].copy()
+
+    def get_image_tile(tile_size):
+        block_size = torch.prod(tile_size)
+        if block_size == 384:
+            tile_size = (1, 16, 24)
+        elif block_size == 128:
+            tile_size = (1, 16, 8)
+        elif block_size == 64:
+            tile_size = (1, 8, 8)
+        elif block_size == 16:
+            tile_size = (1, 4, 4)
+        else:
+            raise ValueError(f"Error tile_size {tile_size}, only support in [16, 64, 128, 384]")
+        return tile_size
+
+    if thw[0] == 1:
+        tile_size = get_image_tile(tile_size)
+        win_size = [1, 1, 1]
+    elif thw[0] <= 31: # 16fps: 5 * 16 / 4 + 1 = 21; 24fps: 5 * 24 / 4 + 1 = 31
+        ssta_topk = ssta_topk // 2
+
+    assert (
+        query.shape[-1] == 128
+    ), "The last dimension of query, key and value must be 128 for flex-block-attn."
+
+    output = ssta_3d_attention(
+        query,
+        key,
+        value,
+        thw,
+        topk=ssta_topk,
+        tile_thw=tile_size,
+        kernel_thw=win_size,
+        text_len=encoder_sequence_length,
+        sparse_type=sparse_type,
+        threshold=ssta_threshold,
+        lambda_=ssta_lambda,
+        pad_type=attn_pad_type,
+        text_mask=text_mask if attn_use_text_mask else None,
+        sampling_type=ssta_sampling_type,
+        adaptive_pool=ssta_adaptive_pool,
+        mask_share_within_head=attn_mask_share_within_head,
+    )
+    return output, softmax_lse
+

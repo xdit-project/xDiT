@@ -243,6 +243,7 @@ def USP(
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
+    Explicit backend can be provided to specify the attention backend to use.
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
@@ -301,6 +302,7 @@ def attention(
     """
     Runs attention call without any parallelism.
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
+    Explicit backend can be provided to specify the attention backend to use.
     """
     attention_function = _get_attention_function(backend=backend)
     out, _ = attention_function(

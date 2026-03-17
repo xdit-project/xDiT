@@ -185,12 +185,12 @@ def _update_and_get_kv_cache(key, value, attn_layer):
     value = value.transpose(1, 2).contiguous()
     return key, value
 
-def _get_attention_function(backend_override=None):
+def _get_attention_function(backend=None):
     """
-    Get the attention function based on the runtime state, or an explicit override.
+    Get the attention function based on the runtime state or from a given explicit backend.
     """
-    if backend_override is not None:
-        attention_backend = backend_override
+    if backend is not None:
+        attention_backend = backend
     else:
         attention_backend = get_runtime_state().attention_backend
     func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
@@ -238,7 +238,7 @@ def USP(
         joint_strategy: str | None = None,
         attn_layer=None,
         combine_qkv_a2a: bool | None = None,
-        backend_override=None,
+        backend=None,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -247,7 +247,7 @@ def USP(
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
 
-    attention_function = _get_attention_function(backend_override=backend_override)
+    attention_function = _get_attention_function(backend=backend)
 
 
     joint_attn_kwargs = None
@@ -296,13 +296,13 @@ def attention(
         value: torch.Tensor,
         dropout_p: float = 0.0,
         is_causal: bool = False,
-        backend_override=None,
+        backend=None,
     ):
     """
     Runs attention call without any parallelism.
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
     """
-    attention_function = _get_attention_function(backend_override=backend_override)
+    attention_function = _get_attention_function(backend=backend)
     out, _ = attention_function(
         query,
         key,

@@ -28,12 +28,13 @@ HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 @xFuserAttentionProcessorRegister.register(WanAttnProcessor)
 class xFuserWanAttnProcessor(WanAttnProcessor):
 
-    def __init__(self, use_parallel_attention: bool = True) -> None:
+    def __init__(self, use_ulysses_parallel_attention: bool = True, is_cross_attention: bool = False) -> None:
         super().__init__()
-        if use_parallel_attention:
+        if use_ulysses_parallel_attention:
             self.attention_function = USP
         else:
             self.attention_function = attention
+        self.is_cross_attention = is_cross_attention
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention
@@ -71,6 +72,12 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         attention_mask: Optional[torch.Tensor] = None,
         rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        backend = None
+        if self.is_cross_attention:
+            # We allow specifying a different backend for cross-attention than the main attention backend
+            # as some backends may have too much overhead for cross-attention.
+            backend = get_runtime_state().get_cross_attention_backend()
+
         encoder_hidden_states_img = None
         if attn.add_k_proj is not None:
             # 512 is the context length of the text encoder, hardcoded for now
@@ -114,12 +121,12 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             key_img = key_img.unflatten(2, (attn.heads, -1))
             value_img = value_img.unflatten(2, (attn.heads, -1))
 
-            hidden_states_img = self.attention_function(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)).transpose(1, 2)
+            hidden_states_img = self.attention_function(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2), backend=backend).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 
 
-        hidden_states = self.attention_function(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)).transpose(1, 2)
+        hidden_states = self.attention_function(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), backend=backend).transpose(1, 2)
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
@@ -174,7 +181,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         )
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor()
-            block.attn2.processor = xFuserWanAttnProcessor(use_parallel_attention=False)
+            block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

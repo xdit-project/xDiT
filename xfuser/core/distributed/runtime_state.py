@@ -58,6 +58,7 @@ def set_random_seed(seed: int):
 
 class RuntimeState(metaclass=ABCMeta):
     attention_backend: AttentionBackendType = AttentionBackendType.SDPA_FLASH
+    cross_attention_backend: Optional[AttentionBackendType] = None
     parallel_config: ParallelConfig
     runtime_config: RuntimeConfig
     input_config: InputConfig
@@ -74,6 +75,8 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_distributed_env(config.parallel_config)
         attention_backend = self._select_attention_backend(config)
         self.set_attention_backend(attention_backend)
+        cross_attention_backend = self._select_cross_attention_backend(config)
+        self.set_cross_attention_backend(cross_attention_backend)
 
     def is_ready(self):
         return self.ready
@@ -124,6 +127,45 @@ class RuntimeState(metaclass=ABCMeta):
         if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8]:
             logger.warning("FP8 attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
+
+    def set_cross_attention_backend(self, cross_attention_backend: Optional[str | AttentionBackendType]):
+        """
+        Set the cross-attention backend. When None, cross-attention will use the main attention_backend.
+        """
+        if cross_attention_backend is None:
+            self.cross_attention_backend = None
+            return
+
+        if isinstance(cross_attention_backend, str):
+            try:
+                cross_attention_backend = AttentionBackendType[cross_attention_backend.upper()]
+            except:
+                pass
+
+        if not isinstance(cross_attention_backend, AttentionBackendType):
+            raise ValueError(f"Value '{cross_attention_backend}' is not a valid attention backend.")
+
+        self._check_if_backend_compatible_with_current_configuration(cross_attention_backend)
+        self.cross_attention_backend = cross_attention_backend
+        logger.warning("Using {} as cross-attention backend.".format(self.cross_attention_backend.name))
+
+    def get_cross_attention_backend(self) -> AttentionBackendType:
+        """
+        Returns the backend to use for cross-attention.
+        Falls back to the main attention_backend when no separate cross-attention backend is configured.
+        """
+        if self.cross_attention_backend is not None:
+            return self.cross_attention_backend
+        return self.attention_backend
+
+    def _select_cross_attention_backend(self, engine_config: Optional[EngineConfig] = None) -> Optional[AttentionBackendType]:
+        """
+        Select the cross-attention backend from config. Returns None if not explicitly set
+        (meaning the main attention_backend will be used).
+        """
+        if engine_config and engine_config.runtime_config.cross_attention_backend:
+            return AttentionBackendType[engine_config.runtime_config.cross_attention_backend.upper()]
+        return None
 
     def _select_attention_backend(self, engine_config: Optional[EngineConfig] = None):
         """

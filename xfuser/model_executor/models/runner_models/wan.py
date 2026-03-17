@@ -79,6 +79,7 @@ class xFuserWan21I2VModel(xFuserModel):
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
+        cross_attention_backend=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -230,6 +231,7 @@ class xFuserWan21T2VModel(xFuserModel):
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
+        cross_attention_backend=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -354,6 +356,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
+        cross_attention_backend=True,
     )
     default_input_values = DefaultInputValues(
         height=736,
@@ -460,6 +463,7 @@ class xFuserWan21VACEModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        cross_attention_backend=True,
     )
 
     default_input_values = DefaultInputValues(

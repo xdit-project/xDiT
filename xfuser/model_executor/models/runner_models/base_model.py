@@ -70,6 +70,7 @@ class ModelCapabilities:
     use_fp4_gemms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
+    cross_attention_backend: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:

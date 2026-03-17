@@ -463,6 +463,7 @@ class xFuserWan21VACEModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        cross_attention_backend=True,
     )
 
     default_input_values = DefaultInputValues(

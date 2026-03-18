@@ -405,11 +405,11 @@ def npu_flash_attn_call(query, key, value, dropout_p, is_causal):
     return block_out, block_lse
 
 @register_attention_function(AttentionBackendType.AITER_SAGE)
-def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal):
+def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attn_param=None):
     # Pass layout="bhsd" to avoid permutation
     softmax_lse = None
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
-    output = attn_fn(query, key, value)
+    output, _ = attn_fn(query, key, value)
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
@@ -443,13 +443,13 @@ def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None)
     if attn_param is None:
         raise ValueError("attn_param must be provided for AITER_SPARSE_SAGE attention.")
     softmax_lse = None
-    sparse_type = attn_param["attn_sparse_type"]  # sta/block_attn/ssta
+    sparse_type = attn_param["attn_sparse_type"]
     ssta_threshold = attn_param["ssta_threshold"]
     ssta_lambda = attn_param["ssta_lambda"]
     ssta_sampling_type = attn_param["ssta_sampling_type"]
     ssta_adaptive_pool = attn_param["ssta_adaptive_pool"]
 
-    attn_pad_type = attn_param["attn_pad_type"]  # repeat/zero
+    attn_pad_type = attn_param["attn_pad_type"]
     attn_use_text_mask = attn_param["attn_use_text_mask"]
     text_mask = attn_param["text_mask"]
     attn_mask_share_within_head = attn_param["attn_mask_share_within_head"]
@@ -459,6 +459,11 @@ def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None)
     thw = attn_param["thw"]
     tile_size = attn_param["tile_size"]
     win_size = attn_param["win_size"][0].copy()
+
+    # Precompute valid text token counts as plain ints — single GPU sync
+    text_valid_lens = None
+    if text_mask is not None and attn_use_text_mask:
+        text_valid_lens = text_mask.sum(dim=-1)
 
     def get_image_tile(tile_size):
         block_size = torch.prod(tile_size)
@@ -477,7 +482,7 @@ def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None)
     if thw[0] == 1:
         tile_size = get_image_tile(tile_size)
         win_size = [1, 1, 1]
-    elif thw[0] <= 31: # 16fps: 5 * 16 / 4 + 1 = 21; 24fps: 5 * 24 / 4 + 1 = 31
+    elif thw[0] <= 31:
         ssta_topk = ssta_topk // 2
 
     assert (
@@ -490,8 +495,8 @@ def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None)
         value,
         thw,
         topk=ssta_topk,
-        tile_thw=tile_size,
-        kernel_thw=win_size,
+        tile_thw=tuple(tile_size),
+        kernel_thw=tuple(win_size),
         text_len=encoder_sequence_length,
         sparse_type=sparse_type,
         threshold=ssta_threshold,
@@ -501,6 +506,7 @@ def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None)
         sampling_type=ssta_sampling_type,
         adaptive_pool=ssta_adaptive_pool,
         mask_share_within_head=attn_mask_share_within_head,
+        text_valid_lens=text_valid_lens,
     )
     return output, softmax_lse
 

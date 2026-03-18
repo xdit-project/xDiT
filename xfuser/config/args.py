@@ -726,10 +726,6 @@ class xFuserArgs:
                 raise ValueError(
                     "When use_hybrid_attn_schedule is True, attention_backend must not be set."
                 )
-            if self.cross_attention_backend is not None:
-                raise ValueError(
-                    "When use_hybrid_attn_schedule is True, cross_attention_backend must not be set."
-                )
             if self.hybrid_attn_schedule is not None:
                 if self.hybrid_attn_low_precision_backend is not None or self.hybrid_attn_high_precision_backend is not None:
                     raise ValueError("When an explicit hybrid attention schedule is provided, neither hybrid_attn_low_precision_backend nor hybrid_attn_high_precision_backend may be set.")

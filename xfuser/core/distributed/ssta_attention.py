@@ -442,8 +442,8 @@ def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
         block_mask = torch.stack(mask_list, dim=0)
         if mask_share_within_head:
             block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
-        block_mask_128 = expand_block_mask(block_mask, factor=block_size // 128)
-        block_lut = block_attn_mask_to_ragged_lut(block_mask_128, q.shape[1])
+        #block_mask_128 = expand_block_mask(block_mask, factor=block_size // 128)
+        block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
         config = {
             "BLOCK_M": 128,
             "BLOCK_N": 128,

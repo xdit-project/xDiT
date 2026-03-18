@@ -484,7 +484,7 @@ def _aiter_sparse_sage(query, key, value, dropout_p, is_causal, attn_param=None)
         win_size = [1, 1, 1]
     elif thw[0] <= 31:
         ssta_topk = ssta_topk // 2
-
+    tile_size = (1, 16, 8)
     assert (
         query.shape[-1] == 128
     ), "The last dimension of query, key and value must be 128 for flex-block-attn."

@@ -35,7 +35,10 @@ def _setup_parallel_vae(vae) -> None:
         vae.decoder = patched_decoder
         log(f"Parallel VAE decoder enabled successfully.")
     except ImportError:
-        raise ValueError("DistVAE library is missing or does not support DecoderAdapter.")
+        raise ValueError(
+            "DistVAE library is missing or does not support DecoderAdapter. "
+            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE."
+            )
     except Exception as e:
         raise ValueError(f"Failed to patch VAE decoder. {e}")
 

@@ -25,21 +25,19 @@ from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser import xFuserFluxPipeline, xFuserArgs
 
 
-packages_info = PACKAGES_CHECKER.get_packages_info()
-if packages_info.get("has_distvae", False):
-    from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-
-
 def _setup_parallel_vae(vae) -> None:
     """ Parallalizes the VAE decoder using distvae """
     try:
+        from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
         patched_decoder = DecoderAdapter(
             vae.decoder, vae_group=get_vae_parallel_group().device_group
         ).to(vae.device)
         vae.decoder = patched_decoder
         log(f"Parallel VAE decoder enabled successfully.")
-    except:
-        raise ValueError("Failed to patch VAE decoder. Current VAE decoder might not be compatible with DistVAE.")
+    except ImportError:
+        raise ValueError("DistVAE library is missing or does not support DecoderAdapter.")
+    except Exception as e:
+        raise ValueError(f"Failed to patch VAE decoder. {e}")
 
 
 @register_model("black-forest-labs/FLUX.1-dev")

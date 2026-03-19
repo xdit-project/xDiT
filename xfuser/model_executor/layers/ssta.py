@@ -280,12 +280,12 @@ def create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
+def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
                       topk=1, tile_thw=(6, 8, 8), kernel_thw=(1, 1, 1),
                       text_len=0, sparse_type='ssta', threshold=0.0,
                       lambda_=None, pad_type="zero", text_mask=None,
                       mask_share_within_head=True, sampling_type=None,
-                      adaptive_pool=None, text_valid_lens=None, attn_fn=None):
+                      adaptive_pool=None, text_valid_lens=None):
 
     if text_len > 0:
         image_q = all_q[:, :, :-text_len, :]
@@ -435,7 +435,7 @@ def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
 
     return o
 
-def SSTA(query, key, value, attn_param, attn_fn):
+def SSTA(attn_fn, query, key, value, attn_param):
     softmax_lse = None
     sparse_type = attn_param["attn_sparse_type"]
     ssta_threshold = attn_param["ssta_threshold"]
@@ -465,6 +465,7 @@ def SSTA(query, key, value, attn_param, attn_fn):
         ssta_topk = ssta_topk // 2
 
     output = ssta_3d_attention(
+        attn_fn,
         query,
         key,
         value,
@@ -482,6 +483,5 @@ def SSTA(query, key, value, attn_param, attn_fn):
         adaptive_pool=ssta_adaptive_pool,
         mask_share_within_head=attn_mask_share_within_head,
         text_valid_lens=text_valid_lens,
-        attn_fn=attn_fn,
     )
     return output, softmax_lse

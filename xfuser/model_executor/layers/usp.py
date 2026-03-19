@@ -282,7 +282,7 @@ def USP(
     # If attn_param is not available or the attention backend is not AITER_SPARSE_SAGE, we fall back to the dense attention
     # TODO: This should not happen silently.
     if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
-        out, _ = SSTA(query, key, value, attn_param, attn_fn=attention_function)
+        out, _ = SSTA(attention_function, query, key, value, attn_param)
         return out
 
     if get_sequence_parallel_world_size() == 1: # No SP

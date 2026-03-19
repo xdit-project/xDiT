@@ -22,9 +22,11 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 
+from xfuser.model_executor.layers.ssta import SSTA
+
 from packaging.version import parse
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
+from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY, AttentionBackendType
 
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None):
@@ -196,7 +198,7 @@ def _get_attention_function(backend=None):
     func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
     if func is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
-    return concat_joint_tensors_decorator(func)
+    return concat_joint_tensors_decorator(func), attention_backend
 
 def concat_joint_tensors_decorator(func):
     """
@@ -276,17 +278,24 @@ def USP(
     if attn_layer:
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
+    # If SSTA is available and attn_param is provided, use SSTA instead of the standard attention function
+    # If attn_param is not available or the attention backend is not AITER_SPARSE_SAGE, we fall back to the dense attention
+    # TODO: This should not happen silently.
+    if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
+        out, _ = SSTA(query, key, value, attn_param, attn_fn=attention_function)
+        return out
+
     if get_sequence_parallel_world_size() == 1: # No SP
-        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs, **kwargs)
+        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs, **kwargs)
+        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs, **kwargs)
+            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
         else: # USP
-            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs, **kwargs)
+            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
         out = _ft_c_output_all_to_all(out)
 
     return out

@@ -1,15 +1,8 @@
 # Licensed under the TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT
 
-import functools
 import math
 import torch
 from einops import rearrange
-try:
-    from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-    flex_block_attn_func = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
-except ImportError:
-    pass
 
 # ── GPU-resident STA mask cache ──────────────────────────────────────────────
 # Keyed on (canvas_thw, tile_thw, kernel_thw, text_block_num, device).
@@ -285,14 +278,6 @@ def create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
     return ssta_3d_mask
 
 
-# ── Block mask expansion ─────────────────────────────────────────────────────
-
-def expand_block_mask(mask_coarse: torch.Tensor, factor: int) -> torch.Tensor:
-    if mask_coarse.ndim not in (2, 4):
-        raise ValueError("mask_coarse must be 2D or 4D")
-    return mask_coarse.repeat_interleave(factor, dim=-2).repeat_interleave(factor, dim=-1)
-
-
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
@@ -300,7 +285,7 @@ def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
                       text_len=0, sparse_type='ssta', threshold=0.0,
                       lambda_=None, pad_type="zero", text_mask=None,
                       mask_share_within_head=True, sampling_type=None,
-                      adaptive_pool=None, text_valid_lens=None):
+                      adaptive_pool=None, text_valid_lens=None, attn_fn=None):
 
     if text_len > 0:
         image_q = all_q[:, :, :-text_len, :]
@@ -403,58 +388,24 @@ def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
         k = image_k
         v = image_v
 
-    if sparse_type == 'sta':
-        block_mask = _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw,
-                                       text_block_num, q.device)
-        o, _ = flex_block_attn_func(q, k, v, block_mask, block_size, block_size)
+    image_q_list = torch.split(image_q, 1, dim=0)
+    image_k_list = torch.split(image_k, 1, dim=0)
+    mask_list = []
+    for i in range(b):
+        tvl = text_valid_lens[i] if text_valid_lens is not None else None
+        bm = create_ssta_3d_mask(
+            image_q_list[i], image_k_list[i],
+            canvas_thw=canvas_thw, tile_thw=tile_thw, kernel_thw=kernel_thw,
+            text_block_num=text_block_num, topk=topk, threshold=threshold,
+            lambda_=lambda_, text_valid_len=tvl,
+            mask_share_within_head=mask_share_within_head,
+            adaptive_pool=adaptive_pool, sampling_type=sampling_type)
+        mask_list.append(bm)
 
-    elif sparse_type == 'block_attn':
-        image_q_list = torch.split(image_q, 1, dim=0)
-        image_k_list = torch.split(image_k, 1, dim=0)
-        mask_list = []
-        for i in range(b):
-            bm = create_moba_3d_mask(
-                image_q_list[i], image_k_list[i], canvas_thw=canvas_thw,
-                topk=topk, tile_thw=tile_thw, kernel_thw=kernel_thw,
-                text_block_num=text_block_num, add_text_mask=True,
-                lambda_=lambda_, threshold=threshold,
-                mask_share_within_head=mask_share_within_head,
-                adaptive_pool=adaptive_pool, sampling_type=sampling_type)
-            mask_list.append(bm)
-        block_mask = torch.stack(mask_list, dim=0)
-        o, _ = flex_block_attn_func(q, k, v, block_mask, block_size, block_size)
-
-    elif sparse_type == 'ssta':
-        image_q_list = torch.split(image_q, 1, dim=0)
-        image_k_list = torch.split(image_k, 1, dim=0)
-        mask_list = []
-        for i in range(b):
-            tvl = text_valid_lens[i] if text_valid_lens is not None else None
-            bm = create_ssta_3d_mask(
-                image_q_list[i], image_k_list[i],
-                canvas_thw=canvas_thw, tile_thw=tile_thw, kernel_thw=kernel_thw,
-                text_block_num=text_block_num, topk=topk, threshold=threshold,
-                lambda_=lambda_, text_valid_len=tvl,
-                mask_share_within_head=mask_share_within_head,
-                adaptive_pool=adaptive_pool, sampling_type=sampling_type)
-            mask_list.append(bm)
-
-        block_mask = torch.stack(mask_list, dim=0)
-        if mask_share_within_head:
-            block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
-        #block_mask_128 = expand_block_mask(block_mask, factor=block_size // 128)
-        block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
-        config = {
-            "BLOCK_M": 128,
-            "BLOCK_N": 128,
-            "waves_per_eu": 2,
-            "PRE_LOAD_V": False,
-            "num_stages": 2,
-            "num_warps": 8,
-        }
-        o, _ = flex_block_attn_func(q, k, v, block_lut=block_lut, config=config)
-    else:
-        raise Exception(f"unsupported sparse_type:{sparse_type}")
+    block_mask = torch.stack(mask_list, dim=0)
+    if mask_share_within_head:
+        block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
+    o, _ = attn_fn(q, k, v, dropout_p=None, is_causal=None, block_mask=block_mask)
 
     if text_len > 0:
         image_o = o[:, :, :-text_target_size, :]
@@ -483,3 +434,54 @@ def ssta_3d_attention(all_q, all_k, all_v, canvas_thw,
         o = image_o
 
     return o
+
+def SSTA(query, key, value, attn_param, attn_fn):
+    softmax_lse = None
+    sparse_type = attn_param["attn_sparse_type"]
+    ssta_threshold = attn_param["ssta_threshold"]
+    ssta_lambda = attn_param["ssta_lambda"]
+    ssta_sampling_type = attn_param["ssta_sampling_type"]
+    ssta_adaptive_pool = attn_param["ssta_adaptive_pool"]
+
+    attn_pad_type = attn_param["attn_pad_type"]
+    attn_use_text_mask = attn_param["attn_use_text_mask"]
+    text_mask = attn_param["text_mask"]
+    attn_mask_share_within_head = attn_param["attn_mask_share_within_head"]
+    encoder_sequence_length = attn_param["encoder_sequence_length"]
+
+    ssta_topk = attn_param["ssta_topk"]
+    thw = attn_param["thw"]
+    tile_size = (1, 16, 8) # Overwrite attn_param["tile_thw"] to match block size in triton sage kernel
+    win_size = attn_param["win_size"][0].copy()
+
+    # Precompute valid text token counts
+    text_valid_lens = None
+    if text_mask is not None and attn_use_text_mask:
+        text_valid_lens = text_mask.sum(dim=-1)
+
+    if thw[0] == 1:
+        win_size = [1, 1, 1]
+    elif thw[0] <= 31:
+        ssta_topk = ssta_topk // 2
+
+    output = ssta_3d_attention(
+        query,
+        key,
+        value,
+        thw,
+        topk=ssta_topk,
+        tile_thw=tuple(tile_size),
+        kernel_thw=tuple(win_size),
+        text_len=encoder_sequence_length,
+        sparse_type=sparse_type,
+        threshold=ssta_threshold,
+        lambda_=ssta_lambda,
+        pad_type=attn_pad_type,
+        text_mask=text_mask if attn_use_text_mask else None,
+        sampling_type=ssta_sampling_type,
+        adaptive_pool=ssta_adaptive_pool,
+        mask_share_within_head=attn_mask_share_within_head,
+        text_valid_lens=text_valid_lens,
+        attn_fn=attn_fn,
+    )
+    return output, softmax_lse

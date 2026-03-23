@@ -81,6 +81,8 @@ class DefaultInputValues:
     negative_prompt: Optional[str] = None
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
+    guidance_scale_2: Optional[float] = None
+    flow_shift: Optional[float] = None
     max_sequence_length: Optional[int] = None
     num_hybrid_attn_high_precision_steps: Optional[int] = None
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
@@ -110,7 +112,6 @@ class ModelSettings:
     })
     valid_tasks: List[str] = field(default_factory=list)
     resolution_divisor: Optional[int] = None
-    flow_shift: Optional[int] = None
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """

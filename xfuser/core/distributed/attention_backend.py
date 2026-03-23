@@ -97,9 +97,7 @@ if env_info["has_transformer_engine"]:
     from transformer_engine.common import recipe
 
     TE_FP8_SCALING = recipe.DelayedScaling(
-        fp8_format=recipe.Format.HYBRID, # E4M3 during forward pass, E5M2 during backward pass
-        amax_history_len=16,
-        amax_compute_algo="max",
+        fp8_dpa=True,
     )
 if env_info["has_sage"]:
     from sageattention import sageattn

@@ -104,6 +104,8 @@ class xFuserArgs:
     seed: int = 42
     output_type: str = "pil"
     guidance_scale: float = 3.5
+    guidance_scale_2: Optional[float] = None
+    flow_shift: Optional[float] = None
     enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
@@ -532,6 +534,16 @@ class xFuserArgs:
             "--guidance_scale",
             type=float,
             help="Guidance scale for classifier free guidance.",
+        )
+        parser.add_argument(
+            "--guidance_scale_2",
+            type=float,
+            help="Guidance scale for classifier free guidance (second scale).",
+        )
+        parser.add_argument(
+            "--flow_shift",
+            type=float,
+            help="Flow shift for the scheduler.",
         )
         parser.add_argument(
             "--enable_sequential_cpu_offload",

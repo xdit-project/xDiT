@@ -92,6 +92,13 @@ if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
 if env_info["has_flash_attn_4"]:
     from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4
+if env_info["has_transformer_engine"]:
+    from transformer_engine.pytorch import DotProductAttention, fp8_autocast
+    from transformer_engine.common import recipe
+
+    TE_FP8_SCALING = recipe.DelayedScaling(
+        fp8_dpa=True,
+    )
 if env_info["has_sage"]:
     from sageattention import sageattn
 if env_info["has_npu_flash_attn"]:
@@ -106,6 +113,7 @@ class AttentionBackendType(Enum):
     CUDNN =  "cuDNN"
     FLASH_3 = "Flash Attention V3"
     FLASH_3_FP8 = "Flash Attention v3 FP8"
+    NVTE_FP8 = "NVTE FP8"
     FLASH_4 = "Flash Attention V4"
     SAGE = "Sage Attention"
     AITER = "AITER"
@@ -434,3 +442,37 @@ def _sage_attn_call(query, key, value, dropout_p, is_causal):
         return_lse=True
     )
     return output, softmax_lse
+
+@functools.lru_cache(maxsize=32)
+def _get_cached_te_fp8_dot_product_attention(
+    num_attention_heads: int,
+    kv_channels: int,
+    attn_mask_type: str,
+    device_index: int,
+):
+    return DotProductAttention(
+        num_attention_heads=num_attention_heads,
+        kv_channels=kv_channels,
+        qkv_format="bshd",
+        attn_mask_type=attn_mask_type,
+        attention_dropout=0.0,
+    ).to(torch.device("cuda", device_index)).eval()
+
+@register_attention_function(AttentionBackendType.NVTE_FP8)
+def _nvte_fp8_flash_attn_call(query, key, value, dropout_p, is_causal):
+    query = query.permute(0, 2, 1, 3).contiguous()
+    key = key.permute(0, 2, 1, 3).contiguous()
+    value = value.permute(0, 2, 1, 3).contiguous()
+    batch, seqlen, num_heads, head_dim = query.shape
+    attn_mask_type = "causal" if is_causal else "no_mask"
+    device_index = query.device.index if query.device.index is not None else 0
+    dpa = _get_cached_te_fp8_dot_product_attention(
+        num_heads,
+        head_dim,
+        attn_mask_type,
+        device_index,
+    )
+    with fp8_autocast(enabled=True, fp8_recipe=TE_FP8_SCALING):
+        out = dpa(query, key, value, attn_mask_type=attn_mask_type)
+    out = out.view(batch, seqlen, num_heads, head_dim).permute(0, 2, 1, 3)
+    return out, None

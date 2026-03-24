@@ -383,11 +383,6 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         flow_shift=5,
     )
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
-
     def _load_model(self) -> DiffusionPipeline:
         torch.set_float32_matmul_precision('high')
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

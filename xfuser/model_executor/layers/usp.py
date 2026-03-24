@@ -281,19 +281,23 @@ def USP(
     # If SSTA is available and attn_param is provided, use SSTA instead of the standard attention function
     # If attn_param is not available or the attention backend is not AITER_SPARSE_SAGE, we fall back to the dense attention
     # TODO: This should not happen silently.
-    if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
-        out, _ = SSTA(attention_function, query, key, value, attn_param)
-        return out
 
     if get_sequence_parallel_world_size() == 1: # No SP
-        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+        if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
+            out, _ = SSTA(attention_function, query, key, value, attn_param)
+        else:
+            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
         out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+            if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
+                ulysses_world_size = get_ulysses_parallel_world_size()
+                out, _ = SSTA(attention_function, query, key, value, attn_param, sp_size=ulysses_world_size)               
+            else:
+                out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
         else: # USP
             out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
         out = _ft_c_output_all_to_all(out)

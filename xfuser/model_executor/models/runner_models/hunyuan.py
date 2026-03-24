@@ -186,18 +186,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
-    capabilities = ModelCapabilities(
-        ulysses_degree=True,
-        ring_degree=True,
-        enable_slicing=True,
-        enable_tiling=True,
-    )
-    default_input_values = DefaultInputValues(
-        height=720,
-        width=1280,
-        num_frames=121,
-        num_inference_steps=50,
-    )
     settings = ModelSettings(
         output_name="hunyuan_video_1_5_sparse",
         model_output_type="video",
@@ -217,7 +205,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         from safetensors.torch import load_file
         from huggingface_hub import hf_hub_download
         from collections import OrderedDict
-        import json, os
+        import json
         pipeline = HunyuanVideo15ImageToVideoPipeline
         # Load the distilled transformer (diffusers format) to get non-block weights
         distilled_transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
@@ -346,14 +334,3 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             torch_dtype=torch.bfloat16,
         )
         return pipe
-
-    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        kwargs = {
-            "num_inference_steps": input_args["num_inference_steps"],
-            "num_frames": input_args["num_frames"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
-            "prompt": input_args["prompt"],
-            "image": input_args["image"],
-        }
-        output = self.pipe(**kwargs)
-        return DiffusionOutput(videos=output.frames, pipe_args=input_args)

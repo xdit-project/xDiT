@@ -301,6 +301,16 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
 
     b, hd, s, d = image_q.shape
     t, h, w = canvas_thw
+    spatial_len = t * h * w
+
+    # After Ulysses de-interleaving, the image sequence may include SP padding
+    # tokens (image_total = t*h*w + pad_amount). Strip them before spatial reshape.
+    sp_pad_len = s - spatial_len
+    if sp_pad_len > 0:
+        image_q = image_q[:, :, :spatial_len, :]
+        image_k = image_k[:, :, :spatial_len, :]
+        image_v = image_v[:, :, :spatial_len, :]
+
     tile_t, tile_h, tile_w = tile_thw
     block_size = math.prod(tile_thw)
 
@@ -428,6 +438,11 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
             unpad = unpad[:, :, :, :, :-pad_w, :]
         image_o = unpad.reshape(b, hd, -1, d)
 
+    # Re-append SP padding tokens that were stripped before spatial processing
+    if sp_pad_len > 0:
+        sp_pad_o = torch.zeros(b, hd, sp_pad_len, d, dtype=image_o.dtype, device=image_o.device)
+        image_o = torch.cat([image_o, sp_pad_o], dim=2)
+
     if text_len > 0:
         o = torch.cat([image_o, text_o], dim=2)
     else:
@@ -435,7 +450,33 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
 
     return o
 
-def SSTA(attn_fn, query, key, value, attn_param):
+# After Ulysses input a2a the sequence is interleaved rank-chunks:
+#   [img_r0, txt_r0, img_r1, txt_r1, ..., img_{U-1}, txt_{U-1}]
+# SSTA expects [all_image, all_text]. De-interleave here.
+def _deinterleave(x, u, txt_len):
+    """Reshape interleaved rank-chunks into [all_image, all_text]."""
+    b, h, s, d = x.shape
+    chunk_len = s // u
+    img_len = chunk_len - txt_len
+    # (b, h, U, chunk_len, d)
+    x = x.reshape(b, h, u, chunk_len, d)
+    img_part = x[:, :, :, :img_len, :]   # (b, h, U, img_len, d)
+    txt_part = x[:, :, :, img_len:, :]    # (b, h, U, txt_len, d)
+    img_part = img_part.reshape(b, h, -1, d)  # (b, h, U*img_len, d)
+    txt_part = txt_part.reshape(b, h, -1, d)  # (b, h, U*txt_len, d)
+    return torch.cat([img_part, txt_part], dim=2)
+
+def _reinterleave(x, u, txt_len):
+    """Reverse: [all_image, all_text] -> interleaved rank-chunks."""
+    b, h, s, d = x.shape
+    total_txt = u * txt_len
+    total_img = s - total_txt
+    img_len = total_img // u
+    img_part = x[:, :, :total_img, :].reshape(b, h, u, img_len, d)
+    txt_part = x[:, :, total_img:, :].reshape(b, h, u, txt_len, d)
+    return torch.cat([img_part, txt_part], dim=3).reshape(b, h, s, d)
+
+def SSTA(attn_fn, query, key, value, attn_param, sp_size=1):
     softmax_lse = None
     sparse_type = attn_param["attn_sparse_type"]
     ssta_threshold = attn_param["ssta_threshold"]
@@ -463,6 +504,11 @@ def SSTA(attn_fn, query, key, value, attn_param):
         win_size = [1, 1, 1]
     elif thw[0] <= 31:
         ssta_topk = ssta_topk // 2
+    
+    if encoder_sequence_length > 0 and sp_size > 1:
+        query = _deinterleave(query, sp_size, encoder_sequence_length)
+        key = _deinterleave(key, sp_size, encoder_sequence_length)
+        value = _deinterleave(value, sp_size, encoder_sequence_length)
 
     output = ssta_3d_attention(
         attn_fn,
@@ -473,7 +519,7 @@ def SSTA(attn_fn, query, key, value, attn_param):
         topk=ssta_topk,
         tile_thw=tuple(tile_size),
         kernel_thw=tuple(win_size),
-        text_len=encoder_sequence_length,
+        text_len=encoder_sequence_length * sp_size,
         sparse_type=sparse_type,
         threshold=ssta_threshold,
         lambda_=ssta_lambda,
@@ -484,4 +530,7 @@ def SSTA(attn_fn, query, key, value, attn_param):
         mask_share_within_head=attn_mask_share_within_head,
         text_valid_lens=text_valid_lens,
     )
+
+    if encoder_sequence_length > 0 and sp_size > 1:
+        output = _reinterleave(output, sp_size, encoder_sequence_length)
     return output, softmax_lse

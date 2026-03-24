@@ -345,12 +345,27 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_attention_mask = encoder_attention_mask.to(torch.bool)[:, any_valid]
     
         if encoder_hidden_states.shape[1] % sp_world_size != 0:
-            get_runtime_state().split_text_embed_in_sp = False
+            if self.attn_param is not None:
+                # SSTA requires symmetric [image, text] layout in Q/K/V.
+                # Pad text to be divisible by sp_world_size so it can be chunked,
+                # ensuring split_text_embed_in_sp=True and avoiding the asymmetric
+                # joint_strategy path which SSTA cannot handle.
+                enc_rem = encoder_hidden_states.shape[1] % sp_world_size
+                enc_pad = sp_world_size - enc_rem
+                encoder_hidden_states = F.pad(encoder_hidden_states, (0, 0, 0, enc_pad))
+                encoder_attention_mask = F.pad(encoder_attention_mask, (0, enc_pad), value=False)
+                get_runtime_state().split_text_embed_in_sp = True
+                encoder_hidden_states = torch.chunk(
+                    encoder_hidden_states,
+                    sp_world_size,
+                    dim=1)[sp_world_rank]
+            else:
+                get_runtime_state().split_text_embed_in_sp = False
         else:
             get_runtime_state().split_text_embed_in_sp = True
             encoder_hidden_states = torch.chunk(
-                encoder_hidden_states, 
-                sp_world_size, 
+                encoder_hidden_states,
+                sp_world_size,
                 dim=1)[sp_world_rank]
 
         # 4. Transformer blocks

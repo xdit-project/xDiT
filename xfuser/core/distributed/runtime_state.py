@@ -124,7 +124,7 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.TE_FP8_FLASH_ATTN]:
+        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.TE_FP8]:
             logger.warning("FP8 attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
@@ -214,7 +214,7 @@ class RuntimeState(metaclass=ABCMeta):
                 from aiter import flash_attn_fp8_pertensor_func
             except ImportError:
                 raise RuntimeError("AITER fp8 flash attention is not available, please update AITER")
-        if attention_backend == AttentionBackendType.TE_FP8_FLASH_ATTN:
+        if attention_backend == AttentionBackendType.TE_FP8:
             if not env_info.get("has_transformer_engine"):
                 raise RuntimeError(
                     "Transformer Engine FP8 attention requires transformer-engine"

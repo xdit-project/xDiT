@@ -92,10 +92,16 @@ class xFuserCausalWanModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
+        transformer_2 = xFuserCausalWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer_2",
+        )
         pipe = xFuserCausalWanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            transformer_2=transformer_2,
         )
         # pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe

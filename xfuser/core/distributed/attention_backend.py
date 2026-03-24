@@ -113,7 +113,7 @@ class AttentionBackendType(Enum):
     CUDNN =  "cuDNN"
     FLASH_3 = "Flash Attention V3"
     FLASH_3_FP8 = "Flash Attention v3 FP8"
-    TE_FP8 = "TE FP8"
+    NVTE_FP8 = "NVTE FP8"
     FLASH_4 = "Flash Attention V4"
     SAGE = "Sage Attention"
     AITER = "AITER"
@@ -458,8 +458,8 @@ def _get_cached_te_fp8_dot_product_attention(
         attention_dropout=0.0,
     ).to(torch.device("cuda", device_index)).eval()
 
-@register_attention_function(AttentionBackendType.TE_FP8)
-def _te_fp8_flash_attn_call(query, key, value, dropout_p, is_causal):
+@register_attention_function(AttentionBackendType.NVTE_FP8)
+def _nvte_fp8_flash_attn_call(query, key, value, dropout_p, is_causal):
     query = query.permute(0, 2, 1, 3).contiguous()
     key = key.permute(0, 2, 1, 3).contiguous()
     value = value.permute(0, 2, 1, 3).contiguous()

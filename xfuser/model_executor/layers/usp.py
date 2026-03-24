@@ -251,8 +251,7 @@ def USP(
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
 
-    attention_function = _get_attention_function(backend=backend)
-    kwargs = {"attn_param": attn_param} if attn_param is not None else None
+    attention_function, attention_backend = _get_attention_function(backend=backend)
 
     joint_attn_kwargs = None
     if joint_strategy:
@@ -318,7 +317,7 @@ def attention(
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
     Explicit backend can be provided to specify the attention backend to use.
     """
-    attention_function = _get_attention_function(backend=backend)
+    attention_function, _ = _get_attention_function(backend=backend)
     out, _ = attention_function(
         query,
         key,

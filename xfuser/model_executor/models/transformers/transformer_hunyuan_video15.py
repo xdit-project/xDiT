@@ -78,14 +78,12 @@ class xFuserHunyuanVideo15AttnProcessor:
         value = value.transpose(1, 2)
 
         #! ---------------------------------------- ATTENTION ---------------------------------------- 
-        attn_kwargs = None
         if self.attn_param is not None:
             self.attn_param["encoder_sequence_length"] = num_encoder_hidden_states_tokens
             self.attn_param["text_mask"] = attention_mask
-            attn_kwargs = {"attn_param": self.attn_param}
         if get_sequence_parallel_world_size() > 1:
             if get_runtime_state().split_text_embed_in_sp:
-                hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False, **attn_kwargs)
+                hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False, attn_param=self.attn_param)
             else:
                 query, encoder_query = query.split(
                     [num_query_tokens, num_encoder_hidden_states_tokens], dim=2
@@ -107,10 +105,10 @@ class xFuserHunyuanVideo15AttnProcessor:
                     joint_key=encoder_key,
                     joint_value=encoder_value,
                     joint_strategy="rear",
-                    **attn_kwargs,
+                    attn_param=self.attn_param,
                 )
         else:
-            hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False, **attn_kwargs)
+            hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False, attn_param=self.attn_param)
         
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -229,7 +227,8 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
-        self.attn_param["thw"] = (post_patch_num_frames, post_patch_height, post_patch_width) # Should modify reference in xFuserHunyuanVideo15AttnProcessor.
+        if self.attn_param is not None:
+            self.attn_param["thw"] = (post_patch_num_frames, post_patch_height, post_patch_width) # Should modify reference in xFuserHunyuanVideo15AttnProcessor.
 
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()

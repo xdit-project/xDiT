@@ -2,7 +2,7 @@ from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import os
 import numpy as np
 
-from diffusers import WanImageToVideoPipeline
+from diffusers import WanImageToVideoPipeline, WanPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
@@ -27,7 +27,7 @@ else:
 logger = logging.get_logger(__name__)
 
 
-class xFuserCausalWanPipeline(WanImageToVideoPipeline):
+class xFuserCausalWanPipeline(WanPipeline):
 
     def prepare_latents(
         self,

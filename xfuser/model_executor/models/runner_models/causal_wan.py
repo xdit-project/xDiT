@@ -41,7 +41,17 @@ class xFuserCausalWanModel(xFuserModel):
         output_name="causal_wan_i2v",
         fp8_gemm_module_list=["transformer.blocks"],
         flow_shift=3,
+        valid_tasks=["t2v"],
     )
+
+    _NUM_FRAMES_PER_BLOCK = 3
+    _SLIDING_WINDOW_NUM_FRAMES = 21
+    _CONTEXT_NOISE = 0
+    _LOCAL_ATTN_SIZE = -1
+    _SINK_SIZE = 0
+    _MAX_ATTENTION_SIZE = 32760
+    _DMD_DENOISING_STEPS = [1000, 850, 700, 550, 350, 275, 200, 125]
+    _FLOW_SHIFT = 3
 
 
     def _load_model(self) -> DiffusionPipeline:
@@ -73,20 +83,21 @@ class xFuserCausalWanModel(xFuserModel):
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
-            num_frames_per_block=3, # Processes X frames at a time
-            sliding_window_num_frames=21, # Sliding window size
-            context_noise=0, # Noise to add to the context as a regularization
-            local_attn_size=-1, # Local attention size, -1 means no local attention
-            sink_size=0, # Sink size, 0 means no sink, i.e, no context in kept
-            max_attention_size=32760, # Max KV size for attention
-            dmd_denoising_steps=[1000, 850, 700, 550, 350, 275, 200, 125],
-            flow_shift=self.settings.flow_shift,
+            num_frames_per_block=self._NUM_FRAMES_PER_BLOCK, # Processes X frames at a time
+            sliding_window_num_frames=self._SLIDING_WINDOW_NUM_FRAMES, # Sliding window size
+            context_noise=self._CONTEXT_NOISE, # Noise to add to the context as a regularization
+            local_attn_size=self._LOCAL_ATTN_SIZE, # Local attention size, -1 means no local attention
+            sink_size=self._SINK_SIZE, # Sink size, 0 means no sink, i.e, no context in kept
+            max_attention_size=self._MAX_ATTENTION_SIZE, # Max KV size for attention
+            dmd_denoising_steps=self._DMD_DENOISING_STEPS,
+            flow_shift=self._FLOW_SHIFT,
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
+        self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         compile_args = copy.deepcopy(input_args)
         compile_args["num_inference_steps"] = 2
         self._run_timed_pipe(compile_args)

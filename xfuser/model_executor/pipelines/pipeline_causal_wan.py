@@ -1,21 +1,13 @@
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
-import os
 import numpy as np
 
-from diffusers import WanImageToVideoPipeline, WanPipeline
+from diffusers import WanPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-from diffusers.image_processor import PipelineImageInput
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.utils import is_torch_xla_available, logging
 import torch
 
-from xfuser.config import EngineConfig
-from xfuser.core.distributed import (
-    get_classifier_free_guidance_rank,
-    get_classifier_free_guidance_world_size,
-    get_cfg_group,
-)
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm

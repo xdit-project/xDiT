@@ -119,16 +119,10 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
             query = self._apply_rotary_emb(query, *rotary_emb)
             key = self._apply_rotary_emb(key, *rotary_emb)
 
-        if kv_cache is not None:
-            hidden_states = self._cached_self_attention(
-                query, key, value, kv_cache, current_start,
-                local_attn_size, sink_size, max_attention_size,
-            )
-        else:
-            # Non-cached fallback: use standard attention
-            hidden_states = attention(
-                query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
-            ).transpose(1, 2)
+        hidden_states = self._cached_self_attention(
+            query, key, value, kv_cache, current_start,
+            local_attn_size, sink_size, max_attention_size,
+        )
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
@@ -193,11 +187,7 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
         attn_k = kv_cache["k"][:, max(0, local_end_index - max_attention_size):local_end_index]
         attn_v = kv_cache["v"][:, max(0, local_end_index - max_attention_size):local_end_index]
 
-        out = F.scaled_dot_product_attention(
-            query.transpose(1, 2),
-            attn_k.transpose(1, 2),
-            attn_v.transpose(1, 2),
-        ).transpose(1, 2)
+        out = attention(query.transpose(1, 2), attn_k.transpose(1, 2), attn_v.transpose(1, 2)).transpose(1, 2)
 
         # Update cache indices
         if isinstance(kv_cache["global_end_index"], torch.Tensor):
@@ -228,90 +218,51 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
             encoder_hidden_states_img = encoder_hidden_states[:, :image_context_length]
             encoder_hidden_states = encoder_hidden_states[:, image_context_length:]
 
-        if crossattn_cache is not None:
-            # Cached cross-attention path
-            query = attn.to_q(hidden_states)
-            query = attn.norm_q(query)
-            query = query.unflatten(2, (attn.heads, -1))
+        # Cached cross-attention path
+        query = attn.to_q(hidden_states)
+        query = attn.norm_q(query)
+        query = query.unflatten(2, (attn.heads, -1))
 
-            if not crossattn_cache["is_init"]:
-                # First block: compute and cache K, V
-                if attn.fused_projections and attn.cross_attention_dim_head is not None:
-                    key, value = attn.to_kv(encoder_hidden_states).chunk(2, dim=-1)
-                else:
-                    key = attn.to_k(encoder_hidden_states)
-                    value = attn.to_v(encoder_hidden_states)
-                key = attn.norm_k(key)
-                key = key.unflatten(2, (attn.heads, -1))
-                value = value.unflatten(2, (attn.heads, -1))
-
-                crossattn_cache["k"][:, :key.shape[1]] = key
-                crossattn_cache["v"][:, :value.shape[1]] = value
-                crossattn_cache["is_init"] = True
-                crossattn_cache["seq_len"] = key.shape[1]
+        if not crossattn_cache["is_init"]:
+            # First block: compute and cache K, V
+            if attn.fused_projections and attn.cross_attention_dim_head is not None:
+                key, value = attn.to_kv(encoder_hidden_states).chunk(2, dim=-1)
             else:
-                seq_len = crossattn_cache["seq_len"]
-                key = crossattn_cache["k"][:, :seq_len]
-                value = crossattn_cache["v"][:, :seq_len]
-
-            # I2V image embeddings (recomputed each time since cheap)
-            hidden_states_img = None
-            if encoder_hidden_states_img is not None:
-                key_img, value_img = self._get_added_kv_projections(attn, encoder_hidden_states_img)
-                key_img = attn.norm_added_k(key_img)
-                key_img = key_img.unflatten(2, (attn.heads, -1))
-                value_img = value_img.unflatten(2, (attn.heads, -1))
-
-                hidden_states_img = F.scaled_dot_product_attention(
-                    query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2)
-                ).transpose(1, 2)
-                hidden_states_img = hidden_states_img.flatten(2, 3).type_as(query)
-
-            hidden_states = F.scaled_dot_product_attention(
-                query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
-            ).transpose(1, 2)
-            hidden_states = hidden_states.flatten(2, 3).type_as(query)
-
-            if hidden_states_img is not None:
-                hidden_states = hidden_states + hidden_states_img
-
-            hidden_states = attn.to_out[0](hidden_states)
-            hidden_states = attn.to_out[1](hidden_states)
-            return hidden_states
-        else:
-            # Non-cached fallback: standard cross-attention
-            query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
-
-            query = attn.norm_q(query)
+                key = attn.to_k(encoder_hidden_states)
+                value = attn.to_v(encoder_hidden_states)
             key = attn.norm_k(key)
-
-            query = query.unflatten(2, (attn.heads, -1))
             key = key.unflatten(2, (attn.heads, -1))
             value = value.unflatten(2, (attn.heads, -1))
 
-            hidden_states_img = None
-            if encoder_hidden_states_img is not None:
-                key_img, value_img = self._get_added_kv_projections(attn, encoder_hidden_states_img)
-                key_img = attn.norm_added_k(key_img)
-                key_img = key_img.unflatten(2, (attn.heads, -1))
-                value_img = value_img.unflatten(2, (attn.heads, -1))
+            crossattn_cache["k"][:, :key.shape[1]] = key
+            crossattn_cache["v"][:, :value.shape[1]] = value
+            crossattn_cache["is_init"] = True
+            crossattn_cache["seq_len"] = key.shape[1]
+        else:
+            seq_len = crossattn_cache["seq_len"]
+            key = crossattn_cache["k"][:, :seq_len]
+            value = crossattn_cache["v"][:, :seq_len]
 
-                hidden_states_img = attention(
-                    query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2), backend=backend
-                ).transpose(1, 2)
-                hidden_states_img = hidden_states_img.flatten(2, 3).type_as(query)
+        # I2V image embeddings
+        hidden_states_img = None
+        if encoder_hidden_states_img is not None:
+            key_img, value_img = self._get_added_kv_projections(attn, encoder_hidden_states_img)
+            key_img = attn.norm_added_k(key_img)
+            key_img = key_img.unflatten(2, (attn.heads, -1))
+            value_img = value_img.unflatten(2, (attn.heads, -1))
 
-            hidden_states = attention(
-                query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), backend=backend
-            ).transpose(1, 2)
-            hidden_states = hidden_states.flatten(2, 3).type_as(query)
+            hidden_states_img = attention(query.transpose(1, 2), key_img.transpose(1, 2), value_img.transpose(1, 2), backend=backend).transpose(1, 2)
+            hidden_states_img = hidden_states_img.flatten(2, 3).type_as(query)
 
-            if hidden_states_img is not None:
-                hidden_states = hidden_states + hidden_states_img
+        hidden_states = attention(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), backend=backend).transpose(1, 2)
+        hidden_states = hidden_states.flatten(2, 3).type_as(query)
 
-            hidden_states = attn.to_out[0](hidden_states)
-            hidden_states = attn.to_out[1](hidden_states)
-            return hidden_states
+        if hidden_states_img is not None:
+            hidden_states = hidden_states + hidden_states_img
+
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+        return hidden_states
 
 
 class xFuserCausalWanTransformerBlock(WanTransformerBlock):
@@ -434,17 +385,13 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
                 eps=eps,
                 added_kv_proj_dim=added_kv_proj_dim,
             )
-            # Copy weight references from the original block (no duplication)
+            # Copy weight references from the original block
             causal_block.load_state_dict(block.state_dict(), strict=True)
             # Assign causal attention processors
             causal_block.attn1.processor = xFuserCausalWanAttnProcessor(is_cross_attention=False)
             causal_block.attn2.processor = xFuserCausalWanAttnProcessor(is_cross_attention=True)
             self.blocks[i] = causal_block
 
-        # Remove instance-level forward binding set by parent (peft wrapper)
-        # so that Python MRO resolves to our class-level forward override
-        if 'forward' in self.__dict__:
-            del self.__dict__['forward']
 
     def _compute_rope_with_offset(
         self,
@@ -489,25 +436,14 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
 
         # Extract causal params from attention_kwargs
-        if attention_kwargs is not None:
-            attention_kwargs = attention_kwargs.copy()
-            lora_scale = attention_kwargs.pop("scale", 1.0)
-            kv_cache = attention_kwargs.pop("kv_cache", None)
-            crossattn_cache = attention_kwargs.pop("crossattn_cache", None)
-            current_start = attention_kwargs.pop("current_start", 0)
-            start_frame = attention_kwargs.pop("start_frame", 0)
-            local_attn_size = attention_kwargs.pop("local_attn_size", -1)
-            sink_size = attention_kwargs.pop("sink_size", 0)
-            max_attention_size = attention_kwargs.pop("max_attention_size", 32760)
-        else:
-            lora_scale = 1.0
-            kv_cache = None
-            crossattn_cache = None
-            current_start = 0
-            start_frame = 0
-            local_attn_size = -1
-            sink_size = 0
-            max_attention_size = 32760
+        attention_kwargs = attention_kwargs.copy()
+        kv_cache = attention_kwargs["kv_cache"]
+        crossattn_cache = attention_kwargs["crossattn_cache"]
+        current_start = attention_kwargs["current_start"]
+        start_frame = attention_kwargs["start_frame"]
+        local_attn_size = attention_kwargs["local_attn_size"]
+        sink_size = attention_kwargs["sink_size"]
+        max_attention_size = attention_kwargs["max_attention_size"]
 
         get_runtime_state().increment_step_counter()
 
@@ -518,10 +454,7 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         post_patch_width = width // p_w
 
         # 1. RoPE with frame offset for causal generation
-        if start_frame > 0 or kv_cache is not None:
-            rotary_emb = self._compute_rope_with_offset(hidden_states, start_frame)
-        else:
-            rotary_emb = self.rope(hidden_states)
+        rotary_emb = self._compute_rope_with_offset(hidden_states, start_frame)
 
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
@@ -536,6 +469,7 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
             timestep, encoder_hidden_states, encoder_hidden_states_image, timestep_seq_len=ts_seq_len
         )
+
         if ts_seq_len is not None:
             timestep_proj = timestep_proj.unflatten(2, (6, -1))
         else:
@@ -544,12 +478,10 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         if encoder_hidden_states_image is not None:
             encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
 
-        # No sequence parallel chunking for causal mode (KV cache is per-GPU)
-
         # 4. Transformer blocks
         for i, block in enumerate(self.blocks):
-            block_kv_cache = kv_cache[i] if kv_cache is not None else None
-            block_crossattn_cache = crossattn_cache[i] if crossattn_cache is not None else None
+            block_kv_cache = kv_cache[i]
+            block_crossattn_cache = crossattn_cache[i]
 
             hidden_states = block(
                 hidden_states,

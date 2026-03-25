@@ -3,7 +3,7 @@ import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.model_executor.models.transformers.transformer_causal_wan import xFuserCausalWanTransformer3DWrapper
-from xfuser.model_executor.pipelines.pipeline_causal_wan_test import xFuserCausalWanPipeline
+from xfuser.model_executor.pipelines.pipeline_causal_wan import xFuserCausalWanPipeline
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
     xFuserModel,

@@ -71,6 +71,7 @@ class ModelCapabilities:
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
+    supports_sparse_attention_backends: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -215,13 +216,15 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
-            config_value = getattr(config, key)
+            config_value = getattr(config, key, None) # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
+            if "sparse" in config.attention_backend and not self.capabilities.supports_sparse_attention_backends:
+                raise ValueError(f"Model {self.settings.model_name} does not support sparse attention backends.")
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:

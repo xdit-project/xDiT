@@ -4,6 +4,11 @@ import math
 import torch
 from einops import rearrange
 
+try:
+    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
+except ImportError:
+    pass # Error is rasied in runtime_state.py if AITER_SPARSE_SAGE is not available.
+
 # ── GPU-resident STA mask cache ──────────────────────────────────────────────
 # Keyed on (canvas_thw, tile_thw, kernel_thw, text_block_num, device).
 # Populated once per unique config (during first torch.compile trace),
@@ -415,7 +420,8 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
     block_mask = torch.stack(mask_list, dim=0)
     if mask_share_within_head:
         block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
-    o, _ = attn_fn(q, k, v, dropout_p=None, is_causal=None, block_mask=block_mask)
+    block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
+    o, _ = attn_fn(q, k, v, block_lut=block_lut)
 
     if text_len > 0:
         image_o = o[:, :, :-text_target_size, :]
@@ -476,24 +482,26 @@ def _reinterleave(x, u, txt_len):
     txt_part = x[:, :, total_img:, :].reshape(b, h, u, txt_len, d)
     return torch.cat([img_part, txt_part], dim=3).reshape(b, h, s, d)
 
-def SSTA(attn_fn, query, key, value, attn_param, sp_size=1):
+def SSTA(attn_fn, query, key, value, attn_kwargs):
     softmax_lse = None
-    sparse_type = attn_param["attn_sparse_type"]
-    ssta_threshold = attn_param["ssta_threshold"]
-    ssta_lambda = attn_param["ssta_lambda"]
-    ssta_sampling_type = attn_param["ssta_sampling_type"]
-    ssta_adaptive_pool = attn_param["ssta_adaptive_pool"]
+    sparse_type = attn_kwargs["attn_sparse_type"]
+    ssta_threshold = attn_kwargs["ssta_threshold"]
+    ssta_lambda = attn_kwargs["ssta_lambda"]
+    ssta_sampling_type = attn_kwargs["ssta_sampling_type"]
+    ssta_adaptive_pool = attn_kwargs["ssta_adaptive_pool"]
 
-    attn_pad_type = attn_param["attn_pad_type"]
-    attn_use_text_mask = attn_param["attn_use_text_mask"]
-    text_mask = attn_param["text_mask"]
-    attn_mask_share_within_head = attn_param["attn_mask_share_within_head"]
-    encoder_sequence_length = attn_param["encoder_sequence_length"]
+    attn_pad_type = attn_kwargs["attn_pad_type"]
+    attn_use_text_mask = attn_kwargs["attn_use_text_mask"]
+    text_mask = attn_kwargs["text_mask"]
+    attn_mask_share_within_head = attn_kwargs["attn_mask_share_within_head"]
+    encoder_sequence_length = attn_kwargs["encoder_sequence_length"]
 
-    ssta_topk = attn_param["ssta_topk"]
-    thw = attn_param["thw"]
-    tile_size = (1, 16, 8) # Overwrite attn_param["tile_thw"] to match block size in triton sage kernel
-    win_size = attn_param["win_size"][0].copy()
+    ssta_topk = attn_kwargs["ssta_topk"]
+    thw = attn_kwargs["thw"]
+    tile_size = (1, 16, 8) # Overwrite attn_kwargs["tile_thw"] to match block size in triton sage kernel
+    win_size = attn_kwargs["win_size"][0].copy()
+
+    sp_size = attn_kwargs["sp_size"]
 
     # Precompute valid text token counts
     text_valid_lens = None

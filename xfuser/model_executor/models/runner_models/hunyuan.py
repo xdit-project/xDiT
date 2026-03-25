@@ -180,24 +180,60 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         compile_args["num_inference_steps"] = 2
         self._run_timed_pipe(compile_args)
 
+HUNYUANVIDEO_15_SPARSE_BLOCK_KEY_MAP = {
+    # Image-side attention
+    "img_attn_q.": "attn.to_q.",
+    "img_attn_k.": "attn.to_k.",
+    "img_attn_v.": "attn.to_v.",
+    "img_attn_proj.": "attn.to_out.0.",
+    "img_attn_q_norm.": "attn.norm_q.",
+    "img_attn_k_norm.": "attn.norm_k.",
+    # Text-side attention
+    "txt_attn_q.": "attn.add_q_proj.",
+    "txt_attn_k.": "attn.add_k_proj.",
+    "txt_attn_v.": "attn.add_v_proj.",
+    "txt_attn_proj.": "attn.to_add_out.",
+    "txt_attn_q_norm.": "attn.norm_added_q.",
+    "txt_attn_k_norm.": "attn.norm_added_k.",
+    # Modulation
+    "img_mod.": "norm1.",
+    "txt_mod.": "norm1_context.",
+    # MLP (img)
+    "img_mlp.fc1.": "ff.net.0.proj.",
+    "img_mlp.fc2.": "ff.net.2.",
+    # MLP (txt)
+    "txt_mlp.fc1.": "ff_context.net.0.proj.",
+    "txt_mlp.fc2.": "ff_context.net.2.",
+}
+HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
+    "linear1_q.": "attn.to_q.",
+    "linear1_k.": "attn.to_k.",
+    "linear1_v.": "attn.to_v.",
+    "linear1_mlp.": "proj_mlp.",
+    "linear2.fc.": "proj_out.",
+    "q_norm.": "attn.norm_q.",
+    "k_norm.": "attn.norm_k.",
+    "modulation.": "norm.",
+}
 
 @register_model("tencent/HunyuanVideo-1.5-Sparse")
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
-    settings = ModelSettings(
-        output_name="hunyuan_video_1_5_sparse",
-        model_output_type="video",
-        fps=24,
-        mod_value=16,
-        valid_tasks=["i2v"],
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        enable_slicing=True,
+        enable_tiling=True,
+        supports_sparse_attention_backends=True,
     )
-
 
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
         self.settings.model_name = "tencent/HunyuanVideo-1.5"
+        self.settings.output_name = "hunyuan_video_1_5_sparse"
+        self.settings.valid_tasks = ["i2v"]
         self.pipe_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
 
 
@@ -241,7 +277,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             target_size=sparse_config.get("target_size", 640),
             task_type="i2v",
             use_meanflow=sparse_config.get("use_meanflow", False),
-            attn_param=sparse_config.get("attn_param", None),
+            attention_kwargs=sparse_config.get("attn_param", None),
         )
 
         # Load non-block weights from distilled model (already in diffusers naming)
@@ -258,41 +294,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             subfolder="transformer/720p_i2v_distilled_sparse",
         )
         state_dict = load_file(weight_file)
-        BLOCK_KEY_MAP = {
-            # Image-side attention
-            "img_attn_q.": "attn.to_q.",
-            "img_attn_k.": "attn.to_k.",
-            "img_attn_v.": "attn.to_v.",
-            "img_attn_proj.": "attn.to_out.0.",
-            "img_attn_q_norm.": "attn.norm_q.",
-            "img_attn_k_norm.": "attn.norm_k.",
-            # Text-side attention
-            "txt_attn_q.": "attn.add_q_proj.",
-            "txt_attn_k.": "attn.add_k_proj.",
-            "txt_attn_v.": "attn.add_v_proj.",
-            "txt_attn_proj.": "attn.to_add_out.",
-            "txt_attn_q_norm.": "attn.norm_added_q.",
-            "txt_attn_k_norm.": "attn.norm_added_k.",
-            # Modulation
-            "img_mod.": "norm1.",
-            "txt_mod.": "norm1_context.",
-            # MLP (img)
-            "img_mlp.fc1.": "ff.net.0.proj.",
-            "img_mlp.fc2.": "ff.net.2.",
-            # MLP (txt)
-            "txt_mlp.fc1.": "ff_context.net.0.proj.",
-            "txt_mlp.fc2.": "ff_context.net.2.",
-        }
-        SINGLE_BLOCK_KEY_MAP = {
-            "linear1_q.": "attn.to_q.",
-            "linear1_k.": "attn.to_k.",
-            "linear1_v.": "attn.to_v.",
-            "linear1_mlp.": "proj_mlp.",
-            "linear2.fc.": "proj_out.",
-            "q_norm.": "attn.norm_q.",
-            "k_norm.": "attn.norm_k.",
-            "modulation.": "norm.",
-        }
+        
         # Remap double_blocks -> transformer_blocks
         remapped = OrderedDict()
         for key, value in state_dict.items():
@@ -302,7 +304,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
                 block_idx = parts[1]
                 rest = parts[2]
                 new_rest = rest
-                for old_prefix, new_prefix in BLOCK_KEY_MAP.items():
+                for old_prefix, new_prefix in HUNYUANVIDEO_15_SPARSE_BLOCK_KEY_MAP.items():
                     if rest.startswith(old_prefix):
                         new_rest = new_prefix + rest[len(old_prefix):]
                         break
@@ -312,7 +314,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
                 block_idx = parts[1]
                 rest = parts[2]
                 new_rest = rest
-                for old_prefix, new_prefix in SINGLE_BLOCK_KEY_MAP.items():
+                for old_prefix, new_prefix in HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP.items():
                     if rest.startswith(old_prefix):
                         new_rest = new_prefix + rest[len(old_prefix):]
                         break

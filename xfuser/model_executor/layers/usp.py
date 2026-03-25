@@ -1,7 +1,6 @@
 # This file implements USP with torch version >= '2.5.0'
 import torch
 import functools
-from torch.nn import functional as F
 
 import torch.distributed._functional_collectives as ft_c
 
@@ -22,11 +21,9 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 
-from xfuser.model_executor.layers.ssta import SSTA
-
 from packaging.version import parse
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY, AttentionBackendType
+from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
 
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None):
@@ -198,7 +195,7 @@ def _get_attention_function(backend=None):
     func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
     if func is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
-    return concat_joint_tensors_decorator(func), attention_backend
+    return concat_joint_tensors_decorator(func)
 
 def concat_joint_tensors_decorator(func):
     """
@@ -210,9 +207,10 @@ def concat_joint_tensors_decorator(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         query, key, value = args[0:3]
-        is_causal = kwargs.pop("is_causal")
-        dropout_p = kwargs.pop("dropout_p")
-        joint_attn_kwargs = kwargs.pop("joint_attn_kwargs", None)
+        is_causal = kwargs.get("is_causal")
+        dropout_p = kwargs.get("dropout_p")
+        joint_attn_kwargs = kwargs.get("joint_attn_kwargs", None)
+        attention_kwargs = kwargs.get("attention_kwargs", None)
 
         if joint_attn_kwargs is not None:
             joint_strategy = joint_attn_kwargs.get("joint_strategy", None)
@@ -225,7 +223,7 @@ def concat_joint_tensors_decorator(func):
                 value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
             joint_attn_kwargs["step"] = step + 1 # In place increment step
 
-        return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal, **kwargs)
+        return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal, attention_kwargs=attention_kwargs)
     return wrapper
 
 def USP(
@@ -241,7 +239,7 @@ def USP(
         attn_layer=None,
         combine_qkv_a2a: bool | None = None,
         backend=None,
-        attn_param: dict | None = None,
+        attention_kwargs: dict | None = None,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -251,7 +249,10 @@ def USP(
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
 
-    attention_function, attention_backend = _get_attention_function(backend=backend)
+    attention_function = _get_attention_function(backend=backend)
+
+    if attention_kwargs is not None:
+        attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
 
     joint_attn_kwargs = None
     if joint_strategy:
@@ -277,28 +278,43 @@ def USP(
     if attn_layer:
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
-    # If SSTA is available and attn_param is provided, use SSTA instead of the standard attention function
-    # If attn_param is not available or the attention backend is not AITER_SPARSE_SAGE, we fall back to the dense attention
-    # TODO: This should not happen silently.
-
     if get_sequence_parallel_world_size() == 1: # No SP
-        if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
-            out, _ = SSTA(attention_function, query, key, value, attn_param)
-        else:
-            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+        out, _ = attention_function(query,
+                                    key,
+                                    value,
+                                    dropout_p=dropout_p,
+                                    is_causal=is_causal,
+                                    joint_attn_kwargs=joint_attn_kwargs,
+                                    attention_kwargs=attention_kwargs)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+        out = ring_attn(attention_function,
+                        query,
+                        key,
+                        value,
+                        dropout_p=dropout_p,
+                        is_causal=is_causal,
+                        joint_attn_kwargs=joint_attn_kwargs,
+                        attention_kwargs=attention_kwargs)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            if attn_param is not None and attention_backend == AttentionBackendType.AITER_SPARSE_SAGE:
-                ulysses_world_size = get_ulysses_parallel_world_size()
-                out, _ = SSTA(attention_function, query, key, value, attn_param, sp_size=ulysses_world_size)               
-            else:
-                out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+            out, _ = attention_function(query,
+                                        key,
+                                        value,
+                                        dropout_p=dropout_p,
+                                        is_causal=is_causal,
+                                        joint_attn_kwargs=joint_attn_kwargs,
+                                        attention_kwargs=attention_kwargs)
         else: # USP
-            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+            out = ring_attn(attention_function,
+                            query,
+                            key,
+                            value,
+                            dropout_p=dropout_p,
+                            is_causal=is_causal,
+                            joint_attn_kwargs=joint_attn_kwargs,
+                            attention_kwargs=attention_kwargs)
         out = _ft_c_output_all_to_all(out)
 
     return out
@@ -317,7 +333,7 @@ def attention(
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
     Explicit backend can be provided to specify the attention backend to use.
     """
-    attention_function, _ = _get_attention_function(backend=backend)
+    attention_function = _get_attention_function(backend=backend)
     out, _ = attention_function(
         query,
         key,

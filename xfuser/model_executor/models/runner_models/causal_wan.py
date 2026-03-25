@@ -12,29 +12,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
-from xfuser.core.utils.runner_utils import (
-    log,
-)
 
-
-
-def _setup_parallel_vae(vae) -> None:
-    """Parallelizes the VAE decoder using distvae."""
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
-        patched_decoder = WanDecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group().device_group
-        ).to(vae.device)
-        vae.decoder = patched_decoder
-        log("Parallel VAE decoder enabled successfully.")
-    except ImportError:
-        raise ValueError(
-            "DistVAE library is missing or does not support WanDecoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE."
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE decoder. {e}")
 
 
 @register_model("CausalWan")
@@ -62,7 +40,7 @@ class xFuserCausalWanModel(xFuserModel):
         model_name="FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers",
         output_name="causal_wan_i2v",
         fp8_gemm_module_list=["transformer.blocks"],
-        flow_shift=12,
+        flow_shift=3,
     )
 
 

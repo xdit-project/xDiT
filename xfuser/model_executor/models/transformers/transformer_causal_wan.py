@@ -134,7 +134,7 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
     def _cached_self_attention(
         self,
         query: torch.Tensor,
-        roped_key: torch.Tensor,
+        key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: dict,
         current_start: int,
@@ -172,14 +172,14 @@ class xFuserCausalWanAttnProcessor(WanAttnProcessor):
                 kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             local_end_index = local_end_index_prev + current_end - global_end_index - num_evicted_tokens
             local_start_index = local_end_index - num_new_tokens
-            kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+            kv_cache["k"][:, local_start_index:local_end_index] = key
             kv_cache["v"][:, local_start_index:local_end_index] = value
         else:
             local_end_index = local_end_index_prev + current_end - global_end_index
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"] = kv_cache["k"].detach()
             kv_cache["v"] = kv_cache["v"].detach()
-            kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+            kv_cache["k"][:, local_start_index:local_end_index] = key
             kv_cache["v"][:, local_start_index:local_end_index] = value
 
         # Attention over cached keys/values
@@ -374,7 +374,7 @@ class xFuserCausalWanTransformer3DWrapper(WanTransformer3DModel):
         )
 
         # Replace each standard WanTransformerBlock with our causal version
-        # that threads extra kwargs through to attention
+        # that passes extra kwargs through to attention
         for i, block in enumerate(self.blocks):
             causal_block = xFuserCausalWanTransformerBlock(
                 dim=num_attention_heads * attention_head_dim,

@@ -1,5 +1,6 @@
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import os
+import numpy as np
 
 from diffusers import WanImageToVideoPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
@@ -125,13 +126,23 @@ class xFuserCausalWanPipeline(WanImageToVideoPipeline):
         # Apply flow_shift to scheduler before computing sigma schedule
         if flow_shift is not None:
             self.scheduler._shift = flow_shift
+
         # Set up scheduler with dense 1000-step schedule for sigma lookups
         self.scheduler.set_timesteps(1000, device=device)
 
-        # Warp DMD timesteps through the scheduler's sigma schedule
+        # Build shifted timestep schedule matching FastVideo's scheduler init
+        # (linspace [1..1000] with shift applied), used for warping DMD steps.
+        num_train = self.scheduler.config.num_train_timesteps
+        shift = flow_shift if flow_shift is not None else 1.0
+        ts = np.linspace(1, num_train, num_train, dtype=np.float32)[::-1].copy()
+        sigmas = ts / num_train
+        sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
+        init_timesteps = torch.from_numpy((sigmas * num_train).astype(np.float32))
+
+        # Warp DMD timesteps through the shifted schedule
         raw_dmd_timesteps = torch.tensor(dmd_denoising_steps, dtype=torch.long)
         scheduler_timesteps = torch.cat((
-            self.scheduler.timesteps.cpu(),
+            init_timesteps,
             torch.tensor([0], dtype=torch.float32),
         ))
         dmd_timesteps = scheduler_timesteps[1000 - raw_dmd_timesteps].to(device)

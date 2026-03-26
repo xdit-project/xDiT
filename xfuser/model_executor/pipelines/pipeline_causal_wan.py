@@ -1,8 +1,9 @@
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import numpy as np
 
-from diffusers import WanPipeline
+from diffusers import WanImageToVideoPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
+from diffusers.image_processor import PipelineImageInput
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.utils import is_torch_xla_available, logging
@@ -19,7 +20,7 @@ else:
 logger = logging.get_logger(__name__)
 
 
-class xFuserCausalWanPipeline(WanPipeline):
+class xFuserCausalWanPipeline(WanImageToVideoPipeline):
 
     def prepare_latents(
         self,
@@ -271,7 +272,7 @@ class xFuserCausalWanPipeline(WanPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        #image: PipelineImageInput,
+        image: PipelineImageInput = None,
         prompt: Union[str, List[str]] = None,
         negative_prompt: Union[str, List[str]] = None,
         height: int = 480,
@@ -312,7 +313,7 @@ class xFuserCausalWanPipeline(WanPipeline):
         self.check_inputs(
             prompt,
             negative_prompt,
-            None, #image
+            image,
             height,
             width,
             prompt_embeds,
@@ -366,6 +367,12 @@ class xFuserCausalWanPipeline(WanPipeline):
         if negative_prompt_embeds is not None:
             negative_prompt_embeds = negative_prompt_embeds.to(transformer_dtype)
 
+        # 3b. Encode image embeddings (CLIP) for i2v
+        if image is not None and self.transformer.config.image_dim is not None:
+            if image_embeds is None:
+                image_embeds = self.encode_image(image, device)
+            image_embeds = image_embeds.repeat(batch_size, 1, 1)
+            image_embeds = image_embeds.to(transformer_dtype)
 
         # 4. Prepare latent variables
 
@@ -428,10 +435,63 @@ class xFuserCausalWanPipeline(WanPipeline):
         block_sizes = self._compute_block_sizes(num_latent_frames, num_frames_per_block, boundary_timestep)
         dmd_timesteps, num_high_noise_steps, sigma_boundary = self._compute_dmd_timesteps(dmd_denoising_steps, boundary_timestep, flow_shift, device)
 
-        total_steps = len(block_sizes) * len(dmd_timesteps)
-
-
+        # 7b. First-frame KV cache seeding for i2v
         start_idx = 0
+        if image is not None:
+            preprocessed = self.video_processor.preprocess(image, height=height, width=width)
+            preprocessed = preprocessed.to(device, dtype=torch.float32)
+            # VAE encode: add temporal dim -> encode -> extract mean
+            first_frame_latent = self.vae.encode(
+                preprocessed.unsqueeze(2).to(self.vae.dtype)
+            ).latent_dist.mean.float()
+            # Normalize using the same latents_mean/latents_std as the decode path
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(first_frame_latent.device, first_frame_latent.dtype)
+            )
+            latents_std = (
+                torch.tensor(self.vae.config.latents_std)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(first_frame_latent.device, first_frame_latent.dtype)
+            )
+            first_frame_latent = (first_frame_latent - latents_mean) / latents_std
+
+            # Seed KV caches by running first frame through both transformers at t=0
+            t_zero = torch.zeros([batch_size], device=device, dtype=torch.long)
+            seed_attn_args = self._build_causal_attn_args(
+                kv_cache, crossattn_cache, 0, frame_seq_length,
+                local_attn_size, sink_size, max_attention_size, attention_kwargs,
+            )
+            with self.transformer.cache_context("cond"):
+                self.transformer(
+                    hidden_states=first_frame_latent.to(transformer_dtype),
+                    timestep=t_zero,
+                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states_image=image_embeds,
+                    attention_kwargs=seed_attn_args,
+                    return_dict=False,
+                )
+            seed_attn_args_2 = self._build_causal_attn_args(
+                kv_cache_2, crossattn_cache, 0, frame_seq_length,
+                local_attn_size, sink_size, max_attention_size, attention_kwargs,
+            )
+            with self.transformer_2.cache_context("cond"):
+                self.transformer_2(
+                    hidden_states=first_frame_latent.to(transformer_dtype),
+                    timestep=t_zero,
+                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states_image=image_embeds,
+                    attention_kwargs=seed_attn_args_2,
+                    return_dict=False,
+                )
+
+            # Write first frame into latents and advance past it
+            latents[:, :, :1] = first_frame_latent
+            start_idx = 1
+            block_sizes.pop(0)
+
+        total_steps = len(block_sizes) * len(dmd_timesteps)
         with self.progress_bar(total=total_steps) as progress_bar:
             for block_idx, block_size in enumerate(block_sizes):
                 end_idx = start_idx + block_size
@@ -482,6 +542,7 @@ class xFuserCausalWanPipeline(WanPipeline):
                             hidden_states=latent_model_input,
                             timestep=timestep,
                             encoder_hidden_states=prompt_embeds,
+                            encoder_hidden_states_image=image_embeds,
                             attention_kwargs=attention_args,
                             return_dict=False,
                         )[0]
@@ -492,6 +553,7 @@ class xFuserCausalWanPipeline(WanPipeline):
                                 hidden_states=latent_model_input,
                                 timestep=timestep,
                                 encoder_hidden_states=negative_prompt_embeds,
+                                encoder_hidden_states_image=image_embeds,
                                 attention_kwargs=attention_args,
                                 return_dict=False,
                             )[0]
@@ -570,7 +632,7 @@ class xFuserCausalWanPipeline(WanPipeline):
                         hidden_states=context_input_model,
                         timestep=context_timestep,
                         encoder_hidden_states=prompt_embeds,
-                        #encoder_hidden_states_image=image_embeds,
+                        encoder_hidden_states_image=image_embeds,
                         attention_kwargs=attention_args,
                         return_dict=False,
                     )
@@ -581,7 +643,7 @@ class xFuserCausalWanPipeline(WanPipeline):
                         hidden_states=context_input_model,
                         timestep=context_timestep,
                         encoder_hidden_states=prompt_embeds,
-                        #encoder_hidden_states_image=image_embeds,
+                        encoder_hidden_states_image=image_embeds,
                         attention_kwargs=attention_args,
                         return_dict=False,
                     )

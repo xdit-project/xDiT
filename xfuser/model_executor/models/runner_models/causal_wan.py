@@ -41,7 +41,7 @@ class xFuserCausalWanModel(xFuserModel):
         output_name="causal_wan_i2v",
         fp8_gemm_module_list=["transformer.blocks"],
         flow_shift=3,
-        valid_tasks=["t2v"],
+        valid_tasks=["t2v", "i2v"],
     )
 
     _NUM_FRAMES_PER_BLOCK = 3
@@ -75,6 +75,7 @@ class xFuserCausalWanModel(xFuserModel):
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
+            image=input_args.get("image"),
             height=input_args["height"],
             width=input_args["width"],
             prompt=input_args["prompt"],
@@ -93,6 +94,21 @@ class xFuserCausalWanModel(xFuserModel):
             flow_shift=self._FLOW_SHIFT,
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
+
+    def _preprocess_args_images(self, input_args: dict) -> dict:
+        input_args = super()._preprocess_args_images(input_args)
+        images = input_args.get("input_images", [])
+        if images:
+            image = images[0]
+            input_args["image"] = image
+        return input_args
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        task = input_args.get("task")
+        images = input_args.get("input_images", [])
+        if task == "i2v" and len(images) != 1:
+            raise ValueError("Exactly one input image is required for CausalWan I2V mode.")
 
     def _compile_model(self, input_args):
         torch._inductor.config.reorder_for_compute_comm_overlap = True

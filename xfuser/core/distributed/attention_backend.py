@@ -4,7 +4,7 @@ import inspect
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
-from xfuser.core.distributed.ssta import SSTA
+from xfuser.core.distributed.ssta import setup_ssta, get_sparse_mask, untile_ssta_output
 
 ATTENTION_FUNCTION_REGISTRY = {}
 
@@ -80,6 +80,10 @@ if env_info["has_aiter"]:
         )
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.
+    try:
+        from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
+    except ImportError:
+        pass # Error is rasied in runtime_state.py if AITER_SPARSE_SAGE is not available.
 
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
@@ -449,6 +453,10 @@ def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attent
         "num_warps": 8,
     }
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", config=config)
-    output, _ = SSTA(attn_fn, query, key, value, attention_kwargs)
+    q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
+    block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
+    block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
+    output, _ = attn_fn(q, k, v, block_lut=block_lut)
+    output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])
     return output, None
 

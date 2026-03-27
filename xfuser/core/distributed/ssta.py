@@ -1,13 +1,48 @@
 # Licensed under the TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT
 
+from dataclasses import dataclass
 import math
 import torch
 from einops import rearrange
 
-try:
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-except ImportError:
-    pass # Error is rasied in runtime_state.py if AITER_SPARSE_SAGE is not available.
+# ── Dataclasses ──────────────────────────────────────────────
+
+@dataclass
+class SSTAState:
+    canvas_thw: tuple[int, int, int]
+    tile_thw: tuple[int, int, int]
+    text_len: int
+    sp_pad_len: int
+    need_pad: bool
+    text_target_size: int
+    need_pad_text: bool
+    text_pad_size: int
+    pad_t: int
+    pad_h: int
+    pad_w: int
+    b: int
+    hd: int
+    t: int
+    h: int
+    w: int
+    d: int
+
+@dataclass
+class MaskConfig:
+    image_q: torch.Tensor
+    image_k: torch.Tensor
+    canvas_thw: tuple
+    tile_thw: tuple
+    kernel_thw: tuple
+    text_block_num: int
+    threshold: float
+    lambda_: float | None
+    text_valid_lens: torch.Tensor | None
+    mask_share_within_head: bool
+    adaptive_pool: tuple | None
+    sampling_type: str
+    topk: int
+    b: int
 
 # ── GPU-resident STA mask cache ──────────────────────────────────────────────
 # Keyed on (canvas_thw, tile_thw, kernel_thw, text_block_num, device).
@@ -65,8 +100,7 @@ def _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw, text_block_num, device):
 
 # ── Tile / Untile ─────────────────────────────────────────────────────────────
 
-def tile(x, canvas_thw, tile_thw, sp_size=1):
-    b, h, s, d = x.shape
+def _tile(x, canvas_thw, tile_thw, sp_size=1):
     t, h, w = canvas_thw
     tile_t_dim, tile_h_dim, tile_w_dim = tile_thw
     n_t = t // tile_t_dim
@@ -80,7 +114,7 @@ def tile(x, canvas_thw, tile_thw, sp_size=1):
                      ts_t=tile_t_dim, ts_h=tile_h_dim, ts_w=tile_w_dim)
 
 
-def untile(x, canvas_thw, tile_thw, sp_size=1):
+def _untile(x, canvas_thw, tile_thw, sp_size=1):
     t, h, w = canvas_thw
     tile_t_dim, tile_h_dim, tile_w_dim = tile_thw
     n_t = t // tile_t_dim
@@ -96,7 +130,7 @@ def untile(x, canvas_thw, tile_thw, sp_size=1):
 
 # ── Sampling ──────────────────────────────────────────────────────────────────
 
-def importance_sampling(q, k, topk, threshold=0.0, lambda_=0.9, adaptive_pool=None):
+def _importance_sampling(q, k, topk, threshold=0.0, lambda_=0.9):
     if threshold > 0.0:
         raise NotImplementedError("importance_sampling with threshold not implemented")
 
@@ -119,8 +153,7 @@ def importance_sampling(q, k, topk, threshold=0.0, lambda_=0.9, adaptive_pool=No
     return top_block_indices
 
 
-def similarity_sampling(q, k, topk, threshold=0.0, block_num=None,
-                        adaptive_pool=None, temperature=0.01):
+def _similarity_sampling(q, k, topk, threshold=0.0,temperature=0.01):
     if threshold > 0.0:
         gate = torch.einsum("bhsd,bhkd->bhsk", q, k)
         gate = gate / temperature
@@ -146,7 +179,7 @@ def similarity_sampling(q, k, topk, threshold=0.0, block_num=None,
 
 # ── MOBA mask ────────────────────────────────────────────────────────────────
 
-def create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
+def _create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, add_text_mask=False, threshold=0.0,
                         lambda_=None, mask_share_within_head=True,
                         q_block_avg_pool=True, adaptive_pool=None,
@@ -207,11 +240,10 @@ def create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
         k_block_means = k_block_means.mean(dim=1, keepdim=True)
 
     if sampling_type == "similarity":
-        top_block_indices = similarity_sampling(q, k_block_means, topk, threshold,
-                                                block_num=block_num, adaptive_pool=adaptive_pool)
+        top_block_indices = _similarity_sampling(q, k_block_means, topk, threshold)
     elif sampling_type == "importance":
-        top_block_indices = importance_sampling(q, k_block_means, topk, threshold,
-                                               lambda_=lambda_, adaptive_pool=adaptive_pool)
+        top_block_indices = _importance_sampling(q, k_block_means, topk, threshold,
+                                               lambda_=lambda_)
     else:
         raise NotImplementedError(f"sampling_type={sampling_type} is not Supported")
 
@@ -239,7 +271,7 @@ def create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
 
 # ── SSTA mask ────────────────────────────────────────────────────────────────
 
-def create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
+def _create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, threshold=0.0, lambda_=None,
                         text_valid_len=None,
                         mask_share_within_head=True, adaptive_pool=None,
@@ -247,7 +279,7 @@ def create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
     sta_3d_mask = _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw,
                                     text_block_num, q.device)
 
-    moba_3d_mask = create_moba_3d_mask(
+    moba_3d_mask = _create_moba_3d_mask(
         q, k, canvas_thw, topk, tile_thw, kernel_thw, text_block_num,
         threshold=threshold, lambda_=lambda_,
         mask_share_within_head=mask_share_within_head,
@@ -283,14 +315,14 @@ def create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
     return ssta_3d_mask
 
 
-# ── Main entry point ─────────────────────────────────────────────────────────
+# ── Pre-processing  ─────────────────────────────────────────────────────────
 
-def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
-                      topk=1, tile_thw=(6, 8, 8), kernel_thw=(1, 1, 1),
-                      text_len=0, sparse_type='ssta', threshold=0.0,
-                      lambda_=None, pad_type="zero", text_mask=None,
-                      mask_share_within_head=True, sampling_type=None,
-                      adaptive_pool=None, text_valid_lens=None):
+def _setup_ssta(all_q, all_k, all_v, canvas_thw,
+                topk=1, tile_thw=(6, 8, 8), kernel_thw=(1, 1, 1),
+                text_len=0, threshold=0.0,
+                lambda_=None, pad_type="zero",
+                mask_share_within_head=True, sampling_type=None,
+                adaptive_pool=None, text_valid_lens=None):
 
     if text_len > 0:
         image_q = all_q[:, :, :-text_len, :]
@@ -318,6 +350,11 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
 
     tile_t, tile_h, tile_w = tile_thw
     block_size = math.prod(tile_thw)
+
+    pad_t = 0
+    pad_h = 0
+    pad_w = 0
+    text_pad_size = 0
 
     need_pad = False
     if t % tile_t != 0 or h % tile_h != 0 or w % tile_w != 0:
@@ -390,9 +427,9 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
         text_k = torch.cat([text_k, ptk], dim=2)
         text_v = torch.cat([text_v, ptv], dim=2)
 
-    image_q = tile(image_q, canvas_thw, tile_thw)
-    image_k = tile(image_k, canvas_thw, tile_thw)
-    image_v = tile(image_v, canvas_thw, tile_thw)
+    image_q = _tile(image_q, canvas_thw, tile_thw)
+    image_k = _tile(image_k, canvas_thw, tile_thw)
+    image_v = _tile(image_v, canvas_thw, tile_thw)
 
     if text_len > 0:
         q = torch.cat([image_q, text_q], dim=2)
@@ -402,59 +439,135 @@ def ssta_3d_attention(attn_fn, all_q, all_k, all_v, canvas_thw,
         q = image_q
         k = image_k
         v = image_v
+    
+    ssta_state = SSTAState(canvas_thw=canvas_thw,
+                     tile_thw=tile_thw, 
+                     text_len=text_len, 
+                     sp_pad_len=sp_pad_len, 
+                     need_pad=need_pad,
+                     text_target_size=text_target_size, 
+                     need_pad_text=need_pad_text, 
+                     text_pad_size=text_pad_size,
+                     pad_t=pad_t, 
+                     pad_h=pad_h,
+                     pad_w=pad_w, 
+                     b=b, 
+                     hd=hd, 
+                     t=t, 
+                     h=h, 
+                     w=w, 
+                     d=d)
 
-    image_q_list = torch.split(image_q, 1, dim=0)
-    image_k_list = torch.split(image_k, 1, dim=0)
-    mask_list = []
-    for i in range(b):
-        tvl = text_valid_lens[i] if text_valid_lens is not None else None
-        bm = create_ssta_3d_mask(
-            image_q_list[i], image_k_list[i],
-            canvas_thw=canvas_thw, tile_thw=tile_thw, kernel_thw=kernel_thw,
-            text_block_num=text_block_num, topk=topk, threshold=threshold,
-            lambda_=lambda_, text_valid_len=tvl,
-            mask_share_within_head=mask_share_within_head,
-            adaptive_pool=adaptive_pool, sampling_type=sampling_type)
-        mask_list.append(bm)
+    mask_config = MaskConfig(image_q=image_q, 
+                   image_k=image_k, 
+                   canvas_thw=canvas_thw, 
+                   tile_thw=tile_thw, 
+                   kernel_thw=kernel_thw,
+                    text_block_num=text_block_num, 
+                    threshold=threshold, 
+                    lambda_=lambda_,
+                    text_valid_lens=text_valid_lens, 
+                    mask_share_within_head=mask_share_within_head,
+                    adaptive_pool=adaptive_pool, 
+                    sampling_type=sampling_type, 
+                    topk=topk, 
+                    b=b)
 
-    block_mask = torch.stack(mask_list, dim=0)
-    if mask_share_within_head:
-        block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
-    block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
-    o, _ = attn_fn(q, k, v, block_lut=block_lut)
+    return q, k, v, mask_config, ssta_state
 
-    if text_len > 0:
-        image_o = o[:, :, :-text_target_size, :]
-        if need_pad_text:
-            text_o = o[:, :, -text_target_size:-text_pad_size, :]
+# ── Post-processing  ─────────────────────────────────────────────────────────
+
+def _untile_ssta_output(o, ssta_state):
+    if ssta_state.text_len > 0:
+        image_o = o[:, :, :-ssta_state.text_target_size, :]
+        if ssta_state.need_pad_text:
+            text_o = o[:, :, -ssta_state.text_target_size:-ssta_state.text_pad_size, :]
         else:
-            text_o = o[:, :, -text_target_size:, :]
+            text_o = o[:, :, -ssta_state.text_target_size:, :]
     else:
         image_o = o
 
-    image_o = untile(image_o, canvas_thw, tile_thw)
+    image_o = _untile(image_o, ssta_state.canvas_thw, ssta_state.tile_thw)
 
-    if need_pad:
-        unpad = image_o.reshape(b, hd, t, h, w, d)
-        if pad_t > 0:
-            unpad = unpad[:, :, :-pad_t, :, :, :]
-        if pad_h > 0:
-            unpad = unpad[:, :, :, :-pad_h, :, :]
-        if pad_w > 0:
-            unpad = unpad[:, :, :, :, :-pad_w, :]
-        image_o = unpad.reshape(b, hd, -1, d)
+    if ssta_state.need_pad:
+        unpad = image_o.reshape(ssta_state.b, 
+                                ssta_state.hd, 
+                                ssta_state.t, 
+                                ssta_state.h, 
+                                ssta_state.w, 
+                                ssta_state.d)
+        if ssta_state.pad_t > 0:
+            unpad = unpad[:, :, :-ssta_state.pad_t, :, :, :]
+        if ssta_state.pad_h > 0:
+            unpad = unpad[:, :, :, :-ssta_state.pad_h, :, :]
+        if ssta_state.pad_w > 0:
+            unpad = unpad[:, :, :, :, :-ssta_state.pad_w, :]
+        image_o = unpad.reshape(ssta_state.b, ssta_state.hd, -1, ssta_state.d)
 
     # Re-append SP padding tokens that were stripped before spatial processing
-    if sp_pad_len > 0:
-        sp_pad_o = torch.zeros(b, hd, sp_pad_len, d, dtype=image_o.dtype, device=image_o.device)
+    if ssta_state.sp_pad_len > 0:
+        sp_pad_o = torch.zeros(ssta_state.b,
+                               ssta_state.hd, 
+                               ssta_state.sp_pad_len, 
+                               ssta_state.d, 
+                               dtype=image_o.dtype, 
+                               device=image_o.device)
         image_o = torch.cat([image_o, sp_pad_o], dim=2)
 
-    if text_len > 0:
+    if ssta_state.text_len > 0:
         o = torch.cat([image_o, text_o], dim=2)
     else:
         o = image_o
 
     return o
+
+# ── Sparse masks  ─────────────────────────────────────────────────────────
+
+def _get_ssta_mask(mask_config):
+    image_q_list = torch.split(mask_config.image_q, 1, dim=0)
+    image_k_list = torch.split(mask_config.image_k, 1, dim=0)
+    mask_list = []
+    for i in range(mask_config.b):
+        tvl = mask_config.text_valid_lens[i] if mask_config.text_valid_lens is not None else None
+        bm = _create_ssta_3d_mask(
+            image_q_list[i], image_k_list[i],
+            canvas_thw=mask_config.canvas_thw, tile_thw=mask_config.tile_thw, kernel_thw=mask_config.kernel_thw,
+            text_block_num=mask_config.text_block_num, topk=mask_config.topk, threshold=mask_config.threshold,
+            lambda_=mask_config.lambda_, text_valid_len=tvl,
+            mask_share_within_head=mask_config.mask_share_within_head,
+            adaptive_pool=mask_config.adaptive_pool, sampling_type=mask_config.sampling_type)
+        mask_list.append(bm)
+
+    block_mask = torch.stack(mask_list, dim=0)
+    if mask_config.mask_share_within_head:
+        block_mask = block_mask.unsqueeze(1)  # [b, 1, s_block, s_block]
+
+    return block_mask
+
+def _get_moba_mask(mask_config):
+    image_q_list = torch.split(mask_config.image_q, 1, dim=0)
+    image_k_list = torch.split(mask_config.image_k, 1, dim=0)
+
+    mask_list = []
+    for i in range(mask_config.b):
+        block_mask = _create_moba_3d_mask(image_q_list[i],
+                                          image_k_list[i],
+                                          canvas_thw=mask_config.canvas_thw,
+                                          topk=mask_config.topk, 
+                                          tile_thw=mask_config.tile_thw, 
+                                          kernel_thw=mask_config.kernel_thw,
+                                          text_block_num=mask_config.text_block_num, 
+                                          add_text_mask=True,
+                                          lambda_=mask_config.lambda_,
+                                          threshold=mask_config.threshold,
+                                          mask_share_within_head=mask_config.mask_share_within_head,
+                                          adaptive_pool=mask_config.adaptive_pool,
+                                          sampling_type=mask_config.sampling_type)
+        mask_list.append(block_mask)
+    block_mask = torch.stack(mask_list, dim=0)
+    return block_mask
+
+# ── Deinterleave and Reinterleave  ─────────────────────────────────────────────────────────
 
 # After Ulysses input a2a the sequence is interleaved rank-chunks:
 #   [img_r0, txt_r0, img_r1, txt_r1, ..., img_{U-1}, txt_{U-1}]
@@ -482,9 +595,9 @@ def _reinterleave(x, u, txt_len):
     txt_part = x[:, :, total_img:, :].reshape(b, h, u, txt_len, d)
     return torch.cat([img_part, txt_part], dim=3).reshape(b, h, s, d)
 
-def SSTA(attn_fn, query, key, value, attn_kwargs):
-    softmax_lse = None
-    sparse_type = attn_kwargs["attn_sparse_type"]
+# ── Entry points  ─────────────────────────────────────────────────────────
+
+def setup_ssta(query, key, value, attn_kwargs):
     ssta_threshold = attn_kwargs["ssta_threshold"]
     ssta_lambda = attn_kwargs["ssta_lambda"]
     ssta_sampling_type = attn_kwargs["ssta_sampling_type"]
@@ -518,27 +631,41 @@ def SSTA(attn_fn, query, key, value, attn_kwargs):
         key = _deinterleave(key, sp_size, encoder_sequence_length)
         value = _deinterleave(value, sp_size, encoder_sequence_length)
 
-    output = ssta_3d_attention(
-        attn_fn,
+    q, k, v, mask_config, ssta_state = _setup_ssta(
         query,
         key,
         value,
         thw,
         topk=ssta_topk,
-        tile_thw=tuple(tile_size),
+        tile_thw=tile_size,
         kernel_thw=tuple(win_size),
         text_len=encoder_sequence_length * sp_size,
-        sparse_type=sparse_type,
         threshold=ssta_threshold,
         lambda_=ssta_lambda,
         pad_type=attn_pad_type,
-        text_mask=text_mask if attn_use_text_mask else None,
         sampling_type=ssta_sampling_type,
         adaptive_pool=ssta_adaptive_pool,
         mask_share_within_head=attn_mask_share_within_head,
         text_valid_lens=text_valid_lens,
     )
 
+    return q, k, v, mask_config, ssta_state
+
+def get_sparse_mask(mask_config, sparse_type="ssta"):
+    if sparse_type == "ssta":
+        block_mask = _get_ssta_mask(mask_config)
+    elif sparse_type == "moba":
+        block_mask = _get_moba_mask(mask_config)
+    elif sparse_type == "sta":
+        block_mask = _get_sta_mask_gpu(mask_config.canvas_thw, mask_config.tile_thw,
+                                      mask_config.kernel_thw, mask_config.text_block_num, mask_config.image_q.device)
+    else:
+        raise NotImplementedError(f"sparse_type={sparse_type} is not Supported")
+    return block_mask
+
+def untile_ssta_output(o, ssta_state, encoder_sequence_length, sp_size):
+    o = _untile_ssta_output(o, ssta_state)
     if encoder_sequence_length > 0 and sp_size > 1:
-        output = _reinterleave(output, sp_size, encoder_sequence_length)
-    return output, softmax_lse
+        o = _reinterleave(o, sp_size, encoder_sequence_length)
+
+    return o

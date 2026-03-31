@@ -42,7 +42,6 @@ class xFuserCausalWanModel(xFuserModel):
         model_name="FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers",
         output_name="causal_wan_i2v",
         fp8_gemm_module_list=["transformer.blocks"],
-        flow_shift=3,
         valid_tasks=["t2v", "i2v"],
     )
 

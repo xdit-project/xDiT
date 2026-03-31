@@ -191,6 +191,7 @@ class xFuserModel(abc.ABC):
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
             compile_input_args = copy.deepcopy(input_args)
+            compile_input_args = self._split_prompts_for_dp(compile_input_args)
             if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)

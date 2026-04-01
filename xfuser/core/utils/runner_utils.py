@@ -14,7 +14,7 @@ from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserH
 logger = logging.getLogger(__name__)
 
 def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
-    """Log message only from the last process to avoid duplicates."""
+    """Log message. By default, only from the last process to avoid duplicates."""
     if log_from_all_processes or is_last_process():
         if debug:
             logger.debug(message)

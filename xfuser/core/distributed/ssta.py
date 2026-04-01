@@ -31,6 +31,7 @@ class SSTAState:
 class MaskConfig:
     image_q: torch.Tensor
     image_k: torch.Tensor
+    text_q: torch.Tensor | None
     canvas_thw: tuple
     tile_thw: tuple
     kernel_thw: tuple
@@ -90,7 +91,7 @@ def _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw, text_block_num, device):
         sta_mask = torch.zeros(pad, pad, dtype=torch.bool, device=device)
         sta_mask[:block_num, :block_num] = block_mask
         sta_mask[:, -text_block_num:] = True
-        sta_mask[-text_block_num:, :] = True
+        sta_mask[-text_block_num:, -text_block_num:] = True   # text Q → text KV only
     else:
         sta_mask = block_mask
 
@@ -179,7 +180,7 @@ def _similarity_sampling(q, k, topk, threshold=0.0,temperature=0.01):
 
 # ── MOBA mask ────────────────────────────────────────────────────────────────
 
-def _create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
+def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, add_text_mask=False, threshold=0.0,
                         lambda_=None, mask_share_within_head=True,
                         q_block_avg_pool=True, adaptive_pool=None,
@@ -258,11 +259,31 @@ def _create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
     if text_block_num > 0:
         pad_block_num = block_num + text_block_num
         moba_3d_mask = torch.zeros(gate_idx_mask.size(0), pad_block_num, pad_block_num,
-                                   dtype=torch.bool, device=gate_idx_mask.device)
+                                    dtype=torch.bool, device=q.device)
         moba_3d_mask[:, :block_num, :block_num] = gate_idx_mask
         if add_text_mask:
-            moba_3d_mask[:, :, -text_block_num:] = True
-            moba_3d_mask[:, -text_block_num:, :] = True
+            moba_3d_mask[:, :, -text_block_num:] = True       # all Q see text KV (keep)
+        # --- NEW: text Q → image K MOBA top-k ---
+        if text_q is not None:
+            block_size = math.prod(tile_thw)
+            tq = text_q.reshape(text_q.size(0), text_q.size(1),
+                                text_block_num, block_size, text_q.size(-1))
+            tq_avg = tq.mean(dim=-2).to(torch.float32)        # (1, H, text_block_num, D)
+            if mask_share_within_head:
+                tq_avg = tq_avg.mean(dim=1, keepdim=True)
+            # k_block_means is already computed above — reuse it
+            if sampling_type == "similarity":
+                text_topk_idx = _similarity_sampling(tq_avg, k_block_means, topk, threshold)
+            elif sampling_type == "importance":
+                text_topk_idx = _importance_sampling(tq_avg, k_block_means, topk, threshold, lambda_=lambda_)
+            text_topk_idx = text_topk_idx.squeeze(0)
+            text_gate = torch.zeros(text_topk_idx.size(0), text_block_num, block_num,
+                                    dtype=torch.bool, device=q.device)
+            text_gate.scatter_(-1, text_topk_idx, True)
+            moba_3d_mask[:, -text_block_num:, :block_num] = text_gate
+        # text Q → text KV (always)
+        moba_3d_mask[:, -text_block_num:, -text_block_num:] = True
+        # --- END NEW ---
     else:
         moba_3d_mask = gate_idx_mask
 
@@ -271,7 +292,7 @@ def _create_moba_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
 
 # ── SSTA mask ────────────────────────────────────────────────────────────────
 
-def _create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
+def _create_ssta_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, threshold=0.0, lambda_=None,
                         text_valid_len=None,
                         mask_share_within_head=True, adaptive_pool=None,
@@ -280,7 +301,7 @@ def _create_ssta_3d_mask(q, k, canvas_thw, topk, tile_thw, kernel_thw,
                                     text_block_num, q.device)
 
     moba_3d_mask = _create_moba_3d_mask(
-        q, k, canvas_thw, topk, tile_thw, kernel_thw, text_block_num,
+        q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw, text_block_num,
         threshold=threshold, lambda_=lambda_,
         mask_share_within_head=mask_share_within_head,
         adaptive_pool=adaptive_pool, sampling_type=sampling_type)
@@ -459,7 +480,8 @@ def _setup_ssta(all_q, all_k, all_v, canvas_thw,
                      d=d)
 
     mask_config = MaskConfig(image_q=image_q, 
-                   image_k=image_k, 
+                   image_k=image_k,
+                   text_q=text_q if text_len > 0 else None,
                    canvas_thw=canvas_thw, 
                    tile_thw=tile_thw, 
                    kernel_thw=kernel_thw,
@@ -526,11 +548,12 @@ def _untile_ssta_output(o, ssta_state):
 def _get_ssta_mask(mask_config):
     image_q_list = torch.split(mask_config.image_q, 1, dim=0)
     image_k_list = torch.split(mask_config.image_k, 1, dim=0)
+    text_q_list = torch.split(mask_config.text_q, 1, dim=0) if mask_config.text_q is not None else None
     mask_list = []
     for i in range(mask_config.b):
         tvl = mask_config.text_valid_lens[i] if mask_config.text_valid_lens is not None else None
         bm = _create_ssta_3d_mask(
-            image_q_list[i], image_k_list[i],
+            image_q_list[i], image_k_list[i], text_q=text_q_list[i] if text_q_list is not None else None,
             canvas_thw=mask_config.canvas_thw, tile_thw=mask_config.tile_thw, kernel_thw=mask_config.kernel_thw,
             text_block_num=mask_config.text_block_num, topk=mask_config.topk, threshold=mask_config.threshold,
             lambda_=mask_config.lambda_, text_valid_len=tvl,
@@ -547,11 +570,13 @@ def _get_ssta_mask(mask_config):
 def _get_moba_mask(mask_config):
     image_q_list = torch.split(mask_config.image_q, 1, dim=0)
     image_k_list = torch.split(mask_config.image_k, 1, dim=0)
+    text_q_list = torch.split(mask_config.text_q, 1, dim=0) if mask_config.text_q is not None else None
 
     mask_list = []
     for i in range(mask_config.b):
         block_mask = _create_moba_3d_mask(image_q_list[i],
                                           image_k_list[i],
+                                          text_q=text_q_list[i] if text_q_list is not None else None,
                                           canvas_thw=mask_config.canvas_thw,
                                           topk=mask_config.topk, 
                                           tile_thw=mask_config.tile_thw, 

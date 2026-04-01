@@ -420,7 +420,7 @@ class xFuserModel(abc.ABC):
     def save_profile(self, profile: torch.profiler.profiler.profile) -> None:
         profile_file = f"{self.config.output_directory}/profile_trace_rank_{get_world_group().rank}.json.gz"
         profile.export_chrome_trace(profile_file)
-        log(f"Profile trace saved to {profile_file}")
+        log(f"Profile trace saved to {profile_file}", log_from_all_processes=True)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """

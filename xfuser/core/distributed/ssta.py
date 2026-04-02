@@ -262,8 +262,8 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                                     dtype=torch.bool, device=q.device)
         moba_3d_mask[:, :block_num, :block_num] = gate_idx_mask
         if add_text_mask:
-            moba_3d_mask[:, :, -text_block_num:] = True       # all Q see text KV (keep)
-        # --- NEW: text Q → image K MOBA top-k ---
+            moba_3d_mask[:, :, -text_block_num:] = True       # all Q see text KV
+        # --- text Q → image K MOBA top-k ---
         if text_q is not None:
             block_size = math.prod(tile_thw)
             tq = text_q.reshape(text_q.size(0), text_q.size(1),
@@ -283,7 +283,6 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
             moba_3d_mask[:, -text_block_num:, :block_num] = text_gate
         # text Q → text KV (always)
         moba_3d_mask[:, -text_block_num:, -text_block_num:] = True
-        # --- END NEW ---
     else:
         moba_3d_mask = gate_idx_mask
 
@@ -461,39 +460,43 @@ def _setup_ssta(all_q, all_k, all_v, canvas_thw,
         k = image_k
         v = image_v
     
-    ssta_state = SSTAState(canvas_thw=canvas_thw,
-                     tile_thw=tile_thw, 
-                     text_len=text_len, 
-                     sp_pad_len=sp_pad_len, 
-                     need_pad=need_pad,
-                     text_target_size=text_target_size, 
-                     need_pad_text=need_pad_text, 
-                     text_pad_size=text_pad_size,
-                     pad_t=pad_t, 
-                     pad_h=pad_h,
-                     pad_w=pad_w, 
-                     b=b, 
-                     hd=hd, 
-                     t=t, 
-                     h=h, 
-                     w=w, 
-                     d=d)
+    ssta_state = SSTAState(
+        canvas_thw=canvas_thw,
+        tile_thw=tile_thw, 
+        text_len=text_len, 
+        sp_pad_len=sp_pad_len, 
+        need_pad=need_pad,
+        text_target_size=text_target_size, 
+        need_pad_text=need_pad_text, 
+        text_pad_size=text_pad_size,
+        pad_t=pad_t, 
+        pad_h=pad_h,
+        pad_w=pad_w, 
+        b=b, 
+        hd=hd, 
+        t=t, 
+        h=h, 
+        w=w, 
+        d=d
+    )
 
-    mask_config = MaskConfig(image_q=image_q, 
-                   image_k=image_k,
-                   text_q=text_q if text_len > 0 else None,
-                   canvas_thw=canvas_thw, 
-                   tile_thw=tile_thw, 
-                   kernel_thw=kernel_thw,
-                    text_block_num=text_block_num, 
-                    threshold=threshold, 
-                    lambda_=lambda_,
-                    text_valid_lens=text_valid_lens, 
-                    mask_share_within_head=mask_share_within_head,
-                    adaptive_pool=adaptive_pool, 
-                    sampling_type=sampling_type, 
-                    topk=topk, 
-                    b=b)
+    mask_config = MaskConfig(
+        image_q=image_q, 
+        image_k=image_k,
+        text_q=text_q if text_len > 0 else None,
+        canvas_thw=canvas_thw, 
+        tile_thw=tile_thw, 
+        kernel_thw=kernel_thw,
+        text_block_num=text_block_num, 
+        threshold=threshold, 
+        lambda_=lambda_,
+        text_valid_lens=text_valid_lens, 
+        mask_share_within_head=mask_share_within_head,
+        adaptive_pool=adaptive_pool, 
+        sampling_type=sampling_type, 
+        topk=topk, 
+        b=b
+    )
 
     return q, k, v, mask_config, ssta_state
 

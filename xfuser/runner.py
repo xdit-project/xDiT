@@ -97,15 +97,16 @@ class xFuserModelRunner:
 
     def save(self, output: DiffusionOutput = None, timings: list = None, profile: torch.profiler.profiler.profile = None, save_once: bool = True) -> None:
         """ Save model output, timings and profiles to file, if applicable """
-        if save_once: # TODO: add rank info to file names so this can even make sense
+        if profile:
+            self.model.save_profile(profile)
+
+        if save_once: # By default, we save output/timing only from one process
             if not is_last_process():
                 return
         if output:
             self.model.save_output(output) # Handle different output types
         if timings:
             self.model.save_timings(timings)
-        if profile:
-            self.model.save_profile(profile)
 
 
 if __name__ == "__main__":

@@ -6,16 +6,12 @@ import functools
 import numpy as np
 from PIL.Image import Image
 from typing import Callable, Optional
-from torchao.quantization.granularity import PerTensor
-from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
-from torchao.quantization.quantize_.common import KernelPreference
-from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
 
 logger = logging.getLogger(__name__)
 
-def log(message: str, debug=False) -> None:
-    """Log message only from the last process to avoid duplicates."""
-    if is_last_process():
+def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
+    """Log message. By default, only from the last process to avoid duplicates."""
+    if log_from_all_processes or is_last_process():
         if debug:
             logger.debug(message)
         else:
@@ -79,9 +75,15 @@ def resize_and_crop_image(image: Image, target_height: int, target_width: int, m
         return image
 
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
-    filter_fn: Callable[[torch.nn.Module, str], bool] = _is_linear,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
     device: Optional[torch.device] = None) -> None:
     """Quantize all linear layers in the given module or module list to FP8."""
+    from torchao.quantization.granularity import PerTensor
+    from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
+    from torchao.quantization.quantize_.common import KernelPreference
+
+    if filter_fn is None:
+        filter_fn = _is_linear
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
@@ -118,6 +120,11 @@ def rgetattr(obj: object, attr: str) -> object:
     return functools.reduce(getattr, [obj] + attr.split("."))
 
 def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hybrid_schedule: bool = False, device: Optional[torch.device] = None):
+    from torchao.quantization.granularity import PerTensor
+    from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
+    from torchao.quantization.quantize_.common import KernelPreference
+    from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
+
     for name, module in list(model.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
 
@@ -133,7 +140,6 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                     device=device,
                 )
             else:
-                # Create low-precision MXFP4 replacement
                 low_precision_layer = xFuserMXFP4Linear(
                     module.in_features,
                     module.out_features,
@@ -142,7 +148,6 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                     dtype=module.weight.dtype
                 )
 
-                # Copy weights
                 with torch.no_grad():
                     low_precision_layer.load_and_quantize_weights(module.weight, module.bias)
 
@@ -174,11 +179,9 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                 else:
                     new_layer = low_precision_layer
 
-                # Replace
                 setattr(model, name, new_layer)
 
         elif len(list(module.children())) > 0:
-            # Recurse into submodules
             quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers, use_hybrid_schedule=use_hybrid_schedule, device=device)
 
 

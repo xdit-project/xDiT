@@ -89,6 +89,8 @@ class xFuserWan21I2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
+        guidance_scale_2=None,
+        flow_shift=5,
         num_hybrid_attn_high_precision_steps = 5,
     )
     settings = ModelSettings(
@@ -104,13 +106,13 @@ class xFuserWan21I2VModel(xFuserModel):
                                  "30.", "31.", "32.", "33.", "34.",
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
-        flow_shift=5,
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
+        self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -123,7 +125,6 @@ class xFuserWan21I2VModel(xFuserModel):
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
         )
-        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -136,6 +137,7 @@ class xFuserWan21I2VModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
+            guidance_scale_2=input_args["guidance_scale_2"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
@@ -203,7 +205,6 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 transformer=transformer,
                 transformer_2=transformer_2,
         )
-        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _compile_model(self, input_args):
@@ -241,6 +242,8 @@ class xFuserWan21T2VModel(xFuserModel):
         num_frames=81,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=3.5,
+        guidance_scale_2=None,
+        flow_shift=12,
         num_hybrid_attn_high_precision_steps = 5,
     )
     settings = ModelSettings(
@@ -256,13 +259,13 @@ class xFuserWan21T2VModel(xFuserModel):
                                  "30.", "31.", "32.", "33.", "34.",
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
-        flow_shift=12,
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
+        self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -275,7 +278,6 @@ class xFuserWan21T2VModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             transformer=transformer,
         )
-        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -287,6 +289,7 @@ class xFuserWan21T2VModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
+            guidance_scale_2=input_args["guidance_scale_2"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
@@ -333,7 +336,6 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             transformer=transformer,
             transformer_2=transformer_2,
         )
-        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _compile_model(self, input_args):
@@ -366,6 +368,8 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         num_frames=121,
         negative_prompt="bright colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, malformed limbs, fused fingers, still picture, cluttered background, three legs, many people in the background, walking backwards",
         guidance_scale=5.0,
+        guidance_scale_2=None,
+        flow_shift=5,
         num_hybrid_attn_high_precision_steps=5,
         num_hybrid_gemm_high_precision_steps=5,
     )
@@ -380,7 +384,6 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         fp8_precision_overrides=("0.", "1.", "28.", "29."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
-        flow_shift=5,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -396,7 +399,6 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
         )
-        pipe.scheduler.config.flow_shift = self.settings.flow_shift
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -408,6 +410,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
             "num_inference_steps": input_args["num_inference_steps"],
             "num_frames": input_args["num_frames"],
             "guidance_scale": input_args["guidance_scale"],
+            "guidance_scale_2": input_args["guidance_scale_2"],
             "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         }
         if self.config.task == "i2v":

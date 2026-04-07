@@ -204,6 +204,7 @@ class PackagesEnvChecker:
         packages_info["has_flash_attn"] = self.check_flash_attn()
         packages_info["has_flash_attn_3"] = self._check_flash_attn_3()
         packages_info["has_flash_attn_4"] = self._check_flash_attn_4()
+        packages_info["has_transformer_engine"] = self.check_transformer_engine()
         packages_info["has_sage"] = self._check_sage()
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
@@ -273,6 +274,36 @@ class PackagesEnvChecker:
             from flash_attn.cute import interface as flash_cute
             return True
         except:
+            return False
+    
+    @staticmethod
+    def _install_flash_attn_3_shim_for_transformer_engine() -> None:
+        """TE imports ``flash_attn_3.flash_attn_interface``; wheels often expose only ``flash_attn_interface``."""
+        import sys
+        import types
+
+        if "flash_attn_3.flash_attn_interface" in sys.modules:
+            return
+        try:
+            import flash_attn_interface as _fai
+        except ImportError:
+            return
+        if "flash_attn_3" not in sys.modules:
+            sys.modules["flash_attn_3"] = types.ModuleType("flash_attn_3")
+        sys.modules["flash_attn_3.flash_attn_interface"] = _fai
+
+    def check_transformer_engine(self):
+        import sys
+        if not torch.cuda.is_available() or _is_hip():
+            return False
+        self._install_flash_attn_3_shim_for_transformer_engine()
+        if "flash_attn_3.flash_attn_interface" not in sys.modules:
+            return False
+        try:
+            from transformer_engine.pytorch import DotProductAttention, fp8_autocast  # noqa: F401
+            from transformer_engine.common import recipe # noqa: F401
+            return True
+        except ImportError:
             return False
 
     def _check_sage(self):

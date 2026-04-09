@@ -89,6 +89,8 @@ class xFuserModelRunner:
 
     def cleanup(self) -> None:
         """ Cleanup resources after model execution """
+        torch.compiler.reset()
+        torch.cuda.synchronize()
         del self.model.pipe
         gc.collect()
         torch.cuda.empty_cache()

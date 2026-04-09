@@ -87,6 +87,8 @@ class DefaultInputValues:
     max_sequence_length: Optional[int] = None
     num_hybrid_attn_high_precision_steps: Optional[int] = None
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
+    ssta_tile_thw: Optional[Tuple[int, int, int]] = None
+    ssta_sparse_text_to_image: Optional[bool] = False
 
 @dataclass
 class ModelSettings:

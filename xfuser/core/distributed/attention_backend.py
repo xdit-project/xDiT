@@ -422,7 +422,7 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
     # Pass layout="bhsd" to avoid permutation
     softmax_lse = None
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
-    output, _ = attn_fn(query, key, value)
+    output = attn_fn(query, key, value)
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
@@ -465,7 +465,7 @@ def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attent
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
     block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
-    output, _ = attn_fn(q, k, v, block_lut=block_lut)
+    output = attn_fn(q, k, v, block_lut=block_lut)
     output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])
     return output, None
 

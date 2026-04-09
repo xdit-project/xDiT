@@ -44,16 +44,17 @@ class MaskConfig:
     sampling_type: str
     topk: int
     b: int
+    sparse_text_to_image: bool
 
 # ── GPU-resident STA mask cache ──────────────────────────────────────────────
-# Keyed on (canvas_thw, tile_thw, kernel_thw, text_block_num, device).
+# Keyed on (canvas_thw, tile_thw, kernel_thw, text_block_num, device, sparse_text_to_image).
 # Populated once per unique config (during first torch.compile trace),
 # then becomes a graph constant for subsequent calls.
 _sta_gpu_cache = {}
 
 
-def _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw, text_block_num, device):
-    key = (canvas_thw, tile_thw, kernel_thw, text_block_num, device)
+def _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw, text_block_num, device, sparse_text_to_image=False):
+    key = (canvas_thw, tile_thw, kernel_thw, text_block_num, device, sparse_text_to_image)
     if key in _sta_gpu_cache:
         return _sta_gpu_cache[key]
 
@@ -91,7 +92,10 @@ def _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw, text_block_num, device):
         sta_mask = torch.zeros(pad, pad, dtype=torch.bool, device=device)
         sta_mask[:block_num, :block_num] = block_mask
         sta_mask[:, -text_block_num:] = True
-        sta_mask[-text_block_num:, -text_block_num:] = True   # text Q → text KV only
+        if sparse_text_to_image:
+            sta_mask[-text_block_num:, -text_block_num:] = True   # text Q → text KV only
+        else:
+            sta_mask[-text_block_num:, :] = True
     else:
         sta_mask = block_mask
 
@@ -184,7 +188,7 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, add_text_mask=False, threshold=0.0,
                         lambda_=None, mask_share_within_head=True,
                         q_block_avg_pool=True, adaptive_pool=None,
-                        sampling_type=None):
+                        sampling_type=None, sparse_text_to_image=False):
     seq_len = q.size(2)
     block_size = math.prod(tile_thw)
     block_num = seq_len // block_size
@@ -262,9 +266,13 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                                     dtype=torch.bool, device=q.device)
         moba_3d_mask[:, :block_num, :block_num] = gate_idx_mask
         if add_text_mask:
-            moba_3d_mask[:, :, -text_block_num:] = True       # all Q see text KV
+            if sparse_text_to_image:
+                moba_3d_mask[:, :, -text_block_num:] = True       # all Q see text KV
+            else:
+                moba_3d_mask[:, :, -text_block_num:] = True
+                moba_3d_mask[:, -text_block_num:, :] = True
         # --- text Q → image K MOBA top-k ---
-        if text_q is not None:
+        if text_q is not None and sparse_text_to_image:
             block_size = math.prod(tile_thw)
             tq = text_q.reshape(text_q.size(0), text_q.size(1),
                                 text_block_num, block_size, text_q.size(-1))
@@ -295,15 +303,15 @@ def _create_ssta_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, threshold=0.0, lambda_=None,
                         text_valid_len=None,
                         mask_share_within_head=True, adaptive_pool=None,
-                        sampling_type=None):
+                        sampling_type=None, sparse_text_to_image=False):
     sta_3d_mask = _get_sta_mask_gpu(canvas_thw, tile_thw, kernel_thw,
-                                    text_block_num, q.device)
+                                    text_block_num, q.device, sparse_text_to_image=sparse_text_to_image)
 
     moba_3d_mask = _create_moba_3d_mask(
         q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw, text_block_num,
         threshold=threshold, lambda_=lambda_,
         mask_share_within_head=mask_share_within_head,
-        adaptive_pool=adaptive_pool, sampling_type=sampling_type)
+        adaptive_pool=adaptive_pool, sampling_type=sampling_type, sparse_text_to_image=sparse_text_to_image)
 
     ssta_3d_mask = torch.logical_or(sta_3d_mask.unsqueeze(0), moba_3d_mask)
 
@@ -342,7 +350,7 @@ def _setup_ssta(all_q, all_k, all_v, canvas_thw,
                 text_len=0, threshold=0.0,
                 lambda_=None, pad_type="zero",
                 mask_share_within_head=True, sampling_type=None,
-                adaptive_pool=None, text_valid_lens=None):
+                adaptive_pool=None, text_valid_lens=None, sparse_text_to_image=False):
 
     if text_len > 0:
         image_q = all_q[:, :, :-text_len, :]
@@ -495,7 +503,8 @@ def _setup_ssta(all_q, all_k, all_v, canvas_thw,
         adaptive_pool=adaptive_pool, 
         sampling_type=sampling_type, 
         topk=topk, 
-        b=b
+        b=b,
+        sparse_text_to_image=sparse_text_to_image
     )
 
     return q, k, v, mask_config, ssta_state
@@ -561,7 +570,7 @@ def _get_ssta_mask(mask_config):
             text_block_num=mask_config.text_block_num, topk=mask_config.topk, threshold=mask_config.threshold,
             lambda_=mask_config.lambda_, text_valid_len=tvl,
             mask_share_within_head=mask_config.mask_share_within_head,
-            adaptive_pool=mask_config.adaptive_pool, sampling_type=mask_config.sampling_type)
+            adaptive_pool=mask_config.adaptive_pool, sampling_type=mask_config.sampling_type, sparse_text_to_image=mask_config.sparse_text_to_image)
         mask_list.append(bm)
 
     block_mask = torch.stack(mask_list, dim=0)
@@ -590,7 +599,8 @@ def _get_moba_mask(mask_config):
                                           threshold=mask_config.threshold,
                                           mask_share_within_head=mask_config.mask_share_within_head,
                                           adaptive_pool=mask_config.adaptive_pool,
-                                          sampling_type=mask_config.sampling_type)
+                                          sampling_type=mask_config.sampling_type,
+                                          sparse_text_to_image=mask_config.sparse_text_to_image)
         mask_list.append(block_mask)
     block_mask = torch.stack(mask_list, dim=0)
     return block_mask
@@ -639,10 +649,12 @@ def setup_ssta(query, key, value, attn_kwargs):
 
     ssta_topk = attn_kwargs["ssta_topk"]
     thw = attn_kwargs["thw"]
-    tile_size = (1, 16, 8) # Overwrite attn_kwargs["tile_thw"] to match block size in triton sage kernel
+    tile_size = attn_kwargs["tile_size"]
     win_size = attn_kwargs["win_size"][0].copy()
 
     sp_size = attn_kwargs["sp_size"]
+
+    sparse_text_to_image = attn_kwargs["sparse_text_to_image"]
 
     # Precompute valid text token counts
     text_valid_lens = None
@@ -675,6 +687,7 @@ def setup_ssta(query, key, value, attn_kwargs):
         adaptive_pool=ssta_adaptive_pool,
         mask_share_within_head=attn_mask_share_within_head,
         text_valid_lens=text_valid_lens,
+        sparse_text_to_image=sparse_text_to_image,
     )
 
     return q, k, v, mask_config, ssta_state
@@ -685,8 +698,12 @@ def get_sparse_mask(mask_config, sparse_type="ssta"):
     elif sparse_type == "moba":
         block_mask = _get_moba_mask(mask_config)
     elif sparse_type == "sta":
-        block_mask = _get_sta_mask_gpu(mask_config.canvas_thw, mask_config.tile_thw,
-                                      mask_config.kernel_thw, mask_config.text_block_num, mask_config.image_q.device)
+        block_mask = _get_sta_mask_gpu(mask_config.canvas_thw,
+                                       mask_config.tile_thw,
+                                       mask_config.kernel_thw,
+                                       mask_config.text_block_num,
+                                       mask_config.image_q.device,
+                                       mask_config.sparse_text_to_image)
     else:
         raise NotImplementedError(f"sparse_type={sparse_type} is not Supported")
     return block_mask

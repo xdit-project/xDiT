@@ -258,6 +258,9 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         )
         with open(config_path) as f:
             sparse_config = json.load(f)
+        if self.config.ssta_tile_thw is not None:
+            sparse_config["attn_param"]["tile_size"] = self.config.ssta_tile_thw
+        sparse_config["attn_param"]["sparse_text_to_image"] = self.config.ssta_sparse_text_to_image
         transformer = xFuserHunyuanVideo15Transformer3DWrapper(
             in_channels=65,  # diffusers i2v: 32 latent * 2 + 1 mask
             out_channels=sparse_config.get("out_channels", 32),

@@ -251,9 +251,6 @@ def USP(
 
     attention_function = _get_attention_function(backend=backend)
 
-    if attention_kwargs is not None:
-        attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
-
     joint_attn_kwargs = None
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)

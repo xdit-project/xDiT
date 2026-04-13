@@ -1,10 +1,12 @@
 import functools
 import torch
 import inspect
+import math
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
 from xfuser.core.distributed.ssta import setup_ssta, get_sparse_mask, untile_ssta_output
+from xfuser.core.distributed import get_ulysses_parallel_world_size
 
 ATTENTION_FUNCTION_REGISTRY = {}
 
@@ -453,9 +455,11 @@ def _sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=No
 
 @register_attention_function(AttentionBackendType.AITER_SPARSE_SAGE)
 def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
+    block_size = math.prod(attention_kwargs["tile_size"])
     config = {
-        "BLOCK_M": 128,
-        "BLOCK_N": 128,
+        "BLOCK_M": block_size,
+        "BLOCK_N": block_size,
         "waves_per_eu": 2,
         "PRE_LOAD_V": False,
         "num_stages": 2,
@@ -464,7 +468,7 @@ def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attent
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", config=config)
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
-    block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
+    block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1])
     output = attn_fn(q, k, v, block_lut=block_lut)
     output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])
     return output, None
@@ -472,9 +476,11 @@ def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attent
 
 @register_attention_function(AttentionBackendType.AITER_SPARSE_SAGE_V2)
 def _aiter_sparse_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
+    block_size = math.prod(attention_kwargs["tile_size"])
     config = {
-        "BLOCK_M": 128,
-        "BLOCK_N": 128,
+        "BLOCK_M": block_size,
+        "BLOCK_N": block_size,
         "waves_per_eu": 2,
         "PRE_LOAD_V": False,
         "num_stages": 3,
@@ -483,7 +489,7 @@ def _aiter_sparse_sage_v2_attn_call(query, key, value, dropout_p, is_causal, att
     attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device], config=config)
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
-    block_lut = block_attn_mask_to_ragged_lut(block_mask, q.shape[1])
+    block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1])
     output = attn_fn(q, k, v, causal=is_causal, block_lut=block_lut)
     output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])
     return output, None

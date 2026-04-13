@@ -227,7 +227,10 @@ class xFuserModel(abc.ABC):
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
-            if "sparse" in config.attention_backend and not self.capabilities.supports_sparse_attention_backends:
+            SparseAttentionBackendTypes = [AttentionBackendType.AITER_SPARSE_SAGE,
+                                           AttentionBackendType.AITER_SPARSE_SAGE_V2]
+            if config.attention_backend in SparseAttentionBackendTypes and \
+               not self.capabilities.supports_sparse_attention_backends:
                 raise ValueError(f"Model {self.settings.model_name} does not support sparse attention backends.")
 
         possible_task = getattr(config, "task", None)

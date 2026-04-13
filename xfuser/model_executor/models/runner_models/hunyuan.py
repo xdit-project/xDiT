@@ -1,5 +1,10 @@
 import torch
 import copy
+import json
+import numpy as np
+from safetensors.torch import load_file
+from huggingface_hub import hf_hub_download
+from collections import OrderedDict
 from diffusers import HunyuanVideoPipeline, HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser import xFuserArgs
@@ -13,11 +18,12 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.runtime_state import get_runtime_state
-from huggingface_hub import hf_hub_download
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
 )
+from xfuser.envs import PACKAGES_CHECKER
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
@@ -229,6 +235,13 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         supports_sparse_attention_backends=True,
     )
 
+    def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:
+        assert attn_param["tile_size"] is not None, "tile_size is not set"
+        assert len(attn_param["tile_size"]) == 3, "tile_size must be a tuple of 3 integers"
+        assert np.prod(attn_param["tile_size"]) == 128 or np.prod(attn_param["tile_size"]) == 384, "product of ssta_tile_thw must be 128 or 384"
+        if PACKAGES_CHECKER.packages_info["has_aiter"]:
+            assert np.prod(attn_param["tile_size"]) == 128, "product of ssta_tile_thw must be 128 for AITER_SPARSE_SAGE and AITER_SPARSE_SAGE_V2"
+
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
         self.settings.model_name = "tencent/HunyuanVideo-1.5"
@@ -238,10 +251,6 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
 
     def _load_model(self) -> DiffusionPipeline:
-        from safetensors.torch import load_file
-        from huggingface_hub import hf_hub_download
-        from collections import OrderedDict
-        import json
         pipeline = HunyuanVideo15ImageToVideoPipeline
         # Load the distilled transformer (diffusers format) to get non-block weights
         distilled_transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
@@ -258,9 +267,12 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         )
         with open(config_path) as f:
             sparse_config = json.load(f)
+
         if self.config.ssta_tile_thw is not None:
             sparse_config["attn_param"]["tile_size"] = self.config.ssta_tile_thw
         sparse_config["attn_param"]["sparse_text_to_image"] = self.config.ssta_sparse_text_to_image
+        self._validate_ssta_attention_kwargs(sparse_config["attn_param"])
+        
         transformer = xFuserHunyuanVideo15Transformer3DWrapper(
             in_channels=65,  # diffusers i2v: 32 latent * 2 + 1 mask
             out_channels=sparse_config.get("out_channels", 32),
@@ -299,29 +311,22 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         state_dict = load_file(weight_file)
         
         # Remap double_blocks -> transformer_blocks
+        BLOCK_REMAP = {
+            "double_blocks.": ("transformer_blocks.", HUNYUANVIDEO_15_SPARSE_BLOCK_KEY_MAP),
+            "single_blocks.": ("single_transformer_blocks.", HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP),
+        }
         remapped = OrderedDict()
         for key, value in state_dict.items():
-            if key.startswith("double_blocks."):
-                # Extract "double_blocks.N.rest"
-                parts = key.split(".", 2)  # ["double_blocks", "N", "rest"]
-                block_idx = parts[1]
-                rest = parts[2]
-                new_rest = rest
-                for old_prefix, new_prefix in HUNYUANVIDEO_15_SPARSE_BLOCK_KEY_MAP.items():
-                    if rest.startswith(old_prefix):
-                        new_rest = new_prefix + rest[len(old_prefix):]
-                        break
-                remapped[f"transformer_blocks.{block_idx}.{new_rest}"] = value
-            elif key.startswith("single_blocks."):
-                parts = key.split(".", 2)
-                block_idx = parts[1]
-                rest = parts[2]
-                new_rest = rest
-                for old_prefix, new_prefix in HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP.items():
-                    if rest.startswith(old_prefix):
-                        new_rest = new_prefix + rest[len(old_prefix):]
-                        break
-                remapped[f"single_transformer_blocks.{block_idx}.{new_rest}"] = value
+            for src_prefix, (dst_prefix, key_map) in BLOCK_REMAP.items():
+                if key.startswith(src_prefix):
+                    parts = key.split(".", 2)
+                    block_idx, rest = parts[1], parts[2]
+                    for old, new in key_map.items():
+                        if rest.startswith(old):
+                            rest = new + rest[len(old):]
+                            break
+                    remapped[f"{dst_prefix}{block_idx}.{rest}"] = value
+                    break
 
         # Only load block keys to avoid overwriting correct non-block weights with unremapped Tencent keys
         block_state = OrderedDict()

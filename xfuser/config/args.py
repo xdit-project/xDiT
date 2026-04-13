@@ -700,7 +700,7 @@ class xFuserArgs:
         parser.add_argument(
             "--ssta_tile_thw",
             type=lambda s: tuple(int(x) for x in s.split(",")),
-            default=None,
+            default=(2,8,8),
             help="Tile size for SSTA as comma-separated T,H,W. E.g. --ssta_tile_thw 2,8,8",
         )
         parser.add_argument(

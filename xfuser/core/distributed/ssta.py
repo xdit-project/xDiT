@@ -1,4 +1,10 @@
-# Licensed under the TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT
+# SSTA (Sparse Spatio-Temporal Attention) implementation for xDiT
+# Based on: HunyuanVideo 1.5 Technical Report
+# https://arxiv.org/pdf/2511.18870
+# And:
+# Fast video generation with sliding tile attention, 2025. --> https://arxiv.org/abs/2502.04507
+# Moba: Mixture of block attention for long-context llms. --> https://arxiv.org/abs/2502.13189
+# Flex-block-attn: https://github.com/Tencent-Hunyuan/flex-block-attn?tab=readme-ov-file
 
 from dataclasses import dataclass
 import math
@@ -37,7 +43,7 @@ class MaskConfig:
     kernel_thw: tuple
     text_block_num: int
     threshold: float
-    lambda_: float | None
+    similarity_weight: float | None
     text_valid_lens: torch.Tensor | None
     mask_share_within_head: bool
     adaptive_pool: tuple | None
@@ -135,108 +141,60 @@ def _untile(x, canvas_thw, tile_thw, sp_size=1):
 
 # ── Sampling ──────────────────────────────────────────────────────────────────
 
-def _importance_sampling(q, k, topk, threshold=0.0, lambda_=0.9):
+def _importance_sampling(q, k, topk, threshold=0.0, similarity_weight=0.9):
     if threshold > 0.0:
         raise NotImplementedError("importance_sampling with threshold not implemented")
 
     q = q / q.norm(dim=-1, keepdim=True)
     k = k / k.norm(dim=-1, keepdim=True)
     gate_similarity = torch.einsum("bhsd,bhkd->bhsk", q, k)
-    gate_similarity = (gate_similarity + 1.0) / 2.0
     gate_unique = torch.einsum("bhsd,bhkd->bhsk", k, k)
-    gate_unique = (gate_unique + 1.0) / 2.0
 
     B, H, K_num, D = k.shape
-    diag_indices = torch.arange(K_num, device=k.device)
-    gate_unique[:, :, diag_indices, diag_indices] = torch.nan
+    mask = ~torch.eye(K_num, dtype=torch.bool, device=k.device)
+    gate_unique_masked = gate_unique * mask[None, None, :, :]
 
-    mean_redundancy = torch.nanmean(gate_unique, dim=-2, keepdim=True)
-    importance_scores = lambda_ * gate_similarity - (1 - lambda_) * mean_redundancy
+    mean_redundancy = torch.sum(gate_unique_masked, dim=-2, keepdim=True) / (K_num - 1)
+    redundancy_weight = 1.0 - similarity_weight
+
+    importance_scores = similarity_weight * gate_similarity - redundancy_weight * mean_redundancy
 
     topk = min(topk, importance_scores.size(-1))
     _, top_block_indices = importance_scores.topk(k=topk, dim=-1, sorted=False)
     return top_block_indices
 
 
-def _similarity_sampling(q, k, topk, threshold=0.0,temperature=0.01):
-    if threshold > 0.0:
-        gate = torch.einsum("bhsd,bhkd->bhsk", q, k)
-        gate = gate / temperature
-        gate_ = torch.softmax(gate, dim=-1)
-        sorted_gate, sorted_indices = torch.sort(gate_, dim=-1, descending=True)
-        cum_scores = torch.cumsum(sorted_gate, dim=-1)
-        above_threshold = cum_scores >= threshold
-        has_any_above = above_threshold.any(dim=-1, keepdim=True)
-        dynamic_topk = above_threshold.int().argmax(dim=-1, keepdim=True) + 1
-        dynamic_topk = torch.where(has_any_above, dynamic_topk,
-                                   torch.full_like(dynamic_topk, topk))
-        dynamic_topk = torch.clamp(dynamic_topk, min=8, max=topk)
-        indices = torch.arange(gate.size(-1), device=gate.device).expand(gate.size())
-        mask = (indices < dynamic_topk).int()
-        top_block_indices = (torch.gather(sorted_indices, -1, indices) * mask
-                             + (1 - mask) * sorted_indices[..., 0:1])
+# ── Block pooling ─────────────────────────────────────────────────────────────
+
+def _block_pool(x, block_shape, adaptive_pool=None):
+    B, H, S, D = x.shape
+    block_size = block_shape[0] * block_shape[1] * block_shape[2]
+    num_blocks = S // block_size
+    if adaptive_pool is not None:
+        x = x.reshape(B * H * num_blocks, *block_shape, D)
+        x = x.permute(0, 4, 1, 2, 3)
+        x = torch.nn.functional.adaptive_avg_pool3d(x, adaptive_pool)
+        pool_d = adaptive_pool[0] * adaptive_pool[1] * adaptive_pool[2] * D
+        x = x.reshape(B, H, num_blocks, pool_d)
     else:
-        gate = torch.einsum("bhsd,bhkd->bhsk", q, k)
-        topk = min(topk, gate.size(-1))
-        _, top_block_indices = gate.topk(k=topk, dim=-1, sorted=False)
-    return top_block_indices
+        x = x.reshape(B, H, num_blocks, block_size, D).mean(dim=3)
+    return x
 
 
 # ── MOBA mask ────────────────────────────────────────────────────────────────
 
 def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
                         text_block_num=0, add_text_mask=False, threshold=0.0,
-                        lambda_=None, mask_share_within_head=True,
+                        similarity_weight=None, mask_share_within_head=True,
                         q_block_avg_pool=True, adaptive_pool=None,
                         sampling_type=None, sparse_text_to_image=False):
     seq_len = q.size(2)
     block_size = math.prod(tile_thw)
     block_num = seq_len // block_size
 
-    block_shape = tile_thw
-    batch_size, num_heads, _, head_dim = k.shape
-    num_blocks_t = math.ceil(canvas_thw[0] / block_shape[0])
-    num_blocks_h = math.ceil(canvas_thw[1] / block_shape[1])
-    num_blocks_w = math.ceil(canvas_thw[2] / block_shape[2])
-
-    def get_block_avg_feat(x, adaptive_pool=None, pooling_type="avg"):
-        x_bm = x.view(batch_size, num_heads, num_blocks_t, num_blocks_h, num_blocks_w,
-                       block_shape[0], block_shape[1], block_shape[2], head_dim)
-        if adaptive_pool is not None:
-            x_bm = x_bm.view(-1, block_shape[0], block_shape[1], block_shape[2], head_dim)
-            x_bm = x_bm.permute(0, 4, 1, 2, 3)
-            if pooling_type == "avg":
-                g = torch.nn.functional.adaptive_avg_pool3d(x_bm, adaptive_pool)
-                g = g.permute(0, 2, 3, 4, 1)
-                x_bm = g.reshape(batch_size, num_heads, -1,
-                                 head_dim * adaptive_pool[0] * adaptive_pool[1] * adaptive_pool[2])
-            elif pooling_type == "max":
-                g = torch.nn.functional.adaptive_max_pool3d(x_bm, adaptive_pool)
-                g = g.permute(0, 2, 3, 4, 1)
-                x_bm = g.reshape(batch_size, num_heads, -1,
-                                 head_dim * adaptive_pool[0] * adaptive_pool[1] * adaptive_pool[2])
-            elif pooling_type == "mix":
-                ga = torch.nn.functional.adaptive_avg_pool3d(x_bm, (1, 1, 1))
-                ga = ga / (ga.norm(dim=1, keepdim=True) + 1e-8)
-                ga = ga.permute(0, 2, 3, 4, 1).reshape(batch_size, num_heads, -1, head_dim)
-                mp = torch.nn.functional.adaptive_max_pool3d(x_bm, adaptive_pool)
-                mp = mp / (mp.norm(dim=1, keepdim=True) + 1e-8)
-                mp = mp.permute(0, 2, 3, 4, 1)
-                mp = mp.reshape(batch_size, num_heads, -1,
-                                head_dim * adaptive_pool[0] * adaptive_pool[1] * adaptive_pool[2])
-                x_bm = torch.cat([mp, ga], dim=-1)
-            else:
-                raise ValueError(f"pooling_type={pooling_type} is not Supported")
-        else:
-            x_bm = x_bm.mean(dim=(-2, -3, -4)).view(batch_size, num_heads, -1, head_dim)
-        return x_bm
-
-    if (sampling_type == "similarity" and threshold > 0.0) and adaptive_pool is None:
-        adaptive_pool = (2, 2, 2)
-
-    k_block_means = get_block_avg_feat(k, adaptive_pool)
+    k_block_means = _block_pool(k, tile_thw, adaptive_pool)
     if q_block_avg_pool:
-        q = get_block_avg_feat(q, adaptive_pool)
+        q = _block_pool(q, tile_thw, adaptive_pool)
     q = q.to(torch.float32)
     k_block_means = k_block_means.to(torch.float32)
 
@@ -244,11 +202,9 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
         q = q.mean(dim=1, keepdim=True)
         k_block_means = k_block_means.mean(dim=1, keepdim=True)
 
-    if sampling_type == "similarity":
-        top_block_indices = _similarity_sampling(q, k_block_means, topk, threshold)
-    elif sampling_type == "importance":
+    if sampling_type == "importance":
         top_block_indices = _importance_sampling(q, k_block_means, topk, threshold,
-                                               lambda_=lambda_)
+                                               similarity_weight=similarity_weight)
     else:
         raise NotImplementedError(f"sampling_type={sampling_type} is not Supported")
 
@@ -280,10 +236,8 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
             if mask_share_within_head:
                 tq_avg = tq_avg.mean(dim=1, keepdim=True)
             # k_block_means is already computed above — reuse it
-            if sampling_type == "similarity":
-                text_topk_idx = _similarity_sampling(tq_avg, k_block_means, topk, threshold)
-            elif sampling_type == "importance":
-                text_topk_idx = _importance_sampling(tq_avg, k_block_means, topk, threshold, lambda_=lambda_)
+            if sampling_type == "importance":
+                text_topk_idx = _importance_sampling(tq_avg, k_block_means, topk, threshold, similarity_weight=similarity_weight)
             text_topk_idx = text_topk_idx.squeeze(0)
             text_gate = torch.zeros(text_topk_idx.size(0), text_block_num, block_num,
                                     dtype=torch.bool, device=q.device)
@@ -300,7 +254,7 @@ def _create_moba_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
 # ── SSTA mask ────────────────────────────────────────────────────────────────
 
 def _create_ssta_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
-                        text_block_num=0, threshold=0.0, lambda_=None,
+                        text_block_num=0, threshold=0.0, similarity_weight=None,
                         text_valid_len=None,
                         mask_share_within_head=True, adaptive_pool=None,
                         sampling_type=None, sparse_text_to_image=False):
@@ -309,7 +263,7 @@ def _create_ssta_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
 
     moba_3d_mask = _create_moba_3d_mask(
         q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw, text_block_num,
-        threshold=threshold, lambda_=lambda_,
+        threshold=threshold, similarity_weight=similarity_weight,
         mask_share_within_head=mask_share_within_head,
         adaptive_pool=adaptive_pool, sampling_type=sampling_type, sparse_text_to_image=sparse_text_to_image)
 
@@ -348,7 +302,7 @@ def _create_ssta_3d_mask(q, k, text_q, canvas_thw, topk, tile_thw, kernel_thw,
 def _setup_ssta(all_q, all_k, all_v, canvas_thw,
                 topk=1, tile_thw=(6, 8, 8), kernel_thw=(1, 1, 1),
                 text_len=0, threshold=0.0,
-                lambda_=None, pad_type="zero",
+                similarity_weight=None, pad_type="zero",
                 mask_share_within_head=True, sampling_type=None,
                 adaptive_pool=None, text_valid_lens=None, sparse_text_to_image=False):
 
@@ -497,7 +451,7 @@ def _setup_ssta(all_q, all_k, all_v, canvas_thw,
         kernel_thw=kernel_thw,
         text_block_num=text_block_num, 
         threshold=threshold, 
-        lambda_=lambda_,
+        similarity_weight=similarity_weight,
         text_valid_lens=text_valid_lens, 
         mask_share_within_head=mask_share_within_head,
         adaptive_pool=adaptive_pool, 
@@ -568,7 +522,7 @@ def _get_ssta_mask(mask_config):
             image_q_list[i], image_k_list[i], text_q=text_q_list[i] if text_q_list is not None else None,
             canvas_thw=mask_config.canvas_thw, tile_thw=mask_config.tile_thw, kernel_thw=mask_config.kernel_thw,
             text_block_num=mask_config.text_block_num, topk=mask_config.topk, threshold=mask_config.threshold,
-            lambda_=mask_config.lambda_, text_valid_len=tvl,
+            similarity_weight=mask_config.similarity_weight, text_valid_len=tvl,
             mask_share_within_head=mask_config.mask_share_within_head,
             adaptive_pool=mask_config.adaptive_pool, sampling_type=mask_config.sampling_type, sparse_text_to_image=mask_config.sparse_text_to_image)
         mask_list.append(bm)
@@ -595,7 +549,7 @@ def _get_moba_mask(mask_config):
                                           kernel_thw=mask_config.kernel_thw,
                                           text_block_num=mask_config.text_block_num, 
                                           add_text_mask=True,
-                                          lambda_=mask_config.lambda_,
+                                          similarity_weight=mask_config.similarity_weight,
                                           threshold=mask_config.threshold,
                                           mask_share_within_head=mask_config.mask_share_within_head,
                                           adaptive_pool=mask_config.adaptive_pool,
@@ -649,8 +603,8 @@ def setup_ssta(query, key, value, attn_kwargs):
 
     ssta_topk = attn_kwargs["ssta_topk"]
     thw = attn_kwargs["thw"]
-    tile_size = attn_kwargs["tile_size"]
-    win_size = attn_kwargs["win_size"][0].copy()
+    tile_size = tuple(attn_kwargs["tile_size"])
+    win_size = tuple(attn_kwargs["win_size"][0].copy())
 
     sp_size = attn_kwargs["sp_size"]
 
@@ -662,7 +616,7 @@ def setup_ssta(query, key, value, attn_kwargs):
         text_valid_lens = text_mask.sum(dim=-1)
 
     if thw[0] == 1:
-        win_size = [1, 1, 1]
+        win_size = (1, 1, 1)
     elif thw[0] <= 31:
         ssta_topk = ssta_topk // 2
     
@@ -678,10 +632,10 @@ def setup_ssta(query, key, value, attn_kwargs):
         thw,
         topk=ssta_topk,
         tile_thw=tile_size,
-        kernel_thw=tuple(win_size),
+        kernel_thw=win_size,
         text_len=encoder_sequence_length * sp_size,
         threshold=ssta_threshold,
-        lambda_=ssta_lambda,
+        similarity_weight=ssta_lambda,
         pad_type=attn_pad_type,
         sampling_type=ssta_sampling_type,
         adaptive_pool=ssta_adaptive_pool,

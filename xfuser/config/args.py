@@ -153,7 +153,6 @@ class xFuserArgs:
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
     # SSTA arguments
     ssta_tile_thw: Optional[Tuple[int, int, int]] = None
-    ssta_sparse_text_to_image: Optional[bool] = False
 
 
     @staticmethod
@@ -702,12 +701,6 @@ class xFuserArgs:
             type=lambda s: tuple(int(x) for x in s.split(",")),
             default=(2,8,8),
             help="Tile size for SSTA as comma-separated T,H,W. E.g. --ssta_tile_thw 2,8,8",
-        )
-        parser.add_argument(
-            "--ssta_sparse_text_to_image",
-            action="store_true",
-            default=False,
-            help="Use sparse text to image for SSTA.",
         )
         return parser
 

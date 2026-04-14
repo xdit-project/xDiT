@@ -186,6 +186,19 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         compile_args["num_inference_steps"] = 2
         self._run_timed_pipe(compile_args)
 
+
+@register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
+@register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
+@register_model("Hunyuanvideo-1.5-Distilled")
+class xFuserHunyuanvideo15DistilledModel(xFuserHunyuanvideo15Model):
+    
+    def __init__(self, config: xFuserArgs) -> None:
+        super().__init__(config)
+        self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
+        self.settings.output_name = "hunyuan_video_1_5_distilled"
+        self.settings.valid_tasks = ["i2v"]
+
+
 HUNYUANVIDEO_15_SPARSE_BLOCK_KEY_MAP = {
     # Image-side attention
     "img_attn_q.": "attn.to_q.",
@@ -239,7 +252,9 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         assert attn_param["tile_size"] is not None, "tile_size is not set"
         assert len(attn_param["tile_size"]) == 3, "tile_size must be a tuple of 3 integers"
         assert np.prod(attn_param["tile_size"]) == 128 or np.prod(attn_param["tile_size"]) == 384, "product of ssta_tile_thw must be 128 or 384"
-        if PACKAGES_CHECKER.packages_info["has_aiter"]:
+        TritonSparseAttentionBackendTypes = [AttentionBackendType.AITER_SPARSE_SAGE,
+                                             AttentionBackendType.AITER_SPARSE_SAGE_V2]
+        if AttentionBackendType[self.config.attention_backend.upper()] in TritonSparseAttentionBackendTypes:
             assert np.prod(attn_param["tile_size"]) == 128, "product of ssta_tile_thw must be 128 for AITER_SPARSE_SAGE and AITER_SPARSE_SAGE_V2"
 
     def __init__(self, config: xFuserArgs) -> None:
@@ -270,7 +285,6 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
         if self.config.ssta_tile_thw is not None:
             sparse_config["attn_param"]["tile_size"] = self.config.ssta_tile_thw
-        sparse_config["attn_param"]["sparse_text_to_image"] = self.config.ssta_sparse_text_to_image
         self._validate_ssta_attention_kwargs(sparse_config["attn_param"])
         
         transformer = xFuserHunyuanVideo15Transformer3DWrapper(
@@ -288,8 +302,8 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
             text_embed_2_dim=sparse_config.get("text_states_dim_2") or 1472,
             image_embed_dim=sparse_config.get("vision_states_dim", 1152),
             rope_theta=sparse_config.get("rope_theta", 256),
-            rope_axes_dim=sparse_config.get("rope_dim_list", (16, 54, 54)),
-            target_size=sparse_config.get("target_size", 640),
+            rope_axes_dim=sparse_config.get("rope_dim_list", (16, 56, 56)),
+            target_size=sparse_config.get("target_size", 960),
             task_type="i2v",
             use_meanflow=sparse_config.get("use_meanflow", False),
             attention_kwargs=sparse_config.get("attn_param", None),

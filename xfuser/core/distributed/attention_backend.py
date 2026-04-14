@@ -73,12 +73,12 @@ if env_info["has_aiter"]:
     import aiter
     from aiter import flash_attn_func as flash_attn_func_aiter
     try:
-        from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
+        from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func, get_sage_fwd_configs
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SAGE is not available.
     try:
         from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import (
-            fav3_sage_mxfp4_wrapper,
+            fav3_sage_mxfp4_wrapper, get_sage_fwd_configs_mxfp4
         )
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SAGE_V2 is not available.
@@ -457,14 +457,9 @@ def _sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=No
 def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
     block_size = math.prod(attention_kwargs["tile_size"])
-    config = {
-        "BLOCK_M": block_size,
-        "BLOCK_N": block_size,
-        "waves_per_eu": 2,
-        "PRE_LOAD_V": False,
-        "num_stages": 2,
-        "num_warps": 8,
-    }
+    config = get_sage_fwd_configs()
+    config["BLOCK_M"] = block_size
+    config["BLOCK_N"] = block_size
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", config=config)
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
@@ -478,14 +473,9 @@ def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attent
 def _aiter_sparse_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
     block_size = math.prod(attention_kwargs["tile_size"])
-    config = {
-        "BLOCK_M": block_size,
-        "BLOCK_N": block_size,
-        "waves_per_eu": 2,
-        "PRE_LOAD_V": False,
-        "num_stages": 3,
-        "num_warps": 8,
-    }
+    config = get_sage_fwd_configs_mxfp4()
+    config["BLOCK_M"] = block_size
+    config["BLOCK_N"] = block_size
     attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device], config=config)
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])

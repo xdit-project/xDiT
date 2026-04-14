@@ -88,7 +88,6 @@ class DefaultInputValues:
     num_hybrid_attn_high_precision_steps: Optional[int] = None
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
     ssta_tile_thw: Optional[Tuple[int, int, int]] = None
-    ssta_sparse_text_to_image: Optional[bool] = False
 
 @dataclass
 class ModelSettings:
@@ -229,9 +228,13 @@ class xFuserModel(abc.ABC):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             SparseAttentionBackendTypes = [AttentionBackendType.AITER_SPARSE_SAGE,
                                            AttentionBackendType.AITER_SPARSE_SAGE_V2]
-            if config.attention_backend in SparseAttentionBackendTypes and \
+            if AttentionBackendType[config.attention_backend.upper()] in SparseAttentionBackendTypes and \
                not self.capabilities.supports_sparse_attention_backends:
-                raise ValueError(f"Model {self.settings.model_name} does not support sparse attention backends.")
+                raise ValueError(f"Model {config.model} does not support sparse attention backends.")
+            elif self.capabilities.supports_sparse_attention_backends and AttentionBackendType[config.attention_backend.upper()] not in SparseAttentionBackendTypes:
+                raise ValueError(f"Model {config.model} supports sparse attention backends, but attention backend {config.attention_backend} was specified.\
+                                 This is not an error per say, but you should to use a sparse attention backend to take advantage of the model's capabilities.\
+                                 If you want to use a dense attention backend, you should use the dense model equivalent.")
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:

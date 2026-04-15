@@ -280,6 +280,43 @@ def quantize_linear_layers_to_nvfp4(
         f"{skipped_fp8_count} overridden to FP8, {skipped_small_count} skipped (too small)")
 
 
+def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretrained_kwargs) -> None:
+    """
+    Workaround for transformers v5 bug where LlamaTokenizer.__init__ unconditionally
+    installs a SentencePiece Metaspace pre-tokenizer, silently breaking newer models
+    that use ByteLevel BPE under the ``tokenizer_class="LlamaTokenizerFast"`` label.
+
+    Reloads affected tokenizer components as ``PreTrainedTokenizerFast``, which
+    respects the pre-tokenizer defined in ``tokenizer.json`` without the override.
+
+    See https://github.com/huggingface/transformers/pull/45345
+    """
+    import transformers
+    from packaging.version import Version
+    if Version(transformers.__version__) < Version("5.0.0"):
+        return
+
+    from transformers import PreTrainedTokenizerFast
+
+    for component_name, component in pipeline.components.items():
+        if component is None or not component_name.startswith("tokenizer"):
+            continue
+
+        if "Llama" not in type(component).__name__:
+            continue
+
+        log(f"Replacing tokenizer '{component_name}' (type={type(component).__name__}) "
+            f"with PreTrainedTokenizerFast...", debug=True)
+
+        fixed = PreTrainedTokenizerFast.from_pretrained(
+            model_name_or_path, subfolder=component_name, **from_pretrained_kwargs
+        )
+        setattr(pipeline, component_name, fixed)
+
+        log(f"Fixed tokenizer '{component_name}': "
+            f"reloaded as PreTrainedTokenizerFast (transformers v5 LlamaTokenizer bug workaround)")
+
+
 def convert_model_convs_to_channels_last(model: torch.nn.Module) -> None:
     """
     Manually convert 2D and 3D convolutional layer weights to channels_last format.

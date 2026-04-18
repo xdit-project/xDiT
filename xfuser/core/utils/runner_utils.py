@@ -74,20 +74,31 @@ def resize_and_crop_image(image: Image, target_height: int, target_width: int, m
         log(f"Cropped from center to: {target_height_aligned}x{target_width_aligned}")
         return image
 
+def _get_fp8_kernel_preference():
+    """Select FP8 kernel preference based on GPU architecture.
+
+    AUTO selects CUTLASS sm90a kernels which crash on Blackwell (sm100a)
+    under torch.compile, so we force TORCH (_scaled_mm) on Blackwell+.
+    """
+    from torchao.quantization.quantize_.common import KernelPreference
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10:
+        return KernelPreference.TORCH
+    return KernelPreference.AUTO
+
+
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
     device: Optional[torch.device] = None) -> None:
     """Quantize all linear layers in the given module or module list to FP8."""
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
-    from torchao.quantization.quantize_.common import KernelPreference
 
     if filter_fn is None:
         filter_fn = _is_linear
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
-                kernel_preference=KernelPreference.AUTO
+                kernel_preference=_get_fp8_kernel_preference(),
         )
     if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
         module_or_module_list_to_quantize = [module_or_module_list_to_quantize]
@@ -122,7 +133,6 @@ def rgetattr(obj: object, attr: str) -> object:
 def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hybrid_schedule: bool = False, device: Optional[torch.device] = None):
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
-    from torchao.quantization.quantize_.common import KernelPreference
     from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
 
     for name, module in list(model.named_children()):
@@ -135,7 +145,7 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                       config=Float8DynamicActivationFloat8WeightConfig(
                           granularity=PerTensor(),
                           set_inductor_config=False,
-                          kernel_preference=KernelPreference.AUTO
+                          kernel_preference=_get_fp8_kernel_preference(),
                     ),
                     device=device,
                 )
@@ -168,7 +178,7 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                         config=Float8DynamicActivationFloat8WeightConfig(
                             granularity=PerTensor(),
                             set_inductor_config=False,
-                            kernel_preference=KernelPreference.AUTO,
+                            kernel_preference=_get_fp8_kernel_preference(),
                         ),
                         device=device,
                     )
@@ -190,7 +200,7 @@ def quantize_linear_layers_to_nvfp4(
     fp8_layers: tuple[str] = None,
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
-    use_triton_kernel: bool = False,
+    use_triton_kernel: bool = True,
 ) -> None:
     """Quantize linear layers to NVFP4 using torchao on NVIDIA Blackwell GPUs.
 
@@ -226,17 +236,14 @@ def quantize_linear_layers_to_nvfp4(
                 continue
 
             if fp8_layers and fqn.startswith(fp8_layers):
-                log(f"  [NVFP4] SKIP (fp8 override) {fqn}: shape=({submodule.out_features}, {submodule.in_features})")
                 skipped_fp8_count += 1
                 continue
 
             layer_min = min(submodule.out_features, submodule.in_features)
             if min_layer_size > 0 and layer_min < min_layer_size:
-                log(f"  [NVFP4] SKIP (too small, min_dim={layer_min} < {min_layer_size}) {fqn}: shape=({submodule.out_features}, {submodule.in_features})")
                 skipped_small_count += 1
                 continue
 
-            log(f"  [NVFP4] QUANTIZE {fqn}: shape=({submodule.out_features}, {submodule.in_features})")
             quantized_count += 1
 
         def nvfp4_filter_fn(mod, fqn):
@@ -255,12 +262,11 @@ def quantize_linear_layers_to_nvfp4(
         if fp8_layers:
             from torchao.quantization.granularity import PerTensor
             from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig
-            from torchao.quantization.quantize_.common import KernelPreference
 
             fp8_config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
-                kernel_preference=KernelPreference.AUTO,
+                kernel_preference=_get_fp8_kernel_preference(),
             )
 
             def fp8_filter_fn(mod, fqn):

@@ -4,6 +4,13 @@ Uses flashinfer's nvfp4_quantize to convert BF16/FP16 Q/K tensors to NVFP4
 (Float4E2M1FN) with block-scaled scale factors in the MMA tile layout
 expected by the hao-ai-lab/flash-attention-fp4 kernel.
 
+NOTE: cutlass-dsl's cute_tensor_like + convert_cute_tensor also works for
+quantization and produces slightly faster kernel execution (~1-2%), but it
+relies on @cute.jit which JIT-compiles a new CUDA kernel for every distinct
+tensor shape. This makes it unsuitable for E2E inference where attention is
+called hundreds of times during warmup/compilation. flashinfer's nvfp4_quantize
+is a pre-compiled kernel with no JIT overhead.
+
 Requires: flashinfer-python (pip install flashinfer-python)
 Requires: CUTE_DSL_ENABLE_TVM_FFI=1 (set automatically in envs.py)
 """

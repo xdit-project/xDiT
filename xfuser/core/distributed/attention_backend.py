@@ -301,8 +301,7 @@ def _flash_attn_4_fp4_call(query, key, value, dropout_p, is_causal):
 
     Input tensors arrive in (batch, nheads, seqlen, headdim) from the USP layer.
     The FAv4 kernel expects (batch, seqlen, nheads, headdim).
-    Q and K are quantized to NVFP4 (float4_e2m1fn_x2) via flashinfer's
-    nvfp4_quantize; V stays in BF16.
+    Q and K are quantized to NVFP4 via flashinfer's nvfp4_quantize; V stays in BF16.
     """
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()

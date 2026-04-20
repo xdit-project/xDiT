@@ -344,11 +344,11 @@ class xFuserHunyuanVideo15Transformer3DWrapper(HunyuanVideo15Transformer3DModel)
         encoder_attention_mask = encoder_attention_mask.to(torch.bool)[:, any_valid]
     
         if encoder_hidden_states.shape[1] % sp_world_size != 0:
-            if self.attention_kwargs is not None and self.attention_kwargs["attn_sparse_type"] == "ssta": # TODO: Verify if this is needed for STA and MOBA as well.
-                # SSTA requires symmetric [image, text] layout in Q/K/V.
+            if self.attention_kwargs is not None:
+                # Sparse models requires symmetric [image, text] layout in Q/K/V.
                 # Pad text to be divisible by sp_world_size so it can be chunked,
                 # ensuring split_text_embed_in_sp=True and avoiding the asymmetric
-                # joint_strategy path which SSTA cannot handle.
+                # joint_strategy path which is not compatible.
                 enc_rem = encoder_hidden_states.shape[1] % sp_world_size
                 enc_pad = sp_world_size - enc_rem
                 encoder_hidden_states = F.pad(encoder_hidden_states, (0, 0, 0, enc_pad))

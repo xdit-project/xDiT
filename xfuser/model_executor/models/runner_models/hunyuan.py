@@ -252,10 +252,6 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         assert attn_param["tile_size"] is not None, "tile_size is not set"
         assert len(attn_param["tile_size"]) == 3, "tile_size must be a tuple of 3 integers"
         assert np.prod(attn_param["tile_size"]) == 128 or np.prod(attn_param["tile_size"]) == 384, "product of ssta_tile_thw must be 128 or 384"
-        TritonSparseAttentionBackendTypes = [AttentionBackendType.AITER_SPARSE_SAGE,
-                                             AttentionBackendType.AITER_SPARSE_SAGE_V2]
-        if AttentionBackendType[self.config.attention_backend.upper()] in TritonSparseAttentionBackendTypes:
-            assert np.prod(attn_param["tile_size"]) == 128, "product of ssta_tile_thw must be 128 for AITER_SPARSE_SAGE and AITER_SPARSE_SAGE_V2"
 
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
@@ -283,8 +279,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         with open(config_path) as f:
             sparse_config = json.load(f)
 
-        if self.config.ssta_tile_thw is not None:
-            sparse_config["attn_param"]["tile_size"] = self.config.ssta_tile_thw
+        sparse_config["attn_param"]["sparse_text_to_image"] = self.config.ssta_sparse_text_to_image
         self._validate_ssta_attention_kwargs(sparse_config["attn_param"])
         
         transformer = xFuserHunyuanVideo15Transformer3DWrapper(

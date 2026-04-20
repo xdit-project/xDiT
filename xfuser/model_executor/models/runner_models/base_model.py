@@ -232,9 +232,12 @@ class xFuserModel(abc.ABC):
                not self.capabilities.supports_sparse_attention_backends:
                 raise ValueError(f"Model {config.model} does not support sparse attention backends.")
             elif self.capabilities.supports_sparse_attention_backends and AttentionBackendType[config.attention_backend.upper()] not in SparseAttentionBackendTypes:
-                raise ValueError(f"Model {config.model} supports sparse attention backends, but attention backend {config.attention_backend} was specified.\
-                                 This is not an error per say, but you should to use a sparse attention backend to take advantage of the model's capabilities.\
-                                 If you want to use a dense attention backend, you should use the dense model equivalent.")
+                raise ValueError(
+                    f"Model {config.model} supports sparse attention backends, but attention backend "
+                    f"'{config.attention_backend}' was specified. This is not an error per se, but you "
+                    f"should use a sparse attention backend to take advantage of the model's capabilities. "
+                    f"If you want to use a dense attention backend, you should use the dense model equivalent."
+                )
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:

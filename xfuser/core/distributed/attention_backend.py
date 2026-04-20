@@ -5,7 +5,7 @@ import math
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
-from xfuser.core.distributed.ssta import setup_ssta, get_sparse_mask, untile_ssta_output
+from xfuser.core.distributed.ssta import setup_ssta, get_sparse_mask, untile_ssta_output, expand_block_mask
 from xfuser.core.distributed import get_ulysses_parallel_world_size
 
 ATTENTION_FUNCTION_REGISTRY = {}
@@ -91,6 +91,7 @@ if env_info["has_aiter"]:
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
     HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
+    _TRITON_SSTA_BLOCK_SIZE = 128
     
 
 if env_info["has_flash_attn"]:
@@ -458,11 +459,13 @@ def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attent
     attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
     block_size = math.prod(attention_kwargs["tile_size"])
     config = get_sage_fwd_configs()
-    config["BLOCK_M"] = block_size
-    config["BLOCK_N"] = block_size
+    config["BLOCK_M"] = _TRITON_SSTA_BLOCK_SIZE
+    config["BLOCK_N"] = _TRITON_SSTA_BLOCK_SIZE
     attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", config=config)
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
+    if block_size != _TRITON_SSTA_BLOCK_SIZE:
+        block_mask = expand_block_mask(block_mask, factor=block_size // _TRITON_SSTA_BLOCK_SIZE)
     block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1])
     output = attn_fn(q, k, v, block_lut=block_lut)
     output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])
@@ -474,11 +477,13 @@ def _aiter_sparse_sage_v2_attn_call(query, key, value, dropout_p, is_causal, att
     attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
     block_size = math.prod(attention_kwargs["tile_size"])
     config = get_sage_fwd_configs_mxfp4()
-    config["BLOCK_M"] = block_size
-    config["BLOCK_N"] = block_size
+    config["BLOCK_M"] = _TRITON_SSTA_BLOCK_SIZE
+    config["BLOCK_N"] = _TRITON_SSTA_BLOCK_SIZE
     attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device], config=config)
     q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
+    if block_size != _TRITON_SSTA_BLOCK_SIZE:
+        block_mask = expand_block_mask(block_mask, factor=block_size // _TRITON_SSTA_BLOCK_SIZE)
     block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1])
     output = attn_fn(q, k, v, causal=is_causal, block_lut=block_lut)
     output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])

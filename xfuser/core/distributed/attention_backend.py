@@ -161,9 +161,9 @@ def _run_mla_bshd(q_bshd, k_bshd, v_bshd):
 
     total_q_tokens = _batch * _q_seq
     total_kv_tokens = _batch * _kv_seq
-    query_ragged = query_fp8.reshape(total_q_tokens, _num_heads, query_fp8.shape[-1]).contiguous()
-    key_ragged = key_fp8.reshape(total_kv_tokens, _num_kv_heads, key_fp8.shape[-1]).contiguous()
-    value_ragged = value_fp8.reshape(total_kv_tokens, _num_kv_heads, _v_head_dim).contiguous()
+    query_ragged = query_fp8.reshape(total_q_tokens, _num_heads, query_fp8.shape[-1])
+    key_ragged = key_fp8.reshape(total_kv_tokens, _num_kv_heads, key_fp8.shape[-1])
+    value_ragged = value_fp8.reshape(total_kv_tokens, _num_kv_heads, _v_head_dim)
 
     metadata = _build_aiter_mla_metadata(
         batch_size=_batch,

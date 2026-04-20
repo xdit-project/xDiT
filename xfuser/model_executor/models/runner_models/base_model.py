@@ -12,7 +12,13 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.envs import PACKAGES_CHECKER, get_platform, _TORCH_GROUPNORM
+from xfuser.envs import (
+    PACKAGES_CHECKER,
+    _TORCH_GROUPNORM,
+    get_platform,
+    _is_hip,
+    _is_cuda,
+)
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
@@ -241,7 +247,6 @@ class xFuserModel(abc.ABC):
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
         if config.use_fp4_gemms:
-            from xfuser.envs import _is_hip, _is_cuda
             if _is_hip() and not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 GEMMs on ROCm require AITER.")
             if _is_cuda():
@@ -468,7 +473,6 @@ class xFuserModel(abc.ABC):
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
         if self.config.use_fp4_gemms:
-            from xfuser.envs import _is_cuda
             if _is_cuda():
                 self._setup_nvfp4_gemms(local_rank=local_rank)
             else:

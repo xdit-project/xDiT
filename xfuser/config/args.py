@@ -152,7 +152,7 @@ class xFuserArgs:
     use_hybrid_gemm_schedule: bool = False
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
     # SSTA arguments
-    ssta_sparse_text_to_image: Optional[bool] = False
+    use_ssta_sparse_text_to_image: Optional[bool] = False
 
 
     @staticmethod
@@ -697,7 +697,7 @@ class xFuserArgs:
             help="Use channels last memory format for the VAE.",
         )
         parser.add_argument(
-            "--ssta_sparse_text_to_image",
+            "--use_ssta_sparse_text_to_image",
             action="store_true",
             default=False,
             help="Use sparse attention for text-to-image attention path in SSTA.",

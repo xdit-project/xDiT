@@ -279,7 +279,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         with open(config_path) as f:
             sparse_config = json.load(f)
 
-        sparse_config["attn_param"]["sparse_text_to_image"] = self.config.ssta_sparse_text_to_image
+        sparse_config["attn_param"]["sparse_text_to_image"] = self.config.use_ssta_sparse_text_to_image
         self._validate_ssta_attention_kwargs(sparse_config["attn_param"])
         
         transformer = xFuserHunyuanVideo15Transformer3DWrapper(

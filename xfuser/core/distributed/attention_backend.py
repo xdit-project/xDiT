@@ -64,6 +64,229 @@ def _aiter_sage_v2_hadamard_matrix(block_r):
         hadamard_matrix[device] = _hadamard.to(device) if _hadamard is not None else None
     return hadamard_matrix
 
+def _get_mla_cache_device_key(device):
+    if device.type == "cuda":
+        return (device.type, torch.cuda.current_device() if device.index is None else device.index)
+    return (device.type, device.index)
+
+_MLA_PREFILL_QK_HEAD_DIM = 192
+_MLA_BLOCK_SIZE = 1
+_MLA_TILE_Q = 256
+_MLA_TILE_KV = 128
+_MLA_METADATA_CACHE = {}
+
+def _launch_mla_prefill_reduce(
+    query_ragged, key_ragged, value_ragged,
+    metadata, qk_head_dim, num_heads, v_head_dim,
+    query_scale, key_scale, value_scale,
+    batch_size, q_seq_len, kv_seq_len,
+    device
+):
+    """Launch MLA prefill and reduce kernels, returning output in ragged layout."""
+    total_q_tokens = batch_size * q_seq_len
+    total_kv_tokens = batch_size * kv_seq_len
+    softmax_scale = qk_head_dim ** -0.5
+
+    output = torch.empty(
+        (total_q_tokens, num_heads, v_head_dim),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    partial_tiles = metadata["reduce_partial_map"].size(0) * _MLA_TILE_Q
+    logits = torch.empty(
+        (partial_tiles, num_heads, v_head_dim),
+        dtype=torch.float32,
+        device=device,
+    )
+    attn_lse = torch.empty(
+        (partial_tiles, num_heads),
+        dtype=torch.float32,
+        device=device,
+    )
+    final_lse = torch.empty(
+        (total_q_tokens, num_heads),
+        dtype=torch.float32,
+        device=device,
+    )
+
+    aiter.mla_prefill_ps_asm_fwd(
+        query_ragged,
+        key_ragged,
+        value_ragged,
+        metadata["qo_indptr"],
+        metadata["kv_indptr"],
+        metadata["kv_indices"],
+        metadata["work_indptr"],
+        metadata["work_info"],
+        metadata["max_seqlen_q"],
+        softmax_scale,
+        False,  # is_causal (prefill is non-causal)
+        logits,
+        attn_lse,
+        output,
+        query_scale,
+        key_scale,
+        value_scale,
+    )
+    aiter.mla_reduce_v1(
+        logits,
+        attn_lse,
+        metadata["reduce_indptr"],
+        metadata["reduce_final_map"],
+        metadata["reduce_partial_map"],
+        _MLA_TILE_Q,
+        output,
+        final_lse,
+    )
+
+    return output
+
+
+def _run_mla_bshd(q_bshd, k_bshd, v_bshd):
+    """Execute MLA prefill+reduce for tensors in BSHD layout."""
+    _batch, _q_seq, _num_heads, _qk_head_dim = q_bshd.shape
+    _, _kv_seq, _num_kv_heads, _v_head_dim = v_bshd.shape
+
+    q_for_kernel = q_bshd
+    k_for_kernel = k_bshd
+    if _qk_head_dim < _MLA_PREFILL_QK_HEAD_DIM:
+        pad_qk = _MLA_PREFILL_QK_HEAD_DIM - _qk_head_dim
+        q_for_kernel = F.pad(q_for_kernel, (0, pad_qk))
+        k_for_kernel = F.pad(k_for_kernel, (0, pad_qk))
+
+    fp8_dtype = aiter.dtypes.fp8
+    query_fp8, query_scale = aiter.per_tensor_quant(q_for_kernel, quant_dtype=fp8_dtype)
+    key_fp8, key_scale = aiter.per_tensor_quant(k_for_kernel, quant_dtype=fp8_dtype)
+    value_fp8, value_scale = aiter.per_tensor_quant(v_bshd, quant_dtype=fp8_dtype)
+
+    total_q_tokens = _batch * _q_seq
+    total_kv_tokens = _batch * _kv_seq
+    query_ragged = query_fp8.reshape(total_q_tokens, _num_heads, query_fp8.shape[-1]).contiguous()
+    key_ragged = key_fp8.reshape(total_kv_tokens, _num_kv_heads, key_fp8.shape[-1]).contiguous()
+    value_ragged = value_fp8.reshape(total_kv_tokens, _num_kv_heads, _v_head_dim).contiguous()
+
+    metadata = _build_aiter_mla_metadata(
+        batch_size=_batch,
+        q_seq_len=_q_seq,
+        kv_seq_len=_kv_seq,
+        num_heads=_num_heads,
+        num_kv_heads=_num_kv_heads,
+        device=q_bshd.device,
+    )
+
+    output_ragged = _launch_mla_prefill_reduce(
+        query_ragged,
+        key_ragged,
+        value_ragged,
+        metadata,
+        _qk_head_dim,
+        _num_heads,
+        _v_head_dim,
+        query_scale,
+        key_scale,
+        value_scale,
+        _batch,
+        _q_seq,
+        _kv_seq,
+        q_bshd.device,
+    )
+
+    return output_ragged.view(_batch, _q_seq, _num_heads, _v_head_dim)
+
+def _build_aiter_mla_metadata(batch_size, q_seq_len, kv_seq_len, num_heads, num_kv_heads, device):
+    if num_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"AITER MLA requires num_heads ({num_heads}) to be divisible by num_kv_heads ({num_kv_heads})."
+        )
+
+    cache_key = (
+        _get_mla_cache_device_key(device),
+        batch_size,
+        q_seq_len,
+        kv_seq_len,
+        num_heads,
+        num_kv_heads,
+    )
+    cached = _MLA_METADATA_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    gqa_ratio = num_heads // num_kv_heads
+    blocks_per_seq = (kv_seq_len + _MLA_BLOCK_SIZE - 1) // _MLA_BLOCK_SIZE
+    num_blocks = batch_size * blocks_per_seq
+    max_qlen = q_seq_len
+
+    qo_indptr_cpu = torch.arange(batch_size + 1, dtype=torch.int32) * q_seq_len
+    kv_indptr_cpu = torch.arange(batch_size + 1, dtype=torch.int32) * blocks_per_seq
+    kv_seq_lens_cpu = torch.full((batch_size,), kv_seq_len, dtype=torch.int32)
+    kv_indices = torch.arange(num_blocks, dtype=torch.int32, device=device)
+
+    qhead_granularity = gqa_ratio
+    qlen_granularity = _MLA_TILE_Q // qhead_granularity
+    kvlen_granularity = max(_MLA_TILE_KV, _MLA_BLOCK_SIZE)
+
+    (
+        (work_meta_data_size, work_meta_data_type),
+        (work_indptr_size, work_indptr_type),
+        (work_info_size, work_info_type),
+        (reduce_indptr_size, reduce_indptr_type),
+        (reduce_final_map_size, reduce_final_map_type),
+        (reduce_partial_map_size, reduce_partial_map_type),
+    ) = aiter.get_ps_metadata_info_v1(
+        batch_size=batch_size,
+        num_head_k=num_kv_heads,
+        max_qlen=max_qlen,
+        qlen_granularity=qlen_granularity,
+    )
+
+    work_metadata_ptrs = torch.empty(
+        work_meta_data_size, dtype=work_meta_data_type, device=device
+    )
+    work_indptr = torch.empty(work_indptr_size, dtype=work_indptr_type, device=device)
+    work_info = torch.empty(work_info_size, dtype=work_info_type, device=device)
+    reduce_indptr = torch.empty(
+        reduce_indptr_size, dtype=reduce_indptr_type, device=device
+    )
+    reduce_final_map = torch.empty(
+        reduce_final_map_size, dtype=reduce_final_map_type, device=device
+    )
+    reduce_partial_map = torch.empty(
+        reduce_partial_map_size, dtype=reduce_partial_map_type, device=device
+    )
+
+    aiter.get_ps_metadata_v1(
+        qo_indptr_cpu,
+        kv_indptr_cpu,
+        kv_seq_lens_cpu,
+        gqa_ratio,
+        num_kv_heads,
+        work_metadata_ptrs,
+        work_indptr,
+        work_info,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+        qhead_granularity=qhead_granularity,
+        qlen_granularity=qlen_granularity,
+        kvlen_granularity=kvlen_granularity,
+        block_size=_MLA_BLOCK_SIZE,
+        is_causal=False,
+    )
+
+    metadata = {
+        "qo_indptr": qo_indptr_cpu.to(device),
+        "kv_indptr": kv_indptr_cpu.to(device),
+        "kv_indices": kv_indices,
+        "work_indptr": work_indptr,
+        "work_info": work_info,
+        "reduce_indptr": reduce_indptr,
+        "reduce_final_map": reduce_final_map,
+        "reduce_partial_map": reduce_partial_map,
+        "max_seqlen_q": max_qlen,
+    }
+    _MLA_METADATA_CACHE[cache_key] = metadata
+    return metadata
+
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
 if env_info["has_aiter"]:
@@ -118,6 +341,7 @@ class AttentionBackendType(Enum):
     SAGE = "Sage Attention"
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
+    AITER_MLA = "AITER MLA"
     AITER_SAGE = "AITER Sage"
     AITER_SAGE_V2 = "AITER Sage V2"
     NPU = "NPU"
@@ -366,6 +590,68 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal):
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
+
+@register_attention_function(AttentionBackendType.AITER_MLA)
+def _aiter_mla_attn_call(query, key, value, dropout_p, is_causal):
+    """Entry point for AITER MLA prefill backend. Thin wrapper around _run_mla_bshd."""
+    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+        raise ValueError("AITER MLA expects query, key, and value tensors in BHSD layout.")
+
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+
+    batch_size, q_seq_len, num_heads, qk_head_dim = query.shape
+    key_batch_size, kv_seq_len, num_kv_heads, key_head_dim = key.shape
+    value_batch_size, value_seq_len, value_num_kv_heads, v_head_dim = value.shape
+
+    if key_batch_size != batch_size or value_batch_size != batch_size:
+        raise ValueError("AITER MLA requires matching batch sizes for query, key, and value.")
+    if value_seq_len != kv_seq_len:
+        raise ValueError("AITER MLA requires key and value to have the same sequence length.")
+    if value_num_kv_heads != num_kv_heads:
+        raise ValueError("AITER MLA requires key and value to have the same number of KV heads.")
+    if key_head_dim != qk_head_dim:
+            raise ValueError("AITER MLA prefill backend currently assumes QK head dimensions to be equal.")
+    if num_heads != num_kv_heads:
+        raise ValueError(
+            "AITER MLA prefill backend currently assumes Hq == Hkv for diffusion inference."
+        )
+    if qk_head_dim > _MLA_PREFILL_QK_HEAD_DIM:
+        raise ValueError(
+            f"AITER MLA supports QK head dimensions up to {_MLA_PREFILL_QK_HEAD_DIM}, got {qk_head_dim}."
+        )
+
+    original_dtype = query.dtype
+
+    # Some MLA kernels reject multi-head settings for D=128 (e.g. H=5), while H=1 is supported.
+    # Avoid the failing kernel path up front by scheduling per-query-head MLA calls.
+    use_per_head_schedule = (
+        qk_head_dim == 128
+        and num_heads != 1
+        and num_heads != 2
+        and num_heads != 4
+        and num_heads != 8
+    )
+
+    if use_per_head_schedule:
+        head_outputs = []
+        for h in range(num_heads):
+            head_outputs.append(
+                _run_mla_bshd(
+                    query[:, :, h : h + 1, :],
+                    key[:, :, h : h + 1, :],
+                    value[:, :, h : h + 1, :],
+                )
+            )
+        output = torch.cat(head_outputs, dim=2)
+    else:
+        output = _run_mla_bshd(query, key, value)
+
+    if output.dtype != original_dtype:
+        output = output.to(original_dtype)
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, None
 
 @register_attention_function(AttentionBackendType.FLASH)
 def _flash_attn_call(query, key, value, dropout_p, is_causal):

@@ -124,7 +124,7 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8]:
+        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8, AttentionBackendType.AITER_MLA]:
             logger.warning("FP8 attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
@@ -205,6 +205,7 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.SDPA_MATH,
                                  AttentionBackendType.FLASH_4,
                                  AttentionBackendType.AITER_FP8,
+                                 AttentionBackendType.AITER_MLA,
                                  AttentionBackendType.AITER_SAGE,
                                  AttentionBackendType.AITER_SAGE_V2]:
             if self.parallel_config.ring_degree > 1:
@@ -219,6 +220,11 @@ class RuntimeState(metaclass=ABCMeta):
                 raise RuntimeError(
                     "Transformer Engine FP8 attention requires transformer-engine"
                 )
+        elif attention_backend == AttentionBackendType.AITER_MLA:
+            try:
+                from aiter import get_ps_metadata_info_v1, get_ps_metadata_v1, mla_prefill_ps_asm_fwd, mla_reduce_v1
+            except ImportError:
+                raise RuntimeError("AITER MLA attention is not available, please update AITER") from None
         elif attention_backend == AttentionBackendType.AITER_SAGE:
             try:
                 import aiter.ops.triton.attention

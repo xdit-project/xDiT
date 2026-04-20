@@ -92,6 +92,9 @@ if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
 if env_info["has_flash_attn_4"]:
     from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4
+if env_info["has_flash_attn_4_fp4"]:
+    from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4_fp4
+    from xfuser.core.distributed.fp4_quantize import quantize_qk_to_fp4
 if env_info["has_transformer_engine"]:
     from transformer_engine.pytorch import DotProductAttention, fp8_autocast
     from transformer_engine.common import recipe
@@ -115,6 +118,7 @@ class AttentionBackendType(Enum):
     FLASH_3_FP8 = "Flash Attention v3 FP8"
     NVTE_FP8 = "NVTE FP8"
     FLASH_4 = "Flash Attention V4"
+    FLASH_4_FP4 = "Flash Attention V4 FP4"
     SAGE = "Sage Attention"
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
@@ -285,6 +289,34 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal):
         key,
         value,
         causal=is_causal,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, softmax_lse
+
+@register_attention_function(AttentionBackendType.FLASH_4_FP4)
+@torch.compiler.disable
+def _flash_attn_4_fp4_call(query, key, value, dropout_p, is_causal):
+    """
+    Flash Attention V4 with runtime FP4 quantization of Q and K.
+
+    Input tensors arrive in (batch, nheads, seqlen, headdim) from the USP layer.
+    The FAv4 kernel expects (batch, seqlen, nheads, headdim).
+    Q and K are quantized to NVFP4 via flashinfer's nvfp4_quantize; V stays in BF16.
+    """
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+
+    q_fp4, mSFQ = quantize_qk_to_fp4(query)
+    k_fp4, mSFK = quantize_qk_to_fp4(key)
+
+    output, softmax_lse = flash_attn_func_4_fp4(
+        q_fp4,
+        k_fp4,
+        value,
+        causal=is_causal,
+        mSFQ=mSFQ,
+        mSFK=mSFK,
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse

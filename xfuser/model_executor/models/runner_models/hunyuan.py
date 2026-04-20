@@ -16,6 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
+    fix_llama_tokenizer_pretokenizer,
 )
 
 @register_model("tencent/HunyuanVideo")
@@ -57,6 +58,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             revision="refs/pr/18",
         )
+        fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision="refs/pr/18")
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

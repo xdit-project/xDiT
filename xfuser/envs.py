@@ -204,6 +204,7 @@ class PackagesEnvChecker:
         packages_info["has_flash_attn"] = self.check_flash_attn()
         packages_info["has_flash_attn_3"] = self._check_flash_attn_3()
         packages_info["has_flash_attn_4"] = self._check_flash_attn_4()
+        packages_info["has_flash_attn_4_fp4"] = self._check_flash_attn_4_fp4()
         packages_info["has_transformer_engine"] = self.check_transformer_engine()
         packages_info["has_sage"] = self._check_sage()
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
@@ -275,7 +276,22 @@ class PackagesEnvChecker:
             return True
         except:
             return False
-    
+
+    def _check_flash_attn_4_fp4(self):
+        if not torch.cuda.is_available() or _is_hip():
+            return False
+        try:
+            major, _ = torch.cuda.get_device_capability()
+            if major < 10:
+                return False
+            from flash_attn.cute.flash_fwd_sm100_fp4 import FlashAttentionForwardSm100  # noqa: F401
+            # TVM-FFI must be enabled for CUTE tensors (FP4 quantized Q/K)
+            # to be passed through the cutlass-dsl compiled kernel.
+            os.environ.setdefault("CUTE_DSL_ENABLE_TVM_FFI", "1")
+            return True
+        except:
+            return False
+
     @staticmethod
     def _install_flash_attn_3_shim_for_transformer_engine() -> None:
         """TE imports ``flash_attn_3.flash_attn_interface``; wheels often expose only ``flash_attn_interface``."""

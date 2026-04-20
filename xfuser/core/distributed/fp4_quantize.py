@@ -43,9 +43,14 @@ def quantize_qk_to_fp4(
     """
     batch, seqlen, nheads, headdim = tensor.shape
 
+    # Pad seqlen so each batch element aligns independently
+    padded_seqlen = math.ceil(seqlen / 128) * 128
+    if padded_seqlen > seqlen:
+        tensor = torch.nn.functional.pad(tensor, (0, 0, 0, 0, 0, padded_seqlen - seqlen))
+
     global_sf = torch.ones(1, device=tensor.device, dtype=torch.float32)
     fp4_data, sf_data = nvfp4_quantize(
-        tensor.reshape(batch * seqlen, nheads * headdim),
+        tensor.reshape(batch * padded_seqlen, nheads * headdim),
         global_sf,
         sfLayout=SfLayout.layout_128x4,
         do_shuffle=False,
@@ -53,13 +58,16 @@ def quantize_qk_to_fp4(
 
     fp4 = (
         fp4_data
-        .reshape(batch, seqlen, nheads, headdim // 2)
+        .reshape(batch, padded_seqlen, nheads, headdim // 2)
         .view(torch.int8)
         .view(torch.float4_e2m1fn_x2)
     )
+    # Slice back to original seqlen for the kernel
+    if padded_seqlen > seqlen:
+        fp4 = fp4[:, :seqlen, ...].contiguous()
 
-    # nvfp4_quantize pads M to next multiple of 128 internally
-    rest_m = math.ceil(seqlen / 128)
+    # sf uses padded dimensions - rest_m is now exact division
+    rest_m = padded_seqlen // 128
     sf_kph = headdim // sf_vec_size
     rest_k = sf_kph // 4
     total_m = batch * rest_m

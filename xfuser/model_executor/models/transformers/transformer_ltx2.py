@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from diffusers.models.transformers.transformer_ltx2 import (
     LTX2VideoTransformer3DModel,
     apply_interleaved_rotary_emb,
@@ -214,6 +214,8 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         audio_encoder_hidden_states: torch.Tensor,
         timestep: torch.LongTensor,
         audio_timestep: Optional[torch.LongTensor] = None,
+        sigma: Optional[torch.Tensor] = None,
+        audio_sigma: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         audio_encoder_attention_mask: Optional[torch.Tensor] = None,
         num_frames: Optional[int] = None,
@@ -223,6 +225,10 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         audio_num_frames: Optional[int] = None,
         video_coords: Optional[torch.Tensor] = None,
         audio_coords: Optional[torch.Tensor] = None,
+        isolate_modalities: bool = False,
+        spatio_temporal_guidance_blocks: Optional[List[int]] = None,
+        perturbation_mask: Optional[torch.Tensor] = None,
+        use_cross_timestep: bool = False,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> torch.Tensor:
@@ -292,6 +298,9 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
     }
 
         """
+
+        # Newer diffusers passes sigma / STG / modality kwargs; accepted above for API compatibility.
+        # When all are omitted (older pipelines), behavior matches the pre-update path.
 
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()

@@ -124,8 +124,8 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8, AttentionBackendType.AITER_MLA]:
-            logger.warning("FP8 attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
+        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8, AttentionBackendType.FLASH_4_FP4, AttentionBackendType.AITER_MLA]:
+            logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
     def set_cross_attention_backend(self, cross_attention_backend: Optional[str | AttentionBackendType]):
@@ -204,6 +204,7 @@ class RuntimeState(metaclass=ABCMeta):
         if attention_backend in [AttentionBackendType.SDPA,
                                  AttentionBackendType.SDPA_MATH,
                                  AttentionBackendType.FLASH_4,
+                                 AttentionBackendType.FLASH_4_FP4,
                                  AttentionBackendType.AITER_FP8,
                                  AttentionBackendType.AITER_MLA,
                                  AttentionBackendType.AITER_SAGE,
@@ -236,6 +237,12 @@ class RuntimeState(metaclass=ABCMeta):
                 from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
             except ImportError:
                 raise RuntimeError("AITER Sage V2 attention is not available, please update AITER") from None
+        elif attention_backend == AttentionBackendType.FLASH_4_FP4:
+            if not env_info.get("has_flash_attn_4_fp4"):
+                raise RuntimeError(
+                    "Flash Attention V4 FP4 is not available. Requires Blackwell GPU (SM >= 10.0) "
+                    "and the hao-ai-lab/flash-attention-fp4 fork with nvidia-cutlass-dsl."
+                )
         elif attention_backend == AttentionBackendType.SAGE:
             if not env_info["has_sage"]:
                 raise RuntimeError("SageAttention is not available, please install SageAttention.")

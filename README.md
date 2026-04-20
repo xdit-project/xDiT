@@ -267,6 +267,7 @@ Several different attention backends are supported:
 | [FAv3 FP8](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3_fp8 |
 | [Transformer Engine FP8](https://github.com/NVIDIA/TransformerEngine) | nvte_fp8 |
 | [FAv4](https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute) | flash_4 |
+| [FAv4 FP4](https://github.com/hao-ai-lab/flash-attention-fp4) | flash_4_fp4 |
 | [SAGE](https://github.com/thu-ml/SageAttention) | sage |
 | [AITER](https://github.com/rocm/aiter) | aiter |
 | [AITER FP8](https://github.com/rocm/aiter) | aiter_fp8 |

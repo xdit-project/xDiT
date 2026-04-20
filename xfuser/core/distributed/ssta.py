@@ -145,8 +145,8 @@ def _importance_sampling(q, k, topk, threshold=0.0, similarity_weight=0.9):
     if threshold > 0.0:
         raise NotImplementedError("importance_sampling with threshold not implemented")
 
-    q = q / q.norm(dim=-1, keepdim=True)
-    k = k / k.norm(dim=-1, keepdim=True)
+    q = q / (q.norm(dim=-1, keepdim=True) + 1e-8)
+    k = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
     gate_similarity = torch.einsum("bhsd,bhkd->bhsk", q, k)
     gate_unique = torch.einsum("bhsd,bhkd->bhsk", k, k)
 
@@ -154,7 +154,8 @@ def _importance_sampling(q, k, topk, threshold=0.0, similarity_weight=0.9):
     mask = ~torch.eye(K_num, dtype=torch.bool, device=k.device)
     gate_unique_masked = gate_unique * mask[None, None, :, :]
 
-    mean_redundancy = torch.sum(gate_unique_masked, dim=-2, keepdim=True) / (K_num - 1)
+    divisor = torch.clamp(torch.tensor(K_num - 1, device=k.device), min=1)
+    mean_redundancy = torch.sum(gate_unique_masked, dim=-2, keepdim=True) / divisor
     redundancy_weight = 1.0 - similarity_weight
 
     importance_scores = similarity_weight * gate_similarity - redundancy_weight * mean_redundancy

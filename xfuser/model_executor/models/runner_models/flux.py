@@ -15,7 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
-    quantize_linear_layers_to_fp8
+    quantize_linear_layers_to_fp8,
 )
 from xfuser.core.distributed import (
     get_runtime_state,

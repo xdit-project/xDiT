@@ -12,13 +12,20 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.config import args, xFuserArgs
-from xfuser.envs import PACKAGES_CHECKER, get_platform, _TORCH_GROUPNORM
+from xfuser.envs import (
+    PACKAGES_CHECKER,
+    _TORCH_GROUPNORM,
+    get_platform,
+    _is_hip,
+    _is_cuda,
+)
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
     quantize_linear_layers_to_fp4,
+    quantize_linear_layers_to_nvfp4,
     convert_model_convs_to_channels_last,
     rgetattr,
 )
@@ -254,8 +261,15 @@ class xFuserModel(abc.ABC):
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
         if config.use_fp4_gemms:
-            if not packages_info.get("has_aiter", False):
-                raise ValueError("FP4 Gemms only supported with AITER.")
+            if _is_hip() and not packages_info.get("has_aiter", False):
+                raise ValueError("FP4 GEMMs on ROCm require AITER.")
+            if _is_cuda():
+                major, _ = torch.cuda.get_device_capability()
+                if major < 10:
+                    raise ValueError(
+                        f"NVFP4 GEMMs require CUDA capability >= 10.0 (Blackwell). "
+                        f"Detected: {torch.cuda.get_device_capability()}"
+                    )
         if config.use_parallel_vae:
             if not packages_info.get("has_distvae", False):
                 raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
@@ -473,7 +487,10 @@ class xFuserModel(abc.ABC):
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
 
         if self.config.use_fp4_gemms:
-            self._setup_mxfp4_gemms(local_rank=local_rank)
+            if _is_cuda():
+                self._setup_nvfp4_gemms(local_rank=local_rank)
+            else:
+                self._setup_mxfp4_gemms(local_rank=local_rank)
         elif self.config.use_fp8_gemms:
             for module_name in self.settings.fp8_gemm_module_list:
                 log(f"Quantizing linear layers in {module_name} to FP8...")
@@ -530,6 +547,24 @@ class xFuserModel(abc.ABC):
         # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
         # where the low-noise transformer should use FP8 quantization.
         # This transformer generates fine details and requires higher precision to maintain quality.
+        for module_name in self.settings.fp8_gemm_module_list:
+            if module_name in self.settings.fp4_gemm_module_list:
+                continue
+            log(f"Quantizing linear layers in {module_name} to FP8...")
+            module = rgetattr(self.pipe, module_name)
+            quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+
+    def _setup_nvfp4_gemms(self, local_rank):
+        for module_name in self.settings.fp4_gemm_module_list:
+            log(f"Quantizing linear layers in {module_name} to NVFP4 (torchao)...")
+            if self.settings.fp8_precision_overrides:
+                log(f"The following blocks will use FP8 instead, to maintain output quality: {self.settings.fp8_precision_overrides}")
+            module = rgetattr(self.pipe, module_name)
+            quantize_linear_layers_to_nvfp4(
+                module,
+                fp8_layers=self.settings.fp8_precision_overrides,
+                device=f"cuda:{local_rank}",
+            )
         for module_name in self.settings.fp8_gemm_module_list:
             if module_name in self.settings.fp4_gemm_module_list:
                 continue

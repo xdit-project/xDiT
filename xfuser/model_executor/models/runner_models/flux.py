@@ -15,7 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
-    quantize_linear_layers_to_fp8
+    quantize_linear_layers_to_fp8,
 )
 from xfuser.core.distributed import (
     get_runtime_state,
@@ -71,6 +71,14 @@ class xFuserFluxModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
+
+    def _compile_model(self, input_args: dict) -> None:
+        """ Compile the model using torch.compile."""
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="reduce-overhead") # Better perf for FLUX.1
+        # two steps to warmup the torch compiler
+        input_args["num_inference_steps"] = 2
+        self._run_timed_pipe(input_args)
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:

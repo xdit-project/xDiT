@@ -6,6 +6,7 @@ import functools
 import numpy as np
 from PIL.Image import Image
 from typing import Callable, Optional
+from xfuser.envs import _is_cuda
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def _get_fp8_kernel_preference():
     under torch.compile, so we force TORCH (_scaled_mm) on Blackwell+.
     """
     from torchao.quantization.quantize_.common import KernelPreference
-    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10:
+    if torch.cuda.is_available() and _is_cuda() and torch.cuda.get_device_capability()[0] >= 10:
         return KernelPreference.TORCH
     return KernelPreference.AUTO
 

@@ -209,7 +209,8 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_MLA,
                                  AttentionBackendType.AITER_SAGE,
                                  AttentionBackendType.AITER_SPARSE_SAGE,
-                                 AttentionBackendType.AITER_SAGE_V2]:
+                                 AttentionBackendType.AITER_SAGE_V2,
+                                 AttentionBackendType.AITER_SPARSE_SAGE_V2,]:
             if self.parallel_config.ring_degree > 1:
                 raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:

@@ -15,5 +15,5 @@ __all__ = [
     "xFuserConv2dWrapper",
     "xFuserPatchEmbedWrapper",
     "xFuserFeedForwardWrapper",
-    "xFuserMXFP4Linear"
+    "xFuserMXFP4Linear",
 ]

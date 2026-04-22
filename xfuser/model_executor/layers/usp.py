@@ -1,7 +1,6 @@
 # This file implements USP with torch version >= '2.5.0'
 import torch
 import functools
-from torch.nn import functional as F
 
 import torch.distributed._functional_collectives as ft_c
 
@@ -211,6 +210,7 @@ def concat_joint_tensors_decorator(func):
         is_causal = kwargs.get("is_causal")
         dropout_p = kwargs.get("dropout_p")
         joint_attn_kwargs = kwargs.get("joint_attn_kwargs", None)
+        attention_kwargs = kwargs.get("attention_kwargs", None)
 
         if joint_attn_kwargs is not None:
             joint_strategy = joint_attn_kwargs.get("joint_strategy", None)
@@ -223,7 +223,7 @@ def concat_joint_tensors_decorator(func):
                 value = _concat_joint_tensor(value, joint_value, joint_strategy, dim=2)
             joint_attn_kwargs["step"] = step + 1 # In place increment step
 
-        return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal)
+        return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal, attention_kwargs=attention_kwargs)
     return wrapper
 
 def USP(
@@ -239,6 +239,7 @@ def USP(
         attn_layer=None,
         combine_qkv_a2a: bool | None = None,
         backend=None,
+        attention_kwargs: dict | None = None,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -249,7 +250,6 @@ def USP(
         combine_qkv_a2a = False
 
     attention_function = _get_attention_function(backend=backend)
-
 
     joint_attn_kwargs = None
     if joint_strategy:
@@ -276,16 +276,42 @@ def USP(
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
     if get_sequence_parallel_world_size() == 1: # No SP
-        out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+        out, _ = attention_function(query,
+                                    key,
+                                    value,
+                                    dropout_p=dropout_p,
+                                    is_causal=is_causal,
+                                    joint_attn_kwargs=joint_attn_kwargs,
+                                    attention_kwargs=attention_kwargs)
 
     elif get_ulysses_parallel_world_size() == 1: # Ring only
-        out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+        out = ring_attn(attention_function,
+                        query,
+                        key,
+                        value,
+                        dropout_p=dropout_p,
+                        is_causal=is_causal,
+                        joint_attn_kwargs=joint_attn_kwargs,
+                        attention_kwargs=attention_kwargs)
 
     else:
         if get_ring_parallel_world_size() == 1: # Ulysses only
-            out, _ = attention_function(query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+            out, _ = attention_function(query,
+                                        key,
+                                        value,
+                                        dropout_p=dropout_p,
+                                        is_causal=is_causal,
+                                        joint_attn_kwargs=joint_attn_kwargs,
+                                        attention_kwargs=attention_kwargs)
         else: # USP
-            out = ring_attn(attention_function, query, key, value, dropout_p=dropout_p, is_causal=is_causal, joint_attn_kwargs=joint_attn_kwargs)
+            out = ring_attn(attention_function,
+                            query,
+                            key,
+                            value,
+                            dropout_p=dropout_p,
+                            is_causal=is_causal,
+                            joint_attn_kwargs=joint_attn_kwargs,
+                            attention_kwargs=attention_kwargs)
         out = _ft_c_output_all_to_all(out)
 
     return out

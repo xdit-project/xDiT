@@ -271,11 +271,27 @@ Several different attention backends are supported:
 | [SAGE](https://github.com/thu-ml/SageAttention) | sage |
 | [AITER](https://github.com/rocm/aiter) | aiter |
 | [AITER FP8](https://github.com/rocm/aiter) | aiter_fp8 |
+| [AITER Sage](https://github.com/rocm/aiter) | aiter_sage |
+| [AITER Sage V2](https://github.com/rocm/aiter) | aiter_sage_v2 |
+| [AITER Sparse Sage](https://github.com/rocm/aiter) | aiter_sparse_sage |
+| [AITER Sparse Sage V2](https://github.com/rocm/aiter) | aiter_sparse_sage_v2 |
 | [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
 
 xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
+
+Pure FP8 attention can introduce visual artifacts in the output video. To mitigate this, xDiT supports hybrid attention, which runs the first and last N diffusion steps with a high-precision backend and the remaining steps with a low-precision one. Enable it with the following flags:
+
+Flag	Description
+`--use_hybrid_attn_schedule`	Enable the hybrid attention scheduler
+`--hybrid_attn_high_precision_backend`	Backend for the first/last N steps (e.g. aiter)
+`--hybrid_attn_low_precision_backend`	Backend for the remaining steps (e.g. aiter_fp8)
+`--num_hybrid_attn_high_precision_steps`	Number of steps N at the start and end that use high precision
+
+AITER now supports Sage (FP8) and Sage v2 (MXFP4, GFX950 only) for improved quality when doing quantized attention. Sage v2 is still recommended to be combined with hybrid attention, using either AITER Sage or just AITER as the high precision backend.
+
+There is also experimental support for Sparse Sage attention backends, currently only working for Hunyuan1.5-Sparse (Distilled model). Running Sparse Sage on multi-gpu can be affected by load imbalance, costing performance. To mitigate this, `--use_ssta_sparse_text_to_image` makes the text-to-image attention path sparse (using MOBA top-k sampling) instead of dense, reducing the computational cost of text tokens attending to image blocks. NOTE: This will change the output video, and needs to be further tested to see whether or not this regresses quality or not.
 
 
 

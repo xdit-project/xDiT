@@ -8,7 +8,7 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
-from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.usp import USP, attention
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -28,6 +28,12 @@ class xFuserZSingleStreamAttnProcessor:
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
     original Z-ImageAttention module.
     """
+
+    def __init__(self, use_ulysses_parallel_attention: bool = True):
+        if use_ulysses_parallel_attention:
+            self.attention_function = USP
+        else:
+            self.attention_function = attention
 
     @staticmethod
     def _pad_heads(x: torch.Tensor, pad_heads: int) -> torch.Tensor:
@@ -94,7 +100,7 @@ class xFuserZSingleStreamAttnProcessor:
                 value = self._pad_heads(value, pad_heads)
 
         # Compute joint attention
-        hidden_states = USP(
+        hidden_states = self.attention_function(
             query,
             key,
             value,
@@ -129,6 +135,8 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         )
         for layer in self.layers:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
+        for layer in self.context_refiner + self.noise_refiner:
+            layer.attention.processor = xFuserZSingleStreamAttnProcessor(use_ulysses_parallel_attention=False)
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

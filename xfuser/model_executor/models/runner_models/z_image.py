@@ -12,6 +12,13 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 
 
+def _normalize_prompt(prompt_input):
+    if isinstance(prompt_input, str):
+        return [prompt_input]
+    if isinstance(prompt_input, list):
+        return prompt_input
+    raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
+
 
 def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
     """Expose a Ulysses-divisible head count for runtime validation.
@@ -69,7 +76,7 @@ class xFuserZImageModel(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        prompt = list(input_args["prompt"]) if isinstance(input_args["prompt"], list) else prompt
+        prompt = _normalize_prompt(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -112,7 +119,7 @@ class xFuserZImageTurboModel(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        prompt = list(input_args["prompt"])
+        prompt = _normalize_prompt(input_args["prompt"])
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],

@@ -16,7 +16,7 @@ def _normalize_prompt(prompt_input):
     if isinstance(prompt_input, str):
         return [prompt_input]
     if isinstance(prompt_input, list):
-        return prompt_input
+        return list(prompt_input) # Recreates the list to avoid issues with in-place editing
     raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
 
 

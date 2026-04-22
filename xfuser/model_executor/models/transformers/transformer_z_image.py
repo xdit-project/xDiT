@@ -13,6 +13,7 @@ from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
+    get_ulysses_parallel_world_size,
     get_sp_group,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -27,6 +28,14 @@ class xFuserZSingleStreamAttnProcessor:
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
     original Z-ImageAttention module.
     """
+
+    @staticmethod
+    def _pad_heads(x: torch.Tensor, pad_heads: int) -> torch.Tensor:
+        if pad_heads <= 0:
+            return x
+        pad_shape = list(x.shape)
+        pad_shape[1] = pad_heads
+        return torch.cat([x, x.new_zeros(pad_shape)], dim=1)
 
     def __call__(
         self,
@@ -75,6 +84,15 @@ class xFuserZSingleStreamAttnProcessor:
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
+        ulysses_world_size = get_ulysses_parallel_world_size()
+        pad_heads = 0
+        if ulysses_world_size > 1:
+            pad_heads = (ulysses_world_size - (query.shape[1] % ulysses_world_size)) % ulysses_world_size
+            if pad_heads:
+                query = self._pad_heads(query, pad_heads)
+                key = self._pad_heads(key, pad_heads)
+                value = self._pad_heads(value, pad_heads)
+
         # Compute joint attention
         hidden_states = USP(
             query,
@@ -83,6 +101,9 @@ class xFuserZSingleStreamAttnProcessor:
             dropout_p=0.0,
             is_causal=False,
         )
+
+        if pad_heads:
+            hidden_states = hidden_states[:, :-pad_heads, :, :]
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)

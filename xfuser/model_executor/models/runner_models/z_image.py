@@ -11,6 +11,30 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
 )
 
+
+
+def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
+    """Expose a Ulysses-divisible head count for runtime validation.
+
+    Keep the real model head layout untouched (e.g., n_heads=30) and only set
+    config.num_attention_heads used by runtime pre-checks.
+    """
+    ulysses_degree = int(ulysses_degree or 1)
+    if ulysses_degree <= 1:
+        return
+
+    real_heads = getattr(transformer.config, "n_heads", None)
+    if not isinstance(real_heads, int):
+        real_heads = getattr(transformer.config, "num_attention_heads", None)
+    if not isinstance(real_heads, int):
+        return
+
+    effective_heads = ((real_heads + ulysses_degree - 1) // ulysses_degree) * ulysses_degree
+    if effective_heads == real_heads:
+        return
+
+    transformer.config.num_attention_heads = effective_heads
+
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
 class xFuserZImageModel(xFuserModel):
@@ -36,6 +60,7 @@ class xFuserZImageModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
+        _set_effective_heads_for_ulysses(transformer, getattr(self.config, "ulysses_degree", 1))
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
@@ -78,6 +103,7 @@ class xFuserZImageTurboModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
+        _set_effective_heads_for_ulysses(transformer, getattr(self.config, "ulysses_degree", 1))
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,

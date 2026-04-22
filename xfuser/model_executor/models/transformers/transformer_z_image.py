@@ -136,7 +136,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         for layer in self.layers:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
         for layer in self.context_refiner + self.noise_refiner:
-            layer.attention.processor = xFuserZSingleStreamAttnProcessor(use_ulysses_parallel_attention=False)
+            layer.attention.processor = xFuserZSingleStreamAttnProcessor()
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
@@ -224,23 +224,20 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             x_attn_mask[i, :seq_len] = 1
 
         # SP support
-        # Leaving these here for posteriority - these would make the model slightly faster
-        # but causes slight numerical differences.
-
-        # pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
-        # x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        # x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        # x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
+        x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.noise_refiner:
-                x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
+                x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
         else:
             for layer in self.noise_refiner:
-                x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+                x = layer(x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
 
         # Gather SP outputs and remove padding
-        #x = self._gather_and_unpad(x, pad_amount, dim=-2)
+        x = self._gather_and_unpad(x, pad_amount, dim=-2)
 
         # cap embed & refine
         cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -264,22 +261,20 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
 
         # SP support
-        # Same as above comments about speed vs numerical differences apply here.
-
-        # pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
-        # cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        # cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        # cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
+        cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.context_refiner:
-                cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
+                cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
         else:
             for layer in self.context_refiner:
-                cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+                cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
 
         # Gather SP outputs and remove padding
-        # cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
+        cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
 
 
         # unified

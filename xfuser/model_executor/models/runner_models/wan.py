@@ -49,7 +49,9 @@ def _setup_parallel_vae(vae) -> None:
     try:
         from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
         patched_encoder = WanEncoderAdapter(
-            vae.encoder, vae_group=get_vae_parallel_group().device_group, vae_scale_factor=8,
+            vae.encoder,
+            vae_group=get_vae_parallel_group().device_group,
+            vae_scale_factor=get_runtime_state().vae_scale_factor_spatial,
         ).to(vae.device)
         vae.encoder = patched_encoder
     except ImportError:

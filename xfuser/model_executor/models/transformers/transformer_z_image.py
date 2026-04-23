@@ -13,6 +13,7 @@ from xfuser.model_executor.layers.usp import USP
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
+    get_ulysses_parallel_world_size,
     get_sp_group,
     get_classifier_free_guidance_world_size,
     get_classifier_free_guidance_rank,
@@ -27,6 +28,14 @@ class xFuserZSingleStreamAttnProcessor:
     Processor for Z-Image single stream attention that adapts the existing Attention class to match the behavior of the
     original Z-ImageAttention module.
     """
+
+    @staticmethod
+    def _pad_heads(x: torch.Tensor, pad_heads: int) -> torch.Tensor:
+        if pad_heads <= 0:
+            return x
+        pad_shape = list(x.shape)
+        pad_shape[1] = pad_heads
+        return torch.cat([x, x.new_zeros(pad_shape)], dim=1)
 
     def __call__(
         self,
@@ -75,6 +84,15 @@ class xFuserZSingleStreamAttnProcessor:
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
+        ulysses_world_size = get_ulysses_parallel_world_size()
+        pad_heads = 0
+        if ulysses_world_size > 1:
+            pad_heads = (ulysses_world_size - (query.shape[1] % ulysses_world_size)) % ulysses_world_size
+            if pad_heads:
+                query = self._pad_heads(query, pad_heads)
+                key = self._pad_heads(key, pad_heads)
+                value = self._pad_heads(value, pad_heads)
+
         # Compute joint attention
         hidden_states = USP(
             query,
@@ -83,6 +101,9 @@ class xFuserZSingleStreamAttnProcessor:
             dropout_p=0.0,
             is_causal=False,
         )
+
+        if pad_heads:
+            hidden_states = hidden_states[:, :-pad_heads, :, :]
 
         # Transpose back to original shape
         hidden_states = hidden_states.transpose(1, 2)
@@ -106,7 +127,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         super().__init__(
             **kwargs
         )
-        for layer in self.layers:
+        for layer in self.layers + self.context_refiner + self.noise_refiner:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
 
 
@@ -195,23 +216,20 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
             x_attn_mask[i, :seq_len] = 1
 
         # SP support
-        # Leaving these here for posteriority - these would make the model slightly faster
-        # but causes slight numerical differences.
-
-        # pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
-        # x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        # x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        # x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        pad_amount = (sp_world_size - (x.shape[1] % sp_world_size)) % sp_world_size
+        x = self._chunk_and_pad_sequence(x, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        x_attn_mask = self._chunk_and_pad_sequence(x_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        x_freqs_cis_chunked = self._chunk_and_pad_sequence(x_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.noise_refiner:
-                x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis, adaln_input)
+                x = self._gradient_checkpointing_func(layer, x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
         else:
             for layer in self.noise_refiner:
-                x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+                x = layer(x, x_attn_mask, x_freqs_cis_chunked, adaln_input)
 
         # Gather SP outputs and remove padding
-        #x = self._gather_and_unpad(x, pad_amount, dim=-2)
+        x = self._gather_and_unpad(x, pad_amount, dim=-2)
 
         # cap embed & refine
         cap_item_seqlens = [len(_) for _ in cap_feats]
@@ -235,22 +253,20 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
 
         # SP support
-        # Same as above comments about speed vs numerical differences apply here.
-
-        # pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
-        # cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
-        # cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
-        # cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        pad_amount = (sp_world_size - (cap_feats.shape[1] % sp_world_size)) % sp_world_size
+        cap_feats = self._chunk_and_pad_sequence(cap_feats, sp_world_rank, sp_world_size, pad_amount, dim=-2)
+        cap_attn_mask = self._chunk_and_pad_sequence(cap_attn_mask, sp_world_rank, sp_world_size, pad_amount, dim=-1)
+        cap_freqs_cis_chunked = self._chunk_and_pad_sequence(cap_freqs_cis, sp_world_rank, sp_world_size, pad_amount, dim=-2)
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             for layer in self.context_refiner:
-                cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis)
+                cap_feats = self._gradient_checkpointing_func(layer, cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
         else:
             for layer in self.context_refiner:
-                cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+                cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis_chunked)
 
         # Gather SP outputs and remove padding
-        # cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
+        cap_feats = self._gather_and_unpad(cap_feats, pad_amount, dim=-2)
 
 
         # unified

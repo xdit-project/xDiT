@@ -512,7 +512,10 @@ class DiTRuntimeState(RuntimeState):
             )
 
     def _get_model_attention_heads(self, pipeline: DiffusionPipeline) -> int:
-        if "num_attention_heads" in pipeline.transformer.config:
+        # Allows models to override their number of attention heads, for Ulysses Anything
+        if hasattr(pipeline.transformer.config, "num_attention_heads"):
+            return pipeline.transformer.config.num_attention_heads
+        elif "num_attention_heads" in pipeline.transformer.config:
             return pipeline.transformer.config.num_attention_heads
         elif "n_heads" in pipeline.transformer.config:
             return pipeline.transformer.config.n_heads

@@ -67,7 +67,7 @@ class xFuserZImageModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-        _set_effective_heads_for_ulysses(transformer, getattr(self.config, "ulysses_degree", 1))
+        _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
@@ -110,7 +110,7 @@ class xFuserZImageTurboModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
-        _set_effective_heads_for_ulysses(transformer, getattr(self.config, "ulysses_degree", 1))
+        _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,

@@ -236,16 +236,21 @@ class xFuserModel(abc.ABC):
         
         sparse_attention_backend_types = [AttentionBackendType.AITER_SPARSE_SAGE,
                                         AttentionBackendType.AITER_SPARSE_SAGE_V2]
-        if AttentionBackendType[config.attention_backend.upper()] in sparse_attention_backend_types and \
-            not self.capabilities.supports_sparse_attention_backends:
-            raise ValueError(f"Model {config.model} does not support sparse attention backends.")
-        elif self.capabilities.supports_sparse_attention_backends and AttentionBackendType[config.attention_backend.upper()] not in sparse_attention_backend_types:
-            raise ValueError(
-                f"Model {config.model} supports sparse attention backends, but attention backend "
-                f"'{config.attention_backend}' was specified. This is not an error per se, but you "
-                f"should use a sparse attention backend to take advantage of the model's capabilities. "
-                f"If you want to use a dense attention backend, you should use the dense model equivalent."
-            )
+        if config.attention_backend is None:
+            if self.capabilities.supports_sparse_attention_backends:
+                raise ValueError(f"Model {config.model} supports sparse attention backends, but no attention backend was specified. Please specify a sparse attention backend to take advantage of the model's capabilities."
+                                 f"If you want to use a dense attention backend, you should use the dense model equivalent.")
+        else:
+            if AttentionBackendType[config.attention_backend.upper()] in sparse_attention_backend_types and \
+                not self.capabilities.supports_sparse_attention_backends:
+                raise ValueError(f"Model {config.model} does not support sparse attention backends.")
+            elif self.capabilities.supports_sparse_attention_backends and AttentionBackendType[config.attention_backend.upper()] not in sparse_attention_backend_types:
+                raise ValueError(
+                    f"Model {config.model} supports sparse attention backends, but attention backend "
+                    f"'{config.attention_backend}' was specified. This is not an error per se, but you "
+                    f"should use a sparse attention backend to take advantage of the model's capabilities. "
+                    f"If you want to use a dense attention backend, you should use the dense model equivalent."
+                )
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:

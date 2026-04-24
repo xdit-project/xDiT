@@ -634,7 +634,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER_MLA)
-def _aiter_mla_attn_call(query, key, value, dropout_p, is_causal):
+def _aiter_mla_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """Entry point for AITER MLA prefill backend. Thin wrapper around _run_mla_bshd."""
     if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
         raise ValueError("AITER MLA expects query, key, and value tensors in BHSD layout.")

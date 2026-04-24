@@ -50,7 +50,6 @@ class xFuserLTX2PerturbedAttnProcessor:
         batch_size, sequence_length, _ = (
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
-        # ------------------------------------------------------------ Same
         if self.gather_kv:
             encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
@@ -65,7 +64,6 @@ class xFuserLTX2PerturbedAttnProcessor:
 
         if attn.to_gate_logits is not None:
             gate_logits = attn.to_gate_logits(hidden_states)
-        # ------------------------------------------------------------
         value = attn.to_v(encoder_hidden_states)
         if all_perturbed is None:
             all_perturbed = torch.all(perturbation_mask == 0) if perturbation_mask is not None else False
@@ -74,7 +72,6 @@ class xFuserLTX2PerturbedAttnProcessor:
             # Skip attention, use the value projection value
             hidden_states = value
         else:
-            # ------------------------------------------------------------ Same except gated in branch
             query = attn.to_q(hidden_states)
             key = attn.to_k(encoder_hidden_states)
 
@@ -90,9 +87,7 @@ class xFuserLTX2PerturbedAttnProcessor:
                 elif attn.rope_type == "split":
                     query = apply_split_rotary_emb(query, query_rotary_emb)
                     key = apply_split_rotary_emb(key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb)
-            # ------------------------------------------------------------
 
-            # ------------------------------------------------------------ Same
             query = query.unflatten(2, (attn.heads, -1)).transpose(1, 2)
             key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
             value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
@@ -106,13 +101,11 @@ class xFuserLTX2PerturbedAttnProcessor:
             )
             hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
             hidden_states = hidden_states.to(query.dtype)
-            # ------------------------------------------------------------
 
             if perturbation_mask is not None:
                 value = value.flatten(2, 3)
                 hidden_states = torch.lerp(value, hidden_states, perturbation_mask)           
 
-        # ------------------------------------------------------------ Same
         if attn.to_gate_logits is not None:
             hidden_states = hidden_states.unflatten(2, (attn.heads, -1))
             gates = 2.0 * torch.sigmoid(gate_logits)
@@ -122,7 +115,6 @@ class xFuserLTX2PerturbedAttnProcessor:
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         return hidden_states
-        # ------------------------------------------------------------
 
 
 class xFuserLTX2AudioVideoAttnProcessor:

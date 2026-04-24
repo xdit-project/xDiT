@@ -529,7 +529,7 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal, attention_kwargs
 
 @register_attention_function(AttentionBackendType.FLASH_4_FP4)
 @torch.compiler.disable
-def _flash_attn_4_fp4_call(query, key, value, dropout_p, is_causal):
+def _flash_attn_4_fp4_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
     Flash Attention V4 with runtime FP4 quantization of Q and K.
 
@@ -634,7 +634,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER_MLA)
-def _aiter_mla_attn_call(query, key, value, dropout_p, is_causal):
+def _aiter_mla_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """Entry point for AITER MLA prefill backend. Thin wrapper around _run_mla_bshd."""
     if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
         raise ValueError("AITER MLA expects query, key, and value tensors in BHSD layout.")
@@ -823,7 +823,7 @@ def _get_cached_te_fp8_dot_product_attention(
     ).to(torch.device("cuda", device_index)).eval()
 
 @register_attention_function(AttentionBackendType.NVTE_FP8)
-def _nvte_fp8_flash_attn_call(query, key, value, dropout_p, is_causal):
+def _nvte_fp8_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     query = query.permute(0, 2, 1, 3).contiguous()
     key = key.permute(0, 2, 1, 3).contiguous()
     value = value.permute(0, 2, 1, 3).contiguous()

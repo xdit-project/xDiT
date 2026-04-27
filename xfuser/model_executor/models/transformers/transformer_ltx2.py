@@ -103,8 +103,8 @@ class xFuserLTX2PerturbedAttnProcessor:
             hidden_states = hidden_states.to(query.dtype)
 
             if perturbation_mask is not None:
-                value = value.flatten(2, 3)
-                hidden_states = torch.lerp(value, hidden_states, perturbation_mask)           
+                value = value.transpose(1, 2).flatten(2, 3)
+                hidden_states = torch.lerp(value, hidden_states, perturbation_mask)
 
         if attn.to_gate_logits is not None:
             hidden_states = hidden_states.unflatten(2, (attn.heads, -1))

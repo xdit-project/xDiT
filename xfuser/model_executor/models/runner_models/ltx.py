@@ -58,6 +58,15 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
     )
 
+    _STG_SCALE = 1.0
+    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS = [28]
+    _MODALITY_SCALE = 3.0
+    _GUIDANCE_RESCALE = 0.7
+    _AUDIO_GUIDANCE_SCALE = 7.0
+    _AUDIO_STG_SCALE = 1.0
+    _AUDIO_MODALITY_SCALE = 3.0
+    _AUDIO_GUIDANCE_RESCALE = 0.7
+
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
@@ -116,14 +125,14 @@ class xFuserLTX23VideoModel(xFuserModel):
             frame_rate=self.settings.fps,
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            stg_scale=input_args.get("stg_scale", 1.0),
-            spatio_temporal_guidance_blocks=input_args.get("spatio_temporal_guidance_blocks", [28]),
-            modality_scale=input_args.get("modality_scale", 3.0),
-            guidance_rescale=input_args.get("guidance_rescale", 0.7),
-            audio_guidance_scale=input_args.get("audio_guidance_scale", 7.0),
-            audio_stg_scale=input_args.get("audio_stg_scale", 1.0),
-            audio_modality_scale=input_args.get("audio_modality_scale", 3.0),
-            audio_guidance_rescale=input_args.get("audio_guidance_rescale", 0.7),
+            stg_scale=self._STG_SCALE,
+            spatio_temporal_guidance_blocks=self._SPATIO_TEMPORAL_GUIDANCE_BLOCKS,
+            modality_scale=self._MODALITY_SCALE,
+            guidance_rescale=self._GUIDANCE_RESCALE,
+            audio_guidance_scale=self._AUDIO_GUIDANCE_SCALE,
+            audio_stg_scale=self._AUDIO_STG_SCALE,
+            audio_modality_scale=self._AUDIO_MODALITY_SCALE,
+            audio_guidance_rescale=self._AUDIO_GUIDANCE_RESCALE,
             use_cross_timestep=True,
             generator=generator,
             output_type="latent",

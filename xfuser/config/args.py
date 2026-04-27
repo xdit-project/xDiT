@@ -548,6 +548,55 @@ class xFuserArgs:
             help="Flow shift for the scheduler.",
         )
         parser.add_argument(
+            "--stg_scale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Spatio-temporal guidance scale (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--spatio_temporal_guidance_blocks",
+            type=int,
+            nargs="*",
+            default=argparse.SUPPRESS,
+            help="Transformer block indices used for spatio-temporal guidance (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--modality_scale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Cross-modality guidance scale (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--guidance_rescale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Classifier-free guidance rescale (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--audio_guidance_scale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Audio classifier-free guidance scale (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--audio_stg_scale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Audio spatio-temporal guidance scale (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--audio_modality_scale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Audio cross-modality guidance scale (LTX-2.3).",
+        )
+        parser.add_argument(
+            "--audio_guidance_rescale",
+            type=float,
+            default=argparse.SUPPRESS,
+            help="Audio classifier-free guidance rescale (LTX-2.3).",
+        )
+        parser.add_argument(
             "--enable_sequential_cpu_offload",
             action="store_true",
             help="Offloading the weights to the CPU.",

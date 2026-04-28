@@ -21,6 +21,7 @@ from xfuser.envs import (
 )
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
+    configure_inductor_comm_overlap,
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
@@ -286,7 +287,7 @@ class xFuserModel(abc.ABC):
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile."""
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default") # TODO: Configurable
         # two steps to warmup the torch compiler
         input_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic

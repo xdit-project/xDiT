@@ -18,6 +18,29 @@ def log(message: str, debug=False, log_from_all_processes: bool = False) -> None
         else:
             logger.info(message)
 
+def configure_inductor_comm_overlap() -> None:
+    """Enable Inductor compute/communication overlap.
+
+    PyTorch 2.10 emptied the default value of
+    ``torch._inductor.config.reorder_for_compute_comm_overlap_passes`` (it
+    used to be ``["reorder_compute_for_overlap", "sink_waits", "raise_comms"]``
+    on 2.9). With the list empty, even though
+    ``reorder_for_compute_comm_overlap`` is on, no scheduler-IR reorder
+    runs and bucketed collectives stay issued in source order, so the
+    runtime never gets a chance to overlap them with compute.
+
+    Restoring the 2.9 default list here is a no-op on torch <= 2.9
+    (the value is already that list) and recovers the 2.9 overlap
+    behavior on torch >= 2.10.
+    """
+    torch._inductor.config.reorder_for_compute_comm_overlap = True
+    torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+        "reorder_compute_for_overlap",
+        "sink_waits",
+        "raise_comms",
+    ]
+
+
 def is_last_process() -> bool:
     """
     Checks based on env rank and world size if this is last process in

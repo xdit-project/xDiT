@@ -21,6 +21,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
+    configure_inductor_comm_overlap,
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
 )
@@ -82,7 +83,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer.compile()
 
         compile_args = copy.deepcopy(input_args)
@@ -180,7 +181,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
 
         # two steps to warmup the torch compiler

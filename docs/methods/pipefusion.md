@@ -39,13 +39,12 @@ We have evaluated the accuracy of PipeFusion, DistriFusion and the baseline as s
 For more details, please refer to the following paper.
 
 ```
-@article{wang2024pipefusion,
-      title={PipeFusion: Displaced Patch Pipeline Parallelism for Inference of Diffusion Transformer Models}, 
-      author={Jiannan Wang and Jiarui Fang and Jinzhe Pan and Aoyu Li and PengCheng Yang},
-      year={2024},
-      eprint={2405.07719},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
+@inproceedings{
+    fang2025pipefusion,
+    title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference},
+    author={Jiarui Fang and Jinzhe Pan and Aoyu Li and Xibo Sun and WANG Jiannan},
+    booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+    year={2025},
+    url={https://openreview.net/forum?id=5xwyxupsLL}
 }
 ```
-

@@ -79,6 +79,7 @@ class ModelCapabilities:
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
+    supports_sparge_attention_backend: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -236,6 +237,8 @@ class xFuserModel(abc.ABC):
         
         sparse_attention_backend_types = [AttentionBackendType.AITER_SPARSE_SAGE,
                                         AttentionBackendType.AITER_SPARSE_SAGE_V2]
+        sparge_attention_backend_types = [AttentionBackendType.AITER_SPARGE,
+                                          AttentionBackendType.AITER_SPARGE_V2]
         if config.attention_backend is None:
             if self.capabilities.supports_sparse_attention_backends:
                 raise ValueError(f"Model {config.model} supports sparse attention backends, but no attention backend was specified. Please specify a sparse attention backend to take advantage of the model's capabilities."
@@ -251,6 +254,12 @@ class xFuserModel(abc.ABC):
                     f"should use a sparse attention backend to take advantage of the model's capabilities. "
                     f"If you want to use a dense attention backend, you should use the dense model equivalent."
                 )
+            elif AttentionBackendType[config.attention_backend.upper()] in sparge_attention_backend_types:
+                if not self.capabilities.supports_sparge_attention_backend:
+                    raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
+                if self.capabilities.cross_attention_backend:
+                    if config.cross_attention_backend is None or AttentionBackendType[config.cross_attention_backend.upper()] in sparge_attention_backend_types:
+                        raise ValueError(f"When Sparge Attention is used, cross attention backend cannot be Sparge.")
 
         possible_task = getattr(config, "task", None)
         if possible_task and self.settings.valid_tasks:

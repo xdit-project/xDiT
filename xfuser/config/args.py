@@ -153,7 +153,11 @@ class xFuserArgs:
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
     # SSTA arguments
     use_ssta_sparse_text_to_image: Optional[bool] = False
-
+    # Sparge attention
+    spargeattn_reorder_sequence: bool = True
+    spargeattn_use_static_block_mask: bool = False
+    spargeattn_simthreshold: float = 0.5
+    spargeattn_cdfthreshold: float = 0.98
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -702,6 +706,33 @@ class xFuserArgs:
             default=False,
             help="Use sparse attention for text-to-image attention path in SSTA.",
         )
+        parser.add_argument(
+            "--spargeattn_simthreshold",
+            type=float,
+            default=0.5,
+            help="Similarity threshold for sparge attention.",
+        )
+        parser.add_argument(
+            "--spargeattn_cdfthreshold",
+            type=float,
+            default=0.98,
+            help="CDF threshold for sparge attention.",
+        )
+        parser.add_argument(
+            "--spargeattn_reorder_sequence",
+            action="store_true",
+            default=True,
+            help="Reorder image tokens via the gilbert space-filling curve "
+                 "before Sparge attention."
+        )
+        parser.add_argument(
+            "--spargeattn_use_static_block_mask",
+            action="store_true",
+            default=False,
+            help="OR a static gilbert block-neighbor mask into the dynamic "
+                 "Sparge block mask. Only meaningful when "
+                 "--spargeattn_reorder_sequence is set."
+        )
         return parser
 
 
@@ -718,7 +749,6 @@ class xFuserArgs:
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         engine_args = cls(**{arg_name: arg_value for arg_name, arg_value in args.items() if arg_name in attrs})
         return engine_args
-
 
 
     def create_config(
@@ -775,6 +805,10 @@ class xFuserArgs:
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
             cross_attention_backend=self.cross_attention_backend,
+            spargeattn_reorder_sequence=self.spargeattn_reorder_sequence,
+            spargeattn_use_static_block_mask=self.spargeattn_use_static_block_mask,
+            spargeattn_simthreshold=self.spargeattn_simthreshold,
+            spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
         )
 
         parallel_config = ParallelConfig(

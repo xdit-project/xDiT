@@ -28,13 +28,22 @@ HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 @xFuserAttentionProcessorRegister.register(WanAttnProcessor)
 class xFuserWanAttnProcessor(WanAttnProcessor):
 
-    def __init__(self, use_ulysses_parallel_attention: bool = True, is_cross_attention: bool = False) -> None:
+    def __init__(
+        self,
+        use_ulysses_parallel_attention: bool = True,
+        is_cross_attention: bool = False,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
         super().__init__()
         if use_ulysses_parallel_attention:
             self.attention_function = USP
         else:
             self.attention_function = attention
         self.is_cross_attention = is_cross_attention
+        # attention_kwargs is the shared, mutable dict used by sparse backends
+        # (SSTA / sparge) to receive layout info like `thw`. Cross-attention and
+        # the I2V image-context sub-call below are dense, so they don't read it.
+        self.attention_kwargs = attention_kwargs
 
     def _get_qkv_projections(self, attn: "WanAttention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor):
         # encoder_hidden_states is only passed for cross-attention
@@ -126,7 +135,13 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             hidden_states_img = hidden_states_img.type_as(query)
 
 
-        hidden_states = self.attention_function(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2), backend=backend).transpose(1, 2)
+        hidden_states = self.attention_function(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            backend=backend,
+            attention_kwargs=self.attention_kwargs,
+        ).transpose(1, 2)
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
@@ -160,6 +175,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         added_kv_proj_dim: Optional[int] = None,
         rope_max_seq_len: int = 1024,
         pos_embed_seq_len: Optional[int] = None,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(
            patch_size,
@@ -179,8 +195,9 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
            rope_max_seq_len,
            pos_embed_seq_len,
         )
+        self.attention_kwargs = attention_kwargs
         for block in self.blocks:
-            block.attn1.processor = xFuserWanAttnProcessor()
+            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
 
 
@@ -234,6 +251,12 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
+        if self.attention_kwargs is not None:
+            self.attention_kwargs["thw"] = (
+                post_patch_num_frames,
+                post_patch_height,
+                post_patch_width,
+            )
 
         # 1. RoPE
         rotary_emb = self.rope(hidden_states)

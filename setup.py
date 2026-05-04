@@ -37,6 +37,8 @@ if __name__ == "__main__":
             "diffusers>=0.33.0",
             "av", # For LTX-2 model
             "peft", # For LTX-2 LoRA
+            "numba",
+            "numpy",
         ],
         extras_require={
             "flash-attn": [

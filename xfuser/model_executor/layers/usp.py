@@ -325,6 +325,7 @@ def attention(
         dropout_p: float = 0.0,
         is_causal: bool = False,
         backend=None,
+        attention_kwargs=None,
     ):
     """
     Runs attention call without any parallelism.
@@ -338,6 +339,7 @@ def attention(
         value,
         dropout_p=dropout_p,
         is_causal=is_causal,
+        attention_kwargs=attention_kwargs,
     )
     return out
 

@@ -244,21 +244,26 @@ class xFuserModel(abc.ABC):
                 raise ValueError(f"Model {config.model} supports sparse attention backends, but no attention backend was specified. Please specify a sparse attention backend to take advantage of the model's capabilities."
                                  f"If you want to use a dense attention backend, you should use the dense model equivalent.")
         else:
-            if AttentionBackendType[config.attention_backend.upper()] in sparse_attention_backend_types and \
+            try:
+                attention_backend = AttentionBackendType[config.attention_backend.upper()]
+                cross_attention_backend = AttentionBackendType[config.cross_attention_backend.upper()]
+            except KeyError:
+                raise ValueError(f"Invalid attention backend: {config.attention_backend} or {config.cross_attention_backend}")
+            if attention_backend in sparse_attention_backend_types and \
                 not self.capabilities.supports_sparse_attention_backends:
                 raise ValueError(f"Model {config.model} does not support sparse attention backends.")
-            elif self.capabilities.supports_sparse_attention_backends and AttentionBackendType[config.attention_backend.upper()] not in sparse_attention_backend_types:
+            elif self.capabilities.supports_sparse_attention_backends and attention_backend not in sparse_attention_backend_types:
                 raise ValueError(
                     f"Model {config.model} supports sparse attention backends, but attention backend "
                     f"'{config.attention_backend}' was specified. This is not an error per se, but you "
                     f"should use a sparse attention backend to take advantage of the model's capabilities. "
                     f"If you want to use a dense attention backend, you should use the dense model equivalent."
                 )
-            elif AttentionBackendType[config.attention_backend.upper()] in sparge_attention_backend_types:
+            elif attention_backend in sparge_attention_backend_types:
                 if not self.capabilities.supports_sparge_attention_backend:
                     raise ValueError(f"Model {config.model} does not support Sparge attention backend.")
                 if self.capabilities.cross_attention_backend:
-                    if config.cross_attention_backend is None or AttentionBackendType[config.cross_attention_backend.upper()] in sparge_attention_backend_types:
+                    if config.cross_attention_backend is None or cross_attention_backend in sparge_attention_backend_types:
                         raise ValueError(f"When Sparge Attention is used, cross attention backend cannot be Sparge.")
 
         possible_task = getattr(config, "task", None)

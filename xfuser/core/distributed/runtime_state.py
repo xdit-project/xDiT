@@ -260,6 +260,12 @@ class RuntimeState(metaclass=ABCMeta):
                 assert inspect.signature(fav3_sage_wrapper_func).parameters.get("block_lut") is not None
             except (ImportError, AssertionError):
                 raise RuntimeError("AITER Sparge attention is not available, please update AITER") from None
+        elif attention_backend == AttentionBackendType.AITER_SPARGE_V2:
+            try:
+                from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
+                assert inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("block_lut") is not None
+            except (ImportError, AssertionError):
+                raise RuntimeError("AITER Sparge V2 attention is not available, please update AITER") from None
 
 
 class UnetRuntimeState(RuntimeState):

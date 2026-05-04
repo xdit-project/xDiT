@@ -720,10 +720,10 @@ class xFuserArgs:
         )
         parser.add_argument(
             "--spargeattn_reorder_sequence",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
             default=True,
             help="Reorder image tokens via the gilbert space-filling curve "
-                 "before Sparge attention."
+                 "before Sparge attention. Use --no-spargeattn_reorder_sequence to disable."
         )
         parser.add_argument(
             "--spargeattn_use_static_block_mask",

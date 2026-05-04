@@ -1,11 +1,9 @@
 import functools
-import time
 import torch
 import inspect
 import math
 import torch.nn.functional as F
 from enum import Enum
-from typing import Optional
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
 from xfuser.core.distributed.ssta import (
     setup_ssta,
@@ -858,8 +856,8 @@ def _nvte_fp8_flash_attn_call(query, key, value, dropout_p, is_causal, attention
 
 def _read_sparge_kwargs(attention_kwargs):
     attn_kwargs = attention_kwargs or {}
-    simthreshd1 = attn_kwargs.get("spargeattn_simthreshold",0.98)
-    cdfthreshd = attn_kwargs.get("spargeattn_cdfthreshold", 0.5)
+    simthreshd1 = attn_kwargs.get("spargeattn_simthreshold",0.5)
+    cdfthreshd = attn_kwargs.get("spargeattn_cdfthreshold", 0.98)
     return (
         simthreshd1,
         cdfthreshd,

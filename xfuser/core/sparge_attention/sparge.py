@@ -62,7 +62,7 @@ def get_gilbert_perm(thw: Tuple[int, int, int], device: torch.device
 
 def get_static_block_neighbor_mask(thw: Tuple[int, int, int],
                                    block_m: int, block_n: int,
-                                   device: torch.device) -> torch.Tensor:
+                                   device: torch.device, gilbert_mapping: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> torch.Tensor:
     key = (tuple(thw), int(block_m), int(block_n), _device_key(device))
     cached = _STATIC_BLOCK_MASK_CACHE.get(key)
     if cached is not None:
@@ -78,16 +78,13 @@ def get_static_block_neighbor_mask(thw: Tuple[int, int, int],
             "--no-spargeattn_use_static_block_mask."
         ) from e
     t, h, w = thw
-    mask_np = sliced_gilbert_block_neighbor_mapping(t, h, w, block_m, block_n)
+    mask_np = sliced_gilbert_block_neighbor_mapping(t, h, w, block_m, block_n, gilbert_mapping=gilbert_mapping)
     mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device)
     _STATIC_BLOCK_MASK_CACHE[key] = mask
     return mask
 
 
 # ── Ulysses de-/re-interleave ────────────────────────────────────────────────
-# After Ulysses input a2a the per-rank sequence is interleaved rank-chunks:
-#   [img_r0, txt_r0, img_r1, txt_r1, ..., img_{U-1}, txt_{U-1}]
-# Sparge expects [all_image, all_text]. De-interleave here.
 
 def _deinterleave(x: torch.Tensor, u: int, txt_len: int) -> torch.Tensor:
     b, h, s, d = x.shape
@@ -162,7 +159,7 @@ def setup_sparge(
             fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
         if use_static_block_mask:
             static_mask = get_static_block_neighbor_mask(
-                thw, block_m, block_n, query.device,
+                thw, block_m, block_n, query.device, gilbert_mapping=None
             )
 
     # 2) Split off image part (without SP padding) and text part.
@@ -259,6 +256,15 @@ def compute_sparge_block_mask(
     # All Q rows attend to text K cols, and all text Q rows attend to all K.
     full[:, :, :, -n_text_k:] = True
     full[:, :, -n_text_q:, :] = True
+    # --- treat the image/text boundary block (if there is one) as dense ---
+    image_len_q = q.shape[2] - text_len   # length of image portion in q
+    image_len_k = k.shape[2] - text_len   # length of image portion in k
+    if image_len_q % block_m != 0:
+        boundary_q = image_len_q // block_m   # last (partial) image block, contains text spillover
+        full[:, :, boundary_q, :] = True
+    if image_len_k % block_n != 0:
+        boundary_k = image_len_k // block_n
+        full[:, :, :, boundary_k] = True
     return full
 
 

@@ -856,8 +856,8 @@ def _nvte_fp8_flash_attn_call(query, key, value, dropout_p, is_causal, attention
 
 def _read_sparge_kwargs(attention_kwargs):
     attn_kwargs = attention_kwargs or {}
-    simthreshd1 = attn_kwargs.get("spargeattn_simthreshold",0.5)
-    cdfthreshd = attn_kwargs.get("spargeattn_cdfthreshold", 0.98)
+    simthreshd1 = attn_kwargs.get("spargeattn_simthreshold",0.3)
+    cdfthreshd = attn_kwargs.get("spargeattn_cdfthreshold", 0.92)
     return (
         simthreshd1,
         cdfthreshd,

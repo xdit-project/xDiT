@@ -156,8 +156,8 @@ class xFuserArgs:
     # Sparge attention
     spargeattn_reorder_sequence: bool = True
     spargeattn_use_static_block_mask: bool = False
-    spargeattn_simthreshold: float = 0.5
-    spargeattn_cdfthreshold: float = 0.98
+    spargeattn_simthreshold: float = 0.3
+    spargeattn_cdfthreshold: float = 0.92
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -709,13 +709,13 @@ class xFuserArgs:
         parser.add_argument(
             "--spargeattn_simthreshold",
             type=float,
-            default=0.5,
+            default=0.3,
             help="Similarity threshold for sparge attention.",
         )
         parser.add_argument(
             "--spargeattn_cdfthreshold",
             type=float,
-            default=0.98,
+            default=0.92,
             help="CDF threshold for sparge attention.",
         )
         parser.add_argument(
@@ -727,11 +727,11 @@ class xFuserArgs:
         )
         parser.add_argument(
             "--spargeattn_use_static_block_mask",
-            action="store_true",
-            default=False,
+            action=argparse.BooleanOptionalAction,
+            default=True,
             help="OR a static gilbert block-neighbor mask into the dynamic "
                  "Sparge block mask. Only meaningful when "
-                 "--spargeattn_reorder_sequence is set."
+                 "--spargeattn_reorder_sequence is set. Use --no-spargeattn_use_static_block_mask to disable."
         )
         return parser
 

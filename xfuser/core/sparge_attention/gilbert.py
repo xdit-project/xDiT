@@ -690,7 +690,8 @@ def _sliced_gilbert_block_neighbor_mapping(
                                 continue
                             neighbor_qb = block_color_map[nx, ny, nz, 0]
                             neighbor_kb = block_color_map[nx, ny, nz, 1]
-                            mask[neighbor_qb, neighbor_kb] = True
+                            mask[qb, neighbor_kb] = True       # current Q × neighbor K
+                            mask[neighbor_qb, kb] = True       # neighbor Q × current K
     return mask
 
 

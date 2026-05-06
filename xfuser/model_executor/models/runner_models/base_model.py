@@ -149,6 +149,7 @@ class ModelSettings:
     fp8_gemm_module_list: List[str] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
+    fp8_precision_override_match_mode: str = "prefix"
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
@@ -677,11 +678,16 @@ class xFuserModel(abc.ABC):
             # approach balances performance and output quality better than uniform quantization.
             log(f"Quantizing linear layers in {module_name} to FP4...")
             if self.settings.fp8_precision_overrides:
-                log(f"The following blocks will be quantized to FP8, to maintain output quality: {self.settings.fp8_precision_overrides}")
+                log(
+                    "The following blocks will be quantized to FP8, to maintain output quality: "
+                    f"{self.settings.fp8_precision_overrides} "
+                    f"(match_mode={self.settings.fp8_precision_override_match_mode})"
+                )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_fp4(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
+                fp8_layer_match_mode=self.settings.fp8_precision_override_match_mode,
                 use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                 device=f"cuda:{local_rank}",
             )
@@ -700,11 +706,16 @@ class xFuserModel(abc.ABC):
         for module_name in self.settings.fp4_gemm_module_list:
             log(f"Quantizing linear layers in {module_name} to NVFP4 (torchao)...")
             if self.settings.fp8_precision_overrides:
-                log(f"The following blocks will use FP8 instead, to maintain output quality: {self.settings.fp8_precision_overrides}")
+                log(
+                    "The following blocks will use FP8 instead, to maintain output quality: "
+                    f"{self.settings.fp8_precision_overrides} "
+                    f"(match_mode={self.settings.fp8_precision_override_match_mode})"
+                )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_nvfp4(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
+                fp8_layer_match_mode=self.settings.fp8_precision_override_match_mode,
                 device=f"cuda:{local_rank}",
             )
         for module_name in self.settings.fp8_gemm_module_list:

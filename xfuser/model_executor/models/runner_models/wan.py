@@ -360,6 +360,21 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
         self.settings.fp8_precision_overrides=None
+        self.settings.fp8_precision_override_match_mode="prefix"
+        if config.fp8_precision_override_patterns:
+            patterns = tuple(
+                pattern.strip()
+                for pattern in config.fp8_precision_override_patterns.split(",")
+                if pattern.strip()
+            )
+            if patterns:
+                self.settings.fp8_precision_overrides = patterns
+                self.settings.fp8_precision_override_match_mode = config.fp8_precision_override_mode
+                log(
+                    "Using custom FP8 override patterns for Wan2.2 T2V: "
+                    f"{self.settings.fp8_precision_overrides} "
+                    f"(match_mode={self.settings.fp8_precision_override_match_mode})"
+                )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

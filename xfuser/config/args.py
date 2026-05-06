@@ -126,6 +126,8 @@ class xFuserArgs:
     cross_attention_backend: Optional[str] = None
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
+    fp8_precision_override_mode: str = "prefix"
+    fp8_precision_override_patterns: Optional[str] = None
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
@@ -591,6 +593,19 @@ class xFuserArgs:
             help="Quantize the transformer linear layers (selected models only).",
         )
 
+        parser.add_argument(
+            "--fp8_precision_override_mode",
+            type=str,
+            default="prefix",
+            choices=["prefix", "suffix", "contains"],
+            help="Pattern match mode used for FP8 override selection when FP4 GEMMs are enabled.",
+        )
+        parser.add_argument(
+            "--fp8_precision_override_patterns",
+            type=nullable_str,
+            default=None,
+            help="Comma-delimited layer patterns to keep in FP8 while running FP4 GEMMs.",
+        )
         parser.add_argument(
             "--num_iterations",
             type=int,

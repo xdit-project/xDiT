@@ -155,7 +155,7 @@ class xFuserArgs:
     use_ssta_sparse_text_to_image: Optional[bool] = False
     # Sparge attention
     spargeattn_reorder_sequence: bool = True
-    spargeattn_use_static_block_mask: bool = False
+    use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
 
@@ -726,12 +726,12 @@ class xFuserArgs:
                  "before Sparge attention. Use --no-spargeattn_reorder_sequence to disable."
         )
         parser.add_argument(
-            "--spargeattn_use_static_block_mask",
+            "--use_spargeattn_static_block_mask",
             action=argparse.BooleanOptionalAction,
             default=True,
             help="OR a static gilbert block-neighbor mask into the dynamic "
                  "Sparge block mask. Only meaningful when "
-                 "--spargeattn_reorder_sequence is set. Use --no-spargeattn_use_static_block_mask to disable."
+                 "--spargeattn_reorder_sequence is set. Use --no-use_spargeattn_static_block_mask to disable."
         )
         return parser
 
@@ -806,7 +806,7 @@ class xFuserArgs:
             attention_backend=self.attention_backend,
             cross_attention_backend=self.cross_attention_backend,
             spargeattn_reorder_sequence=self.spargeattn_reorder_sequence,
-            spargeattn_use_static_block_mask=self.spargeattn_use_static_block_mask,
+            use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
         )

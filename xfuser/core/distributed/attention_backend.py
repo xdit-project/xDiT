@@ -861,17 +861,14 @@ def _read_sparge_kwargs(attention_kwargs):
     return (
         simthreshd1,
         cdfthreshd,
-        bool(attn_kwargs.get("spargeattn_reorder_sequence", False)),
-        bool(attn_kwargs.get("spargeattn_use_static_block_mask", False)),
+        bool(attn_kwargs.get("spargeattn_reorder_sequence", True)),
+        bool(attn_kwargs.get("use_spargeattn_static_block_mask", True)),
         attn_kwargs.get("thw"),
         int(attn_kwargs.get("encoder_sequence_length", 0)),
     )
 
-
-@register_attention_function(AttentionBackendType.AITER_SPARGE)
-def _aiter_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config):
     simthreshd1, cdfthreshd, reorder, use_static, thw, esl = _read_sparge_kwargs(attention_kwargs)
-    config = get_sage_fwd_configs()
     q, k, v, state, static_mask = setup_sparge(
         query, key, value,
         thw=thw,
@@ -889,7 +886,14 @@ def _aiter_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_k
         text_len=state.text_len,
         block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
     )
-    block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1])
+    num_heads = q.shape[1]
+    return q, k, v, state, block_mask, num_heads
+
+@register_attention_function(AttentionBackendType.AITER_SPARGE)
+def _aiter_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    config = get_sage_fwd_configs()
+    q, k, v, state, block_mask, num_heads = _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config)
+    block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=num_heads)
     output, softmax_lse = fav3_sage_wrapper_func(
         q, k, v, block_lut=block_lut, layout="bhsd", config=config, return_lse=True,
     )
@@ -898,29 +902,12 @@ def _aiter_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_k
 
 @register_attention_function(AttentionBackendType.AITER_SPARGE_V2)
 def _aiter_sparge_v2_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    simthreshd1, cdfthreshd, reorder, use_static, thw, esl = _read_sparge_kwargs(attention_kwargs)
     query = query.contiguous()
     key = key.contiguous()
     value = value.contiguous()
     config = get_sage_fwd_configs_mxfp4()
-    q, k, v, state, static_mask = setup_sparge(
-        query, key, value,
-        thw=thw,
-        sp_size=get_ulysses_parallel_world_size(),
-        encoder_sequence_length=esl,
-        reorder_sequence=reorder,
-        use_static_block_mask=use_static,
-        block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
-    )
-    block_mask = compute_sparge_block_mask(
-        q, k,
-        simthreshd1=simthreshd1, cdfthreshd=cdfthreshd,
-        is_causal=is_causal,
-        static_block_mask=static_mask,
-        text_len=state.text_len,
-        block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
-    )
-    block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1])
+    q, k, v, state, block_mask, num_heads = _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config)
+    block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=num_heads)
     output = fav3_sage_mxfp4_wrapper(
         q, k, v, causal=is_causal, block_lut=block_lut,
         layout="bhsd", hadamard_rotation=True,

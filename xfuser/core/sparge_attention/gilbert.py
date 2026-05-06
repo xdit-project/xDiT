@@ -2,11 +2,10 @@
 # Copyright (c) 2018 Jakub Červený
 # Copyright (c) 2024 abetusk
 
-from re import L
 import numpy
 from numba import njit
 import torch
-from typing import Optional, Tuple, List, Set
+from typing import Optional, Tuple, List
 
 
 

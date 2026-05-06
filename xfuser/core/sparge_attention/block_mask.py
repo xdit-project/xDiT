@@ -11,6 +11,9 @@
 #   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
+#
+#   This file has been modified from the upstream Apache-2.0 source at
+#   https://github.com/thu-ml/SpargeAttn (spas_sage_attn/utils.py).
 
 import torch
 import triton
@@ -19,18 +22,20 @@ import triton.language as tl
 
 # Module-level cache of broadcast threshold tensors keyed on a hashable
 # Python tuple (so torch.compile / dynamo can constant-fold the lookup
-# and bake the resulting tensor into the graph). NOT functools.lru_cache,
-# which has known guard issues under torch.compile.
+# and bake the resulting tensor into the graph).
 #
 # Key layout: (float_value, num_heads, device_type, device_index)
 #   - float_value is the scalar broadcast across all heads
 #   - num_heads is the target shape[0]
 #   - device_type / device_index distinguish per-GPU copies in multi-GPU runs
 _HYPER_TENSOR_CACHE: dict[tuple, torch.Tensor] = {}
+
+
 def _device_key(device: torch.device) -> tuple:
     # `torch.device` instances are not always hashable across versions; use
     # explicit (type, index) so the key is stable and dynamo-friendly.
     return (device.type, device.index if device.index is not None else -1)
+
 def hyperparameter_check(
     hyper: float | torch.Tensor, H: int, device: torch.device
 ) -> torch.Tensor:

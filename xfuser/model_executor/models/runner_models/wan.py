@@ -50,7 +50,7 @@ def _build_sparge_attention_kwargs(config: "xFuserArgs") -> dict:
         "spargeattn_simthreshold": config.spargeattn_simthreshold,
         "spargeattn_cdfthreshold": config.spargeattn_cdfthreshold,
         "spargeattn_reorder_sequence": config.spargeattn_reorder_sequence,
-        "spargeattn_use_static_block_mask": config.spargeattn_use_static_block_mask,
+        "use_spargeattn_static_block_mask": config.use_spargeattn_static_block_mask,
     }
 
 

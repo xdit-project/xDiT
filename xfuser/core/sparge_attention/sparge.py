@@ -75,7 +75,7 @@ def get_static_block_neighbor_mask(thw: Tuple[int, int, int],
         raise ImportError(
             "Sparge static block-neighbor mask requires `numba` and "
             "`numpy`. Install them or run with "
-            "--no-spargeattn_use_static_block_mask."
+            "--no-use_spargeattn_static_block_mask."
         ) from e
     t, h, w = thw
     mask_np = sliced_gilbert_block_neighbor_mapping(t, h, w, block_m, block_n, gilbert_mapping=gilbert_mapping)

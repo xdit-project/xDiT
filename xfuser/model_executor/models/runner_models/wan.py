@@ -43,25 +43,30 @@ COMMON_FSDP_STRATEGY = {
 }
 
 
-def _setup_parallel_vae(vae) -> None:
+def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
     """ Parallelizes VAE en-/decoder using distvae """
     # Handle encoder
-    try:
-        from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
-        patched_encoder = WanEncoderAdapter(
-            vae.encoder,
-            vae_group=get_vae_parallel_group().device_group,
-            vae_scale_factor=get_runtime_state().vae_scale_factor_spatial,
-        ).to(vae.device)
-        vae.encoder = patched_encoder
-    except ImportError:
-        raise log(
-            "DistVAE library is missing or does not support WanEncoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
-            "Defaulting to single-rank encoder."
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE encoder. {e}")
+    if enable_parallel_encoder:
+        try:
+            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
+            vae_scale_factor = getattr(vae.config, 'scaling_factor', 8)
+            if hasattr(vae.config, 'vae_scale_factor_spatial'):
+                vae_scale_factor = self.vae_config.vae_scale_factor_spatial
+            patched_encoder = WanEncoderAdapter(
+                vae.encoder,
+                vae_group=get_vae_parallel_group().device_group,
+                vae_scale_factor=vae_scale_factor,
+            ).to(vae.device)
+            vae.encoder = patched_encoder
+            log(f"Parallel VAE encoder enabled successfully.")
+        except ImportError:
+            raise log(
+                "DistVAE library is missing or does not support WanEncoderAdapter. "
+                "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
+                "Defaulting to single-rank encoder."
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to patch VAE encoder. {e}")
     # Handle decoder
     try:
         from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
@@ -99,6 +104,7 @@ class xFuserWan21I2VModel(xFuserModel):
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         cross_attention_backend=True,
     )
     default_input_values = DefaultInputValues(
@@ -130,7 +136,7 @@ class xFuserWan21I2VModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
+            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:

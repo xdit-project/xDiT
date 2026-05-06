@@ -67,6 +67,7 @@ class ModelCapabilities:
     tensor_parallel_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
+    use_parallel_vae_encoder: bool = False
     fully_shard_degree: bool = False
     # Memory optimizations
     enable_slicing: bool = False

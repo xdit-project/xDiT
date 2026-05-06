@@ -289,7 +289,7 @@ class xFuserWan21T2VModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
+            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:

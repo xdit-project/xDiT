@@ -51,7 +51,7 @@ def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
             from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
             vae_scale_factor = getattr(vae.config, 'scaling_factor', 8)
             if hasattr(vae.config, 'vae_scale_factor_spatial'):
-                vae_scale_factor = self.vae_config.vae_scale_factor_spatial
+                vae_scale_factor = vae_config.vae_scale_factor_spatial
             patched_encoder = WanEncoderAdapter(
                 vae.encoder,
                 vae_group=get_vae_parallel_group().device_group,

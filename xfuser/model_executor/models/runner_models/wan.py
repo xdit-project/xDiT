@@ -60,7 +60,7 @@ def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
             vae.encoder = patched_encoder
             log(f"Parallel VAE encoder enabled successfully.")
         except ImportError:
-            raise log(
+            log(
                 "DistVAE library is missing or does not support WanEncoderAdapter. "
                 "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
                 "Defaulting to single-rank encoder."
@@ -76,7 +76,7 @@ def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
         vae.decoder = patched_decoder
         log(f"Parallel VAE decoder enabled successfully.")
     except ImportError:
-        raise log(
+        log(
             "DistVAE library is missing or does not support WanDecoderAdapter. "
             "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
             "Defaulting to single-rank decoder."

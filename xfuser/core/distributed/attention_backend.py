@@ -335,6 +335,8 @@ if env_info["has_transformer_engine"]:
     )
 if env_info["has_sage"]:
     from sageattention import sageattn
+if env_info["has_flex_block_attn"]:
+    from flex_block_attn import flex_block_attn_func
 if env_info["has_npu_flash_attn"]:
     import torch_npu
 
@@ -351,6 +353,7 @@ class AttentionBackendType(Enum):
     FLASH_4 = "Flash Attention V4"
     FLASH_4_FP4 = "Flash Attention V4 FP4"
     SAGE = "Sage Attention"
+    FLEX_BLOCK_ATTN = "Flex Block Attention"
     AITER = "AITER"
     AITER_FP8 = "AITER FP8"
     AITER_MLA = "AITER MLA"
@@ -771,6 +774,30 @@ def _sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=No
     )
     return output, softmax_lse
 
+@torch.library.custom_op("xfuser::flex_block_attn", mutates_args=())
+def flex_block_attn_op(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_m: int,
+    block_n: int,
+    block_mask: torch.Tensor,
+) -> torch.Tensor:
+    return flex_block_attn_func(q, k, v, block_m, block_n, block_mask)
+
+@flex_block_attn_op.register_fake
+def _(q, k, v, block_m, block_n, block_mask):
+    return torch.empty_like(q)
+
+@register_attention_function(AttentionBackendType.FLEX_BLOCK_ATTN)
+def _flex_block_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    attention_kwargs["sp_size"] = get_ulysses_parallel_world_size()
+    block_size = math.prod(attention_kwargs["tile_size"])
+    q, k, v, mask_config, ssta_state = setup_ssta(query, key, value, attention_kwargs)
+    block_mask = get_sparse_mask(mask_config, sparse_type=attention_kwargs["attn_sparse_type"])
+    output = flex_block_attn_op(q, k, v, block_size, block_size, block_mask)
+    output = untile_ssta_output(output, ssta_state, attention_kwargs["encoder_sequence_length"], attention_kwargs["sp_size"])
+    return output, None
 
 @register_attention_function(AttentionBackendType.AITER_SPARSE_SAGE)
 def _aiter_sparse_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):

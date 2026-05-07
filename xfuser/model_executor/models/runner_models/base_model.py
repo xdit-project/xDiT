@@ -235,7 +235,8 @@ class xFuserModel(abc.ABC):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
         
         sparse_attention_backend_types = [AttentionBackendType.AITER_SPARSE_SAGE,
-                                        AttentionBackendType.AITER_SPARSE_SAGE_V2]
+                                        AttentionBackendType.AITER_SPARSE_SAGE_V2,
+                                        AttentionBackendType.FLEX_BLOCK_ATTN]
         if config.attention_backend is None:
             if self.capabilities.supports_sparse_attention_backends:
                 raise ValueError(f"Model {config.model} supports sparse attention backends, but no attention backend was specified. Please specify a sparse attention backend to take advantage of the model's capabilities."

@@ -150,7 +150,7 @@ def setup_sparge(
             fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
         if use_static_block_mask:
             static_mask = get_static_block_neighbor_mask(
-                thw, block_m, block_n, query.device, gilbert_mapping=None
+                thw, block_m, block_n, query.device, gilbert_mapping=(inv_perm, fwd_perm)
             )
 
     # 2) Split off image part (without SP padding) and text part.

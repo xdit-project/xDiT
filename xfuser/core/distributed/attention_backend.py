@@ -861,10 +861,10 @@ def _read_sparge_kwargs(attention_kwargs):
     return (
         simthreshd1,
         cdfthreshd,
-        bool(attn_kwargs.get("spargeattn_reorder_sequence", True)),
-        bool(attn_kwargs.get("use_spargeattn_static_block_mask", True)),
+        attn_kwargs.get("spargeattn_reorder_sequence", True),
+        attn_kwargs.get("use_spargeattn_static_block_mask", True),
         attn_kwargs.get("thw"),
-        int(attn_kwargs.get("encoder_sequence_length", 0)),
+        attn_kwargs.get("encoder_sequence_length", 0),
     )
 
 def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config):
@@ -880,7 +880,8 @@ def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, con
     )
     block_mask = compute_sparge_block_mask(
         q, k,
-        simthreshd1=simthreshd1, cdfthreshd=cdfthreshd,
+        simthreshd1=simthreshd1,
+        cdfthreshd=cdfthreshd,
         is_causal=is_causal,
         static_block_mask=static_mask,
         text_len=state.text_len,

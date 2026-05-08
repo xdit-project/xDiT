@@ -17,6 +17,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 
 from xfuser.core.utils.runner_utils import (
+    configure_inductor_comm_overlap,
     log,
 )
 
@@ -172,7 +173,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
     def _compile_model(self, input_args: dict) -> None:
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.second_pipe.transformer = torch.compile(self.second_pipe.transformer, mode="default")
 
@@ -291,7 +292,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
     def _compile_model(self, input_args: dict) -> None:
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.second_pipe.transformer = torch.compile(self.second_pipe.transformer, mode="default")
 

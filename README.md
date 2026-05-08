@@ -434,7 +434,7 @@ We also warmly welcome developers to join us in enhancing the project. If you ha
 
 ```
 
-[PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://arxiv.org/abs/2405.14430)
+[PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://openreview.net/forum?id=5xwyxupsLL)
 
 ```
 @inproceedings{

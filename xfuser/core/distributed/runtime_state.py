@@ -211,7 +211,8 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_SAGE,
                                  AttentionBackendType.AITER_SPARSE_SAGE,
                                  AttentionBackendType.AITER_SAGE_V2,
-                                 AttentionBackendType.AITER_SPARSE_SAGE_V2,]:
+                                 AttentionBackendType.AITER_SPARSE_SAGE_V2,
+                                 AttentionBackendType.FLEX_BLOCK_ATTN]:
             if self.parallel_config.ring_degree > 1:
                 raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:
@@ -270,6 +271,10 @@ class RuntimeState(metaclass=ABCMeta):
                     raise RuntimeError(msg) from None
             except ImportError:
                 raise RuntimeError(msg) from None
+        elif attention_backend == AttentionBackendType.FLEX_BLOCK_ATTN:
+            if not env_info["has_flex_block_attn"]:
+                raise RuntimeError("Flex Block Attention is not available, please install Flex Block Attention.")
+
 
 
 class UnetRuntimeState(RuntimeState):

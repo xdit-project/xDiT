@@ -207,6 +207,7 @@ class PackagesEnvChecker:
         packages_info["has_flash_attn_4_fp4"] = self._check_flash_attn_4_fp4()
         packages_info["has_transformer_engine"] = self.check_transformer_engine()
         packages_info["has_sage"] = self._check_sage()
+        packages_info["has_flex_block_attn"] = self._check_flex_block_attn()
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
@@ -325,6 +326,13 @@ class PackagesEnvChecker:
     def _check_sage(self):
         try:
             from sageattention import sageattn
+            return True
+        except:
+            return False
+
+    def _check_flex_block_attn(self):
+        try:
+            from flex_block_attn import flex_block_attn_func
             return True
         except:
             return False

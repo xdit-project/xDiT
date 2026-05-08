@@ -18,6 +18,54 @@ def log(message: str, debug=False, log_from_all_processes: bool = False) -> None
         else:
             logger.info(message)
 
+def configure_inductor_comm_overlap() -> None:
+    """Enable Inductor compute/communication overlap.
+
+    Prefers the ATen-level distributed optimization passes that PyTorch upstream
+    now recommends over the legacy scheduler-IR passes
+    (see https://github.com/pytorch/pytorch/issues/169461). They run on the ATen
+    FX graph before Inductor scheduling and enable overlap scheduling,
+    overlap-preserving collective bucketing, and overlap dependency insertion.
+    ``collective_estimator="benchmark"`` is required on RCCL/MI355X, where the
+    analytical NCCL bandwidth model can be ~10x off and leaves the scheduler
+    thinking collectives are far more expensive than they are.
+
+    Falls back to the legacy scheduler-IR passes when
+    ``torch._inductor.config.aten_distributed_optimizations`` is unavailable
+    (it landed in torch >= 2.10). PyTorch 2.10 also emptied the default value of
+    ``reorder_for_compute_comm_overlap_passes`` (it used to be
+    ``["reorder_compute_for_overlap", "sink_waits", "raise_comms"]`` on 2.9), so
+    the fallback restores the 2.9 list to recover the old overlap behavior on
+    torch builds without the ATen passes.
+    """
+    aten_opts = getattr(torch._inductor.config, "aten_distributed_optimizations", None)
+
+    if aten_opts is not None:
+        aten_opts.enable_overlap_scheduling = True
+        aten_opts.collective_bucketing = True
+        aten_opts.insert_overlap_deps = True
+        aten_opts.collective_estimator = "benchmark"
+        # Disable the legacy scheduler-IR overlap passes so we don't run two
+        # competing reorderers on the same graph.
+        torch._inductor.config.reorder_for_compute_comm_overlap = False
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = []
+        log("Inductor comm/compute overlap: using aten_distributed_optimizations "
+            "(enable_overlap_scheduling, collective_bucketing, insert_overlap_deps, "
+            "collective_estimator=benchmark)",
+            debug=True)
+        return
+
+    log("torch._inductor.config.aten_distributed_optimizations is unavailable "
+        "on this torch build; using legacy scheduler-IR overlap passes.",
+        debug=True)
+    torch._inductor.config.reorder_for_compute_comm_overlap = True
+    torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+        "reorder_compute_for_overlap",
+        "sink_waits",
+        "raise_comms",
+    ]
+
+
 def is_last_process() -> bool:
     """
     Checks based on env rank and world size if this is last process in

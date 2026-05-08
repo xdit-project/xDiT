@@ -25,6 +25,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
+    configure_inductor_comm_overlap,
     log,
     resize_and_crop_image,
     resize_image_to_max_area,
@@ -54,8 +55,31 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
     }
 
 
-def _setup_parallel_vae(vae) -> None:
-    """ Parallalizes the VAE decoder using distvae """
+def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
+    """ Parallelizes VAE en-/decoder using distvae """
+    # Handle encoder
+    if enable_parallel_encoder:
+        try:
+            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
+            vae_scale_factor = getattr(vae.config, 'scaling_factor', 8)
+            if hasattr(vae.config, 'vae_scale_factor_spatial'):
+                vae_scale_factor = vae.config.vae_scale_factor_spatial
+            patched_encoder = WanEncoderAdapter(
+                vae.encoder,
+                vae_group=get_vae_parallel_group().device_group,
+                vae_scale_factor=vae_scale_factor,
+            ).to(vae.device)
+            vae.encoder = patched_encoder
+            log(f"Parallel VAE encoder enabled successfully.")
+        except ImportError:
+            log(
+                "DistVAE library is missing or does not support WanEncoderAdapter. "
+                "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
+                "Defaulting to single-rank encoder."
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to patch VAE encoder. {e}")
+    # Handle decoder
     try:
         from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
         patched_decoder = WanDecoderAdapter(
@@ -64,9 +88,10 @@ def _setup_parallel_vae(vae) -> None:
         vae.decoder = patched_decoder
         log(f"Parallel VAE decoder enabled successfully.")
     except ImportError:
-        raise ValueError(
+        log(
             "DistVAE library is missing or does not support WanDecoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE."
+            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
+            "Defaulting to single-rank decoder."
         )
     except Exception as e:
         raise ValueError(f"Failed to patch VAE decoder. {e}")
@@ -91,6 +116,7 @@ class xFuserWan21I2VModel(xFuserModel):
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
     )
@@ -123,7 +149,7 @@ class xFuserWan21I2VModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
+            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -176,7 +202,7 @@ class xFuserWan21I2VModel(xFuserModel):
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
     def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
@@ -223,7 +249,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         return pipe
 
     def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
@@ -280,7 +306,7 @@ class xFuserWan21T2VModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
+            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -312,7 +338,7 @@ class xFuserWan21T2VModel(xFuserModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
@@ -358,7 +384,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         return pipe
 
     def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
@@ -440,7 +466,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        configure_inductor_comm_overlap()
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self._run_timed_pipe(input_args)
 

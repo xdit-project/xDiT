@@ -4,6 +4,10 @@ from typing import Optional, Tuple
 import torch
 
 from xfuser.core.sparge_attention.block_mask import get_block_map_meansim
+from xfuser.core.sparge_attention.gilbert import (
+    curve as gilbert_curve,
+    sliced_gilbert_block_neighbor_mapping,
+)
 
 
 # ── Caches ────────────────────────────────────────────────────────────────────
@@ -47,39 +51,26 @@ def get_gilbert_perm(thw: Tuple[int, int, int], device: torch.device
     cached = _GILBERT_PERM_CACHE.get(key)
     if cached is not None:
         return cached
-    try:
-        from xfuser.core.sparge_attention.gilbert import curve as gilbert_curve
-    except ImportError as e:
-        raise ImportError(
-            "Sparge gilbert reordering requires `numba` and `numpy`. "
-            "Install them or run with --no-spargeattn_reorder_sequence."
-        ) from e
     t, h, w = thw
     inv_perm, fwd_perm = gilbert_curve(t, h, w, device)
     _GILBERT_PERM_CACHE[key] = (fwd_perm, inv_perm)
     return fwd_perm, inv_perm
 
 
-def get_static_block_neighbor_mask(thw: Tuple[int, int, int],
-                                   block_m: int, block_n: int,
-                                   device: torch.device, gilbert_mapping: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> torch.Tensor:
+def get_static_block_neighbor_mask(
+    thw: Tuple[int, int, int],
+    block_m: int, block_n: int,
+    device: torch.device,
+    gilbert_mapping: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+) -> torch.Tensor:
     key = (tuple(thw), int(block_m), int(block_n), _device_key(device))
     cached = _STATIC_BLOCK_MASK_CACHE.get(key)
     if cached is not None:
         return cached
-    try:
-        from xfuser.core.sparge_attention.gilbert import (
-            sliced_gilbert_block_neighbor_mapping,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "Sparge static block-neighbor mask requires `numba` and "
-            "`numpy`. Install them or run with "
-            "--no-use_spargeattn_static_block_mask."
-        ) from e
     t, h, w = thw
-    mask_np = sliced_gilbert_block_neighbor_mapping(t, h, w, block_m, block_n, gilbert_mapping=gilbert_mapping)
-    mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device)
+    mask = sliced_gilbert_block_neighbor_mapping(
+        t, h, w, block_m, block_n, device, gilbert_mapping=gilbert_mapping,
+    )
     _STATIC_BLOCK_MASK_CACHE[key] = mask
     return mask
 

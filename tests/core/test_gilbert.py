@@ -1,17 +1,13 @@
 import unittest
 
-try:
-    import numpy
-    from xfuser.core.sparge_attention.gilbert import (
-        sliced_gilbert_block_neighbor_mapping,
-        _sliced_gilbert_block_neighbor_mapping,
-    )
-    _GILBERT_IMPORT_OK = True
-except ImportError:
-    _GILBERT_IMPORT_OK = False
+import torch
+
+from xfuser.core.sparge_attention.gilbert import (
+    sliced_gilbert_block_neighbor_mapping,
+    _sliced_gilbert_block_neighbor_mapping,
+)
 
 
-@unittest.skipUnless(_GILBERT_IMPORT_OK, "numba/numpy and gilbert module required")
 class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
     """Tests for sliced_gilbert_block_neighbor_mapping with known expected results."""
 
@@ -19,15 +15,15 @@ class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
         """Identity linear_to_hilbert and block_m == block_n -> strictly diagonal mask."""
         t, h, w = 2, 2, 2
         block_m = block_n = 2
-        linear_to_hilbert = numpy.arange(8, dtype=numpy.int64)
+        linear_to_hilbert = torch.arange(8, dtype=torch.int64)
         mask = _sliced_gilbert_block_neighbor_mapping(
             t, h, w, block_m, block_n, linear_to_hilbert
         )
-        expected = numpy.eye(4, dtype=numpy.bool_)
-        self.assertEqual(mask.shape, (4, 4))
-        self.assertEqual(mask.dtype, numpy.bool_)
+        expected = torch.eye(4, dtype=torch.bool)
+        self.assertEqual(tuple(mask.shape), (4, 4))
+        self.assertEqual(mask.dtype, torch.bool)
         self.assertTrue(
-            numpy.array_equal(mask, expected),
+            torch.equal(mask, expected),
             f"Expected block-diagonal mask, got\n{mask}",
         )
 
@@ -35,17 +31,18 @@ class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
         """Public API with identity (lth, htl) yields same block-diagonal mask."""
         t, h, w = 2, 2, 2
         block_m = block_n = 2
-        linear_to_hilbert = numpy.arange(8, dtype=numpy.int64)
-        hilbert_to_linear = numpy.arange(8, dtype=numpy.int64)
+        device = torch.device("cpu")
+        linear_to_hilbert = torch.arange(8, dtype=torch.int64)
+        hilbert_to_linear = torch.arange(8, dtype=torch.int64)
         mask = sliced_gilbert_block_neighbor_mapping(
-            t, h, w, block_m, block_n,
+            t, h, w, block_m, block_n, device,
             gilbert_mapping=(linear_to_hilbert, hilbert_to_linear),
         )
-        expected = numpy.eye(4, dtype=numpy.bool_)
-        self.assertEqual(mask.shape, (4, 4))
-        self.assertEqual(mask.dtype, numpy.bool_)
+        expected = torch.eye(4, dtype=torch.bool)
+        self.assertEqual(tuple(mask.shape), (4, 4))
+        self.assertEqual(mask.dtype, torch.bool)
         self.assertTrue(
-            numpy.array_equal(mask, expected),
+            torch.equal(mask, expected),
             f"Expected block-diagonal mask, got\n{mask}",
         )
 
@@ -53,12 +50,12 @@ class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
         """Shape and dtype for non-square block grid (qblocks != kblocks)."""
         t, h, w = 1, 4, 4
         block_m, block_n = 4, 2
-        linear_to_hilbert = numpy.arange(16, dtype=numpy.int64)
+        linear_to_hilbert = torch.arange(16, dtype=torch.int64)
         mask = _sliced_gilbert_block_neighbor_mapping(
             t, h, w, block_m, block_n, linear_to_hilbert
         )
-        self.assertEqual(mask.shape, (4, 8))
-        self.assertEqual(mask.dtype, numpy.bool_)
+        self.assertEqual(tuple(mask.shape), (4, 8))
+        self.assertEqual(mask.dtype, torch.bool)
 
 
 if __name__ == "__main__":

@@ -221,17 +221,9 @@ def get_block_map_meansim(
     any_ge = ge.any(dim=-1)
     # 0-D fallback value broadcasts in `where`; avoids a (B, H, Q) alloc.
     num_to_select = torch.where(any_ge, idx, idx.new_full((), K))
-    # Vectorized replacement for fill_block_map_triton:
-    #   sorted_score.indices[b,h,q,k] = original kv-block index ranked at
-    #   position k by descending score. We keep ranks 0..num_to_select-1, then
-    #   scatter that "keep" mask back into original kv-block coordinates.
-    # `clamp(min=1)` mirrors the kernel's "at least one block per query" rule
-    # ((cur_num_to_select + 1) if cur_num_to_select == 0 else cur_num_to_select).
-    num_to_select = num_to_select.clamp(min=1)
-    ranks = torch.arange(K, device=pooled_score.device).view(1, 1, 1, K)
-    keep_in_sort_order = ranks < num_to_select.unsqueeze(-1)  # (B, H, Q, K) bool
+ 
     final_map = torch.zeros_like(pooled_score, dtype=torch.bool)
-    final_map.scatter_(-1, sorted_score.indices, keep_in_sort_order)
+    final_map = fill_block_map_triton(final_map, num_to_select, sorted_score.indices)
     final_map = final_map | (~sim_kblocks) | (~sim_qblocks)
     if is_causal:
         final_map = final_map * causal_mask[None, None, ...]

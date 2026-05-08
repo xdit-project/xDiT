@@ -895,10 +895,10 @@ def _aiter_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_k
     config = get_sage_fwd_configs()
     q, k, v, state, block_mask, num_heads = _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config)
     block_lut = block_attn_mask_to_ragged_lut(block_mask, num_heads=num_heads)
-    output, softmax_lse = fav3_sage_wrapper_func(
-        q, k, v, block_lut=block_lut, layout="bhsd", config=config, return_lse=True,
+    output = fav3_sage_wrapper_func(
+        q, k, v, block_lut=block_lut, layout="bhsd", config=config,
     )
-    return restore_sparge_output(output, state), softmax_lse
+    return restore_sparge_output(output, state), None
 
 
 @register_attention_function(AttentionBackendType.AITER_SPARGE_V2)

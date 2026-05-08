@@ -255,17 +255,21 @@ class RuntimeState(metaclass=ABCMeta):
             if not env_info["has_sage"]:
                 raise RuntimeError("SageAttention is not available, please install SageAttention.")
         elif attention_backend == AttentionBackendType.AITER_SPARGE:
+            msg = "AITER Sparge attention is not available, please update AITER"
             try:
                 from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
-                assert inspect.signature(fav3_sage_wrapper_func).parameters.get("block_lut") is not None
-            except (ImportError, AssertionError):
-                raise RuntimeError("AITER Sparge attention is not available, please update AITER") from None
+                if inspect.signature(fav3_sage_wrapper_func).parameters.get("block_lut") is None:
+                    raise RuntimeError(msg) from None
+            except ImportError:
+                raise RuntimeError(msg) from None
         elif attention_backend == AttentionBackendType.AITER_SPARGE_V2:
+            msg = "AITER Sparge V2 attention is not available, please update AITER"
             try:
                 from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
-                assert inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("block_lut") is not None
-            except (ImportError, AssertionError):
-                raise RuntimeError("AITER Sparge V2 attention is not available, please update AITER") from None
+                if inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("block_lut") is None:
+                    raise RuntimeError(msg) from None
+            except ImportError:
+                raise RuntimeError(msg) from None
 
 
 class UnetRuntimeState(RuntimeState):

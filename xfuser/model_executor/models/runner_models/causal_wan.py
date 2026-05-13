@@ -14,7 +14,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
-from xfuser.core.utils.runner_utils import configure_inductor_comm_overlap
 
 
 
@@ -145,7 +144,7 @@ class xFuserCausalWanModel(xFuserModel):
             raise ValueError("Exactly one input image is required for CausalWan I2V mode.")
 
     def _compile_model(self, input_args):
-        configure_inductor_comm_overlap()
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         compile_args = copy.deepcopy(input_args)

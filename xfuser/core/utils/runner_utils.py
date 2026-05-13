@@ -87,6 +87,174 @@ def _get_fp8_kernel_preference():
     return KernelPreference.AUTO
 
 
+def _patch_torchao_float8_fsdp2() -> list[str]:
+    """
+    Patch torchao's inference Float8Tensor for FSDP2 (fully_shard) compatibility.
+
+    Two separate problems require two sets of patches:
+
+    1. Init-time aten op bugs:
+       FSDP2 calls torch.chunk which passes aten.split.Tensor with dim as a kwarg,
+       but the existing Float8Tensor handler expects 3 positional args which raises
+       a ValueError. We fix split and add new_empty/new_zeros/copy_/view handlers for
+       the param-management ops FSDP2 calls during _init_sharded_param.
+
+    2. Forward-time subclass loss:
+       FSDP2 all-gather reconstructs sharded params as plain torch.Tensors, 
+       stripping the Float8Tensor subclass. F.linear then sees raw fp8 bytes
+       interpreted as bf16, resulting in garbage output. Fix: implement
+       fsdp_pre/post_all_gather so FSDP2 gathers qdata and reconstructs a proper
+       Float8Tensor on the other side. This mirrors WeightWithDynamicFloat8CastTensor
+       in torchao/float8/fsdp_utils.py (the training path).
+
+    Returns list of patch names applied (logged on first call).
+    """
+    from torchao.quantization.quantize_.workflows.float8.float8_tensor import Float8Tensor
+
+    aten = torch.ops.aten
+    table = Float8Tensor._ATEN_OP_TABLE.get(Float8Tensor, {})
+    patched = []
+
+    def _make_float8(tensor, new_qdata, new_block_size=None):
+        _, attr_dict = tensor.__tensor_flatten__()
+        if new_block_size is not None:
+            attr_dict = {**attr_dict, 'block_size': new_block_size}
+        return Float8Tensor.__tensor_unflatten__(
+            {'qdata': new_qdata, 'scale': tensor.scale}, attr_dict, None, None
+        )
+
+    # aten.split.Tensor: torch.chunk passes dim as kwarg; existing handler
+    # expects 3 positional args which raises a ValueError. Also handles PerTensor
+    # scale when FSDP2 flattens weights to 1D before making them a DTensor.
+    split_op = aten.split.Tensor
+    if split_op in table:
+        _orig_split = table[split_op]
+        def _split(func, types, args, kwargs):
+            if len(args) == 2:
+                args = args + (kwargs.pop("dim", 0),)
+            tensor, split_size, dim = args
+            if isinstance(tensor, Float8Tensor) and tensor.scale.numel() == 1:
+                new_qdatas = aten.split.Tensor(tensor.qdata, split_size, dim)
+                return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
+            return _orig_split(func, types, args, kwargs)
+        table[split_op] = _split
+        patched.append("aten.split.Tensor")
+
+    # aten.new_empty: FSDP2 calls _chunk_with_empty which pads short chunk lists with size-0 tensors
+    def _new_empty(_, _t, args, kwargs):
+        tensor = args[0]
+        size = list(args[1]) if len(args) > 1 else list(kwargs.get("size", []))
+        new_qdata = tensor.qdata.new_empty(size, pin_memory=kwargs.get("pin_memory", False))
+        return _make_float8(tensor, new_qdata, size if size else [0])
+    table[aten.new_empty.default] = _new_empty
+    patched.append("aten.new_empty.default")
+
+    # aten.new_zeros: FSDP2 allocates a padded sharded-param buffer
+    def _new_zeros(_, _t, args, kwargs):
+        tensor = args[0]
+        size = list(args[1]) if len(args) > 1 else list(kwargs.get("size", []))
+        new_qdata = tensor.qdata.new_zeros(size, pin_memory=kwargs.get("pin_memory", False))
+        return _make_float8(tensor, new_qdata, size)
+    table[aten.new_zeros.default] = _new_zeros
+    patched.append("aten.new_zeros.default")
+
+    # aten.copy_: FSDP2 fills the padded buffer from the local fp8 shard
+    def _copy_(_, _t, args, _kw):
+        dst, src = args[0], args[1]
+        dst.qdata.copy_(src.qdata if isinstance(src, Float8Tensor) else src)
+        return dst
+    table[aten.copy_.default] = _copy_
+    patched.append("aten.copy_.default")
+
+    # aten.view.default: existing handler only supports 2D↔3D; FSDP2 may call
+    # view(-1) to flatten to 1D before sharding.
+    _orig_view = table.get(aten.view.default)
+    def _view(func, types, args, kwargs):
+        tensor, size = args
+        if len(size) == 1:
+            numel = tensor.numel()
+            return _make_float8(tensor, tensor.qdata.reshape(numel), [numel])
+        if _orig_view is not None:
+            return _orig_view(func, types, args, kwargs)
+        raise NotImplementedError(f"Float8Tensor view patch: unhandled {tensor.shape} -> {size}")
+    table[aten.view.default] = _view
+    patched.append("aten.view.default")
+
+    # aten.as_strided.default: FSDP2 uses this during init_unsharded_param to
+    # create a strided view into the all-gathered buffer.
+    def _as_strided(_, _t, args, kwargs):
+        tensor, size, stride = args[0], args[1], args[2]
+        storage_offset = args[3] if len(args) > 3 else kwargs.get("storage_offset", 0)
+        new_qdata = aten.as_strided.default(tensor.qdata, size, stride, storage_offset)
+        return _make_float8(tensor, new_qdata, list(size))
+    table[aten.as_strided.default] = _as_strided
+    patched.append("aten.as_strided.default")
+
+    # __torch_dispatch__ fallthrough: for any remaining FSDP structural ops not
+    # in the table (e.g. torch.ops.fsdp.*), unwrap to qdata and call through.
+    # Compute ops (linear, mm, addmm) ARE in the table so they won't hit this.
+    @classmethod
+    def _patched_dispatch(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        inner_table = cls._ATEN_OP_TABLE.get(cls, {})
+        if func in inner_table:
+            return inner_table[func](func, types, args, kwargs)
+        def _unwrap(t):
+            return t.qdata if isinstance(t, cls) else t
+        unwrapped_args = torch.utils._pytree.tree_map(_unwrap, args)
+        unwrapped_kwargs = torch.utils._pytree.tree_map(_unwrap, kwargs)
+        return func(*unwrapped_args, **unwrapped_kwargs)
+    Float8Tensor.__torch_dispatch__ = _patched_dispatch
+    patched.append("__torch_dispatch__ fallthrough")
+
+    # fsdp_pre_all_gather / fsdp_post_all_gather: preserve Float8Tensor subclass
+    # through FSDP2 all-gather. Without these, all-gather returns a plain Tensor,
+    # F.linear bypasses fp8 dispatch and interprets e4m3fn bytes as bf16, resulting
+    # in noise output. For static-scale inference Float8Tensor, scale is per-tensor
+    # (scalar) and identical across all ranks, so only qdata needs to be gathered.
+
+    def _fsdp_pre_all_gather(self, _mesh):
+        _, attr_dict = self.__tensor_flatten__()
+        return (self.qdata,), (self.scale, attr_dict)
+
+    def _fsdp_post_all_gather(_self, all_gather_outputs, metadata, _param_dtype, *, out=None):
+        (qdata,) = all_gather_outputs
+        scale, attr_dict = metadata
+        if out is not None:
+            if isinstance(out, Float8Tensor):
+                out.qdata.copy_(qdata)
+                return
+            raise RuntimeError(
+                f"fsdp_post_all_gather: out must be Float8Tensor, got {type(out)}"
+            )
+        # attr_dict was captured before sharding, so block_size reflects the 1D
+        # shard shape. Patch it to the all-gathered shape before reconstructing.
+        attr_dict = {**attr_dict, 'block_size': list(qdata.shape)}
+        # Return (tensor, inner_tensors): FSDP2 keeps inner_tensors alive until
+        # reshard; without this second element FSDP2 unpacks the tensor itself.
+        fp8 = Float8Tensor.__tensor_unflatten__(
+            {'qdata': qdata, 'scale': scale}, attr_dict, None, None
+        )
+        return fp8, (qdata,)
+
+    Float8Tensor.fsdp_pre_all_gather = _fsdp_pre_all_gather
+    Float8Tensor.fsdp_post_all_gather = _fsdp_post_all_gather
+    patched.append("fsdp_pre_all_gather")
+    patched.append("fsdp_post_all_gather")
+
+    return patched
+
+
+_TORCHAO_FLOAT8_FSDP2_PATCHES: list[str] = []
+
+try:
+    _TORCHAO_FLOAT8_FSDP2_PATCHES = _patch_torchao_float8_fsdp2()
+    logger.debug("torchao Float8Tensor FSDP2 patches applied: %s", _TORCHAO_FLOAT8_FSDP2_PATCHES)
+except Exception as e:
+    logger.debug("torchao Float8Tensor FSDP2 patches skipped (%s): %s", type(e).__name__, e)
+
+
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
     device: Optional[torch.device] = None) -> None:

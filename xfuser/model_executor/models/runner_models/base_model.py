@@ -558,21 +558,21 @@ class xFuserModel(abc.ABC):
         """ Hook for any post model-load and state initialization """
 
         local_rank = get_world_group().local_rank
+        # FSDP path handles device placement and quantization (per-block for FSDP2).
         if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
             self.pipe = self.pipe.to(f"cuda:{local_rank}")
-
-        if self.config.use_fp4_gemms:
-            if _is_cuda():
-                self._setup_nvfp4_gemms(local_rank=local_rank)
-            else:
-                self._setup_mxfp4_gemms(local_rank=local_rank)
-        elif self.config.use_fp8_gemms:
-            for module_name in self.settings.fp8_gemm_module_list:
-                log(f"Quantizing linear layers in {module_name} to FP8...")
-                module = rgetattr(self.pipe, module_name)
-                quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+            if self.config.use_fp4_gemms:
+                if _is_cuda():
+                    self._setup_nvfp4_gemms(local_rank=local_rank)
+                else:
+                    self._setup_mxfp4_gemms(local_rank=local_rank)
+            elif self.config.use_fp8_gemms:
+                for module_name in self.settings.fp8_gemm_module_list:
+                    log(f"Quantizing linear layers in {module_name} to FP8...")
+                    module = rgetattr(self.pipe, module_name)
+                    quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -586,6 +586,12 @@ class xFuserModel(abc.ABC):
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
+        if self.config.use_fp8_gemms:
+            from xfuser.core.utils.runner_utils import _TORCHAO_FLOAT8_FSDP2_PATCHES
+            assert _TORCHAO_FLOAT8_FSDP2_PATCHES, (
+                "FSDP2 + FP8 requires torchao Float8Tensor patches but they failed to apply at "
+                "import time. Check for torchao import errors in runner_utils."
+            )
         local_rank = get_world_group().local_rank
         fs_local_rank = get_fs_group().local_rank
         device_group = get_fs_group().device_group
@@ -595,7 +601,13 @@ class xFuserModel(abc.ABC):
                 strategy = self.settings.fsdp_strategy[component_name]
                 wrap_attrs = strategy.get("wrap_attrs", [])
                 dtype = strategy.get("dtype", None)
-                fsdp_object = shard_component(component, wrap_attrs, device_group, fs_local_rank, dtype)
+                quantize_fn = self._build_fsdp_quantize_fn(component_name, wrap_attrs, fs_local_rank)
+                reshard_after_forward = self.config.reshard_after_forward
+                fsdp_object = shard_component(
+                    component, wrap_attrs, device_group, fs_local_rank, dtype,
+                    quantize_fn=quantize_fn,
+                    reshard_after_forward=reshard_after_forward,
+                )
                 setattr(self.pipe, component_name, fsdp_object)
             else:
                 log(f"Skipping FSDP wrapping for {component_name}...")
@@ -604,6 +616,59 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
+
+    def _build_fsdp_quantize_fn(
+        self, component_name: str, wrap_attrs: list, local_rank: int
+    ):
+        """
+        Return a per-block quantize callable (block, block_idx) -> None for this
+        component, or None if no quantization is configured for it.
+
+        fp8_precision_overrides entries like "5." apply to block index 5. We strip
+        the block-index prefix before passing to the quantize functions so they see
+        the same local FQN paths they would in the non-FSDP path.
+        """
+        if not (self.config.use_fp4_gemms or self.config.use_fp8_gemms):
+            return None
+
+        device = f"cuda:{local_rank}"
+        fp4_list = set(self.settings.fp4_gemm_module_list or [])
+        fp8_list = set(self.settings.fp8_gemm_module_list or [])
+        fp8_overrides = self.settings.fp8_precision_overrides or ()
+
+        paths = [f"{component_name}.{a}" for a in wrap_attrs]
+
+        use_fp4_here = self.config.use_fp4_gemms and any(p in fp4_list for p in paths)
+        # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
+        use_fp8_here = (
+            self.config.use_fp8_gemms and any(p in fp8_list for p in paths)
+        ) or (
+            self.config.use_fp4_gemms and any(p in fp8_list and p not in fp4_list for p in paths)
+        )
+
+        if not use_fp4_here and not use_fp8_here:
+            return None
+
+        def quantize_fn(block, block_idx: int) -> None:
+            block_prefix = f"{block_idx}."
+            # Strip the block-index prefix so the quantize functions see local FQN paths.
+            local_fp8 = tuple(
+                o[len(block_prefix):] for o in fp8_overrides if o.startswith(block_prefix)
+            ) or None
+            if use_fp4_here:
+                if _is_cuda():
+                    quantize_linear_layers_to_nvfp4(block, fp8_layers=local_fp8, device=device)
+                else:
+                    quantize_linear_layers_to_fp4(
+                        block,
+                        fp8_layers=local_fp8,
+                        use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
+                        device=device,
+                    )
+            else:
+                quantize_linear_layers_to_fp8(block, device=device)
+
+        return quantize_fn
 
     def _setup_mxfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:

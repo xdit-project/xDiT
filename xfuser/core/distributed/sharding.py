@@ -13,10 +13,11 @@ Key Features:
 Functions:
     - shard_dit: Shard a Diffusion Transformer (DiT) model
     - shard_t5_encoder: Shard a T5 encoder model
-    - shard_transformer_blocks: Generic transformer block sharding
+    - shard_component: Generic transformer block sharding
 """
+import logging
 from functools import partial
-from typing import Iterable, Optional, Any
+from typing import Callable, Iterable, Optional
 
 import torch
 import functools
@@ -25,9 +26,21 @@ from torch.distributed.fsdp import (
     ShardingStrategy,
     FullyShardedDataParallel as FSDP,
 )
-from torch.distributed.fsdp.wrap import (
-    lambda_auto_wrap_policy,
-)
+from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+from torch.distributed.device_mesh import DeviceMesh
+
+
+logger = logging.getLogger(__name__)
+
+
+def _make_mesh(
+    process_group: Optional[torch.distributed.ProcessGroup],
+    device_type: str = "cuda",
+):
+    """Wrap an existing ProcessGroup as a 1-D DeviceMesh without creating a new NCCL communicator."""
+    if process_group is None:
+        return None
+    return DeviceMesh.from_group(process_group, device_type)
 
 
 def children_to_device(
@@ -55,7 +68,7 @@ def children_to_device(
     Example:
         >>> model = TransformerModel()
         >>> # Move all children except 'blocks' to GPU
-        >>> _children_to_device(model, 'cuda:0', excluded_children=['blocks'])
+        >>> children_to_device(model, 'cuda:0', excluded_children=['blocks'])
     """
     for name, child in module.named_children():
         if name not in excluded_children:
@@ -182,13 +195,16 @@ def shard_component(
     use_orig_params: bool = True,
     sync_module_states: bool = True,
     forward_prefetch: bool = True,
+    reshard_after_forward: bool = True,
+    quantize_fn: Optional[Callable] = None,
 ) -> torch.nn.Module:
     """
     Wrap a component with FSDP, treating each block as a separate FSDP unit.
 
-    This function applies Fully Sharded Data Parallel (FSDP) to a transformer model,
-    automatically wrapping each transformer block separately for optimal memory
-    distribution. Parameters and buffers are converted to the specified dtype.
+    Uses FSDP1 when quantize_fn is None (O(1) flat-param hooks, no DTensor bookkeeping,
+    fastest for non-quantized inference). Uses FSDP2 (composable fully_shard) when
+    quantize_fn is provided, required for torchao quantized tensor types that cannot
+    be flattened to FSDP1's 1D FlatParameter.
 
     Args:
         component (nn.Module): The transformer model to wrap with FSDP.
@@ -208,6 +224,14 @@ def shard_component(
             Defaults to True.
         forward_prefetch (bool, optional): Whether to use forward prefetch.
             Defaults to True.
+        reshard_after_forward (bool, optional): If True (default), reshard parameters after each
+            block's forward. Set False to keep params gathered post-forward, trading
+            memory for latency. Maps to ShardingStrategy in FSDP1, reshard_after_forward
+            in FSDP2.
+            Defaults to True.
+        quantize_fn (Callable, optional): Called as quantize_fn(block, idx) per block
+            before FSDP2 wrapping. Selects FSDP2 path when provided.
+            Defaults to None.
 
     Returns:
         nn.Module: The FSDP-wrapped component.
@@ -222,41 +246,75 @@ def shard_component(
         ...     device_id=0,
         ...     process_group=get_sp_group().device_group,  # NOT get_sp_group()
         ...     dtype=torch.bfloat16,
-        ...     sync_module_states=True,
-        ...     forward_prefetch=True
+        ...     forward_prefetch=True,
+        ...     reshard_after_forward=True,
+        ...     quantize_fn=quantize_fn,
         ... )
 
     Note:
-        - Uses FULL_SHARD strategy for maximum memory savings
-        - Each element in 'wrap_attrs' becomes a separate FSDP unit
+        - Each element in wrap_attrs becomes a separate FSDP unit
         - Requires PyTorch distributed to be initialized before calling
-        - When passing a GroupCoordinator from get_sp_group() or get_world_group(),
-          extract the ProcessGroup with `.device_group` attribute
     """
-    # Determine device: use CUDA if available and device_id specified, else CPU
-    if device_id is None:
-        if torch.cuda.is_available():
-            device_id = torch.cuda.current_device()
-        else:
-            device_id = None  # CPU mode
+    if device_id is None and torch.cuda.is_available():
+        device_id = torch.cuda.current_device()
 
-    wrapped_elements = []
+    wrapped_blocks = []
     for wrap_attr in wrap_attrs:
-        wrapped_elements.extend(rgetattr(component, wrap_attr))
+        wrapped_blocks.extend(rgetattr(component, wrap_attr))
 
     if dtype:
         component = component.to(dtype)
 
-    component = FSDP(
-        component,
-        process_group=process_group,
-        device_id=device_id,
-        auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=lambda module: module in wrapped_elements),
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        sync_module_states=sync_module_states,
-        use_orig_params=use_orig_params,
-        forward_prefetch=forward_prefetch,
-    )
+    if quantize_fn is None:
+        # FSDP1: Fastest path for non-quantized inference.
+        return FSDP(
+            component,
+            process_group=process_group,
+            device_id=device_id,
+            auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=lambda m: m in wrapped_blocks),
+            sharding_strategy=ShardingStrategy.FULL_SHARD if reshard_after_forward else ShardingStrategy.SHARD_GRAD_OP,
+            sync_module_states=sync_module_states,
+            use_orig_params=use_orig_params,
+            forward_prefetch=forward_prefetch,
+        )
+
+    # FSDP2: Required for torchao quantized tensors.
+    from torch.distributed._composable.fsdp import fully_shard  # noqa: PLC0415
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    device_str = f"{device_type}:{device_id}"
+    mesh = _make_mesh(process_group, device_type)
+
+    # Move non-block children first; block containers are handled block-by-block below.
+    wrap_top_names = {attr.split(".")[0] for attr in wrap_attrs}
+    for name, child in component.named_children():
+        if name not in wrap_top_names:
+            child.to(device_str)
+
+    # Sequential: after fully_shard(block) each rank holds 1/N params, freeing memory
+    # for the next block. At most one full block on GPU at a time.
+    for i, block in enumerate(wrapped_blocks):
+        block.to(device_str)
+        quantize_fn(block, i)
+        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward)
+
+    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward)
+
+    # FSDP2 forward prefetch: each block pre-fetches the next two blocks' all-gathers
+    # so communication overlaps with compute. The first block has no predecessor to
+    # trigger its prefetch, so a pre-hook manually unshards it before the forward begins.
+    if forward_prefetch and len(wrapped_blocks) > 1:
+        for i, block in enumerate(wrapped_blocks):
+            lookahead = [
+                wrapped_blocks[i + j]
+                for j in range(1, 3)
+                if i + j < len(wrapped_blocks)
+            ]
+            if lookahead:
+                block.set_modules_to_forward_prefetch(lookahead)
+
+        def _unshard_first_block(_module, _args, _kwargs):
+            wrapped_blocks[0].unshard(async_op=True)
+        component.register_forward_pre_hook(_unshard_first_block, with_kwargs=True)
 
     return component
 

@@ -25,7 +25,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
-    configure_inductor_comm_overlap,
     log,
     resize_and_crop_image,
     resize_image_to_max_area,
@@ -202,7 +201,7 @@ class xFuserWan21I2VModel(xFuserModel):
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
     def _compile_model(self, input_args):
-        configure_inductor_comm_overlap()
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
@@ -249,7 +248,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         return pipe
 
     def _compile_model(self, input_args):
-        configure_inductor_comm_overlap()
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
@@ -338,7 +337,7 @@ class xFuserWan21T2VModel(xFuserModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
-        configure_inductor_comm_overlap()
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         compile_args = copy.deepcopy(input_args)
         # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
@@ -384,7 +383,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         return pipe
 
     def _compile_model(self, input_args):
-        configure_inductor_comm_overlap()
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
@@ -466,7 +465,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
     def _compile_model(self, input_args):
-        configure_inductor_comm_overlap()
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
         self._run_timed_pipe(input_args)
 

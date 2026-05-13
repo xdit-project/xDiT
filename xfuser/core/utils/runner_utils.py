@@ -311,11 +311,33 @@ def _matches_fp8_override(layer_fqn: str, fp8_layers: tuple[str] | None, match_m
     raise ValueError(f"Unsupported FP8 override match mode: {match_mode}")
 
 
+def _matches_fp8_override_any(
+    layer_fqn: str,
+    primary_patterns: tuple[str] | None,
+    primary_mode: str = "prefix",
+    extra_patterns: tuple[str] | None = None,
+    extra_mode: str = "prefix",
+) -> bool:
+    """Match if EITHER the primary rule OR the (optional) extra rule fires.
+
+    Used to support unioning a per-model default override (e.g. boundary blocks)
+    with a user-supplied extra override (e.g. FFN-suffix), without giving up the
+    default protection.
+    """
+    if _matches_fp8_override(layer_fqn, primary_patterns, primary_mode):
+        return True
+    if _matches_fp8_override(layer_fqn, extra_patterns, extra_mode):
+        return True
+    return False
+
+
 def quantize_linear_layers_to_fp4(
     model,
     parent_name='',
     fp8_layers=None,
     fp8_layer_match_mode: str = "prefix",
+    fp8_extra_layers=None,
+    fp8_extra_match_mode: str = "prefix",
     use_hybrid_schedule: bool = False,
     device: Optional[torch.device] = None,
 ):
@@ -327,7 +349,13 @@ def quantize_linear_layers_to_fp4(
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
-            if _matches_fp8_override(full_name, fp8_layers, fp8_layer_match_mode):
+            if _matches_fp8_override_any(
+                full_name,
+                fp8_layers,
+                fp8_layer_match_mode,
+                fp8_extra_layers,
+                fp8_extra_match_mode,
+            ):
                 quantize_(
                       module,
                       config=Float8DynamicActivationFloat8WeightConfig(
@@ -385,6 +413,8 @@ def quantize_linear_layers_to_fp4(
                 full_name,
                 fp8_layers=fp8_layers,
                 fp8_layer_match_mode=fp8_layer_match_mode,
+                fp8_extra_layers=fp8_extra_layers,
+                fp8_extra_match_mode=fp8_extra_match_mode,
                 use_hybrid_schedule=use_hybrid_schedule,
                 device=device,
             )
@@ -394,6 +424,8 @@ def quantize_linear_layers_to_nvfp4(
     module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     fp8_layers: tuple[str] = None,
     fp8_layer_match_mode: str = "prefix",
+    fp8_extra_layers: tuple[str] = None,
+    fp8_extra_match_mode: str = "prefix",
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
     use_triton_kernel: bool = True,
@@ -405,6 +437,10 @@ def quantize_linear_layers_to_nvfp4(
         fp8_layers: FQN patterns of layers that should use FP8 instead of NVFP4.
         fp8_layer_match_mode: Match mode for fp8_layers patterns: prefix/suffix/contains.
             for quality-sensitive blocks.
+        fp8_extra_layers: optional second set of FQN patterns; layers matching the
+            primary OR the extra rule are promoted to FP8. Used to union user-supplied
+            overrides with the model's default boundary protections.
+        fp8_extra_match_mode: Match mode for fp8_extra_layers patterns.
         device: Target device.
         min_layer_size: Skip NVFP4 for layers where min(out_features, in_features)
             is below this threshold (quantization overhead may exceed the speedup).
@@ -432,7 +468,13 @@ def quantize_linear_layers_to_nvfp4(
             if not isinstance(submodule, torch.nn.Linear):
                 continue
 
-            if _matches_fp8_override(fqn, fp8_layers, fp8_layer_match_mode):
+            if _matches_fp8_override_any(
+                fqn,
+                fp8_layers,
+                fp8_layer_match_mode,
+                fp8_extra_layers,
+                fp8_extra_match_mode,
+            ):
                 skipped_fp8_count += 1
                 continue
 
@@ -446,7 +488,13 @@ def quantize_linear_layers_to_nvfp4(
         def nvfp4_filter_fn(mod, fqn):
             if not _is_linear(mod, fqn):
                 return False
-            if _matches_fp8_override(fqn, fp8_layers, fp8_layer_match_mode):
+            if _matches_fp8_override_any(
+                fqn,
+                fp8_layers,
+                fp8_layer_match_mode,
+                fp8_extra_layers,
+                fp8_extra_match_mode,
+            ):
                 return False
             if min_layer_size > 0:
                 layer_min = min(mod.out_features, mod.in_features)
@@ -456,7 +504,7 @@ def quantize_linear_layers_to_nvfp4(
 
         quantize_(module, config=nvfp4_config, filter_fn=nvfp4_filter_fn, device=device)
 
-        if fp8_layers:
+        if fp8_layers or fp8_extra_layers:
             from torchao.quantization.granularity import PerTensor
             from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig
 
@@ -469,7 +517,13 @@ def quantize_linear_layers_to_nvfp4(
             def fp8_filter_fn(mod, fqn):
                 if not _is_linear(mod, fqn):
                     return False
-                return _matches_fp8_override(fqn, fp8_layers, fp8_layer_match_mode)
+                return _matches_fp8_override_any(
+                    fqn,
+                    fp8_layers,
+                    fp8_layer_match_mode,
+                    fp8_extra_layers,
+                    fp8_extra_match_mode,
+                )
 
             quantize_(module, config=fp8_config, filter_fn=fp8_filter_fn, device=device)
 

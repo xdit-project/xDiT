@@ -446,6 +446,32 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         valid_tasks=["i2v", "t2v"],
     )
 
+    def __init__(self, config: xFuserArgs) -> None:
+        super().__init__(config)
+        if config.fp8_precision_override_patterns:
+            patterns = tuple(
+                pattern.strip()
+                for pattern in config.fp8_precision_override_patterns.split(",")
+                if pattern.strip()
+            )
+            if patterns:
+                if config.fp8_precision_override_extend:
+                    self.settings.fp8_precision_override_extra_patterns = patterns
+                    self.settings.fp8_precision_override_extra_match_mode = config.fp8_precision_override_mode
+                    log(
+                        f"Extending TI2V default FP8 overrides {self.settings.fp8_precision_overrides} "
+                        f"(mode={self.settings.fp8_precision_override_match_mode}) with extra rule "
+                        f"{patterns} (mode={config.fp8_precision_override_mode})"
+                    )
+                else:
+                    self.settings.fp8_precision_overrides = patterns
+                    self.settings.fp8_precision_override_match_mode = config.fp8_precision_override_mode
+                    log(
+                        "Using custom FP8 override patterns for Wan2.2 TI2V: "
+                        f"{self.settings.fp8_precision_overrides} "
+                        f"(match_mode={self.settings.fp8_precision_override_match_mode})"
+                    )
+
     def _load_model(self) -> DiffusionPipeline:
         torch.set_float32_matmul_precision('high')
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

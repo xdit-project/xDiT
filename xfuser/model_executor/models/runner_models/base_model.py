@@ -136,7 +136,6 @@ class DefaultInputValues:
     max_sequence_length: Optional[int] = None
     num_hybrid_attn_high_precision_steps: Optional[int] = None
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
-    ssta_tile_thw: Optional[Tuple[int, int, int]] = None
 
 @dataclass
 class ModelSettings:
@@ -150,6 +149,8 @@ class ModelSettings:
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_match_mode: str = "prefix"
+    fp8_precision_override_extra_patterns: Tuple[str] = None
+    fp8_precision_override_extra_match_mode: str = "prefix"
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
@@ -269,14 +270,14 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
-            config_value = getattr(config, key, None) # Some config options might not be set in the CLI, such as support for specific attention backends.
+            config_value = getattr(config, key)
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
-        
+
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
         supports_sparge = self.capabilities.supports_sparge_attention_backends
@@ -683,11 +684,19 @@ class xFuserModel(abc.ABC):
                     f"{self.settings.fp8_precision_overrides} "
                     f"(match_mode={self.settings.fp8_precision_override_match_mode})"
                 )
+            if self.settings.fp8_precision_override_extra_patterns:
+                log(
+                    "Additional FP8 override rule (union with primary): "
+                    f"{self.settings.fp8_precision_override_extra_patterns} "
+                    f"(match_mode={self.settings.fp8_precision_override_extra_match_mode})"
+                )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_fp4(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
                 fp8_layer_match_mode=self.settings.fp8_precision_override_match_mode,
+                fp8_extra_layers=self.settings.fp8_precision_override_extra_patterns,
+                fp8_extra_match_mode=self.settings.fp8_precision_override_extra_match_mode,
                 use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                 device=f"cuda:{local_rank}",
             )
@@ -711,11 +720,19 @@ class xFuserModel(abc.ABC):
                     f"{self.settings.fp8_precision_overrides} "
                     f"(match_mode={self.settings.fp8_precision_override_match_mode})"
                 )
+            if self.settings.fp8_precision_override_extra_patterns:
+                log(
+                    "Additional FP8 override rule (union with primary): "
+                    f"{self.settings.fp8_precision_override_extra_patterns} "
+                    f"(match_mode={self.settings.fp8_precision_override_extra_match_mode})"
+                )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_nvfp4(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
                 fp8_layer_match_mode=self.settings.fp8_precision_override_match_mode,
+                fp8_extra_layers=self.settings.fp8_precision_override_extra_patterns,
+                fp8_extra_match_mode=self.settings.fp8_precision_override_extra_match_mode,
                 device=f"cuda:{local_rank}",
             )
         for module_name in self.settings.fp8_gemm_module_list:

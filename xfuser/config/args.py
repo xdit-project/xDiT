@@ -141,6 +141,7 @@ class xFuserArgs:
     dataset_path: Optional[str] = None
     use_fsdp: bool = False
     fully_shard_degree: int = 1
+    reshard_after_forward: bool = True
     use_vae_channels_last_format: bool = False
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
@@ -493,6 +494,14 @@ class xFuserArgs:
             type=int,
             default=1,
             help="Fully sharding (sharding) degree."
+        )
+        parser.add_argument(
+            "--no_reshard_after_forward",
+            dest="reshard_after_forward",
+            action="store_false",
+            help="Keep parameters gathered after each block's forward instead of resharding. "
+                 "Trades memory for latency by eliminating repeated all-gathers. "
+                 "Only valid with --fully_shard_degree > 1.",
         )
         parser.add_argument(
             "--height",

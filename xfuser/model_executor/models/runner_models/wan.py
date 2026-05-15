@@ -351,9 +351,11 @@ class xFuserWan21T2VModel(xFuserModel):
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
     def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
+        # Must set registry identity before super().__init__ → _validate_config (see xFuserWan22I2VModel).
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_t2v"
+        self.settings.valid_tasks = ["t2v"]
+        super().__init__(config)
         self.settings.fsdp_strategy["transformer_2"] = {
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,

@@ -368,13 +368,30 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                 if pattern.strip()
             )
             if patterns:
-                self.settings.fp8_precision_overrides = patterns
-                self.settings.fp8_precision_override_match_mode = config.fp8_precision_override_mode
-                log(
-                    "Using custom FP8 override patterns for Wan2.2 T2V: "
-                    f"{self.settings.fp8_precision_overrides} "
-                    f"(match_mode={self.settings.fp8_precision_override_match_mode})"
-                )
+                if config.fp8_precision_override_extend:
+                    # UNION applies only to transformer.blocks (fp4_gemm_module_list);
+                    # transformer_2.blocks stays full FP8 via fp8_gemm_module_list pass.
+                    self.settings.fp8_precision_override_extra_patterns = patterns
+                    self.settings.fp8_precision_override_extra_match_mode = (
+                        config.fp8_precision_override_mode
+                    )
+                    log(
+                        "Extending Wan2.2 T2V tower-1 FP8 overrides "
+                        f"{self.settings.fp8_precision_overrides} "
+                        f"(mode={self.settings.fp8_precision_override_match_mode}) "
+                        f"with extra rule {patterns} "
+                        f"(mode={config.fp8_precision_override_mode})"
+                    )
+                else:
+                    self.settings.fp8_precision_overrides = patterns
+                    self.settings.fp8_precision_override_match_mode = (
+                        config.fp8_precision_override_mode
+                    )
+                    log(
+                        "Using custom FP8 override patterns for Wan2.2 T2V (tower 1 only): "
+                        f"{self.settings.fp8_precision_overrides} "
+                        f"(match_mode={self.settings.fp8_precision_override_match_mode})"
+                    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(

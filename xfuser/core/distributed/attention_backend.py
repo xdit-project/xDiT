@@ -328,6 +328,31 @@ if env_info["has_aiter"]:
     _TRITON_SSTA_BLOCK_SIZE = 128
     
 
+if env_info["has_aiter"]:
+    try:
+        from aiter.ops.flydsl import flydsl_flash_attn_func as flydsl_flash_attn_func_aiter
+        from torch.library import custom_op, register_fake
+
+        @custom_op("xfuser::flydsl_attn_kernel", mutates_args=())
+        def _flydsl_attn_kernel(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return flydsl_flash_attn_func_aiter(query, key, value, causal=is_causal)
+
+        @register_fake("xfuser::flydsl_attn_kernel")
+        def _flydsl_attn_kernel_fake(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return torch.empty_like(query)
+
+    except ImportError:
+        pass
 if env_info["has_flash_attn"]:
     from flash_attn import flash_attn_func as flash_attn_func_2
 if env_info["has_flash_attn_3"]:
@@ -374,6 +399,7 @@ class AttentionBackendType(Enum):
     AITER_SPARSE_SAGE_V2 = "AITER Sparse Sage V2"
     AITER_SPARGE = "AITER Sparge"
     AITER_SPARGE_V2 = "AITER Sparge V2"
+    AITER_FLYDSL = "AITER FlyDSL"
     NPU = "NPU"
 
 def register_attention_function(backend_type):
@@ -942,3 +968,12 @@ def _aiter_sparge_v2_attn_call(query, key, value, dropout_p, is_causal, attentio
         R=HADAMARD_MATRIX[query.device], config=config,
     )
     return restore_sparge_output(output, state), None
+
+@register_attention_function(AttentionBackendType.AITER_FLYDSL)
+def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output = torch.ops.xfuser.flydsl_attn_kernel(query, key, value, is_causal)
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, None

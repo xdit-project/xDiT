@@ -22,6 +22,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         use_cfg_parallel=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -33,6 +34,11 @@ class xFuserStableDiffusionModel(xFuserModel):
         model_name="stabilityai/stable-diffusion-3.5-large",
         output_name="stable_diffusion_3_5_large",
         model_output_type="image",
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+            }
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:

@@ -56,11 +56,17 @@ class xFuserZImageModel(xFuserModel):
         use_cfg_parallel=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
         output_name="z_image",
         model_output_type="image",
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["noise_refiner", "context_refiner", "layers"],
+            }
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -104,10 +110,18 @@ class xFuserZImageTurboModel(xFuserModel):
         num_inference_steps=9,
         guidance_scale=0.0,
     )
+    capabilities = ModelCapabilities(
+        fully_shard_degree=True,
+    )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image-Turbo",
         output_name="z_image_turbo",
         model_output_type="image",
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["noise_refiner", "context_refiner", "layers"],
+            }
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:

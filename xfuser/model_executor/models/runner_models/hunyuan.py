@@ -36,7 +36,8 @@ class xFuserHunyuanvideoModel(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
-        use_hybrid_attn_schedule=True
+        use_hybrid_attn_schedule=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -51,6 +52,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
         output_name="hunyuan_video",
         model_output_type="video",
         fps=24,
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -111,6 +117,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -124,6 +131,11 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fps=24,
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+            }
+        },
     )
 
 
@@ -260,6 +272,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         enable_slicing=True,
         enable_tiling=True,
         supports_sparse_attention_backends=True,
+        fully_shard_degree=True,
     )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:

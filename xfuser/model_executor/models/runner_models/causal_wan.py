@@ -23,7 +23,7 @@ class xFuserCausalWanModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=False,   # SP incompatible with KV cache initially
         ring_degree=False,
-        fully_shard_degree=False,
+        fully_shard_degree=True,
         use_fp8_gemms=False,
         use_parallel_vae=False,
         enable_tiling=True,
@@ -45,6 +45,16 @@ class xFuserCausalWanModel(xFuserModel):
         output_name="causal_wan_i2v",
         fp8_gemm_module_list=["transformer.blocks"],
         valid_tasks=["t2v", "i2v"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["blocks"],
+                "dtype": torch.bfloat16,
+            },
+            "transformer_2": {
+                "wrap_attrs": ["blocks"],
+                "dtype": torch.bfloat16,
+            },
+        },
     )
 
     _NUM_FRAMES_PER_BLOCK = 3

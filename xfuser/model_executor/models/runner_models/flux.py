@@ -54,6 +54,7 @@ class xFuserFluxModel(xFuserModel):
         use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -67,6 +68,11 @@ class xFuserFluxModel(xFuserModel):
         output_name="flux_1_dev",
         model_output_type="image",
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -136,6 +142,7 @@ class xFuserFluxKontextModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -150,6 +157,11 @@ class xFuserFluxKontextModel(xFuserModel):
         model_output_type="image",
         mod_value=16,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -300,6 +312,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        fully_shard_degree=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -313,6 +326,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         output_name="flux_2_klein_9b",
         model_output_type="image",
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -366,4 +384,9 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         output_name="flux_2_klein_4b",
         model_output_type="image",
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        },
     )

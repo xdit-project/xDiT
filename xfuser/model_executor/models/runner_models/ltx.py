@@ -51,6 +51,11 @@ class xFuserLTX23VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+            }
+        },
     )
 
     capabilities = ModelCapabilities(
@@ -58,6 +63,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
 
     _STG_SCALE = 1.0
@@ -224,12 +230,18 @@ class xFuserLTX2VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+            }
+        },
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:

@@ -832,13 +832,13 @@ class xFuserArgs:
                     "extra FP8 override patterns are only applied when quantizing linear layers for FP4 GEMMs."
                 )
             raw = self.fp8_precision_override_patterns
-            if raw is None or not str(raw).strip():
+            if raw is None or not raw.strip():
                 raise ValueError(
                     "When fp8_precision_override_extend is True, --fp8_precision_override_patterns "
                     "must be a non-empty comma-separated list (each entry non-blank after trim). "
                     "Those patterns are UNIONed with the model's built-in fp8_precision_overrides."
                 )
-            parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
             if not parts:
                 raise ValueError(
                     "When fp8_precision_override_extend is True, --fp8_precision_override_patterns "

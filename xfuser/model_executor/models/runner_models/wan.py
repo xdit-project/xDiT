@@ -215,6 +215,7 @@ class xFuserWan21I2VModel(xFuserModel):
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
     def __init__(self, config: xFuserArgs) -> None:
+        self.settings = copy.deepcopy(self.settings)
         self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_i2v"
         super().__init__(config)
@@ -385,6 +386,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     def __init__(self, config: xFuserArgs) -> None:
         # Must set registry identity before super().__init__ → _validate_config (see xFuserWan22I2VModel).
         # Leave settings.valid_tasks unset so callers do not need --task (matches xFuserWan21T2VModel).
+        self.settings = copy.deepcopy(self.settings)
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_t2v"
         super().__init__(config)
@@ -498,6 +500,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     )
 
     def __init__(self, config: xFuserArgs) -> None:
+        self.settings = copy.deepcopy(self.settings)
         super().__init__(config)
         if config.fp8_precision_override_patterns:
             patterns = tuple(

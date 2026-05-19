@@ -613,6 +613,7 @@ class xFuserModel(abc.ABC):
                     component, wrap_attrs, device_group, fs_local_rank, dtype,
                     quantize_fn=quantize_fn,
                     reshard_after_forward=reshard_after_forward,
+                    memory_efficient_init=self.config.memory_efficient_sharding,
                 )
                 setattr(self.pipe, component_name, fsdp_object)
             else:

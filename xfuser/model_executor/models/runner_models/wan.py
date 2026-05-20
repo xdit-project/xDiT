@@ -1,4 +1,5 @@
 import copy
+import re
 import torch
 from typing import List
 from PIL import Image
@@ -7,6 +8,7 @@ from diffusers import WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers import AutoencoderKLWan, WanVACEPipeline
 from diffusers.utils import load_image
+from safetensors.torch import load_file
 
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
@@ -94,6 +96,41 @@ def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
         )
     except Exception as e:
         raise ValueError(f"Failed to patch VAE decoder. {e}")
+
+
+def _remap_lightx2v_to_diffusers(k: str) -> str:
+    """Remap a LightX2V-format state dict key to the diffusers WanTransformer3DModel naming."""
+    k = re.sub(r'\.self_attn\.q\.', '.attn1.to_q.', k)
+    k = re.sub(r'\.self_attn\.k\.', '.attn1.to_k.', k)
+    k = re.sub(r'\.self_attn\.v\.', '.attn1.to_v.', k)
+    k = re.sub(r'\.self_attn\.o\.', '.attn1.to_out.0.', k)
+    k = re.sub(r'\.self_attn\.norm_q\.', '.attn1.norm_q.', k)
+    k = re.sub(r'\.self_attn\.norm_k\.', '.attn1.norm_k.', k)
+    k = re.sub(r'\.cross_attn\.q\.', '.attn2.to_q.', k)
+    k = re.sub(r'\.cross_attn\.k\.', '.attn2.to_k.', k)
+    k = re.sub(r'\.cross_attn\.v\.', '.attn2.to_v.', k)
+    k = re.sub(r'\.cross_attn\.o\.', '.attn2.to_out.0.', k)
+    k = re.sub(r'\.cross_attn\.norm_q\.', '.attn2.norm_q.', k)
+    k = re.sub(r'\.cross_attn\.norm_k\.', '.attn2.norm_k.', k)
+    k = re.sub(r'\.ffn\.0\.', '.ffn.net.0.proj.', k)
+    k = re.sub(r'\.ffn\.2\.', '.ffn.net.2.', k)
+    k = re.sub(r'\.norm3\.', '.norm2.', k)
+    k = re.sub(r'(blocks\.\d+)\.modulation$', r'\1.scale_shift_table', k)
+    k = re.sub(r'^head\.head\.', 'proj_out.', k)
+    k = re.sub(r'^head\.modulation$', 'scale_shift_table', k)
+    k = re.sub(r'^text_embedding\.0\.', 'condition_embedder.text_embedder.linear_1.', k)
+    k = re.sub(r'^text_embedding\.2\.', 'condition_embedder.text_embedder.linear_2.', k)
+    k = re.sub(r'^time_embedding\.0\.', 'condition_embedder.time_embedder.linear_1.', k)
+    k = re.sub(r'^time_embedding\.2\.', 'condition_embedder.time_embedder.linear_2.', k)
+    k = re.sub(r'^time_projection\.1\.', 'condition_embedder.time_proj.', k)
+    return k
+
+
+def _load_distilled_weights(model: torch.nn.Module, path: str) -> None:
+    """Load a LightX2V distilled safetensors checkpoint into a diffusers WanTransformer3DModel."""
+    raw = load_file(path, device="cpu")
+    remapped = {_remap_lightx2v_to_diffusers(k): v for k, v in raw.items()}
+    model.load_state_dict(remapped, strict=True)
 
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
@@ -253,6 +290,63 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
         self._run_timed_pipe(input_args)
+
+
+@register_model("Wan2.2-Distilled-I2V")
+class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
+    """Wan2.2 I2V with LightX2V 4-step distilled weights.
+
+    Loads the base diffusers architecture from Wan-AI/Wan2.2-I2V-A14B-Diffusers and
+    replaces the transformer weights from LightX2V BF16 distilled checkpoints.
+
+    Required extra args (passed via xFuserArgs or runner config):
+        distilled_transformer_path:   path to high-noise .safetensors  (transformer)
+        distilled_transformer_2_path: path to low-noise  .safetensors  (transformer_2)
+    """
+
+    # boundary_step_index=2 out of 4 steps → t_boundary = 500 / 1000 = 0.5
+    _BOUNDARY_RATIO = 0.5
+    _BASE_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_frames=81,
+        num_inference_steps=4,
+        guidance_scale=3.5,
+        guidance_scale_2=3.5,
+        flow_shift=5.0,
+        num_hybrid_attn_high_precision_steps=5,
+    )
+
+    def __init__(self, config: xFuserArgs) -> None:
+        self.settings.model_name = self._BASE_MODEL
+        self.settings.output_name = "wan2.2_distilled_i2v"
+        super().__init__(config)
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self._BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+            attention_kwargs=_build_attention_kwargs(self.config),
+        )
+        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self._BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer_2",
+            attention_kwargs=_build_attention_kwargs(self.config),
+        )
+        _load_distilled_weights(transformer,   self.config.distilled_transformer_path)
+        _load_distilled_weights(transformer_2, self.config.distilled_transformer_2_path)
+        pipe = xFuserWanImageToVideoPipeline.from_pretrained(
+            pretrained_model_name_or_path=self._BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+            transformer=transformer,
+            transformer_2=transformer_2,
+            boundary_ratio=self._BOUNDARY_RATIO,
+        )
+        return pipe
 
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")

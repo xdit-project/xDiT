@@ -57,6 +57,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         enable_tiling=True,
+        enable_slicing=True,
     )
 
     _STG_SCALE = 1.0
@@ -224,6 +225,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         enable_tiling=True,
+        enable_slicing=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:

@@ -21,6 +21,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         pipefusion_parallel_degree=True,
         use_cfg_parallel=True,
         enable_tiling=True,
+        enable_slicing=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,

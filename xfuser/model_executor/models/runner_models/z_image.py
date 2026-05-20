@@ -55,6 +55,7 @@ class xFuserZImageModel(xFuserModel):
     capabilities = ModelCapabilities(
         use_cfg_parallel=True,
         enable_tiling=True,
+        enable_slicing=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -93,14 +94,16 @@ class xFuserZImageModel(xFuserModel):
 @register_model("Z-Image-Turbo")
 class xFuserZImageTurboModel(xFuserModel):
 
+    capabilities = ModelCapabilities(
+        fully_shard_degree=True,
+        enable_tiling=True,
+        enable_slicing=True,
+    )
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
         num_inference_steps=9,
         guidance_scale=0.0,
-    )
-    capabilities = ModelCapabilities(
-        enable_tiling=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image-Turbo",

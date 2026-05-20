@@ -26,6 +26,7 @@ class xFuserCausalWanModel(xFuserModel):
         fully_shard_degree=False,
         use_fp8_gemms=False,
         use_parallel_vae=False,
+        enable_tiling=True,
     )
     default_input_values = DefaultInputValues(
         height=512,

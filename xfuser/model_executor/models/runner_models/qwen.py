@@ -26,6 +26,7 @@ class xFuserQwenImageEditModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        enable_tiling=True,
     )
     default_input_values = DefaultInputValues(
         num_inference_steps=50,
@@ -100,6 +101,7 @@ class xFuserQwenImageModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
+        enable_tiling=True,
     )
     default_input_values = DefaultInputValues(
         height=928,

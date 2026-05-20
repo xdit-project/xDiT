@@ -126,9 +126,8 @@ class xFuserArgs:
     cross_attention_backend: Optional[str] = None
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
-    fp8_precision_override_mode: str = "prefix"
-    fp8_precision_override_patterns: Optional[str] = None
-    fp8_precision_override_extend: bool = False
+    fp8_precision_override_prefix_patterns: Optional[str] = None
+    fp8_precision_override_suffix_patterns: Optional[str] = None
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
@@ -594,25 +593,18 @@ class xFuserArgs:
             help="Quantize the transformer linear layers (selected models only).",
         )
         parser.add_argument(
-            "--fp8_precision_override_mode",
-            type=str,
-            default="prefix",
-            choices=["prefix", "suffix", "contains"],
-            help="Pattern match mode used for FP8 override selection when FP4 GEMMs are enabled.",
-        )
-        parser.add_argument(
-            "--fp8_precision_override_patterns",
+            "--fp8_precision_override_prefix_patterns",
             type=nullable_str,
             default=None,
-            help="Comma-delimited layer patterns to keep in FP8 while running FP4 GEMMs.",
+            help="Comma-delimited FQN prefix patterns to keep in FP8 during FP4 GEMMs "
+                 "(replaces model default prefix overrides when set).",
         )
         parser.add_argument(
-            "--fp8_precision_override_extend",
-            action="store_true",
-            help="Treat --fp8_precision_override_patterns as an ADDITIONAL rule on top of "
-                 "the model's default fp8_precision_overrides rather than replacing them. "
-                 "Useful for stacking targeted overrides (e.g. FFN-only) on top of the "
-                 "built-in boundary-block protections.",
+            "--fp8_precision_override_suffix_patterns",
+            type=nullable_str,
+            default=None,
+            help="Comma-delimited FQN suffix patterns to keep in FP8 during FP4 GEMMs "
+                 "(replaces model default suffix overrides when set).",
         )
 
         parser.add_argument(
@@ -822,28 +814,14 @@ class xFuserArgs:
             if not self.use_fp4_gemms:
                 raise ValueError("When use_hybrid_gemm_schedule is True, use_fp4_gemms must be set.")
 
-        # FP8 precision overrides during FP4 GEMMs: --fp8_precision_override_extend unions user
-        # patterns with per-model defaults (see wan.py). Fail fast if the flag is set without
-        # actionable patterns, or without --use_fp4_gemms (otherwise the CLI implies a no-op).
-        if self.fp8_precision_override_extend:
-            if not self.use_fp4_gemms:
-                raise ValueError(
-                    "When fp8_precision_override_extend is True, use_fp4_gemms must be set: "
-                    "extra FP8 override patterns are only applied when quantizing linear layers for FP4 GEMMs."
-                )
-            raw = self.fp8_precision_override_patterns
-            if raw is None or not raw.strip():
-                raise ValueError(
-                    "When fp8_precision_override_extend is True, --fp8_precision_override_patterns "
-                    "must be a non-empty comma-separated list (each entry non-blank after trim). "
-                    "Those patterns are UNIONed with the model's built-in fp8_precision_overrides."
-                )
-            parts = [p.strip() for p in raw.split(",") if p.strip()]
-            if not parts:
-                raise ValueError(
-                    "When fp8_precision_override_extend is True, --fp8_precision_override_patterns "
-                    "must contain at least one non-empty pattern (got only commas/whitespace)."
-                )
+        if (
+            self.fp8_precision_override_prefix_patterns is not None
+            or self.fp8_precision_override_suffix_patterns is not None
+        ) and not self.use_fp4_gemms:
+            raise ValueError(
+                "FP8 precision override patterns require --use_fp4_gemms: "
+                "overrides apply when quantizing linear layers for FP4 GEMMs."
+            )
 
         model_config = ModelConfig(
             model=self.model,

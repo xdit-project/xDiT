@@ -568,7 +568,8 @@ class xFuserModel(abc.ABC):
         if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
-            self.pipe = self.pipe.to(f"cuda:{local_rank}")
+            if not (self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload):
+                self.pipe = self.pipe.to(f"cuda:{local_rank}")
             if self.config.use_fp4_gemms:
                 if _is_cuda():
                     self._setup_nvfp4_gemms(local_rank=local_rank)

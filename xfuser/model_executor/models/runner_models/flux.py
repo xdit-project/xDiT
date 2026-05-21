@@ -340,7 +340,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
+                "wrap_attrs": ["model.layers"],
             },
         },
     )
@@ -401,7 +401,7 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
+                "wrap_attrs": ["model.layers"],
             },
         },
     )

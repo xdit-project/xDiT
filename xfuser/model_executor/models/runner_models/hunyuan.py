@@ -285,6 +285,11 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         self.settings.model_name = "tencent/HunyuanVideo-1.5"
         self.settings.output_name = "hunyuan_video_1_5_sparse"
         self.settings.valid_tasks = ["i2v"]
+        self.settings.fsdp_strategy = {
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            }
+        }
         self.pipe_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
 
 

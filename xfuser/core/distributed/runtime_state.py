@@ -214,7 +214,19 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_SPARSE_SAGE_V2,
                                  AttentionBackendType.FLEX_BLOCK_ATTN]:
             if self.parallel_config.ring_degree > 1:
-                raise RuntimeError("Selected attention backend does not support ring parallelism.")
+                if attention_backend == AttentionBackendType.AITER_SAGE:
+                    try:
+                        from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
+                    except ImportError:
+                        raise RuntimeError("AITER Sage attention is not available, please update AITER") from None
+                    try:
+                        has_lse = inspect.signature(fav3_sage_wrapper_func).parameters.get("return_lse") is not None
+                    except (AttributeError, TypeError):
+                        has_lse = False
+                    if not has_lse:
+                        raise RuntimeError("AITER Sage attention does not support return_lse, please update AITER")
+                else:
+                    raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:
             try:
                 from aiter import flash_attn_fp8_pertensor_func

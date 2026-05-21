@@ -53,6 +53,12 @@ def _check_aiter_fp8_has_descale():
         AITER_FP8_HAS_DESCALE = False
     return AITER_FP8_HAS_DESCALE
 
+def _check_aiter_sage_has_return_lse():
+    try:
+        return inspect.signature(fav3_sage_wrapper_func).parameters.get("return_lse") is not None
+    except (NameError, ImportError, AttributeError, TypeError):
+        return False
+
 def _aiter_sage_v2_hadamard_matrix(block_r):
     hadamard_matrix = {}
     try:
@@ -324,6 +330,7 @@ if env_info["has_aiter"]:
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
+    AITER_SAGE_HAS_RETURN_LSE = _check_aiter_sage_has_return_lse()
     HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
     _TRITON_SSTA_BLOCK_SIZE = 128
     
@@ -757,8 +764,13 @@ def npu_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwarg
 @register_attention_function(AttentionBackendType.AITER_SAGE)
 def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     # Pass layout="bhsd" to avoid permutation
-    attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=True)
-    output, softmax_lse = attn_fn(query, key, value)
+    if AITER_SAGE_HAS_RETURN_LSE:
+        attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=True)
+        output, softmax_lse = attn_fn(query, key, value)
+    else:
+        attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
+        output = attn_fn(query, key, value)
+        softmax_lse = None
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)

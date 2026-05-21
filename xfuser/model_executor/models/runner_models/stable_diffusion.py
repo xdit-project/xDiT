@@ -37,7 +37,10 @@ class xFuserStableDiffusionModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
-            }
+            },
+            "text_encoder_3": {
+                "wrap_attrs": ["encoder.block"],
+            },
         },
     )
 

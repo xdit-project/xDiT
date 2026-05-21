@@ -65,7 +65,10 @@ class xFuserZImageModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["noise_refiner", "context_refiner", "layers"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )
 
@@ -120,7 +123,10 @@ class xFuserZImageTurboModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["noise_refiner", "context_refiner", "layers"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )
 

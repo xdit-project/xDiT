@@ -54,6 +54,9 @@ class xFuserCausalWanModel(xFuserModel):
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
             },
+            "text_encoder": {
+                "wrap_attrs": ["encoder.block"],
+            },
         },
     )
 

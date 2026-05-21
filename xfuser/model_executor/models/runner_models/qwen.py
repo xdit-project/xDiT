@@ -41,7 +41,10 @@ class xFuserQwenImageEditModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
         fp8_gemm_module_list=["transformer.transformer_blocks"],
     )
@@ -118,7 +121,10 @@ class xFuserQwenImageModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )
 

@@ -71,7 +71,10 @@ class xFuserFluxModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder_2": {
+                "wrap_attrs": ["encoder.block"],
+            },
         },
     )
 
@@ -160,7 +163,10 @@ class xFuserFluxKontextModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder_2": {
+                "wrap_attrs": ["encoder.block"],
+            },
         },
     )
 
@@ -254,7 +260,10 @@ class xFuserFlux2Model(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         }
     )
 
@@ -329,7 +338,10 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )
 
@@ -387,6 +399,9 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )

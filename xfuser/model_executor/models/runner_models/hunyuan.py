@@ -55,7 +55,10 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["layers"],
+            },
         },
     )
 
@@ -134,7 +137,13 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["layers"],
+            },
+            "text_encoder_2": {
+                "wrap_attrs": ["encoder.block"],
+            },
         },
     )
 
@@ -288,7 +297,13 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         self.settings.fsdp_strategy = {
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["layers"],
+            },
+            "text_encoder_2": {
+                "wrap_attrs": ["encoder.block"],
+            },
         }
         self.pipe_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
 

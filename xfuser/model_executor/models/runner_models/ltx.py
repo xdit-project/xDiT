@@ -54,7 +54,10 @@ class xFuserLTX23VideoModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )
 
@@ -233,7 +236,10 @@ class xFuserLTX2VideoModel(xFuserModel):
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
-            }
+            },
+            "text_encoder": {
+                "wrap_attrs": ["model.language_model.layers"],
+            },
         },
     )
     capabilities = ModelCapabilities(

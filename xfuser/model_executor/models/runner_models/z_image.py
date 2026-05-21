@@ -95,7 +95,6 @@ class xFuserZImageModel(xFuserModel):
 class xFuserZImageTurboModel(xFuserModel):
 
     capabilities = ModelCapabilities(
-        fully_shard_degree=True,
         enable_tiling=True,
         enable_slicing=True,
     )

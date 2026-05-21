@@ -639,6 +639,13 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
                     perturbation_mask=block_perturbation_mask,
                     all_perturbed=block_all_perturbed,
                 )
+                # Workaround for pytorch/pytorch#152887: when compile_repeated_blocks
+                # is used with mode="reduce-overhead", every block call hits the same
+                # compiled callable. CUDA Graph Trees cannot handle the resulting
+                # ``x = f(x)`` chain (the previous call's static-memory output is the
+                # next call's input). Cloning into fresh user memory breaks the alias.
+                hidden_states = hidden_states.clone()
+                audio_hidden_states = audio_hidden_states.clone()
 
         # 6. Output layers (including unpatchification)
         scale_shift_values = self.scale_shift_table[None, None] + embedded_timestep[:, :, None]

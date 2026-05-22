@@ -376,6 +376,25 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         pipe.scheduler = _DistilledWanScheduler()
         return pipe
 
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        if not self.config.distilled_transformer_path:
+            raise ValueError(
+                "--distilled_transformer_path is required for Wan2.2-Distilled-I2V "
+                "(path to high-noise safetensors file)."
+            )
+        if not self.config.distilled_transformer_2_path:
+            raise ValueError(
+                "--distilled_transformer_2_path is required for Wan2.2-Distilled-I2V "
+                "(path to low-noise safetensors file)."
+            )
+        steps = input_args.get("num_inference_steps")
+        if steps != 4:
+            raise ValueError(
+                f"Wan2.2-Distilled-I2V uses a fixed 4-step schedule; "
+                f"num_inference_steps must be 4, got {steps}."
+            )
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps
         # do_classifier_free_guidance=False, so negative_prompt has no effect.

@@ -92,6 +92,7 @@ Individual model classes that inherit from `xFuserModel`:
 | HunyuanVideo | `HunyuanVideo`, `tencent/HunyuanVideo` |
 | HunyuanVideo-1.5 | `HunyuanVideo-1.5`, `tencent/HunyuanVideo-1.5` |
 | Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
+| Wan 2.2 Distilled I2V (LightX2V 4-step) | `Wan2.2-Distilled-I2V` |
 | Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 | Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B`, `Wan-AI/Wan2.1-VACE-1.3B` |
 | Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3.5-large` |
@@ -153,6 +154,13 @@ Individual model classes that inherit from `xFuserModel`:
 | `--enable_sequential_cpu_offload` | Enable sequential CPU offload | False |
 | `--attention_backend` | Attention backend selection | None |
 
+### Model-specific Arguments
+
+| Argument | Description | Required for |
+|----------|-------------|--------------|
+| `--distilled_transformer_path` | Path to the **high-noise** distilled transformer safetensors (used for denoising steps 0–1) | `Wan2.2-Distilled-I2V` |
+| `--distilled_transformer_2_path` | Path to the **low-noise** distilled transformer safetensors (used for denoising steps 2–3) | `Wan2.2-Distilled-I2V` |
+
 ### Benchmarking
 
 | Argument | Description | Default |
@@ -193,6 +201,17 @@ xdit --model HunyuanVideo \
     --height 720 \
     --width 1280 \
     --num_frames 49 \
+    --ulysses_degree 8
+```
+
+### Distilled Video Generation
+
+```bash
+xdit --model Wan2.2-Distilled-I2V \
+    --distilled_transformer_path   /path/to/wan2.2_i2v_A14b_high_noise_lightx2v_4step_720p_260412.safetensors \
+    --distilled_transformer_2_path /path/to/wan2.2_i2v_A14b_low_noise_lightx2v_4step_720p_260412.safetensors \
+    --input_images /path/to/image.jpg \
+    --prompt "A cat walking in a garden" \
     --ulysses_degree 8
 ```
 

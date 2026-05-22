@@ -3,8 +3,7 @@ import re
 import torch
 from typing import List
 from PIL import Image
-from typing import List
-from diffusers import WanPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler, WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers import AutoencoderKLWan, WanVACEPipeline
 from diffusers.utils import load_image
@@ -131,6 +130,33 @@ def _load_distilled_weights(model: torch.nn.Module, path: str) -> None:
     raw = load_file(path, device="cpu")
     remapped = {_remap_lightx2v_to_diffusers(k): v for k, v in raw.items()}
     model.load_state_dict(remapped, strict=True)
+
+
+def _distilled_scheduler_sigmas() -> torch.Tensor:
+    """Sigmas (including terminal 0) for Wan2.2 I2V 4-step distilled schedule.
+
+    LightX2V distilled Wan2.2 uses sample_shift=5 and denoising_step_list=[1000, 750, 500, 250]:
+      σ_linear indices [0, 250, 500, 750] → shifted → [1.0, 0.9375, 0.8333, 0.625]
+      timesteps = σ * 1000               →           [1000, 937.5, 833.3, 625.0]
+    """
+    sample_shift = 5.0
+    sigma_linear = torch.linspace(1.0, 0.0, 1001)[:-1]
+    sigma_shifted = sample_shift * sigma_linear / (1.0 + (sample_shift - 1.0) * sigma_linear)
+    indices = [0, 250, 500, 750]  # 1000 - [1000, 750, 500, 250]
+    return torch.cat([sigma_shifted[indices], torch.zeros(1)])
+
+
+class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
+    """FlowMatchEulerDiscreteScheduler with fixed 4-step sigmas for LightX2V Wan2.2 distilled inference."""
+
+    def set_timesteps(self, num_inference_steps, device=None, **kwargs):
+        self.num_inference_steps = num_inference_steps
+        dev = torch.device(device) if device else torch.device("cpu")
+        sigmas = _distilled_scheduler_sigmas().to(dev)
+        self.sigmas = sigmas
+        self.timesteps = sigmas[:-1] * self.config.num_train_timesteps
+        self._step_index = None
+        self._begin_index = None
 
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
@@ -300,12 +326,13 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
     replaces the transformer weights from LightX2V BF16 distilled checkpoints.
 
     Required extra args (passed via xFuserArgs or runner config):
-        distilled_transformer_path:   path to high-noise .safetensors  (transformer)
-        distilled_transformer_2_path: path to low-noise  .safetensors  (transformer_2)
+        distilled_transformer_path:   path to high-noise .safetensors (transformer)
+        distilled_transformer_2_path: path to low-noise .safetensors (transformer_2)
     """
 
-    # boundary_step_index=2 out of 4 steps → t_boundary = 500 / 1000 = 0.5
-    _BOUNDARY_RATIO = 0.5
+    # LightX2V boundary_step_index=2 (step-index comparison) maps to a timestep threshold
+    # between shifted t[1]≈937 and t[2]≈833. 0.9 → threshold 900 correctly splits 2+2.
+    _BOUNDARY_RATIO = 0.9
     _BASE_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
     default_input_values = DefaultInputValues(
@@ -313,10 +340,10 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         width=1280,
         num_frames=81,
         num_inference_steps=4,
-        guidance_scale=3.5,
-        guidance_scale_2=3.5,
-        flow_shift=5.0,
-        num_hybrid_attn_high_precision_steps=5,
+        guidance_scale=1.0,
+        guidance_scale_2=None,
+        flow_shift=5,
+        num_hybrid_attn_high_precision_steps=1,
     )
 
     def __init__(self, config: xFuserArgs) -> None:
@@ -346,7 +373,24 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             transformer_2=transformer_2,
             boundary_ratio=self._BOUNDARY_RATIO,
         )
+        pipe.scheduler = _DistilledWanScheduler()
         return pipe
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps
+        # do_classifier_free_guidance=False, so negative_prompt has no effect.
+        output = self.pipe(
+            image=input_args["image"],
+            height=input_args["height"],
+            width=input_args["width"],
+            prompt=input_args["prompt"],
+            num_inference_steps=input_args["num_inference_steps"],
+            num_frames=input_args["num_frames"],
+            guidance_scale=1.0,
+            guidance_scale_2=None,
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        )
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")

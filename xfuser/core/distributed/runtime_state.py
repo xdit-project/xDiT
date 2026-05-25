@@ -221,10 +221,16 @@ class RuntimeState(metaclass=ABCMeta):
                         raise RuntimeError("AITER Sage attention is not available, please update AITER") from None
                     try:
                         has_lse = inspect.signature(fav3_sage_wrapper_func).parameters.get("return_lse") is not None
+                        # Check if the function has a smooth_k parameter, this parameter was shipped with a fix for the lse computation, 
+                        # needed for correct ring-attention merging.
+                        has_smooth_k = inspect.signature(fav3_sage_wrapper_func).parameters.get("smooth_k") is not None
                     except (AttributeError, TypeError):
                         has_lse = False
+                        has_smooth_k = False
                     if not has_lse:
                         raise RuntimeError("AITER Sage attention does not support return_lse, please update AITER")
+                    if not has_smooth_k:
+                        raise RuntimeError("AITER Sage attention is missing the smooth_k LSE correction required for ring parallelism, please update AITER")
                 else:
                     raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:

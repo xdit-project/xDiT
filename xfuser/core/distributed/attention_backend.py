@@ -11,7 +11,7 @@ from xfuser.core.distributed.ssta import (
     untile_ssta_output,
     expand_block_mask,
 )
-from xfuser.core.distributed import get_ulysses_parallel_world_size
+from xfuser.core.distributed import get_ulysses_parallel_world_size, get_ring_parallel_world_size
 from xfuser.core.sparge_attention.sparge import (
     setup_sparge,
     compute_sparge_block_mask,
@@ -764,7 +764,7 @@ def npu_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwarg
 @register_attention_function(AttentionBackendType.AITER_SAGE)
 def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     # Pass layout="bhsd" to avoid permutation
-    if AITER_SAGE_HAS_RETURN_LSE:
+    if AITER_SAGE_HAS_RETURN_LSE and get_ring_parallel_world_size() > 1:
         attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=True)
         output, softmax_lse = attn_fn(query, key, value)
     else:

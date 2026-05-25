@@ -1,12 +1,13 @@
 import copy
+import re
 import torch
 from typing import List
 from PIL import Image
-from typing import List
-from diffusers import WanPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler, WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers import AutoencoderKLWan, WanVACEPipeline
 from diffusers.utils import load_image
+from safetensors.torch import load_file
 
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
@@ -94,6 +95,68 @@ def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
         )
     except Exception as e:
         raise ValueError(f"Failed to patch VAE decoder. {e}")
+
+
+def _remap_lightx2v_to_diffusers(k: str) -> str:
+    """Remap a LightX2V-format state dict key to the diffusers WanTransformer3DModel naming."""
+    k = re.sub(r'\.self_attn\.q\.', '.attn1.to_q.', k)
+    k = re.sub(r'\.self_attn\.k\.', '.attn1.to_k.', k)
+    k = re.sub(r'\.self_attn\.v\.', '.attn1.to_v.', k)
+    k = re.sub(r'\.self_attn\.o\.', '.attn1.to_out.0.', k)
+    k = re.sub(r'\.self_attn\.norm_q\.', '.attn1.norm_q.', k)
+    k = re.sub(r'\.self_attn\.norm_k\.', '.attn1.norm_k.', k)
+    k = re.sub(r'\.cross_attn\.q\.', '.attn2.to_q.', k)
+    k = re.sub(r'\.cross_attn\.k\.', '.attn2.to_k.', k)
+    k = re.sub(r'\.cross_attn\.v\.', '.attn2.to_v.', k)
+    k = re.sub(r'\.cross_attn\.o\.', '.attn2.to_out.0.', k)
+    k = re.sub(r'\.cross_attn\.norm_q\.', '.attn2.norm_q.', k)
+    k = re.sub(r'\.cross_attn\.norm_k\.', '.attn2.norm_k.', k)
+    k = re.sub(r'\.ffn\.0\.', '.ffn.net.0.proj.', k)
+    k = re.sub(r'\.ffn\.2\.', '.ffn.net.2.', k)
+    k = re.sub(r'\.norm3\.', '.norm2.', k)
+    k = re.sub(r'(blocks\.\d+)\.modulation$', r'\1.scale_shift_table', k)
+    k = re.sub(r'^head\.head\.', 'proj_out.', k)
+    k = re.sub(r'^head\.modulation$', 'scale_shift_table', k)
+    k = re.sub(r'^text_embedding\.0\.', 'condition_embedder.text_embedder.linear_1.', k)
+    k = re.sub(r'^text_embedding\.2\.', 'condition_embedder.text_embedder.linear_2.', k)
+    k = re.sub(r'^time_embedding\.0\.', 'condition_embedder.time_embedder.linear_1.', k)
+    k = re.sub(r'^time_embedding\.2\.', 'condition_embedder.time_embedder.linear_2.', k)
+    k = re.sub(r'^time_projection\.1\.', 'condition_embedder.time_proj.', k)
+    return k
+
+
+def _load_distilled_weights(model: torch.nn.Module, path: str) -> None:
+    """Load a LightX2V distilled safetensors checkpoint into a diffusers WanTransformer3DModel."""
+    raw = load_file(path, device="cpu")
+    remapped = {_remap_lightx2v_to_diffusers(k): v for k, v in raw.items()}
+    model.load_state_dict(remapped, strict=True)
+
+
+def _distilled_scheduler_sigmas() -> torch.Tensor:
+    """Sigmas (including terminal 0) for Wan2.2 I2V 4-step distilled schedule.
+
+    LightX2V distilled Wan2.2 uses sample_shift=5 and denoising_step_list=[1000, 750, 500, 250]:
+      σ_linear indices [0, 250, 500, 750] → shifted → [1.0, 0.9375, 0.8333, 0.625]
+      timesteps = σ * 1000               →           [1000, 937.5, 833.3, 625.0]
+    """
+    sample_shift = 5.0
+    sigma_linear = torch.linspace(1.0, 0.0, 1001)[:-1]
+    sigma_shifted = sample_shift * sigma_linear / (1.0 + (sample_shift - 1.0) * sigma_linear)
+    indices = [0, 250, 500, 750]  # 1000 - [1000, 750, 500, 250]
+    return torch.cat([sigma_shifted[indices], torch.zeros(1)])
+
+
+class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
+    """FlowMatchEulerDiscreteScheduler with fixed 4-step sigmas for LightX2V Wan2.2 distilled inference."""
+
+    def set_timesteps(self, num_inference_steps, device=None, **kwargs):
+        self.num_inference_steps = num_inference_steps
+        dev = torch.device(device) if device else torch.device("cpu")
+        sigmas = _distilled_scheduler_sigmas().to(dev)
+        self.sigmas = sigmas
+        self.timesteps = sigmas[:-1] * self.config.num_train_timesteps
+        self._step_index = None
+        self._begin_index = None
 
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
@@ -253,6 +316,119 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
         # Full cycle to warmup the torch compiler
         self._run_timed_pipe(input_args)
+
+
+@register_model("Wan2.2-Distilled-I2V")
+class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
+    """Wan2.2 I2V with LightX2V 4-step distilled weights.
+
+    Loads the base diffusers architecture from Wan-AI/Wan2.2-I2V-A14B-Diffusers and
+    replaces the transformer weights from LightX2V BF16 distilled checkpoints.
+
+    Required extra args (passed via xFuserArgs or runner config):
+        distilled_transformer_path:   path to high-noise .safetensors (transformer)
+        distilled_transformer_2_path: path to low-noise .safetensors (transformer_2)
+    """
+
+    # LightX2V boundary_step_index=2 (step-index comparison) maps to a timestep threshold
+    # between shifted t[1]≈937 and t[2]≈833. 0.9 → threshold 900 correctly splits 2+2.
+    _BOUNDARY_RATIO = 0.9
+    _BASE_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        fully_shard_degree=True,
+        use_fp8_gemms=True,
+        use_cfg_parallel=False,
+        use_fp4_gemms=True,
+        use_hybrid_attn_schedule=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
+        cross_attention_backend=True,
+        supports_sparge_attention_backends=True,
+        supports_distilled_weights=True,
+    )
+    default_input_values = DefaultInputValues(
+        height=720,
+        width=1280,
+        num_frames=81,
+        num_inference_steps=4,
+        guidance_scale=1.0,
+        guidance_scale_2=None,
+        flow_shift=5,
+        num_hybrid_attn_high_precision_steps=1,
+    )
+
+    def __init__(self, config: xFuserArgs) -> None:
+        self.settings.model_name = self._BASE_MODEL
+        self.settings.output_name = "wan2.2_distilled_i2v"
+        super().__init__(config)
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self._BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer",
+            attention_kwargs=_build_attention_kwargs(self.config),
+            low_cpu_mem_usage=True,
+        )
+        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
+            pretrained_model_name_or_path=self._BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+            subfolder="transformer_2",
+            attention_kwargs=_build_attention_kwargs(self.config),
+            low_cpu_mem_usage=True,
+        )
+        _load_distilled_weights(transformer,   self.config.distilled_transformer_path)
+        _load_distilled_weights(transformer_2, self.config.distilled_transformer_2_path)
+        pipe = xFuserWanImageToVideoPipeline.from_pretrained(
+            pretrained_model_name_or_path=self._BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+            transformer=transformer,
+            transformer_2=transformer_2,
+            boundary_ratio=self._BOUNDARY_RATIO,
+        )
+        pipe.scheduler = _DistilledWanScheduler.from_config(pipe.scheduler.config)
+        return pipe
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        if not self.config.distilled_transformer_path:
+            raise ValueError(
+                "--distilled_transformer_path is required for Wan2.2-Distilled-I2V "
+                "(path to high-noise safetensors file)."
+            )
+        if not self.config.distilled_transformer_2_path:
+            raise ValueError(
+                "--distilled_transformer_2_path is required for Wan2.2-Distilled-I2V "
+                "(path to low-noise safetensors file)."
+            )
+        steps = input_args.get("num_inference_steps")
+        if steps != 4:
+            raise ValueError(
+                f"Wan2.2-Distilled-I2V uses a fixed 4-step schedule; "
+                f"num_inference_steps must be 4, got {steps}."
+            )
+        guidance_scale = input_args.get("guidance_scale")
+        if guidance_scale != 1.0:
+            log(f"Using guidance_scale=1.0. Other guindance scale values are not supported with this model.")
+
+    def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps
+        # do_classifier_free_guidance=False, so negative_prompt has no effect.
+        output = self.pipe(
+            image=input_args["image"],
+            height=input_args["height"],
+            width=input_args["width"],
+            prompt=input_args["prompt"],
+            num_inference_steps=input_args["num_inference_steps"],
+            num_frames=input_args["num_frames"],
+            guidance_scale=1.0,
+            guidance_scale_2=None,
+            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+        )
+        return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")

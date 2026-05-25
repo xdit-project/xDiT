@@ -231,6 +231,17 @@ class RuntimeState(metaclass=ABCMeta):
                         raise RuntimeError("AITER Sage attention does not support return_lse, please update AITER")
                     if not has_smooth_k:
                         raise RuntimeError("AITER Sage attention is missing the smooth_k LSE correction required for ring parallelism, please update AITER")
+                elif attention_backend == AttentionBackendType.AITER_SAGE_V2:
+                    try:
+                        from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
+                    except ImportError:
+                        raise RuntimeError("AITER Sage V2 attention is not available, please update AITER") from None
+                    try:
+                        has_lse = inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("return_lse") is not None
+                    except (AttributeError, TypeError):
+                        has_lse = False
+                    if not has_lse:
+                        raise RuntimeError("AITER Sage V2 attention does not support return_lse, please update AITER")
                 else:
                     raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:

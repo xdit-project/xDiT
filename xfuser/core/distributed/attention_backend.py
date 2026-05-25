@@ -59,6 +59,12 @@ def _check_aiter_sage_has_return_lse():
     except (NameError, ImportError, AttributeError, TypeError):
         return False
 
+def _check_aiter_sage_v2_has_return_lse():
+    try:
+        return inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("return_lse") is not None
+    except (NameError, ImportError, AttributeError, TypeError):
+        return False
+
 def _aiter_sage_v2_hadamard_matrix(block_r):
     hadamard_matrix = {}
     try:
@@ -331,6 +337,7 @@ if env_info["has_aiter"]:
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
     AITER_SAGE_HAS_RETURN_LSE = _check_aiter_sage_has_return_lse()
+    AITER_SAGE_V2_HAS_RETURN_LSE = _check_aiter_sage_v2_has_return_lse()
     HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
     _TRITON_SSTA_BLOCK_SIZE = 128
     
@@ -781,9 +788,13 @@ def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_
     query = query.contiguous()
     key = key.contiguous()
     value = value.contiguous()
-    softmax_lse = None
-    attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
-    output = attn_fn(query, key, value, causal=is_causal)
+    if AITER_SAGE_V2_HAS_RETURN_LSE and get_ring_parallel_world_size() > 1:
+        attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device], return_lse=True)
+        output, softmax_lse = attn_fn(query, key, value, causal=is_causal)
+    else:
+        attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device])
+        output = attn_fn(query, key, value, causal=is_causal)
+        softmax_lse = None
     return output, softmax_lse
 
 

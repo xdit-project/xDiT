@@ -139,7 +139,12 @@ class xFuserHunyuanvideo15Model(xFuserModel):
                 "wrap_attrs": ["transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["layers"],
+                # Qwen2_5_VLTextModel uses _can_record_outputs to collect hidden_states
+                # by isinstance-checking for Qwen2_5_VLDecoderLayer. Per-layer FSDP
+                # wrapping replaces those instances with FSDP wrappers, breaking the
+                # isinstance check and leaving hidden_states=None at inference time.
+                # Wrapping the whole encoder as one unit preserves the layer instances.
+                "wrap_attrs": [],
             },
             "text_encoder_2": {
                 "wrap_attrs": ["encoder.block"],

@@ -159,7 +159,7 @@ class xFuserArgs:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
-    # Distilled model weight paths (e.g. LightX2V Wan2.2 4-step distilled)
+    # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
 
@@ -749,13 +749,13 @@ class xFuserArgs:
             "--distilled_transformer_path",
             type=nullable_str,
             default=None,
-            help="Path to the distilled transformer path. i.e. high-noise distilled transformer safetensors file (Wan2.2 Distilled I2V).",
+            help="Path to the distilled transformer path. i.e. high-noise distilled transformer safetensors file.",
         )
         parser.add_argument(
             "--distilled_transformer_2_path",
             type=nullable_str,
             default=None,
-            help="Path to the distilled transformer_2 path i.e. low-noise distilled transformer_2 safetensors file (Wan2.2 Distilled I2V).",
+            help="Path to the distilled transformer_2 path i.e. low-noise distilled transformer_2 safetensors file.",
         )
         return parser
 

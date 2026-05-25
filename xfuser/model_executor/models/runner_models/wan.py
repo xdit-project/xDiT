@@ -335,6 +335,20 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
     _BOUNDARY_RATIO = 0.9
     _BASE_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        fully_shard_degree=True,
+        use_fp8_gemms=True,
+        use_cfg_parallel=False,
+        use_fp4_gemms=True,
+        use_hybrid_attn_schedule=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
+        cross_attention_backend=True,
+        supports_sparge_attention_backends=True,
+        supports_distilled_weights=True,
+    )
     default_input_values = DefaultInputValues(
         height=720,
         width=1280,
@@ -394,6 +408,9 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
                 f"Wan2.2-Distilled-I2V uses a fixed 4-step schedule; "
                 f"num_inference_steps must be 4, got {steps}."
             )
+        guidance_scale = input_args.get("guidance_scale")
+        if guidance_scale != 1.0:
+            log(f"Using guidance_scale=1.0. Other guindance scale values are not supported with this model.")
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps

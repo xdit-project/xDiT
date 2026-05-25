@@ -158,8 +158,8 @@ Individual model classes that inherit from `xFuserModel`:
 
 | Argument | Description | Required for |
 |----------|-------------|--------------|
-| `--distilled_transformer_path` | Path to the **high-noise** distilled transformer safetensors (used for denoising steps 0–1) | `Wan2.2-Distilled-I2V` |
-| `--distilled_transformer_2_path` | Path to the **low-noise** distilled transformer safetensors (used for denoising steps 2–3) | `Wan2.2-Distilled-I2V` |
+| `--distilled_transformer_path` | Path to the **high-noise** distilled transformer safetensors | `Wan2.2-Distilled-I2V` |
+| `--distilled_transformer_2_path` | Path to the **low-noise** distilled transformer safetensors | `Wan2.2-Distilled-I2V` |
 
 ### Benchmarking
 

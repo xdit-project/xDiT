@@ -121,6 +121,7 @@ class ModelCapabilities:
     cross_attention_backend: bool = False
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
+    supports_distilled_weights: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -353,6 +354,11 @@ class xFuserModel(abc.ABC):
             if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
                 log("AITER GroupNorm is not supported with parallel VAE. Reverting to torch GroupNorm.")
                 torch.nn.GroupNorm = _TORCH_GROUPNORM
+        
+        if config.distilled_transformer_path or config.distilled_transformer_2_path:
+            if not self.capabilities.supports_distilled_weights:
+                raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
+
 
 
     def _compile_model(self, input_args: dict) -> None:

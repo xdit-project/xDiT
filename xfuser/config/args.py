@@ -749,7 +749,7 @@ class xFuserArgs:
             "--distilled_transformer_path",
             type=nullable_str,
             default=None,
-            help="Path to the distilled transformer path. i.e. high-noise distilled transformer safetensors file.",
+            help="Path to the high-noise distilled transformer safetensors file.",
         )
         parser.add_argument(
             "--distilled_transformer_2_path",

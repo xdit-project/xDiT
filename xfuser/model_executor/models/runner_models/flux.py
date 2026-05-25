@@ -272,8 +272,13 @@ class xFuserFlux2Model(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
+        te = self.pipe.text_encoder
+        # vision_tower is never called for FLUX.2 text-only embedding; keep on CPU.
+        if hasattr(te, "model") and hasattr(te.model, "vision_tower"):
+            te.model.vision_tower = te.model.vision_tower.cpu()
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
+
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(

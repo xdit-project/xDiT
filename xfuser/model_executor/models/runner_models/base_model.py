@@ -604,7 +604,8 @@ class xFuserModel(abc.ABC):
         device_group = get_fs_group().device_group
         for component_name, component in self.pipe.components.items():
             if component_name in self.settings.fsdp_strategy:
-                log(f"Sharding {component_name} with FSDP...")
+                log(f"Sharding {component_name} with FSDP... "
+                    f"(VRAM before: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
                 strategy = self.settings.fsdp_strategy[component_name]
                 wrap_attrs = strategy.get("wrap_attrs", [])
                 dtype = strategy.get("dtype", None)
@@ -617,8 +618,11 @@ class xFuserModel(abc.ABC):
                     memory_efficient_init=self.config.memory_efficient_sharding,
                 )
                 setattr(self.pipe, component_name, fsdp_object)
+                torch.cuda.empty_cache()
+                log(f"Sharded {component_name}. "
+                    f"(VRAM after: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
             else:
-                log(f"Skipping FSDP wrapping for {component_name}...")
+                log(f"i m wrapping for {component_name}...")
                 if hasattr(component, "to"):
                     component.to(f"cuda:{local_rank}")
                 else:

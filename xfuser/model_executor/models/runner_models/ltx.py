@@ -56,7 +56,9 @@ class xFuserLTX23VideoModel(xFuserModel):
                 "wrap_attrs": ["transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
+                # wrap_attrs=[] wraps the entire encoder as one FSDP unit to avoid
+                # fully_shard(component) re-materializing all params for the outer shard.
+                "wrap_attrs": [],
             },
         },
     )
@@ -247,7 +249,9 @@ class xFuserLTX2VideoModel(xFuserModel):
                 "wrap_attrs": ["transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
+                # wrap_attrs=[] wraps the entire encoder as one FSDP unit to avoid
+                # fully_shard(component) re-materializing all params for the outer shard.
+                "wrap_attrs": [],
             },
         },
     )

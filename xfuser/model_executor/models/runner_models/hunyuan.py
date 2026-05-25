@@ -57,7 +57,10 @@ class xFuserHunyuanvideoModel(xFuserModel):
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["layers"],
+                # LLaMA layers use output_hidden_states=True with isinstance checks
+                # that break when layers are individually FSDP-wrapped. Wrap the
+                # whole encoder as one unit to preserve layer instances.
+                "wrap_attrs": [],
             },
         },
     )

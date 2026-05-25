@@ -389,7 +389,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             transformer_2=transformer_2,
             boundary_ratio=self._BOUNDARY_RATIO,
         )
-        pipe.scheduler = _DistilledWanScheduler()
+        pipe.scheduler = _DistilledWanScheduler.from_config(pipe.scheduler.config)
         return pipe
 
     def _validate_args(self, input_args: dict) -> None:

@@ -755,7 +755,7 @@ class xFuserArgs:
             "--distilled_transformer_2_path",
             type=nullable_str,
             default=None,
-            help="Path to the distilled transformer_2 path i.e. low-noise distilled transformer_2 safetensors file.",
+            help="Path to the low-noise distilled transformer_2 safetensors file.",
         )
         return parser
 

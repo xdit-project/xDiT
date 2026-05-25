@@ -198,6 +198,7 @@ def shard_component(
     reshard_after_forward: bool = True,
     quantize_fn: Optional[Callable] = None,
     memory_efficient_init: bool = False,
+    offload_policy: Optional[str] = None,
 ) -> torch.nn.Module:
     """
     Wrap a component with FSDP, treating each block as a separate FSDP unit.
@@ -288,16 +289,19 @@ def shard_component(
 
     # FSDP2: Required for torchao quantized tensors, or when use_fsdp2=True for
     # sequential block-by-block init to reduce peak GPU memory during model load.
-    from torch.distributed._composable.fsdp import fully_shard  # noqa: PLC0415
+    from torch.distributed._composable.fsdp import fully_shard, CPUOffloadPolicy  # noqa: PLC0415
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     device_str = f"{device_type}:{device_id}"
     mesh = _make_mesh(process_group, device_type)
+    cpu_offload = CPUOffloadPolicy() if offload_policy == "cpu" else None
 
-    # Move non-block children first; block containers are handled block-by-block below.
+    # Move non-block children to device. With CPUOffloadPolicy params stay on CPU,
+    # so skip this step — fully_shard handles placement.
     wrap_top_names = {attr.split(".")[0] for attr in wrap_attrs}
-    for name, child in component.named_children():
-        if name not in wrap_top_names:
-            child.to(device_str)
+    if cpu_offload is None:
+        for name, child in component.named_children():
+            if name not in wrap_top_names:
+                child.to(device_str)
 
     # Sequential: after fully_shard(block) each rank holds 1/N params, freeing memory
     # for the next block. At most one full block on GPU at a time.
@@ -305,9 +309,9 @@ def shard_component(
         block.to(device_str)
         if quantize_fn is not None:
             quantize_fn(block, i)
-        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward)
+        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
 
-    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward)
+    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
 
     # FSDP2 forward prefetch: each block pre-fetches the next two blocks' all-gathers
     # so communication overlaps with compute. The first block has no predecessor to

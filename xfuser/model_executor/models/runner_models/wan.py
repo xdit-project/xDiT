@@ -39,7 +39,11 @@ COMMON_FSDP_STRATEGY = {
         "dtype": torch.bfloat16,
     },
     "text_encoder": {
+        # CPU offload keeps shards on CPU between uses so the text encoder
+        # all_gather buffer doesn't compete with sharded transformer params
+        # during encode_prompt.
         "wrap_attrs": ["encoder.block"],
+        "offload_policy": "cpu",
     }
 }
 

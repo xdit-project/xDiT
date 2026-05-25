@@ -262,10 +262,10 @@ class xFuserFlux2Model(xFuserModel):
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
             },
             "text_encoder": {
-                # wrap_attrs=[] wraps the entire encoder as one FSDP unit. Per-layer
-                # wrapping caused fully_shard(component) to re-materialize all params
-                # for the outer shard, peaking at ~24GB instead of the expected ~7GB.
-                "wrap_attrs": [],
+                # CPU offload keeps shards on CPU so the all_gather buffer (~13GB)
+                # doesn't compete with the sharded transformer at encode time.
+                "wrap_attrs": ["model.language_model.layers"],
+                "offload_policy": "cpu",
             },
         }
     )

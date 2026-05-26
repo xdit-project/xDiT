@@ -34,14 +34,12 @@ def _(
     return torch.empty(M, N, dtype=torch.bfloat16, device=a_q.device)
 
 
-def _pad_to_multiple(t: torch.Tensor, block: int) -> tuple[torch.Tensor, bool]:
-    """Pad last two dims to multiples of block. Returns (padded, was_padded)."""
-    rows, cols = t.shape[-2], t.shape[-1]
-    r_pad = (-rows) % block
-    c_pad = (-cols) % block
-    if r_pad == 0 and c_pad == 0:
+def _pad_cols_to_multiple(t: torch.Tensor, block: int) -> tuple[torch.Tensor, bool]:
+    """Pad last dim (cols) to a multiple of block. Returns (padded, was_padded)."""
+    c_pad = (-t.shape[-1]) % block
+    if c_pad == 0:
         return t, False
-    return torch.nn.functional.pad(t, (0, c_pad, 0, r_pad)), True
+    return torch.nn.functional.pad(t, (0, c_pad)), True
 
 
 class xFuserFP8BlockScaleLinear(nn.Module):
@@ -86,17 +84,25 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         n_blocks = math.ceil(N / _FP8_BLOCK)
         k_blocks = math.ceil(K / _FP8_BLOCK)
 
-        # Move to target device before quantization — avoids slow CPU math
+        # Move to target device; stay in BF16 — FP8 cast (3 mantissa bits) dominates error,
+        # not BF16 intermediates (7 bits). Only w_amax is cast to FP32 for the stored scale.
         target = device if device is not None else weight.device
-        w = weight.to(device=target, dtype=torch.float32)
-        w_padded, was_padded = _pad_to_multiple(w, _FP8_BLOCK)
+        w = weight.to(device=target)
+        # Pad both dims for the [n_blocks, 128, k_blocks, 128] reshape
+        r_pad = (-N) % _FP8_BLOCK
+        c_pad = (-K) % _FP8_BLOCK
+        if r_pad or c_pad:
+            w = torch.nn.functional.pad(w, (0, c_pad, 0, r_pad))
+            was_padded = True
+        else:
+            was_padded = False
 
-        w_blocks = w_padded.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
+        w_blocks = w.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
         w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)  # [n_blocks, k_blocks]
-        w_scale = (w_amax / _FP8_MAX).float()
+        w_scale = (w_amax.float() / _FP8_MAX)
 
         w_q = (w_blocks / w_amax[:, None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX)
-        w_q = w_q.to(torch.float8_e4m3fn).reshape(w_padded.shape[0], w_padded.shape[1])
+        w_q = w_q.to(torch.float8_e4m3fn).reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
         if was_padded:
             w_q = w_q[:N, :K].contiguous()
 
@@ -119,13 +125,12 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         # fails to build on gfx1201 with ROCm 7.2.3:
         #   __builtin_amdgcn_raw_ptr_buffer_load_lds needs vmem-to-lds-load-insts
         # Manual block-128 quant; torch.compile/Inductor fuses these into ~2 kernels.
-        x_f32 = x.float()
-        x_padded, needs_pad = _pad_to_multiple(x_f32, _FP8_BLOCK)
+        x_padded, needs_pad = _pad_cols_to_multiple(x, _FP8_BLOCK)
         K_pad = x_padded.shape[1]
 
         x_blocks = x_padded.reshape(M, k_blocks, _FP8_BLOCK)
-        x_amax = x_blocks.abs().amax(dim=-1).clamp(min=1e-12)  # [M_flat, k_blocks]
-        x_scale = (x_amax / _FP8_MAX).float()
+        x_amax = x_blocks.abs().amax(dim=-1).clamp(min=1e-12)  # [M, k_blocks]
+        x_scale = (x_amax.float() / _FP8_MAX)
         x_q = (x_blocks / x_amax.unsqueeze(-1) * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX)
         x_q = x_q.to(torch.float8_e4m3fn).reshape(M, K_pad)
         if needs_pad:

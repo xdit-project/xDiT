@@ -325,7 +325,7 @@ def quantize_linear_layers_to_fp8_blockscale(
                 device=weight.device,
                 dtype=weight.dtype,
             )
-            # Free BF16 weight before FP32 quant copy to halve peak memory per layer
+            # Free BF16 weight before quantization to avoid holding two copies on GPU
             module.weight = None
             if module.bias is not None:
                 module.bias = None

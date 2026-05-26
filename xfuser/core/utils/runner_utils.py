@@ -316,14 +316,21 @@ def quantize_linear_layers_to_fp8_blockscale(
 
     for name, module in list(model.named_children()):
         if isinstance(module, torch.nn.Linear):
+            weight = module.weight.data
+            bias = module.bias.data if module.bias is not None else None
             fp8_layer = xFuserFP8BlockScaleLinear(
                 module.in_features,
                 module.out_features,
-                bias=(module.bias is not None),
-                device=module.weight.device,
-                dtype=module.weight.dtype,
+                bias=(bias is not None),
+                device=weight.device,
+                dtype=weight.dtype,
             )
-            fp8_layer.load_and_quantize_weights(module.weight, module.bias, device=device)
+            # Free BF16 weight before FP32 quant copy to halve peak memory per layer
+            module.weight = None
+            if module.bias is not None:
+                module.bias = None
+            fp8_layer.load_and_quantize_weights(weight, bias, device=device)
+            del weight, bias
             setattr(model, name, fp8_layer)
         elif next(module.children(), None) is not None:
             quantize_linear_layers_to_fp8_blockscale(module, device=device)

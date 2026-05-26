@@ -570,8 +570,15 @@ class xFuserModel(abc.ABC):
         if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
-            if not (self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload):
+            offload_requested = (
+                self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload
+            )
+            if not offload_requested:
                 self.pipe = self.pipe.to(f"cuda:{local_rank}")
+            elif self.config.use_fp8_gemms or self.config.use_fp4_gemms:
+                log("WARNING: FP8/FP4 quantization with CPU offload enabled. "
+                    "Quantized weights will be paged between CPU and GPU on every forward call. "
+                    "Consider removing --enable_model_cpu_offload when using quantization.")
             if self.config.use_fp4_gemms:
                 if _is_cuda():
                     self._setup_nvfp4_gemms(local_rank=local_rank)

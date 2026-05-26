@@ -323,9 +323,7 @@ def quantize_linear_layers_to_fp8_blockscale(
                 device=module.weight.device,
                 dtype=module.weight.dtype,
             )
-            fp8_layer.load_and_quantize_weights(module.weight, module.bias)
-            if device is not None:
-                fp8_layer.to(device)
+            fp8_layer.load_and_quantize_weights(module.weight, module.bias, device=device)
             setattr(model, name, fp8_layer)
         elif next(module.children(), None) is not None:
             quantize_linear_layers_to_fp8_blockscale(module, device=device)

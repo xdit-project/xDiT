@@ -73,18 +73,22 @@ class xFuserFP8BlockScaleLinear(nn.Module):
             self.register_parameter("bias", None)
 
     def load_and_quantize_weights(
-        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
+        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
     ) -> None:
-        self._quantize_weights(weight)
+        self._quantize_weights(weight, device=device)
         if bias is not None and self.bias is not None:
-            self.bias.data.copy_(bias.data)
+            target = device if device is not None else bias.device
+            self.bias = torch.nn.Parameter(bias.to(device=target, dtype=bias.dtype).detach())
 
-    def _quantize_weights(self, weight: torch.Tensor) -> None:
+    def _quantize_weights(self, weight: torch.Tensor, device: Optional[torch.device] = None) -> None:
         N, K = weight.shape
         n_blocks = math.ceil(N / _FP8_BLOCK)
         k_blocks = math.ceil(K / _FP8_BLOCK)
 
-        w = weight.to(torch.float32)
+        # Move to target device before quantization — avoids slow CPU math
+        target = device if device is not None else weight.device
+        w = weight.to(device=target, dtype=torch.float32)
         w_padded, was_padded = _pad_to_multiple(w, _FP8_BLOCK)
 
         w_blocks = w_padded.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)

@@ -573,28 +573,25 @@ class xFuserModel(abc.ABC):
             offload_requested = (
                 self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload
             )
+            # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
+            # All other quant paths (FP4, torchao FP8) need weights on GPU first.
+            if self.config.use_fp8_gemms and _use_aiter_fp8_path():
+                for module_name in self.settings.fp8_gemm_module_list:
+                    log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
+                    quantize_linear_layers_to_fp8_blockscale(
+                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}"
+                    )
             if not offload_requested:
                 self.pipe = self.pipe.to(f"cuda:{local_rank}")
-            elif self.config.use_fp8_gemms or self.config.use_fp4_gemms:
-                log("WARNING: FP8/FP4 quantization with CPU offload enabled. "
-                    "Quantized weights will be paged between CPU and GPU on every forward call. "
-                    "Consider removing --enable_model_cpu_offload when using quantization.")
             if self.config.use_fp4_gemms:
                 if _is_cuda():
                     self._setup_nvfp4_gemms(local_rank=local_rank)
                 else:
                     self._setup_mxfp4_gemms(local_rank=local_rank)
-            elif self.config.use_fp8_gemms:
+            if self.config.use_fp8_gemms and not _use_aiter_fp8_path():
                 for module_name in self.settings.fp8_gemm_module_list:
-                    module = rgetattr(self.pipe, module_name)
-                    if _use_aiter_fp8_path():
-                        log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
-                        quantize_linear_layers_to_fp8_blockscale(
-                            module, device=f"cuda:{local_rank}"
-                        )
-                    else:
-                        log(f"Quantizing {module_name} to FP8 (torchao)...")
-                        quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+                    log(f"Quantizing {module_name} to FP8 (torchao)...")
+                    quantize_linear_layers_to_fp8(rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}")
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)

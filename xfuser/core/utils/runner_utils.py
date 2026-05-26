@@ -6,9 +6,32 @@ import functools
 import numpy as np
 from PIL.Image import Image
 from typing import Callable, Optional
-from xfuser.envs import _is_cuda
+from xfuser.envs import _is_cuda, _is_hip
 
 logger = logging.getLogger(__name__)
+
+
+def _use_aiter_fp8_path() -> bool:
+    """True on ROCm RDNA4+ (gfx1200+) with AITER present.
+
+    Restricted to gfx1200+ (RDNA4: R9700, etc.) where our AITER block-128
+    path has been validated and torchao/hipBLASLt FP8 is unavailable (ROCm 7.2.3).
+    CDNA3+ (MI300/MI350, gfx940-999) has battle-tested torchao FP8 and falls
+    through to that path instead.
+    """
+    if not _is_hip():
+        return False
+    try:
+        import aiter  # noqa: F401
+    except ImportError:
+        return False
+    import re
+    arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    m = re.match(r"gfx(\d+)", arch)
+    if not m:
+        return False
+    n = int(m.group(1))
+    return n >= 1200
 
 def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
     """Log message. By default, only from the last process to avoid duplicates."""
@@ -278,6 +301,42 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
             filter_fn=filter_fn,
             device=device
         )
+
+
+def quantize_linear_layers_to_fp8_blockscale(
+    model: torch.nn.Module,
+    parent_name: str = "",
+    device: Optional[torch.device] = None,
+) -> None:
+    """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
+
+    Mirrors quantize_linear_layers_to_fp4 structure: recursive tree walk, in-place
+    setattr replacement. Pre-quantizes weights to FP8 block-128 at call time.
+    """
+    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
+
+    for name, module in list(model.named_children()):
+        if isinstance(module, torch.nn.Linear):
+            fp8_layer = xFuserFP8BlockScaleLinear(
+                module.in_features,
+                module.out_features,
+                bias=(module.bias is not None),
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+            )
+            with torch.no_grad():
+                fp8_layer.load_and_quantize_weights(module.weight, module.bias)
+            if device is not None:
+                if fp8_layer.weight_fp8 is not None:
+                    fp8_layer.weight_fp8 = fp8_layer.weight_fp8.to(device)
+                if fp8_layer.weight_scale is not None:
+                    fp8_layer.weight_scale = fp8_layer.weight_scale.to(device)
+                if fp8_layer.bias is not None:
+                    fp8_layer.bias.data = fp8_layer.bias.data.to(device)
+            setattr(model, name, fp8_layer)
+        elif len(list(module.children())) > 0:
+            full_name = f"{parent_name}.{name}" if parent_name else name
+            quantize_linear_layers_to_fp8_blockscale(module, full_name, device=device)
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:

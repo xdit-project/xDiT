@@ -24,9 +24,11 @@ from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
+    quantize_linear_layers_to_fp8_blockscale,
     quantize_linear_layers_to_fp4,
     quantize_linear_layers_to_nvfp4,
     convert_model_convs_to_channels_last,
+    _use_aiter_fp8_path,
     rgetattr,
 )
 
@@ -577,9 +579,15 @@ class xFuserModel(abc.ABC):
                     self._setup_mxfp4_gemms(local_rank=local_rank)
             elif self.config.use_fp8_gemms:
                 for module_name in self.settings.fp8_gemm_module_list:
-                    log(f"Quantizing linear layers in {module_name} to FP8...")
                     module = rgetattr(self.pipe, module_name)
-                    quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+                    if _use_aiter_fp8_path():
+                        log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
+                        quantize_linear_layers_to_fp8_blockscale(
+                            module, device=f"cuda:{local_rank}"
+                        )
+                    else:
+                        log(f"Quantizing {module_name} to FP8 (torchao)...")
+                        quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -593,7 +601,7 @@ class xFuserModel(abc.ABC):
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
-        if self.config.use_fp8_gemms:
+        if self.config.use_fp8_gemms and _is_cuda():
             from xfuser.core.utils.runner_utils import _TORCHAO_FLOAT8_FSDP2_PATCHES
             assert _TORCHAO_FLOAT8_FSDP2_PATCHES, (
                 "FSDP2 + FP8 requires torchao Float8Tensor patches but they failed to apply at "
@@ -707,7 +715,10 @@ class xFuserModel(abc.ABC):
                         device=device,
                     )
             else:
-                quantize_linear_layers_to_fp8(block, device=device)
+                if _use_aiter_fp8_path():
+                    quantize_linear_layers_to_fp8_blockscale(block, device=device)
+                else:
+                    quantize_linear_layers_to_fp8(block, device=device)
 
         return quantize_fn
 

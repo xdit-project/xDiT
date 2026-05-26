@@ -133,7 +133,7 @@ class xFuserFP8BlockScaleLinear(nn.Module):
 
         output = torch.ops.mylib.fp8_blockscale_gemm(
             x_q, x_scale, self.weight_fp8, self.weight_scale,
-        )
+        ).to(input.dtype)
         if self.bias is not None:
             output = output + self.bias
         return output.view(*original_shape[:-1], self.out_features)

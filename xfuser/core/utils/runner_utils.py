@@ -305,7 +305,6 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
 
 def quantize_linear_layers_to_fp8_blockscale(
     model: torch.nn.Module,
-    parent_name: str = "",
     device: Optional[torch.device] = None,
 ) -> None:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
@@ -327,16 +326,10 @@ def quantize_linear_layers_to_fp8_blockscale(
             with torch.no_grad():
                 fp8_layer.load_and_quantize_weights(module.weight, module.bias)
             if device is not None:
-                if fp8_layer.weight_fp8 is not None:
-                    fp8_layer.weight_fp8 = fp8_layer.weight_fp8.to(device)
-                if fp8_layer.weight_scale is not None:
-                    fp8_layer.weight_scale = fp8_layer.weight_scale.to(device)
-                if fp8_layer.bias is not None:
-                    fp8_layer.bias.data = fp8_layer.bias.data.to(device)
+                fp8_layer.to(device)
             setattr(model, name, fp8_layer)
         elif len(list(module.children())) > 0:
-            full_name = f"{parent_name}.{name}" if parent_name else name
-            quantize_linear_layers_to_fp8_blockscale(module, full_name, device=device)
+            quantize_linear_layers_to_fp8_blockscale(module, device=device)
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:

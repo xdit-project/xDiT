@@ -108,6 +108,7 @@ class xFuserZImageTurboModel(xFuserModel):
     capabilities = ModelCapabilities(
         enable_tiling=True,
         enable_slicing=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -130,6 +131,7 @@ class xFuserZImageTurboModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
+        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
     )
 
     def _load_model(self) -> DiffusionPipeline:

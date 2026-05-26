@@ -323,12 +323,11 @@ def quantize_linear_layers_to_fp8_blockscale(
                 device=module.weight.device,
                 dtype=module.weight.dtype,
             )
-            with torch.no_grad():
-                fp8_layer.load_and_quantize_weights(module.weight, module.bias)
+            fp8_layer.load_and_quantize_weights(module.weight, module.bias)
             if device is not None:
                 fp8_layer.to(device)
             setattr(model, name, fp8_layer)
-        elif len(list(module.children())) > 0:
+        elif next(module.children(), None) is not None:
             quantize_linear_layers_to_fp8_blockscale(module, device=device)
 
 

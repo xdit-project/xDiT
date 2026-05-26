@@ -34,6 +34,16 @@ def _(
     return torch.empty(M, N, dtype=torch.bfloat16, device=a_q.device)
 
 
+def _pad_to_multiple(t: torch.Tensor, block: int) -> tuple[torch.Tensor, bool]:
+    """Pad last two dims to multiples of block. Returns (padded, was_padded)."""
+    rows, cols = t.shape[-2], t.shape[-1]
+    r_pad = (-rows) % block
+    c_pad = (-cols) % block
+    if r_pad == 0 and c_pad == 0:
+        return t, False
+    return torch.nn.functional.pad(t, (0, c_pad, 0, r_pad)), True
+
+
 class xFuserFP8BlockScaleLinear(nn.Module):
     """
     Drop-in nn.Linear replacement using AITER gemm_a8w8_blockscale (block-128 FP8 w8a8).
@@ -50,68 +60,55 @@ class xFuserFP8BlockScaleLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
                  device=None, dtype=None):
-        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-
-        self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, **factory_kwargs)
-        )
+        # weight is not allocated here — buffers are registered by load_and_quantize_weights
+        self.register_parameter("weight", None)
         if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+            self.bias = nn.Parameter(
+                torch.empty(out_features, device=device, dtype=dtype)
+            )
         else:
             self.register_parameter("bias", None)
 
     def load_and_quantize_weights(
-        self, weights: torch.Tensor, bias: Optional[torch.Tensor] = None
+        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> None:
-        with torch.no_grad():
-            self.weight.data.copy_(weights.data)
-            if bias is not None and self.bias is not None:
-                self.bias.data.copy_(bias.data)
-        self._quantize_weights()
+        self._quantize_weights(weight)
+        if bias is not None and self.bias is not None:
+            self.bias.data.copy_(bias.data)
 
-    def _quantize_weights(self) -> None:
-        if self.weight is None:
-            raise RuntimeError(
-                "Cannot quantize: weight is None. Call load_and_quantize_weights() first."
-            )
-        N, K = self.weight.shape
+    def _quantize_weights(self, weight: torch.Tensor) -> None:
+        N, K = weight.shape
         n_blocks = math.ceil(N / _FP8_BLOCK)
         k_blocks = math.ceil(K / _FP8_BLOCK)
-        N_pad = n_blocks * _FP8_BLOCK
-        K_pad = k_blocks * _FP8_BLOCK
 
-        w = self.weight.to(torch.float32)
-        if N_pad != N or K_pad != K:
-            w_padded = torch.zeros(N_pad, K_pad, dtype=torch.float32, device=w.device)
-            w_padded[:N, :K] = w
-        else:
-            w_padded = w
+        w = weight.to(torch.float32)
+        w_padded, was_padded = _pad_to_multiple(w, _FP8_BLOCK)
 
-        # [n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK] -> amax per [n_blocks, k_blocks]
         w_blocks = w_padded.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
         w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)  # [n_blocks, k_blocks]
         w_scale = (w_amax / _FP8_MAX).float()
 
         w_q = (w_blocks / w_amax[:, None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX)
-        w_q = w_q.to(torch.float8_e4m3fn).reshape(N_pad, K_pad)[:N, :K].contiguous()
+        w_q = w_q.to(torch.float8_e4m3fn).reshape(w_padded.shape[0], w_padded.shape[1])
+        if was_padded:
+            w_q = w_q[:N, :K].contiguous()
 
-        delattr(self, "weight")
-        self.register_parameter("weight", None)
         self.register_buffer("weight_fp8", w_q, persistent=True)
         self.register_buffer("weight_scale", w_scale, persistent=True)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "weight_fp8"):
-            self._quantize_weights()
+            raise RuntimeError(
+                "weight_fp8 not initialized. Call load_and_quantize_weights() first."
+            )
 
         original_shape = input.shape
         x = input.view(-1, self.in_features)
         M, K = x.shape
         k_blocks = math.ceil(K / _FP8_BLOCK)
-        K_pad = k_blocks * _FP8_BLOCK
 
         # aiter.get_hip_quant(aiter.QuantType.per_1x128) is the natural API here —
         # fused HIP kernel matching MXFP4's per_1x32 pattern — but module_quant JIT
@@ -119,17 +116,16 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         #   __builtin_amdgcn_raw_ptr_buffer_load_lds needs vmem-to-lds-load-insts
         # Manual block-128 quant; torch.compile/Inductor fuses these into ~2 kernels.
         x_f32 = x.float()
-        if K_pad != K:
-            x_padded = torch.zeros(M, K_pad, dtype=torch.float32, device=x_f32.device)
-            x_padded[:, :K] = x_f32
-        else:
-            x_padded = x_f32
+        x_padded, needs_pad = _pad_to_multiple(x_f32, _FP8_BLOCK)
+        K_pad = x_padded.shape[1]
 
         x_blocks = x_padded.reshape(M, k_blocks, _FP8_BLOCK)
         x_amax = x_blocks.abs().amax(dim=-1).clamp(min=1e-12)  # [M_flat, k_blocks]
         x_scale = (x_amax / _FP8_MAX).float()
         x_q = (x_blocks / x_amax.unsqueeze(-1) * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX)
-        x_q = x_q.to(torch.float8_e4m3fn).reshape(M, K_pad)[:, :K].contiguous()
+        x_q = x_q.to(torch.float8_e4m3fn).reshape(M, K_pad)
+        if needs_pad:
+            x_q = x_q[:, :K].contiguous()
 
         output = torch.ops.mylib.fp8_blockscale_gemm(
             x_q, x_scale, self.weight_fp8, self.weight_scale,

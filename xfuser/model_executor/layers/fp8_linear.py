@@ -101,8 +101,12 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)  # [n_blocks, k_blocks]
         w_scale = (w_amax.float() / _FP8_MAX)
 
-        w_q = (w_blocks / w_amax[:, None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX)
-        w_q = w_q.to(torch.float8_e4m3fn).reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
+        # Process one row-block at a time to avoid a full BF16 intermediate alongside the weight.
+        # Peak: BF16 weight + FP8 output + one 128-row BF16 chunk (~0.75 MB for K=3072).
+        w_q = torch.empty_like(w_blocks, dtype=torch.float8_e4m3fn)
+        for i in range(n_blocks):
+            w_q[i] = (w_blocks[i] / w_amax[i][None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+        w_q = w_q.reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
         if was_padded:
             w_q = w_q[:N, :K].contiguous()
 

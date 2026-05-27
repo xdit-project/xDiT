@@ -627,7 +627,7 @@ class xFuserModel(abc.ABC):
                 log(f"Sharded {component_name}. "
                     f"(VRAM after: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
             else:
-                log(f"i m wrapping for {component_name}...")
+                log(f"Skipping FSDP wrapping for {component_name}...")
                 if hasattr(component, "to"):
                     component.to(f"cuda:{local_rank}")
                 else:

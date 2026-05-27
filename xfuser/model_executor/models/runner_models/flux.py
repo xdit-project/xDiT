@@ -262,8 +262,6 @@ class xFuserFlux2Model(xFuserModel):
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
             },
             "text_encoder": {
-                # CPU offload keeps shards on CPU so the all_gather buffer (~13GB)
-                # doesn't compete with the sharded transformer at encode time.
                 "wrap_attrs": ["model.language_model.layers"],
                 "offload_policy": "cpu",
             },

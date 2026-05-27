@@ -60,9 +60,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
                 # LLaMA layers use output_hidden_states=True with isinstance checks
                 # that break when layers are individually FSDP-wrapped. Wrap the
                 # whole encoder as one unit to preserve layer instances.
-                # CPU offload keeps shards on CPU between uses so the text encoder
-                # all_gather buffer (~14GB) doesn't compete with sharded transformer
-                # params during encode_prompt.
                 "wrap_attrs": [],
                 "offload_policy": "cpu",
             },

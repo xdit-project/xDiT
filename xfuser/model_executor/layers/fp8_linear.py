@@ -110,7 +110,9 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         if was_padded:
             w_q = w_q[:N, :K].contiguous()
 
-        self.register_buffer("weight_fp8", w_q, persistent=True)
+        # weight_fp8 as Parameter (not buffer) so FSDP2 shards it across ranks.
+        # requires_grad=False: inference only, no gradient needed.
+        self.weight_fp8 = nn.Parameter(w_q, requires_grad=False)
         self.register_buffer("weight_scale", w_scale, persistent=True)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

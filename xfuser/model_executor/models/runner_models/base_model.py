@@ -631,8 +631,8 @@ class xFuserModel(abc.ABC):
                     memory_efficient_init=self.config.memory_efficient_sharding,
                     offload_policy=offload_policy,
                     # All ranks load from the same checkpoint so states are already
-                    # identical. Skip the GPU broadcast to avoid OOM on large encoders.
-                    sync_module_states=offload_policy != "cpu",
+                    # identical. No broadcast needed regardless of offload policy.
+                    sync_module_states=False,
                 )
                 setattr(self.pipe, component_name, fsdp_object)
                 torch.cuda.empty_cache()

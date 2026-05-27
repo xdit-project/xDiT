@@ -125,7 +125,9 @@ Individual model classes that inherit from `xFuserModel`:
 | `--data_parallel_degree` | Data parallel degree | 1 |
 | `--use_cfg_parallel` | Enable CFG parallel | False |
 | `--use_parallel_vae` | Enable parallel VAE | False |
-| `--use_fsdp` | Enable FSDP | False |
+| `--fully_shard_degree` | FSDP sharding degree; set to number of GPUs to shard across. 1 disables sharding. | 1 |
+| `--no_reshard_after_forward` | Keep parameters gathered after each block forward; trades memory for latency | False |
+| `--memory_efficient_sharding` | Load transformer blocks one at a time during init to reduce peak GPU memory; requires `--fully_shard_degree > 1` | False |
 
 ### Input Parameters
 

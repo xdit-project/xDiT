@@ -105,8 +105,6 @@ class xFuserQwenImageModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        enable_tiling=True,
-        enable_slicing=True,
         use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(

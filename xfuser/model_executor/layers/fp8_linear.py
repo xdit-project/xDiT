@@ -46,10 +46,8 @@ class xFuserFP8BlockScaleLinear(nn.Module):
     """
     Drop-in nn.Linear replacement using AITER gemm_a8w8_blockscale (block-128 FP8 w8a8).
 
-    Weights pre-quantized at load time to float8_e4m3fn with per-block-128 scales
-    stored as persistent buffers (FSDP2-compatible, no Float8Tensor subclass or patches).
-    Activations block-quantized dynamically in forward() — ops are visible to
-    torch.compile/Inductor for fusion into ~2 kernels (reduction + elementwise).
+    Weights pre-quantized at load time to float8_e4m3fn. Activations block-quantized
+    dynamically in forward() — ops are visible to torch.compile/Inductor for fusion.
 
     Scale shapes:
         weight_scale: [ceil(N/128), ceil(K/128)]
@@ -61,7 +59,6 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        # weight is not allocated here — buffers are registered by load_and_quantize_weights
         self.register_parameter("weight", None)
         if bias:
             self.bias = nn.Parameter(
@@ -84,8 +81,6 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         n_blocks = math.ceil(N / _FP8_BLOCK)
         k_blocks = math.ceil(K / _FP8_BLOCK)
 
-        # Move to target device; stay in BF16 — FP8 cast (3 mantissa bits) dominates error,
-        # not BF16 intermediates (7 bits). Only w_amax is cast to FP32 for the stored scale.
         target = device if device is not None else weight.device
         w = weight.to(device=target)
         # Pad both dims for the [n_blocks, 128, k_blocks, 128] reshape
@@ -101,8 +96,7 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)  # [n_blocks, k_blocks]
         w_scale = (w_amax.float() / _FP8_MAX)
 
-        # Process one row-block at a time to avoid a full BF16 intermediate alongside the weight.
-        # Peak: BF16 weight + FP8 output + one 128-row BF16 chunk (~0.75 MB for K=3072).
+        # One row-block at a time: avoids a full BF16 intermediate alongside the weight.
         w_q = torch.empty_like(w_blocks, dtype=torch.float8_e4m3fn)
         for i in range(n_blocks):
             w_q[i] = (w_blocks[i] / w_amax[i][None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)

@@ -12,13 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def _use_aiter_fp8_path() -> bool:
-    """True on ROCm RDNA4+ (gfx1200+) with AITER present.
-
-    Restricted to gfx1200+ (RDNA4: R9700, etc.) where our AITER block-128
-    path has been validated and torchao/hipBLASLt FP8 is unavailable (ROCm 7.2.3).
-    CDNA3+ (MI300/MI350, gfx940-999) has battle-tested torchao FP8 and falls
-    through to that path instead.
-    """
+    """True on ROCm gfx1200+ (RDNA4) with AITER present."""
     if not _is_hip():
         return False
     try:

@@ -106,8 +106,6 @@ class xFuserZImageModel(xFuserModel):
 class xFuserZImageTurboModel(xFuserModel):
 
     capabilities = ModelCapabilities(
-        enable_tiling=True,
-        enable_slicing=True,
         use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(

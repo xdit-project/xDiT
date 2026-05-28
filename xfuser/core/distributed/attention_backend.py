@@ -971,10 +971,15 @@ def _aiter_sparge_v2_attn_call(query, key, value, dropout_p, is_causal, attentio
 
 @register_attention_function(AttentionBackendType.AITER_FLYDSL)
 def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    # This kernel only supports causal self-attention; fall back for cross-attention
-    # and non-causal attention.
-    if not is_causal or query.shape[2] != key.shape[2]:
+    # Cross-attention is unsupported. For non-causal self-attention, this kernel raises
+    # when the seq_len padding ratio to align to 128 exceeds 0.5% (same check as the kernel).
+    if query.shape[2] != key.shape[2]:
         return _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs)
+    if not is_causal:
+        seq_len = query.shape[2]
+        pad = (-seq_len) % 128
+        if pad > 0 and pad / (seq_len + pad) > 0.005:
+            return _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()

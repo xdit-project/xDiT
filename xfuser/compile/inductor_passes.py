@@ -11,11 +11,6 @@ Currently provides:
 The pass is pattern-matched on the FX graph and is a no-op when the bad
 pattern is not present, so it is safe to install globally; non-matching
 configurations are untouched.
-
-This pass does NOT introduce a graph break. ``torch.library.custom_op`` is
-an Inductor opacity barrier (the op is treated as opaque for fusion purposes),
-not a Dynamo bailout: the FX graph stays connected as a single compiled
-subgraph and the AOT segment count is unchanged.
 """
 
 from __future__ import annotations

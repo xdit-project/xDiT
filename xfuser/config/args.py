@@ -159,6 +159,9 @@ class xFuserArgs:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
+    # Distilled model weight paths
+    distilled_transformer_path: Optional[str] = None
+    distilled_transformer_2_path: Optional[str] = None
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -741,6 +744,18 @@ class xFuserArgs:
             help="OR a static gilbert block-neighbor mask into the dynamic "
                  "Sparge block mask. Only meaningful when "
                  "--spargeattn_reorder_sequence is set. Use --no-use_spargeattn_static_block_mask to disable."
+        )
+        parser.add_argument(
+            "--distilled_transformer_path",
+            type=nullable_str,
+            default=None,
+            help="Path to the high-noise distilled transformer safetensors file.",
+        )
+        parser.add_argument(
+            "--distilled_transformer_2_path",
+            type=nullable_str,
+            default=None,
+            help="Path to the low-noise distilled transformer_2 safetensors file.",
         )
         return parser
 

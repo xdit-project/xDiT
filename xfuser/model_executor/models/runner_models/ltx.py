@@ -180,8 +180,7 @@ class xFuserLTX23VideoModel(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer.compile_repeated_blocks(mode="default")
-        self.second_pipe.transformer.compile_repeated_blocks(mode="default")
+        self.pipe.transformer.compile_repeated_blocks(mode="reduce-overhead")
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
@@ -308,8 +307,7 @@ class xFuserLTX2VideoModel(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer.compile_repeated_blocks(mode="default")
-        self.second_pipe.transformer.compile_repeated_blocks(mode="default")
+        self.pipe.transformer.compile_repeated_blocks(mode="reduce-overhead")
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)

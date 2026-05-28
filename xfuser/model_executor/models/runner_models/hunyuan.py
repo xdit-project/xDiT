@@ -25,6 +25,7 @@ from xfuser.core.utils.runner_utils import (
     fix_llama_tokenizer_pretokenizer,
 )
 from xfuser.envs import PACKAGES_CHECKER
+from xfuser.compile import install_inductor_passes
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
@@ -82,6 +83,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
+        # Install Inductor post-grad pass that defeats a scheduler bug in the
+        # asymmetric joint attention path with the AITER Sage backend. The pass
+        # is pattern-matched on the FX graph and is a no-op for configurations
+        # that don't produce the bad pattern (non-sage backends, symmetric SP).
+        install_inductor_passes()
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer.compile()
 
@@ -180,6 +186,12 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
     def _compile_model(self, input_args: dict) -> None:
         """ Compile the model using torch.compile """
+        # Install Inductor post-grad pass that defeats a scheduler bug in the
+        # asymmetric joint attention path with the AITER Sage backend. The pass
+        # is pattern-matched on the FX graph and is a no-op for configurations
+        # that don't produce the bad pattern (e.g., symmetric SP, non-sage
+        # backends, models without the post-A2A joint cat).
+        install_inductor_passes()
         torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
 

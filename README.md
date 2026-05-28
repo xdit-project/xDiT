@@ -116,6 +116,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
 | [🎬 Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 Wan2.2-Distilled (LightX2V 4-step)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 CausalWan2.2](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) | ❎ | ❎ | ❎ | ❎ | ✔️ | NA |
 | [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuandit.md) |
@@ -276,10 +277,13 @@ Several different attention backends are supported:
 | [AITER Sparse Sage](https://github.com/rocm/aiter) | aiter_sparse_sage |
 | [AITER Sparse Sage V2](https://github.com/rocm/aiter) | aiter_sparse_sage_v2 |
 | [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
+| [AITER FlyDSL](https://github.com/rocm/aiter) | aiter_flydsl |
 
 xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
+
+`aiter_flydsl` uses a FlyDSL kernel (MLIR-compiled), validated on gfx1200+ (RDNA4). It only supports causal self-attention; non-causal and cross-attention calls automatically fall back to `sdpa_flash`.
 
 Pure FP8 attention can introduce visual artifacts in the output video. To mitigate this, xDiT supports hybrid attention, which runs the first and last N diffusion steps with a high-precision backend and the remaining steps with a low-precision one. Enable it with the following flags:
 
@@ -311,6 +315,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |
 | [Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | >= 0.35.2 |
 | [Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | >= 0.35.2 |
+| [Wan2.2-Distilled (LightX2V)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | >= 0.35.2 |
 
 <h2 id="dev-guide">📚  Develop Guide</h2>
 

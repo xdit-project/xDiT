@@ -135,6 +135,7 @@ class xFuserFluxKontextModel(xFuserModel):
         use_fp8_gemms=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -150,6 +151,11 @@ class xFuserFluxKontextModel(xFuserModel):
         mod_value=16,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
@@ -217,6 +223,7 @@ class xFuserFlux2Model(xFuserModel):
         fully_shard_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -238,6 +245,11 @@ class xFuserFlux2Model(xFuserModel):
             }
         }
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
@@ -287,6 +299,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         use_fp8_gemms=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_parallel_vae=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -301,6 +314,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         model_output_type="image",
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(

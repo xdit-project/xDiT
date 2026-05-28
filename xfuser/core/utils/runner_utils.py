@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def _use_aiter_fp8_path() -> bool:
-    """True on ROCm gfx1200+ (RDNA4) with AITER present."""
+    """True on ROCm gfx1200 (Navi 44) or gfx1201 (Navi 48) with AITER present."""
     if not _is_hip():
         return False
     try:
@@ -25,7 +25,7 @@ def _use_aiter_fp8_path() -> bool:
     if not m:
         return False
     n = int(m.group(1))
-    return n >= 1200
+    return n in {1200, 1201}
 
 def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
     """Log message. By default, only from the last process to avoid duplicates."""

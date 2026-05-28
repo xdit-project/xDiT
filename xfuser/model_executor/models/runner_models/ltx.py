@@ -51,16 +51,6 @@ class xFuserLTX23VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": ["transformer_blocks"],
-            },
-            "text_encoder": {
-                # wrap_attrs=[] wraps the entire encoder as one FSDP unit to avoid
-                # fully_shard(component) re-materializing all params for the outer shard.
-                "wrap_attrs": [],
-            },
-        },
     )
 
     capabilities = ModelCapabilities(
@@ -68,7 +58,6 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
-        fully_shard_degree=True,
     )
 
     _STG_SCALE = 1.0
@@ -213,17 +202,8 @@ class xFuserLTX23VideoModel(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.fully_shard_degree > 1:
-            # Share FSDP-placed components from the main pipe; transformer is already
-            # shared at load time. Without this, second_pipe holds a duplicate full
-            # text_encoder copy on each rank, OOMing 32 GB cards during multi-GPU init.
-            self.second_pipe.text_encoder = self.pipe.text_encoder
-            self.second_pipe.vae = self.pipe.vae
-            device = f"cuda:{torch.cuda.current_device()}"
-            self.upsample_pipe.latent_upsampler.to(device)
-        else:
-            self.upsample_pipe.to(self.pipe.device)
-            self.second_pipe.to(self.pipe.device)
+        self.upsample_pipe.to(self.pipe.device)
+        self.second_pipe.to(self.pipe.device)
 
 
 @register_model("Lightricks/LTX-2")
@@ -244,23 +224,12 @@ class xFuserLTX2VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": ["transformer_blocks"],
-            },
-            "text_encoder": {
-                # wrap_attrs=[] wraps the entire encoder as one FSDP unit to avoid
-                # fully_shard(component) re-materializing all params for the outer shard.
-                "wrap_attrs": [],
-            },
-        },
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
-        fully_shard_degree=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -359,11 +328,5 @@ class xFuserLTX2VideoModel(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.fully_shard_degree > 1:
-            self.second_pipe.text_encoder = self.pipe.text_encoder
-            self.second_pipe.vae = self.pipe.vae
-            device = f"cuda:{torch.cuda.current_device()}"
-            self.upsample_pipe.latent_upsampler.to(device)
-        else:
-            self.upsample_pipe.to(self.pipe.device)
-            self.second_pipe.to(self.pipe.device)
+        self.upsample_pipe.to(self.pipe.device)
+        self.second_pipe.to(self.pipe.device)

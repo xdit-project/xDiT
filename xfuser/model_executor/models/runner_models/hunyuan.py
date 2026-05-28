@@ -36,8 +36,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
-        use_hybrid_attn_schedule=True,
-        fully_shard_degree=True,
+        use_hybrid_attn_schedule=True
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -52,18 +51,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
         output_name="hunyuan_video",
         model_output_type="video",
         fps=24,
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            },
-            "text_encoder": {
-                # LLaMA layers use output_hidden_states=True with isinstance checks
-                # that break when layers are individually FSDP-wrapped. Wrap the
-                # whole encoder as one unit to preserve layer instances.
-                "wrap_attrs": [],
-                "offload_policy": "cpu",
-            },
-        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -124,7 +111,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
-        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -138,22 +124,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fps=24,
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": ["transformer_blocks"],
-            },
-            "text_encoder": {
-                # Qwen2_5_VLTextModel uses _can_record_outputs to collect hidden_states
-                # by isinstance-checking for Qwen2_5_VLDecoderLayer. Per-layer FSDP
-                # wrapping replaces those instances with FSDP wrappers, breaking the
-                # isinstance check and leaving hidden_states=None at inference time.
-                # Wrapping the whole encoder as one unit preserves the layer instances.
-                "wrap_attrs": [],
-            },
-            "text_encoder_2": {
-                "wrap_attrs": ["encoder.block"],
-            },
-        },
     )
 
 
@@ -290,31 +260,6 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         enable_slicing=True,
         enable_tiling=True,
         supports_sparse_attention_backends=True,
-        fully_shard_degree=True,
-    )
-    settings = ModelSettings(
-        model_name="tencent/HunyuanVideo-1.5",
-        output_name="hunyuan_video_1_5_sparse",
-        model_output_type="video",
-        fps=24,
-        mod_value=16,
-        valid_tasks=["i2v"],
-        fsdp_strategy={
-            "transformer": {
-                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            },
-            "text_encoder": {
-                # Qwen2_5_VLTextModel uses _can_record_outputs to collect hidden_states
-                # by isinstance-checking for Qwen2_5_VLDecoderLayer. Per-layer FSDP
-                # wrapping replaces those instances with FSDP wrappers, breaking the
-                # isinstance check and leaving hidden_states=None at inference time.
-                # Wrapping the whole encoder as one unit preserves the layer instances.
-                "wrap_attrs": [],
-            },
-            "text_encoder_2": {
-                "wrap_attrs": ["encoder.block"],
-            },
-        },
     )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:
@@ -324,6 +269,9 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
+        self.settings.model_name = "tencent/HunyuanVideo-1.5"
+        self.settings.output_name = "hunyuan_video_1_5_sparse"
+        self.settings.valid_tasks = ["i2v"]
         self.pipe_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
 
 

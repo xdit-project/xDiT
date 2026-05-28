@@ -78,8 +78,8 @@ class xFuserFP8BlockScaleLinear(nn.Module):
 
     def _quantize_weights(self, weight: torch.Tensor, device: Optional[torch.device] = None) -> None:
         N, K = weight.shape
-        n_blocks = math.ceil(N / _FP8_BLOCK)
-        k_blocks = math.ceil(K / _FP8_BLOCK)
+        n_blocks = (N + _FP8_BLOCK - 1) // _FP8_BLOCK
+        k_blocks = (K + _FP8_BLOCK - 1) // _FP8_BLOCK
 
         target = device if device is not None else weight.device
         w = weight.to(device=target)

@@ -28,7 +28,7 @@ from xfuser.core.utils.runner_utils import (
     quantize_linear_layers_to_fp4,
     quantize_linear_layers_to_nvfp4,
     convert_model_convs_to_channels_last,
-    _use_aiter_fp8_path,
+    _use_aiter_fp8_rdna4,
     rgetattr,
 )
 
@@ -575,7 +575,7 @@ class xFuserModel(abc.ABC):
             )
             # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
             # All other quant paths (FP4, torchao FP8) need weights on GPU first.
-            if self.config.use_fp8_gemms and _use_aiter_fp8_path():
+            if self.config.use_fp8_gemms and _use_aiter_fp8_rdna4():
                 for module_name in self.settings.fp8_gemm_module_list:
                     log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
                     quantize_linear_layers_to_fp8_blockscale(
@@ -588,7 +588,7 @@ class xFuserModel(abc.ABC):
                     self._setup_nvfp4_gemms(local_rank=local_rank)
                 else:
                     self._setup_mxfp4_gemms(local_rank=local_rank)
-            if self.config.use_fp8_gemms and not _use_aiter_fp8_path():
+            if self.config.use_fp8_gemms and not _use_aiter_fp8_rdna4():
                 for module_name in self.settings.fp8_gemm_module_list:
                     log(f"Quantizing {module_name} to FP8 (torchao)...")
                     quantize_linear_layers_to_fp8(rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}")
@@ -719,7 +719,7 @@ class xFuserModel(abc.ABC):
                         device=device,
                     )
             else:
-                if _use_aiter_fp8_path():
+                if _use_aiter_fp8_rdna4():
                     quantize_linear_layers_to_fp8_blockscale(block, device=device)
                 else:
                     quantize_linear_layers_to_fp8(block, device=device)

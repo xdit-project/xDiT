@@ -11,7 +11,7 @@ from xfuser.envs import _is_cuda, _is_hip
 logger = logging.getLogger(__name__)
 
 
-def _use_aiter_fp8_path() -> bool:
+def _use_aiter_fp8_rdna4() -> bool:
     """True on ROCm gfx1200 (Navi 44) or gfx1201 (Navi 48) with AITER present."""
     if not _is_hip():
         return False

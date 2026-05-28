@@ -150,19 +150,17 @@ def fix_sage_joint_cat_fusion(graph: fx.Graph) -> fx.Graph:
 
         num_matches += 1
 
-    # Always log diagnostics so we can tell whether the pass ran at all.
-    logger.info(
-        "fix_sage_joint_cat_fusion: scanned graph: %d cat nodes total, "
-        "%d with multiple users, %d with reduction user, %d matches inserted. "
-        "Sample cat-user targets: %s",
-        num_cat_nodes,
-        num_cat_with_multi_users,
-        num_cat_with_reduction,
-        num_matches,
-        " | ".join(sample_user_targets) if sample_user_targets else "(none)",
-    )
-
     if num_matches > 0:
+        logger.info(
+            "fix_sage_joint_cat_fusion: scanned graph: %d cat nodes total, "
+            "%d with multiple users, %d with reduction user, %d matches inserted. "
+            "Sample cat-user targets: %s",
+            num_cat_nodes,
+            num_cat_with_multi_users,
+            num_cat_with_reduction,
+            num_matches,
+            " | ".join(sample_user_targets) if sample_user_targets else "(none)",
+        )
         graph.lint()
 
     return graph

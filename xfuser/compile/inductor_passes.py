@@ -76,8 +76,8 @@ def _is_reduction_target(target) -> bool:
 
 def fix_sage_joint_cat_fusion(graph: fx.Graph) -> fx.Graph:
     """Insert an opaque realize marker between an ``aten.cat`` node and its
-    reduction consumers, only when the cat is also consumed by an opaque
-    Triton kernel (``triton_kernel_wrapper_mutation``, used by sage_quant).
+    reduction consumers, only when the cat has >= 2 users and at least one
+    is ``aten.abs.default`` or ``aten.mean.dim``.
 
     This is the precise FX pattern produced by xDiT's asymmetric joint
     attention path (``_concat_joint_tensor`` after Ulysses all-to-all) when
@@ -151,7 +151,7 @@ def fix_sage_joint_cat_fusion(graph: fx.Graph) -> fx.Graph:
         num_matches += 1
 
     # Always log diagnostics so we can tell whether the pass ran at all.
-    logger.warning(
+    logger.info(
         "fix_sage_joint_cat_fusion: scanned graph: %d cat nodes total, "
         "%d with multiple users, %d with reduction user, %d matches inserted. "
         "Sample cat-user targets: %s",
@@ -176,11 +176,15 @@ def install() -> None:
     """Register :func:`fix_sage_joint_cat_fusion` as Inductor's post-grad
     custom_post_pass.
 
-    Safe to call multiple times: re-registering with the same function is a
-    no-op. If a *different* ``post_grad_custom_post_pass`` is already set
-    (e.g., installed by another component), this will replace it and log a
-    warning; Inductor only supports a single hook in that slot, and composing
-    multiple hooks correctly is the caller's responsibility.
+    Idempotent and compositional:
+
+    - If nothing is registered, installs ``fix_sage_joint_cat_fusion`` directly.
+    - If another pass is already registered, installs a wrapper that runs the
+      existing pass first and then ``fix_sage_joint_cat_fusion``. The existing
+      pass's behavior is preserved.
+    - If a chain we previously created (or ``fix_sage_joint_cat_fusion`` itself)
+      is already installed, this call is a no-op — re-installing does not grow
+      the chain across repeated ``_compile_model`` invocations.
 
     Must be called before :func:`torch.compile` so the hook is in place when
     Inductor lowers any subsequent graph.
@@ -194,13 +198,26 @@ def install() -> None:
         return
 
     if existing is not None:
+        if getattr(existing, "_xfuser_composed", False):
+            return
+
+        def composed_pass(graph: fx.Graph) -> fx.Graph:
+            result = existing(graph)
+            # FX passes may mutate in-place and return None.
+            # Normalize so our pass always receives a Graph.
+            if result is None:
+                result = graph
+            return fix_sage_joint_cat_fusion(result)
+
+        composed_pass._xfuser_composed = True
+        inductor_config.post_grad_custom_post_pass = composed_pass
         logger.warning(
-            "post_grad_custom_post_pass is already set to %r; replacing with "
-            "fix_sage_joint_cat_fusion. Compose manually if both are needed.",
+            "post_grad_custom_post_pass is already set to %r; chained "
+            "fix_sage_joint_cat_fusion with it.",
             existing,
         )
-
-    inductor_config.post_grad_custom_post_pass = fix_sage_joint_cat_fusion
-    logger.warning(
-        "fix_sage_joint_cat_fusion: registered as post_grad_custom_post_pass"
-    )
+    else:
+        inductor_config.post_grad_custom_post_pass = fix_sage_joint_cat_fusion
+        logger.warning(
+            "fix_sage_joint_cat_fusion: registered as post_grad_custom_post_pass"
+        )

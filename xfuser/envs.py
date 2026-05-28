@@ -220,7 +220,7 @@ class PackagesEnvChecker:
         """
         if not torch.cuda.is_available():
             return False
-        if not self._on_mi3xx():
+        if not self._on_mi3xx() and not self._on_rdna4():
             return False
         try:
             import aiter
@@ -391,6 +391,11 @@ class PackagesEnvChecker:
         device = torch.cuda.current_device()
         gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
         return any(arch in gcn_arch_name for arch in ["gfx950", "gfx942"])
+
+    def _on_rdna4(self):
+        device = torch.cuda.current_device()
+        gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
+        return "gfx1201" in gcn_arch_name
 
 
 PACKAGES_CHECKER = PackagesEnvChecker()

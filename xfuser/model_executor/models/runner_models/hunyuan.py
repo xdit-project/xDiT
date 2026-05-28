@@ -292,6 +292,30 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         supports_sparse_attention_backends=True,
         fully_shard_degree=True,
     )
+    settings = ModelSettings(
+        model_name="tencent/HunyuanVideo-1.5",
+        output_name="hunyuan_video_1_5_sparse",
+        model_output_type="video",
+        fps=24,
+        mod_value=16,
+        valid_tasks=["i2v"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
+            },
+            "text_encoder": {
+                # Qwen2_5_VLTextModel uses _can_record_outputs to collect hidden_states
+                # by isinstance-checking for Qwen2_5_VLDecoderLayer. Per-layer FSDP
+                # wrapping replaces those instances with FSDP wrappers, breaking the
+                # isinstance check and leaving hidden_states=None at inference time.
+                # Wrapping the whole encoder as one unit preserves the layer instances.
+                "wrap_attrs": [],
+            },
+            "text_encoder_2": {
+                "wrap_attrs": ["encoder.block"],
+            },
+        },
+    )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:
         assert attn_param["tile_size"] is not None, "tile_size is not set"
@@ -300,22 +324,6 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
     def __init__(self, config: xFuserArgs) -> None:
         super().__init__(config)
-        self.settings.model_name = "tencent/HunyuanVideo-1.5"
-        self.settings.output_name = "hunyuan_video_1_5_sparse"
-        self.settings.valid_tasks = ["i2v"]
-        self.settings.fsdp_strategy = {
-            "transformer": {
-                "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
-            },
-            "text_encoder": {
-                # Same as parent: Qwen2_5_VLTextModel isinstance-checks for
-                # Qwen2_5_VLDecoderLayer; per-layer FSDP wrapping breaks that check.
-                "wrap_attrs": [],
-            },
-            "text_encoder_2": {
-                "wrap_attrs": ["encoder.block"],
-            },
-        }
         self.pipe_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
 
 

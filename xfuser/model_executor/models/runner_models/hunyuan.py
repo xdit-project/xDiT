@@ -308,7 +308,9 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
             },
             "text_encoder": {
-                "wrap_attrs": ["layers"],
+                # Same as parent: Qwen2_5_VLTextModel isinstance-checks for
+                # Qwen2_5_VLDecoderLayer; per-layer FSDP wrapping breaks that check.
+                "wrap_attrs": [],
             },
             "text_encoder_2": {
                 "wrap_attrs": ["encoder.block"],

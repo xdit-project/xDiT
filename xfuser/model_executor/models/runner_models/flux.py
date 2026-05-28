@@ -52,6 +52,8 @@ class xFuserFluxModel(xFuserModel):
         ring_degree=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
+        enable_tiling=True,
+        enable_slicing=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -131,6 +133,8 @@ class xFuserFluxKontextModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        enable_tiling=True,
+        enable_slicing=True,
         use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
@@ -217,6 +221,8 @@ class xFuserFlux2Model(xFuserModel):
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         fully_shard_degree=True,
+        enable_tiling=True,
+        enable_slicing=True,
         use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
@@ -291,6 +297,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        enable_tiling=True,
+        enable_slicing=True,
         use_parallel_vae=True,
     )
 

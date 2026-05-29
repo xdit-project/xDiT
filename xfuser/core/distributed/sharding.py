@@ -197,14 +197,16 @@ def shard_component(
     forward_prefetch: bool = True,
     reshard_after_forward: bool = True,
     quantize_fn: Optional[Callable] = None,
+    memory_efficient_init: bool = False,
+    offload_policy: Optional[str] = None,
 ) -> torch.nn.Module:
     """
     Wrap a component with FSDP, treating each block as a separate FSDP unit.
 
-    Uses FSDP1 when quantize_fn is None (O(1) flat-param hooks, no DTensor bookkeeping,
-    fastest for non-quantized inference). Uses FSDP2 (composable fully_shard) when
-    quantize_fn is provided, required for torchao quantized tensor types that cannot
-    be flattened to FSDP1's 1D FlatParameter.
+    Uses FSDP1 when quantize_fn is None and memory_efficient_init is False (O(1)
+    flat-param hooks, no DTensor bookkeeping, fastest for non-quantized inference).
+    Uses FSDP2 (composable fully_shard) when quantize_fn is provided (required: FSDP1
+    cannot flatten torchao quantized tensor subtypes) or memory_efficient_init is True)
 
     Args:
         component (nn.Module): The transformer model to wrap with FSDP.
@@ -230,8 +232,13 @@ def shard_component(
             in FSDP2.
             Defaults to True.
         quantize_fn (Callable, optional): Called as quantize_fn(block, idx) per block
-            before FSDP2 wrapping. Selects FSDP2 path when provided.
+            before FSDP2 wrapping. Automatically selects FSDP2; do not combine with
+            memory_efficient_init=False to try to force FSDP1, it will be ignored.
             Defaults to None.
+        memory_efficient_init (bool, optional): Initialize blocks sequentially one at a
+            time to minimize peak GPU memory during model load. Selects FSDP2. Only use
+            when the model OOMs during init with FSDP1; FSDP1 is faster at inference.
+            Defaults to False.
 
     Returns:
         nn.Module: The FSDP-wrapped component.
@@ -255,6 +262,8 @@ def shard_component(
         - Each element in wrap_attrs becomes a separate FSDP unit
         - Requires PyTorch distributed to be initialized before calling
     """
+    use_fsdp2 = quantize_fn is not None or memory_efficient_init
+
     if device_id is None and torch.cuda.is_available():
         device_id = torch.cuda.current_device()
 
@@ -265,7 +274,7 @@ def shard_component(
     if dtype:
         component = component.to(dtype)
 
-    if quantize_fn is None:
+    if not use_fsdp2:
         # FSDP1: Fastest path for non-quantized inference.
         return FSDP(
             component,
@@ -278,26 +287,31 @@ def shard_component(
             forward_prefetch=forward_prefetch,
         )
 
-    # FSDP2: Required for torchao quantized tensors.
-    from torch.distributed._composable.fsdp import fully_shard  # noqa: PLC0415
+    # FSDP2: Required for torchao quantized tensors, or when use_fsdp2=True for
+    # sequential block-by-block init to reduce peak GPU memory during model load.
+    from torch.distributed._composable.fsdp import fully_shard, CPUOffloadPolicy  # noqa: PLC0415
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     device_str = f"{device_type}:{device_id}"
     mesh = _make_mesh(process_group, device_type)
+    cpu_offload = CPUOffloadPolicy() if offload_policy == "cpu" else None
 
-    # Move non-block children first; block containers are handled block-by-block below.
+    # Move non-block children to device. With CPUOffloadPolicy params stay on CPU,
+    # so skip this step — fully_shard handles placement.
     wrap_top_names = {attr.split(".")[0] for attr in wrap_attrs}
-    for name, child in component.named_children():
-        if name not in wrap_top_names:
-            child.to(device_str)
+    if cpu_offload is None:
+        for name, child in component.named_children():
+            if name not in wrap_top_names:
+                child.to(device_str)
 
     # Sequential: after fully_shard(block) each rank holds 1/N params, freeing memory
     # for the next block. At most one full block on GPU at a time.
     for i, block in enumerate(wrapped_blocks):
         block.to(device_str)
-        quantize_fn(block, i)
-        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward)
+        if quantize_fn is not None:
+            quantize_fn(block, i)
+        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
 
-    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward)
+    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
 
     # FSDP2 forward prefetch: each block pre-fetches the next two blocks' all-gathers
     # so communication overlaps with compute. The first block has no predecessor to

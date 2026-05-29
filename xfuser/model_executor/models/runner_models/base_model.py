@@ -568,7 +568,8 @@ class xFuserModel(abc.ABC):
         if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
-            self.pipe = self.pipe.to(f"cuda:{local_rank}")
+            if not (self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload):
+                self.pipe = self.pipe.to(f"cuda:{local_rank}")
             if self.config.use_fp4_gemms:
                 if _is_cuda():
                     self._setup_nvfp4_gemms(local_rank=local_rank)
@@ -603,18 +604,28 @@ class xFuserModel(abc.ABC):
         device_group = get_fs_group().device_group
         for component_name, component in self.pipe.components.items():
             if component_name in self.settings.fsdp_strategy:
-                log(f"Sharding {component_name} with FSDP...")
+                log(f"Sharding {component_name} with FSDP... "
+                    f"(VRAM before: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
                 strategy = self.settings.fsdp_strategy[component_name]
                 wrap_attrs = strategy.get("wrap_attrs", [])
                 dtype = strategy.get("dtype", None)
+                offload_policy = strategy.get("offload_policy", None)
                 quantize_fn = self._build_fsdp_quantize_fn(component_name, wrap_attrs, fs_local_rank)
                 reshard_after_forward = self.config.reshard_after_forward
                 fsdp_object = shard_component(
                     component, wrap_attrs, device_group, fs_local_rank, dtype,
                     quantize_fn=quantize_fn,
                     reshard_after_forward=reshard_after_forward,
+                    memory_efficient_init=self.config.memory_efficient_sharding,
+                    offload_policy=offload_policy,
+                    # All ranks load from the same checkpoint so states are already
+                    # identical. Skip the GPU broadcast to avoid OOM on large encoders.
+                    sync_module_states=offload_policy != "cpu",
                 )
                 setattr(self.pipe, component_name, fsdp_object)
+                torch.cuda.empty_cache()
+                log(f"Sharded {component_name}. "
+                    f"(VRAM after: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
             else:
                 log(f"Skipping FSDP wrapping for {component_name}...")
                 if hasattr(component, "to"):
@@ -622,6 +633,30 @@ class xFuserModel(abc.ABC):
                 else:
                     log(f"Component {component_name} has no .to() method, skipping device move.")
                     pass
+
+        # diffusers' _execution_device short-circuits on the first nn.Module component
+        # that lacks _hf_hook, returning self.device (= first module's .device).
+        # With CPUOffloadPolicy, text_encoder.device = cpu, breaking latent generation.
+        # Fix: give every nn.Module component a minimal _hf_hook so _execution_device
+        # continues past them, with cpu-offloaded components advertising cuda.
+        cpu_offloaded = {
+            name for name, s in self.settings.fsdp_strategy.items()
+            if s.get("offload_policy") == "cpu"
+        }
+        if cpu_offloaded:
+            cuda_device = f"cuda:{local_rank}"
+
+            class _ExecDeviceHook:
+                def __init__(self, execution_device):
+                    self.execution_device = execution_device
+
+            for name, component in self.pipe.components.items():
+                if not isinstance(component, torch.nn.Module):
+                    continue
+                if not hasattr(component, "_hf_hook"):
+                    component._hf_hook = _ExecDeviceHook(
+                        cuda_device if name in cpu_offloaded else None
+                    )
 
     def _build_fsdp_quantize_fn(
         self, component_name: str, wrap_attrs: list, local_rank: int

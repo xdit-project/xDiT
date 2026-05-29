@@ -39,7 +39,11 @@ COMMON_FSDP_STRATEGY = {
         "dtype": torch.bfloat16,
     },
     "text_encoder": {
+        # CPU offload keeps shards on CPU between uses so the text encoder
+        # all_gather buffer doesn't compete with sharded transformer params
+        # during encode_prompt.
         "wrap_attrs": ["encoder.block"],
+        "offload_policy": "cpu",
     }
 }
 
@@ -693,6 +697,7 @@ class xFuserWan21VACEModel(xFuserModel):
         cross_attention_backend=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -708,6 +713,15 @@ class xFuserWan21VACEModel(xFuserModel):
         fps=16,
         model_output_type="video",
         fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["blocks", "vace_blocks"],
+                "dtype": torch.bfloat16,
+            },
+            "text_encoder": {
+                "wrap_attrs": ["encoder.block"],
+            },
+        },
     )
 
     def __init__(self, config: xFuserArgs) -> None:

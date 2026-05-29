@@ -978,6 +978,7 @@ def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_k
     if not is_causal:
         seq_len = query.shape[2]
         pad = (-seq_len) % 128
+        # 199*pad > seq_len is pad/(seq_len+pad) > 0.005 (0.5%) in integer arithmetic.
         if pad > 0 and 199 * pad > seq_len:
             return _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()

@@ -6,7 +6,7 @@ import functools
 import numpy as np
 from PIL.Image import Image
 from typing import Callable, Optional
-from xfuser.envs import _is_cuda, _is_hip
+from xfuser.envs import _is_cuda, _is_hip, PACKAGES_CHECKER
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +19,7 @@ def _use_aiter_fp8_rdna4() -> bool:
         import aiter  # noqa: F401
     except ImportError:
         return False
-    import re
-    arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-    m = re.match(r"gfx(\d+)", arch)
-    if not m:
-        return False
-    n = int(m.group(1))
-    return n in {1200, 1201}
+    return PACKAGES_CHECKER._on_rdna4()
 
 def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
     """Log message. By default, only from the last process to avoid duplicates."""

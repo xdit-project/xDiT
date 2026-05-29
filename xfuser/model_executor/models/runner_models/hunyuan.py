@@ -36,7 +36,8 @@ class xFuserHunyuanvideoModel(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
-        use_hybrid_attn_schedule=True
+        use_hybrid_attn_schedule=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -51,6 +52,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         output_name="hunyuan_video",
         model_output_type="video",
         fps=24,
+        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -111,6 +113,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -122,6 +125,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         output_name="hunyuan_video_1_5",
         model_output_type="video",
         fps=24,
+        fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
     )

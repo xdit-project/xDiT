@@ -222,6 +222,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         model_name="Lightricks/LTX-2",
         output_name="ltx_2_video",
         model_output_type="video",
+        fp8_gemm_module_list=["transformer.transformer_blocks"],
         fps=24,
         resolution_divisor=64,
     )
@@ -230,6 +231,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_fp8_gemms=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:

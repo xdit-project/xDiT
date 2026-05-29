@@ -105,8 +105,7 @@ class xFuserQwenImageModel(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
-        enable_tiling=True,
-        enable_slicing=True,
+        use_fp8_gemms=True,
     )
     default_input_values = DefaultInputValues(
         height=928,
@@ -118,6 +117,7 @@ class xFuserQwenImageModel(xFuserModel):
         model_name="Qwen/Qwen-Image",
         output_name="qwen_image",
         model_output_type="image",
+        fp8_gemm_module_list=["transformer.transformer_blocks"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],

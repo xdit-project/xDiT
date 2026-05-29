@@ -6,9 +6,20 @@ import functools
 import numpy as np
 from PIL.Image import Image
 from typing import Callable, Optional
-from xfuser.envs import _is_cuda
+from xfuser.envs import _is_cuda, _is_hip, PACKAGES_CHECKER
 
 logger = logging.getLogger(__name__)
+
+
+def _use_aiter_fp8_rdna4() -> bool:
+    """True on ROCm gfx1200 (Navi 44) or gfx1201 (Navi 48) with AITER present."""
+    if not _is_hip():
+        return False
+    try:
+        import aiter  # noqa: F401
+    except ImportError:
+        return False
+    return PACKAGES_CHECKER._on_rdna4()
 
 def log(message: str, debug=False, log_from_all_processes: bool = False) -> None:
     """Log message. By default, only from the last process to avoid duplicates."""
@@ -278,6 +289,39 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
             filter_fn=filter_fn,
             device=device
         )
+
+
+def quantize_linear_layers_to_fp8_blockscale(
+    model: torch.nn.Module,
+    device: Optional[torch.device] = None,
+) -> None:
+    """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
+
+    Mirrors quantize_linear_layers_to_fp4 structure: recursive tree walk, in-place
+    setattr replacement. Pre-quantizes weights to FP8 block-128 at call time.
+    """
+    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
+
+    for name, module in list(model.named_children()):
+        if isinstance(module, torch.nn.Linear):
+            weight = module.weight.data
+            bias = module.bias.data if module.bias is not None else None
+            fp8_layer = xFuserFP8BlockScaleLinear(
+                module.in_features,
+                module.out_features,
+                bias=(bias is not None),
+                device=weight.device,
+                dtype=weight.dtype,
+            )
+            # Free BF16 weight before quantization to avoid holding two copies on GPU
+            module.weight = None
+            if module.bias is not None:
+                module.bias = None
+            fp8_layer.load_and_quantize_weights(weight, bias, device=device)
+            del weight, bias
+            setattr(model, name, fp8_layer)
+        elif next(module.children(), None) is not None:
+            quantize_linear_layers_to_fp8_blockscale(module, device=device)
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:

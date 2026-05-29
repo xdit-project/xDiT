@@ -24,9 +24,11 @@ from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
     quantize_linear_layers_to_fp8,
+    quantize_linear_layers_to_fp8_blockscale,
     quantize_linear_layers_to_fp4,
     quantize_linear_layers_to_nvfp4,
     convert_model_convs_to_channels_last,
+    _use_aiter_fp8_rdna4,
     rgetattr,
 )
 
@@ -568,18 +570,28 @@ class xFuserModel(abc.ABC):
         if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
         else:
-            if not (self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload):
+            offload_requested = (
+                self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload
+            )
+            # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
+            # All other quant paths (FP4, torchao FP8) need weights on GPU first.
+            if self.config.use_fp8_gemms and _use_aiter_fp8_rdna4():
+                for module_name in self.settings.fp8_gemm_module_list:
+                    log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
+                    quantize_linear_layers_to_fp8_blockscale(
+                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}"
+                    )
+            if not offload_requested:
                 self.pipe = self.pipe.to(f"cuda:{local_rank}")
             if self.config.use_fp4_gemms:
                 if _is_cuda():
                     self._setup_nvfp4_gemms(local_rank=local_rank)
                 else:
                     self._setup_mxfp4_gemms(local_rank=local_rank)
-            elif self.config.use_fp8_gemms:
+            if self.config.use_fp8_gemms and not _use_aiter_fp8_rdna4():
                 for module_name in self.settings.fp8_gemm_module_list:
-                    log(f"Quantizing linear layers in {module_name} to FP8...")
-                    module = rgetattr(self.pipe, module_name)
-                    quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+                    log(f"Quantizing {module_name} to FP8 (torchao)...")
+                    quantize_linear_layers_to_fp8(rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}")
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -593,7 +605,7 @@ class xFuserModel(abc.ABC):
 
     def _shard_model_with_fsdp(self) -> None:
         """ Shard the model with FSDP based on settings """
-        if self.config.use_fp8_gemms:
+        if self.config.use_fp8_gemms and _is_cuda():
             from xfuser.core.utils.runner_utils import _TORCHAO_FLOAT8_FSDP2_PATCHES
             assert _TORCHAO_FLOAT8_FSDP2_PATCHES, (
                 "FSDP2 + FP8 requires torchao Float8Tensor patches but they failed to apply at "
@@ -619,8 +631,8 @@ class xFuserModel(abc.ABC):
                     memory_efficient_init=self.config.memory_efficient_sharding,
                     offload_policy=offload_policy,
                     # All ranks load from the same checkpoint so states are already
-                    # identical. Skip the GPU broadcast to avoid OOM on large encoders.
-                    sync_module_states=offload_policy != "cpu",
+                    # identical. No broadcast needed regardless of offload policy.
+                    sync_module_states=False,
                 )
                 setattr(self.pipe, component_name, fsdp_object)
                 torch.cuda.empty_cache()
@@ -707,7 +719,10 @@ class xFuserModel(abc.ABC):
                         device=device,
                     )
             else:
-                quantize_linear_layers_to_fp8(block, device=device)
+                if _use_aiter_fp8_rdna4():
+                    quantize_linear_layers_to_fp8_blockscale(block, device=device)
+                else:
+                    quantize_linear_layers_to_fp8(block, device=device)
 
         return quantize_fn
 

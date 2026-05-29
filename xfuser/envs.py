@@ -395,7 +395,7 @@ class PackagesEnvChecker:
     def _on_rdna4(self):
         device = torch.cuda.current_device()
         gcn_arch_name = torch.cuda.get_device_properties(device).gcnArchName
-        return "gfx1201" in gcn_arch_name
+        return any(arch in gcn_arch_name for arch in ["gfx1200", "gfx1201"])
 
 
 PACKAGES_CHECKER = PackagesEnvChecker()

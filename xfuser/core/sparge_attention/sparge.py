@@ -118,7 +118,7 @@ def setup_sparge(
 
     text_len_post_deint = encoder_sequence_length * sp_size
 
-    # 1) Ulysses de-interleave (no-op when text_len == 0 or sp_size == 1).
+    # Ulysses de-interleave (no-op when text_len == 0 or sp_size == 1).
     if text_len_post_deint > 0 and sp_size > 1:
         query = _deinterleave(query, sp_size, encoder_sequence_length)
         key = _deinterleave(key, sp_size, encoder_sequence_length)
@@ -130,12 +130,16 @@ def setup_sparge(
     static_mask: Optional[torch.Tensor] = None
     sp_pad_len = 0
 
-    if reorder_sequence or use_static_block_mask:
+    # Static mask is defined in Gilbert-permuted block space; meaningless
+    # without reorder. Match upstream's invariant and silently drop it.
+    if use_static_block_mask and not reorder_sequence:
+        use_static_block_mask = False
+
+    if reorder_sequence:
         if thw is None:
             raise ValueError(
-                "Sparge with reorder_sequence=True or "
-                "use_static_block_mask=True requires `attention_kwargs['thw']` "
-                "to be published by the model wrapper."
+                "Sparge with reorder_sequence=True requires "
+                "`attention_kwargs['thw']` to be published by the model wrapper."
             )
         spatial_len = thw[0] * thw[1] * thw[2]
         sp_pad_len = image_len_post_deint - spatial_len
@@ -146,14 +150,13 @@ def setup_sparge(
                 f"({spatial_len}). Mismatch between attention_kwargs['thw'] "
                 f"and the input sequence."
             )
-        if reorder_sequence:
-            fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
+        fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
         if use_static_block_mask:
             static_mask = get_static_block_neighbor_mask(
                 thw, block_m, block_n, query.device, gilbert_mapping=(inv_perm, fwd_perm)
             )
 
-    # 2) Split off image part (without SP padding) and text part.
+    # Split off image part (without SP padding) and text part.
     if text_len_post_deint > 0:
         image_q = query[:, :, :image_len_post_deint, :]
         image_k = key[:, :, :image_len_post_deint, :]
@@ -171,13 +174,12 @@ def setup_sparge(
         image_k = image_k[:, :, :spatial_len, :]
         image_v = image_v[:, :, :spatial_len, :]
 
-    # 3) Gilbert permute on the image part.
     if fwd_perm is not None:
         image_q = image_q.index_select(dim=2, index=fwd_perm)
         image_k = image_k.index_select(dim=2, index=fwd_perm)
         image_v = image_v.index_select(dim=2, index=fwd_perm)
 
-    # 4) Re-concatenate text tail.
+    # Re-concatenate text tail.
     if text_q is not None:
         q_out = torch.cat([image_q, text_q], dim=2)
         k_out = torch.cat([image_k, text_k], dim=2)

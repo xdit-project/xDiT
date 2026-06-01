@@ -110,10 +110,9 @@ def _combined_qkv_all_to_all(q, k, v):
 
     qkv = _sdpa_all_to_all_single(qkv)
 
-    # [3, b, h/P, P, s, d]
-    qkv = qkv.permute(1, 2, 3, 0, 4, 5).contiguous()
-    # [3, b, h/P, P*s, d]
-    qkv = qkv.view(3, b, h // world_size, -1, d)
+    # [3, b, h/P, P*s, d]  — reshape directly avoids the intermediate
+    # contiguous copy that the separate permute+view required.
+    qkv = qkv.permute(1, 2, 3, 0, 4, 5).reshape(3, b, h // world_size, -1, d)
 
     q, k, v = torch.unbind(qkv, dim=0)
     return q, k, v
@@ -132,6 +131,7 @@ def _ft_c_output_all_to_all(x):
     x = _sdpa_all_to_all_single(x)
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
+
 
 def _preprocess_joint_tensors(joint_key, joint_value):
     """

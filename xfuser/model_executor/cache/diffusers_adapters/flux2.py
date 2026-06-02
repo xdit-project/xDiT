@@ -96,7 +96,9 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
     # Override: are_two_tensor_similar (device fix for multi-GPU Ulysses)
     # ------------------------------------------------------------------
     def are_two_tensor_similar(self, t1: torch.Tensor, t2: torch.Tensor, threshold) -> torch.Tensor:
-        return self.l1_distance(t1, t2) < threshold.to(t1.device)
+        if isinstance(threshold, torch.Tensor):
+            threshold = threshold.to(t1.device)
+        return self.l1_distance(t1, t2) < threshold
 
     # ------------------------------------------------------------------
     # Eager-only store helpers (break out of CUDA graph pool)

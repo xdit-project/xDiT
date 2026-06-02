@@ -118,6 +118,7 @@ class ModelCapabilities:
     # Other features
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
+    use_fbcache: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -152,6 +153,7 @@ class ModelSettings:
     fp8_gemm_module_list: List[str] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
+    fbcache_thresh: float = 0.12
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer

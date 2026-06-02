@@ -47,6 +47,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
                 "XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE", None
             ),
     "AITER_SAGE_V2_BLOCK_R": lambda: os.environ.get("XFUSER_AITER_SAGE_V2_BLOCK_R", "128"),
+    "XDIT_FBCACHE_THRESH": lambda: os.environ.get("XDIT_FBCACHE_THRESH", None),
 }
 
 

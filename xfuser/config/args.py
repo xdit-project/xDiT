@@ -766,6 +766,11 @@ class xFuserArgs:
             default=None,
             help="Path to the low-noise distilled transformer_2 safetensors file.",
         )
+        parser.add_argument(
+            "--use_fbcache",
+            action="store_true",
+            help="Enable FBCache to accelerate the diffusion loop",
+        )
         return parser
 
 

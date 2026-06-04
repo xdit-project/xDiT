@@ -62,12 +62,30 @@ def get_static_block_neighbor_mask(
     block_m: int, block_n: int,
     device: torch.device,
     gilbert_mapping: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    *,
+    mapping_kind: str = "gilbert",
 ) -> torch.Tensor:
-    key = (tuple(thw), int(block_m), int(block_n), _device_key(device))
+    """Block-pair neighbour mask for the (thw, block_m, block_n) layout.
+
+    ``mapping_kind`` disambiguates the cache when the same shape is built
+    under different block layouts (Gilbert-reordered vs linear row-major).
+    For ``"linear"`` an identity ``linear_to_hilbert`` is built on demand
+    if no ``gilbert_mapping`` was supplied.
+    """
+    key = (
+        tuple(thw),
+        int(block_m),
+        int(block_n),
+        _device_key(device),
+        str(mapping_kind),
+    )
     cached = _STATIC_BLOCK_MASK_CACHE.get(key)
     if cached is not None:
         return cached
     t, h, w = thw
+    if mapping_kind == "linear" and gilbert_mapping is None:
+        identity = torch.arange(t * h * w, dtype=torch.int64, device=device)
+        gilbert_mapping = (identity, identity)
     mask = sliced_gilbert_block_neighbor_mapping(
         t, h, w, block_m, block_n, device, gilbert_mapping=gilbert_mapping,
     )
@@ -118,7 +136,7 @@ def setup_sparge(
 
     text_len_post_deint = encoder_sequence_length * sp_size
 
-    # 1) Ulysses de-interleave (no-op when text_len == 0 or sp_size == 1).
+    # Ulysses de-interleave (no-op when text_len == 0 or sp_size == 1).
     if text_len_post_deint > 0 and sp_size > 1:
         query = _deinterleave(query, sp_size, encoder_sequence_length)
         key = _deinterleave(key, sp_size, encoder_sequence_length)
@@ -130,13 +148,19 @@ def setup_sparge(
     static_mask: Optional[torch.Tensor] = None
     sp_pad_len = 0
 
-    if reorder_sequence or use_static_block_mask:
-        if thw is None:
-            raise ValueError(
-                "Sparge with reorder_sequence=True or "
-                "use_static_block_mask=True requires `attention_kwargs['thw']` "
-                "to be published by the model wrapper."
-            )
+    # Both reorder and the static mask operate on the spatial (thw) layout,
+    # so they both need thw and they both need SP padding to be stripped
+    # off so the block grid lines up with the (t, h, w) cuboid.
+    if use_static_block_mask and thw is None:
+        use_static_block_mask = False
+
+    if reorder_sequence and thw is None:
+        raise ValueError(
+            "Sparge with reorder_sequence=True requires "
+            "`attention_kwargs['thw']` to be published by the model wrapper."
+        )
+
+    if thw is not None and (reorder_sequence or use_static_block_mask):
         spatial_len = thw[0] * thw[1] * thw[2]
         sp_pad_len = image_len_post_deint - spatial_len
         if sp_pad_len < 0:
@@ -146,14 +170,24 @@ def setup_sparge(
                 f"({spatial_len}). Mismatch between attention_kwargs['thw'] "
                 f"and the input sequence."
             )
-        if reorder_sequence:
-            fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
+
+    if reorder_sequence:
+        fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
         if use_static_block_mask:
             static_mask = get_static_block_neighbor_mask(
-                thw, block_m, block_n, query.device, gilbert_mapping=(inv_perm, fwd_perm)
+                thw, block_m, block_n, query.device,
+                gilbert_mapping=(inv_perm, fwd_perm),
+                mapping_kind="gilbert",
             )
+    elif use_static_block_mask:
+        # Linear (row-major) order: feed the neighbour builder an identity
+        # linear_to_hilbert so it emits a *linear*-block neighbour mask.
+        static_mask = get_static_block_neighbor_mask(
+            thw, block_m, block_n, query.device,
+            mapping_kind="linear",
+        )
 
-    # 2) Split off image part (without SP padding) and text part.
+    # Split off image part (without SP padding) and text part.
     if text_len_post_deint > 0:
         image_q = query[:, :, :image_len_post_deint, :]
         image_k = key[:, :, :image_len_post_deint, :]
@@ -171,13 +205,12 @@ def setup_sparge(
         image_k = image_k[:, :, :spatial_len, :]
         image_v = image_v[:, :, :spatial_len, :]
 
-    # 3) Gilbert permute on the image part.
     if fwd_perm is not None:
         image_q = image_q.index_select(dim=2, index=fwd_perm)
         image_k = image_k.index_select(dim=2, index=fwd_perm)
         image_v = image_v.index_select(dim=2, index=fwd_perm)
 
-    # 4) Re-concatenate text tail.
+    # Re-concatenate text tail.
     if text_q is not None:
         q_out = torch.cat([image_q, text_q], dim=2)
         k_out = torch.cat([image_k, text_k], dim=2)

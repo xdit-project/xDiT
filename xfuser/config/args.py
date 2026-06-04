@@ -30,20 +30,32 @@ logger = init_logger(__name__)
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
+    def _normalize_name(self, name: str) -> str:
+        # First, try the standard normalization (all hyphens to underscores)
+        fully_normalized = "--" + name[len("--"):].replace("-", "_")
+        if fully_normalized in self._option_string_actions:
+            return fully_normalized
+
+        # If not found, check if it's a BooleanOptionalAction (starts with --no-)
+        if name.startswith("--no-"):
+            no_dash_normalized = "--no-" + name[len("--no-"):].replace("-", "_")
+            if no_dash_normalized in self._option_string_actions:
+                return no_dash_normalized
+
+        return fully_normalized
+
     def parse_args(self, args=None, namespace=None):
         if args is None:
             args = sys.argv[1:]
 
-        # Convert underscores to dashes and vice versa in argument names
         processed_args = []
         for arg in args:
             if arg.startswith("--"):
                 if "=" in arg:
                     key, value = arg.split("=", 1)
-                    key = "--" + key[len("--") :].replace("-", "_")
-                    processed_args.append(f"{key}={value}")
+                    processed_args.append(f"{self._normalize_name(key)}={value}")
                 else:
-                    processed_args.append("--" + arg[len("--") :].replace("-", "_"))
+                    processed_args.append(self._normalize_name(arg))
             else:
                 processed_args.append(arg)
 

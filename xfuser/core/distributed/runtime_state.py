@@ -212,8 +212,10 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_MLA,
                                  AttentionBackendType.AITER_SAGE,
                                  AttentionBackendType.AITER_SPARSE_SAGE,
+                                 AttentionBackendType.AITER_SPARGE,
                                  AttentionBackendType.AITER_SAGE_V2,
                                  AttentionBackendType.AITER_SPARSE_SAGE_V2,
+                                 AttentionBackendType.AITER_SPARGE_V2,
                                  AttentionBackendType.AITER_FLYDSL,
                                  AttentionBackendType.FLEX_BLOCK_ATTN]:
             if self.parallel_config.ring_degree > 1:

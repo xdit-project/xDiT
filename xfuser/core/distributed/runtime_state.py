@@ -1,4 +1,5 @@
 from abc import ABCMeta
+import importlib
 import inspect
 import random
 from typing import List, Optional
@@ -214,36 +215,40 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_SPARSE_SAGE_V2,
                                  AttentionBackendType.FLEX_BLOCK_ATTN]:
             if self.parallel_config.ring_degree > 1:
+                # Ring parallelism merges per-rank attention outputs via LSE, so
+                # the wrapper must expose return_lse (and, for AITER_SAGE,
+                # smooth_k -- shipped with the LSE-correction fix needed for
+                # correct merging). Pick (module, symbol, required params)
+                # for the selected backend and validate the wrapper's signature.
                 if attention_backend == AttentionBackendType.AITER_SAGE:
-                    try:
-                        from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func
-                    except ImportError:
-                        raise RuntimeError("AITER Sage attention is not available, please update AITER") from None
-                    try:
-                        has_lse = inspect.signature(fav3_sage_wrapper_func).parameters.get("return_lse") is not None
-                        # Check if the function has a smooth_k parameter, this parameter was shipped with a fix for the lse computation, 
-                        # needed for correct ring-attention merging.
-                        has_smooth_k = inspect.signature(fav3_sage_wrapper_func).parameters.get("smooth_k") is not None
-                    except (AttributeError, TypeError):
-                        has_lse = False
-                        has_smooth_k = False
-                    if not has_lse:
-                        raise RuntimeError("AITER Sage attention does not support return_lse, please update AITER")
-                    if not has_smooth_k:
-                        raise RuntimeError("AITER Sage attention is missing the smooth_k LSE correction required for ring parallelism, please update AITER")
+                    module_path = "aiter.ops.triton.attention.fav3_sage"
+                    symbol = "fav3_sage_wrapper_func"
+                    required = ("return_lse", "smooth_k")
                 elif attention_backend == AttentionBackendType.AITER_SAGE_V2:
-                    try:
-                        from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import fav3_sage_mxfp4_wrapper
-                    except ImportError:
-                        raise RuntimeError("AITER Sage V2 attention is not available, please update AITER") from None
-                    try:
-                        has_lse = inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("return_lse") is not None
-                    except (AttributeError, TypeError):
-                        has_lse = False
-                    if not has_lse:
-                        raise RuntimeError("AITER Sage V2 attention does not support return_lse, please update AITER")
+                    module_path = "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper"
+                    symbol = "fav3_sage_mxfp4_wrapper"
+                    required = ("return_lse",)
                 else:
-                    raise RuntimeError("Selected attention backend does not support ring parallelism.")
+                    raise RuntimeError(
+                        "Selected attention backend does not support ring parallelism."
+                    )
+                try:
+                    fn = getattr(importlib.import_module(module_path), symbol)
+                except ImportError:
+                    raise RuntimeError(
+                        f"{attention_backend.value} attention is not available, "
+                        "please update AITER"
+                    ) from None
+                try:
+                    params = inspect.signature(fn).parameters
+                except (AttributeError, TypeError):
+                    params = {}
+                missing = [p for p in required if p not in params]
+                if missing:
+                    raise RuntimeError(
+                        f"{attention_backend.value} attention is missing {missing} "
+                        "required for ring parallelism, please update AITER"
+                    )
         if attention_backend == AttentionBackendType.AITER_FP8:
             try:
                 from aiter import flash_attn_fp8_pertensor_func

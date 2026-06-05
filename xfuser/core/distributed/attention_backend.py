@@ -53,13 +53,14 @@ def _check_aiter_fp8_has_descale():
         AITER_FP8_HAS_DESCALE = False
     return AITER_FP8_HAS_DESCALE
 
-def _check_aiter_sage_has_return_lse():
+def _check_aiter_sage_supports_ring():
     try:
-        return inspect.signature(fav3_sage_wrapper_func).parameters.get("return_lse") is not None
+        parameters = inspect.signature(fav3_sage_wrapper_func).parameters
+        return "return_lse" in parameters and "smooth_k" in parameters
     except (NameError, ImportError, AttributeError, TypeError):
         return False
 
-def _check_aiter_sage_v2_has_return_lse():
+def _check_aiter_sage_v2_supports_ring():
     try:
         return inspect.signature(fav3_sage_mxfp4_wrapper).parameters.get("return_lse") is not None
     except (NameError, ImportError, AttributeError, TypeError):
@@ -336,8 +337,8 @@ if env_info["has_aiter"]:
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
-    AITER_SAGE_HAS_RETURN_LSE = _check_aiter_sage_has_return_lse()
-    AITER_SAGE_V2_HAS_RETURN_LSE = _check_aiter_sage_v2_has_return_lse()
+    AITER_SAGE_SUPPORTS_RING = _check_aiter_sage_supports_ring()
+    AITER_SAGE_V2_SUPPORTS_RING = _check_aiter_sage_v2_supports_ring()
     HADAMARD_MATRIX = _aiter_sage_v2_hadamard_matrix(AITER_SAGE_V2_BLOCK_R)
     _TRITON_SSTA_BLOCK_SIZE = 128
     
@@ -771,8 +772,8 @@ def npu_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwarg
 @register_attention_function(AttentionBackendType.AITER_SAGE)
 def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     # Pass layout="bhsd" to avoid permutation
-    if AITER_SAGE_HAS_RETURN_LSE and get_ring_parallel_world_size() > 1:
-        attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=True)
+    if AITER_SAGE_SUPPORTS_RING and get_ring_parallel_world_size() > 1:
+        attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd", return_lse=True, smooth_k=True)
         output, softmax_lse = attn_fn(query, key, value)
     else:
         attn_fn = functools.partial(fav3_sage_wrapper_func, layout="bhsd")
@@ -788,7 +789,7 @@ def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_
     query = query.contiguous()
     key = key.contiguous()
     value = value.contiguous()
-    if AITER_SAGE_V2_HAS_RETURN_LSE and get_ring_parallel_world_size() > 1:
+    if AITER_SAGE_V2_SUPPORTS_RING and get_ring_parallel_world_size() > 1:
         attn_fn = functools.partial(fav3_sage_mxfp4_wrapper, layout="bhsd", hadamard_rotation=True, R=HADAMARD_MATRIX[query.device], return_lse=True)
         output, softmax_lse = attn_fn(query, key, value, causal=is_causal)
     else:

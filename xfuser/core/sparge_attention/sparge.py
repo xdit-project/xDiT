@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from xfuser.core.sparge_attention.block_mask import get_block_map_meansim
 from xfuser.core.sparge_attention.gilbert import (
@@ -41,6 +42,9 @@ class SpargeState:
     d: int
     dtype: torch.dtype
     device: torch.device
+    image_len: int = 0
+    img_pad: int = 0
+    tail_pad: int = 0
 
 
 # ── Cache builders ───────────────────────────────────────────────────────────
@@ -129,6 +133,7 @@ def setup_sparge(
     use_static_block_mask: bool = False,
     block_m: int = 128,
     block_n: int = 128,
+    pad_block_divisible: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
            SpargeState, Optional[torch.Tensor]]:
 
@@ -210,6 +215,26 @@ def setup_sparge(
         image_k = image_k.index_select(dim=2, index=fwd_perm)
         image_v = image_v.index_select(dim=2, index=fwd_perm)
 
+    _a, _b = block_m, block_n
+    while _b:
+        _a, _b = _b, _a % _b
+    align = block_m * block_n // _a
+    image_len = image_q.shape[2]
+    need_image_pad = pad_block_divisible or text_len_post_deint > 0
+    img_pad = (-image_len) % align if need_image_pad else 0
+    if img_pad > 0:
+        image_q = F.pad(image_q, (0, 0, 0, img_pad))
+        image_k = F.pad(image_k, (0, 0, 0, img_pad))
+        image_v = F.pad(image_v, (0, 0, 0, img_pad))
+        if static_mask is not None:
+            n_iq = (image_len + img_pad) // block_m
+            n_ik = (image_len + img_pad) // block_n
+            padded_static = torch.zeros(
+                (n_iq, n_ik), dtype=static_mask.dtype, device=static_mask.device
+            )
+            padded_static[: static_mask.shape[0], : static_mask.shape[1]] = static_mask
+            static_mask = padded_static
+
     # Re-concatenate text tail.
     if text_q is not None:
         q_out = torch.cat([image_q, text_q], dim=2)
@@ -219,6 +244,13 @@ def setup_sparge(
         q_out = image_q
         k_out = image_k
         v_out = image_v
+
+    total_len = q_out.shape[2]
+    tail_pad = (-total_len) % align if pad_block_divisible else 0
+    if tail_pad > 0:
+        q_out = F.pad(q_out, (0, 0, 0, tail_pad))
+        k_out = F.pad(k_out, (0, 0, 0, tail_pad))
+        v_out = F.pad(v_out, (0, 0, 0, tail_pad))
 
     state = SpargeState(
         sp_pad_len=sp_pad_len,
@@ -230,6 +262,9 @@ def setup_sparge(
         d=d,
         dtype=query.dtype,
         device=query.device,
+        image_len=image_len,
+        img_pad=img_pad,
+        tail_pad=tail_pad,
     )
     return q_out, k_out, v_out, state, static_mask
 
@@ -293,12 +328,18 @@ def compute_sparge_block_mask(
 
 
 def restore_sparge_output(o: torch.Tensor, state: SpargeState) -> torch.Tensor:
+    if state.tail_pad > 0:
+        o = o[:, :, : o.shape[2] - state.tail_pad, :]
+
     if state.text_len > 0:
-        image_o = o[:, :, :-state.text_len, :]
         text_o = o[:, :, -state.text_len:, :]
+        image_o = o[:, :, : o.shape[2] - state.text_len, :]
     else:
         image_o = o
         text_o = None
+
+    if state.img_pad > 0:
+        image_o = image_o[:, :, : image_o.shape[2] - state.img_pad, :]
 
     if state.inv_perm is not None:
         image_o = image_o.index_select(dim=2, index=state.inv_perm)
@@ -320,3 +361,24 @@ def restore_sparge_output(o: torch.Tensor, state: SpargeState) -> torch.Tensor:
         # sp_size); pass per-rank text length to _reinterleave.
         out = _reinterleave(out, state.sp_size, state.text_len // state.sp_size)
     return out
+
+
+def mask_padded_kv_blocks(
+    block_mask: torch.Tensor, state: SpargeState, block_n: int
+) -> torch.Tensor:
+    if state.img_pad == 0 and state.tail_pad == 0:
+        return block_mask
+
+    image_padded = state.image_len + state.img_pad
+    n_ik = image_padded // block_n
+    first_img_pad = (state.image_len + block_n - 1) // block_n
+    if first_img_pad < n_ik:
+        block_mask[:, :, :, first_img_pad:n_ik] = False
+
+    if state.tail_pad > 0:
+        n_tk = (state.text_len + state.tail_pad + block_n - 1) // block_n
+        first_txt_pad = (state.text_len + block_n - 1) // block_n
+        if first_txt_pad < n_tk:
+            block_mask[:, :, :, n_ik + first_txt_pad : n_ik + n_tk] = False
+
+    return block_mask

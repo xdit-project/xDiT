@@ -217,7 +217,7 @@ class RuntimeState(metaclass=ABCMeta):
             if self.parallel_config.ring_degree > 1:
                 # Ring parallelism merges per-rank attention outputs via LSE, so
                 # the wrapper must expose return_lse (and, for AITER_SAGE,
-                # smooth_k -- shipped with the LSE-correction fix needed for
+                # smooth_k, shipped with the LSE-correction fix needed for
                 # correct merging). Pick (module, symbol, required params)
                 # for the selected backend and validate the wrapper's signature.
                 if attention_backend == AttentionBackendType.AITER_SAGE:

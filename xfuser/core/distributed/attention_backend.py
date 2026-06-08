@@ -975,7 +975,7 @@ def _aiter_sparge_v2_attn_call(query, key, value, dropout_p, is_causal, attentio
 
 @register_attention_function(AttentionBackendType.FLEX_BLOCK_SPARGE)
 def _flex_block_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    config = {"BLOCK_M": 128, "BLOCK_N": 128}
+    config = {"BLOCK_M": 256, "BLOCK_N": 256}
     q, k, v, state, block_mask, num_heads = _build_sparge_block_mask(
         query, key, value, is_causal, attention_kwargs, config, pad_block_divisible=True
     )

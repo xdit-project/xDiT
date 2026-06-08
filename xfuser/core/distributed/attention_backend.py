@@ -16,6 +16,7 @@ from xfuser.core.sparge_attention.sparge import (
     setup_sparge,
     compute_sparge_block_mask,
     restore_sparge_output,
+    mask_padded_kv_blocks,
 )
 
 ATTENTION_FUNCTION_REGISTRY = {}
@@ -399,6 +400,7 @@ class AttentionBackendType(Enum):
     AITER_SPARSE_SAGE_V2 = "AITER Sparse Sage V2"
     AITER_SPARGE = "AITER Sparge"
     AITER_SPARGE_V2 = "AITER Sparge V2"
+    FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     NPU = "NPU"
 
@@ -920,7 +922,7 @@ def _read_sparge_kwargs(attention_kwargs):
         attn_kwargs.get("encoder_sequence_length", 0),
     )
 
-def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config):
+def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, config, pad_block_divisible=False):
     simthreshd1, cdfthreshd, reorder, use_static, thw, esl = _read_sparge_kwargs(attention_kwargs)
     q, k, v, state, static_mask = setup_sparge(
         query, key, value,
@@ -930,6 +932,7 @@ def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, con
         reorder_sequence=reorder,
         use_static_block_mask=use_static,
         block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
+        pad_block_divisible=pad_block_divisible,
     )
     block_mask = compute_sparge_block_mask(
         q, k,
@@ -937,9 +940,10 @@ def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, con
         cdfthreshd=cdfthreshd,
         is_causal=is_causal,
         static_block_mask=static_mask,
-        text_len=state.text_len,
+        text_len=state.text_len + state.tail_pad,
         block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
     )
+    block_mask = mask_padded_kv_blocks(block_mask, state, config["BLOCK_N"])
     num_heads = q.shape[1]
     return q, k, v, state, block_mask, num_heads
 
@@ -966,6 +970,18 @@ def _aiter_sparge_v2_attn_call(query, key, value, dropout_p, is_causal, attentio
         q, k, v, causal=is_causal, block_lut=block_lut,
         layout="bhsd", hadamard_rotation=True,
         R=HADAMARD_MATRIX[query.device], config=config,
+    )
+    return restore_sparge_output(output, state), None
+
+@register_attention_function(AttentionBackendType.FLEX_BLOCK_SPARGE)
+def _flex_block_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    config = {"BLOCK_M": 256, "BLOCK_N": 256}
+    q, k, v, state, block_mask, num_heads = _build_sparge_block_mask(
+        query, key, value, is_causal, attention_kwargs, config, pad_block_divisible=True
+    )
+    output = flex_block_attn_op(
+        q.contiguous(), k.contiguous(), v.contiguous(),
+        config["BLOCK_M"], config["BLOCK_N"], block_mask,
     )
     return restore_sparge_output(output, state), None
 

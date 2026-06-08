@@ -217,7 +217,8 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_SPARSE_SAGE_V2,
                                  AttentionBackendType.AITER_SPARGE_V2,
                                  AttentionBackendType.AITER_FLYDSL,
-                                 AttentionBackendType.FLEX_BLOCK_ATTN]:
+                                 AttentionBackendType.FLEX_BLOCK_ATTN,
+                                 AttentionBackendType.FLEX_BLOCK_SPARGE]:
             if self.parallel_config.ring_degree > 1:
                 raise RuntimeError("Selected attention backend does not support ring parallelism.")
         if attention_backend == AttentionBackendType.AITER_FP8:
@@ -281,7 +282,8 @@ class RuntimeState(metaclass=ABCMeta):
                 from aiter.ops.flydsl import flydsl_flash_attn_func
             except ImportError:
                 raise RuntimeError("AITER FlyDSL attention is not available, please update AITER") from None
-        elif attention_backend == AttentionBackendType.FLEX_BLOCK_ATTN:
+        elif attention_backend in (AttentionBackendType.FLEX_BLOCK_ATTN,
+                                   AttentionBackendType.FLEX_BLOCK_SPARGE):
             if not env_info["has_flex_block_attn"]:
                 raise RuntimeError("Flex Block Attention is not available, please install Flex Block Attention.")
 

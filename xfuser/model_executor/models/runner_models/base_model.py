@@ -20,6 +20,7 @@ from xfuser.envs import (
     _is_cuda,
 )
 from xfuser.core.distributed.parallel_state import get_fs_group
+from xfuser.core.sparge_attention import head_balance
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -255,6 +256,11 @@ class xFuserModel(abc.ABC):
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
+        # Set the Sparge head-balancing gate before any torch.compile (which
+        # happens in _compile_model, called after this). Setting it here keeps
+        # head_balance.ENABLED a trace-time constant for dynamo.
+        head_balance.set_enabled(getattr(self.config, "use_spargeattn_head_balance", False))
+
         if self.config.enable_slicing:
             log("Enabling VAE slicing...")
             self.pipe.vae.enable_slicing()

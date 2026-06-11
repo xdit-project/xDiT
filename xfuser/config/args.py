@@ -172,6 +172,7 @@ class xFuserArgs:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
+    use_spargeattn_head_balance: bool = False
     # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
@@ -767,6 +768,13 @@ class xFuserArgs:
                  "--spargeattn_reorder_sequence is set. Use --no-use_spargeattn_static_block_mask to disable."
         )
         parser.add_argument(
+            "--use_spargeattn_head_balance",
+            action="store_true",
+            help="Balance per-rank attention work across Ulysses ranks by "
+                 "permuting heads (block-sparse load balancing). Only has an "
+                 "effect with ulysses_degree>1 and a Sparge attention backend.",
+        )
+        parser.add_argument(
             "--distilled_transformer_path",
             type=nullable_str,
             default=None,
@@ -859,6 +867,7 @@ class xFuserArgs:
             use_spargeattn_static_block_mask=self.use_spargeattn_static_block_mask,
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
+            use_spargeattn_head_balance=self.use_spargeattn_head_balance,
         )
 
         parallel_config = ParallelConfig(

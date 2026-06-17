@@ -86,7 +86,7 @@ def _build_hadamard_matrix(block_r, dtype=torch.bfloat16, allow_sylvester_fallba
         if not allow_sylvester_fallback:
             return None
         # Local Sylvester construction: H1=[[1]], H2n=[[Hn,Hn],[Hn,-Hn]].
-        assert block_r & (block_r - 1) == 0, "Hadamard block_r must be a power of 2"
+        assert block_r > 0 and (block_r & (block_r - 1)) == 0, 'Hadamard block_r must be a positive power of 2'
         H = torch.ones((1, 1), dtype=torch.float32)
         while H.shape[0] < block_r:
             H = torch.cat([torch.cat([H, H], dim=1), torch.cat([H, -H], dim=1)], dim=0)
@@ -647,6 +647,8 @@ def _fp8_hadamard_rotate(x: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
     """Orthonormal Hadamard rotation along head_dim (in blocks of R.shape[-1]).
     Rotating both Q and K by R leaves Q @ K.T unchanged (kernel sees identical
     scores) while spreading outliers to cut fp8 quant error."""
+    if R is None:
+        return x
     d = x.shape[-1]
     block_r = R.shape[-1]
     R = R.to(x.dtype)

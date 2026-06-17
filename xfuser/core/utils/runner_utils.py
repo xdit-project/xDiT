@@ -98,6 +98,17 @@ def _get_fp8_kernel_preference():
     return KernelPreference.AUTO
 
 
+def _float8_tensor_op_table(float8_cls: type) -> dict:
+    """Return the mutable per-class op table (torchao 0.14+ naming varies)."""
+    for attr in ("_ATEN_OP_TABLE", "_ATEN_OP_OR_TORCH_FN_TABLE"):
+        root = getattr(float8_cls, attr, None)
+        if root is not None:
+            if float8_cls not in root:
+                root[float8_cls] = {}
+            return root[float8_cls]
+    raise AttributeError(f"{float8_cls!r} has no _ATEN_OP_* op table")
+
+
 def _patch_torchao_float8_fsdp2() -> list[str]:
     """
     Patch torchao's inference Float8Tensor for FSDP2 (fully_shard) compatibility.
@@ -123,7 +134,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     from torchao.quantization.quantize_.workflows.float8.float8_tensor import Float8Tensor
 
     aten = torch.ops.aten
-    table = Float8Tensor._ATEN_OP_TABLE.get(Float8Tensor, {})
+    table = _float8_tensor_op_table(Float8Tensor)
     patched = []
 
     def _make_float8(tensor, new_qdata, new_block_size=None):
@@ -138,18 +149,23 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     # expects 3 positional args which raises a ValueError. Also handles PerTensor
     # scale when FSDP2 flattens weights to 1D before making them a DTensor.
     split_op = aten.split.Tensor
-    if split_op in table:
-        _orig_split = table[split_op]
-        def _split(func, types, args, kwargs):
-            if len(args) == 2:
-                args = args + (kwargs.pop("dim", 0),)
-            tensor, split_size, dim = args
-            if isinstance(tensor, Float8Tensor) and tensor.scale.numel() == 1:
-                new_qdatas = aten.split.Tensor(tensor.qdata, split_size, dim)
-                return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
+    _orig_split = table.get(split_op)
+
+    def _split(func, types, args, kwargs):
+        if len(args) == 2:
+            args = args + (kwargs.pop("dim", 0),)
+        tensor, split_size, dim = args
+        if isinstance(tensor, Float8Tensor) and tensor.scale.numel() == 1:
+            new_qdatas = aten.split.Tensor(tensor.qdata, split_size, dim)
+            return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
+        if _orig_split is not None:
             return _orig_split(func, types, args, kwargs)
-        table[split_op] = _split
-        patched.append("aten.split.Tensor")
+        raise NotImplementedError(
+            f"Float8Tensor split: unhandled types={types} args={args} kwargs={kwargs}"
+        )
+
+    table[split_op] = _split
+    patched.append("aten.split.Tensor")
 
     # aten.new_empty: FSDP2 calls _chunk_with_empty which pads short chunk lists with size-0 tensors
     def _new_empty(_, _t, args, kwargs):
@@ -208,7 +224,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     def _patched_dispatch(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-        inner_table = cls._ATEN_OP_TABLE.get(cls, {})
+        inner_table = _float8_tensor_op_table(cls)
         if func in inner_table:
             return inner_table[func](func, types, args, kwargs)
         def _unwrap(t):

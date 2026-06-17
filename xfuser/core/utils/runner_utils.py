@@ -359,7 +359,26 @@ def rgetattr(obj: object, attr: str) -> object:
     """ Recursive getattr to get nested attributes """
     return functools.reduce(getattr, [obj] + attr.split("."))
 
-def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hybrid_schedule: bool = False, device: Optional[torch.device] = None):
+def _layer_uses_fp8_override(
+    layer_fqn: str,
+    fp8_layers: tuple[str] | None,
+    fp8_suffix_layers: tuple[str] | None,
+) -> bool:
+    if fp8_layers and layer_fqn.startswith(fp8_layers):
+        return True
+    if fp8_suffix_layers and layer_fqn.endswith(fp8_suffix_layers):
+        return True
+    return False
+
+
+def quantize_linear_layers_to_fp4(
+    model,
+    parent_name='',
+    fp8_layers=None,
+    fp8_suffix_layers: tuple[str] | None = None,
+    use_hybrid_schedule: bool = False,
+    device: Optional[torch.device] = None,
+):
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
     from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
@@ -368,7 +387,7 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
-            if fp8_layers and full_name.startswith(fp8_layers):
+            if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
                 quantize_(
                       module,
                       config=Float8DynamicActivationFloat8WeightConfig(
@@ -421,12 +440,20 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                 setattr(model, name, new_layer)
 
         elif len(list(module.children())) > 0:
-            quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers, use_hybrid_schedule=use_hybrid_schedule, device=device)
+            quantize_linear_layers_to_fp4(
+                module,
+                full_name,
+                fp8_layers=fp8_layers,
+                fp8_suffix_layers=fp8_suffix_layers,
+                use_hybrid_schedule=use_hybrid_schedule,
+                device=device,
+            )
 
 
 def quantize_linear_layers_to_nvfp4(
     module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     fp8_layers: tuple[str] = None,
+    fp8_suffix_layers: tuple[str] | None = None,
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
     use_triton_kernel: bool = True,
@@ -435,8 +462,8 @@ def quantize_linear_layers_to_nvfp4(
 
     Args:
         module_or_module_list_to_quantize: Module(s) whose linear layers will be quantized.
-        fp8_layers: FQN prefixes of layers that should use FP8 instead of NVFP4
-            for quality-sensitive blocks.
+        fp8_layers: FQN prefixes of layers that should use FP8 instead of NVFP4.
+        fp8_suffix_layers: FQN suffixes of layers that should use FP8 instead of NVFP4.
         device: Target device.
         min_layer_size: Skip NVFP4 for layers where min(out_features, in_features)
             is below this threshold (quantization overhead may exceed the speedup).
@@ -464,7 +491,7 @@ def quantize_linear_layers_to_nvfp4(
             if not isinstance(submodule, torch.nn.Linear):
                 continue
 
-            if fp8_layers and fqn.startswith(fp8_layers):
+            if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 skipped_fp8_count += 1
                 continue
 
@@ -478,7 +505,7 @@ def quantize_linear_layers_to_nvfp4(
         def nvfp4_filter_fn(mod, fqn):
             if not _is_linear(mod, fqn):
                 return False
-            if fp8_layers and fqn.startswith(fp8_layers):
+            if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 return False
             if min_layer_size > 0:
                 layer_min = min(mod.out_features, mod.in_features)
@@ -488,7 +515,7 @@ def quantize_linear_layers_to_nvfp4(
 
         quantize_(module, config=nvfp4_config, filter_fn=nvfp4_filter_fn, device=device)
 
-        if fp8_layers:
+        if fp8_layers or fp8_suffix_layers:
             from torchao.quantization.granularity import PerTensor
             from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig
 
@@ -501,7 +528,7 @@ def quantize_linear_layers_to_nvfp4(
             def fp8_filter_fn(mod, fqn):
                 if not _is_linear(mod, fqn):
                     return False
-                return fqn.startswith(fp8_layers)
+                return _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers)
 
             quantize_(module, config=fp8_config, filter_fn=fp8_filter_fn, device=device)
 

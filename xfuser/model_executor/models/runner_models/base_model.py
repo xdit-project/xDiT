@@ -154,6 +154,7 @@ class ModelSettings:
     fp8_gemm_module_list: List[str] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
+    fp8_precision_override_suffixes: Tuple[str] = None
     fbcache_thresh: float = 0.12
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
@@ -582,6 +583,24 @@ class xFuserModel(abc.ABC):
             name += f"_{self.config.task}"
         return name
 
+    def _apply_fp8_override_cli_from_config(self, config: xFuserArgs) -> None:
+        """Apply optional CLI FP8 override patterns (per-slot) into ModelSettings."""
+
+        def _parse_csv_patterns(raw: Optional[str]) -> Optional[Tuple[str, ...]]:
+            if raw is None or not raw.strip():
+                return None
+            patterns = tuple(p.strip() for p in raw.split(",") if p.strip())
+            return patterns or None
+
+        if config.fp8_precision_override_prefix_patterns is not None:
+            self.settings.fp8_precision_overrides = _parse_csv_patterns(
+                config.fp8_precision_override_prefix_patterns
+            )
+        if config.fp8_precision_override_suffix_patterns is not None:
+            self.settings.fp8_precision_override_suffixes = _parse_csv_patterns(
+                config.fp8_precision_override_suffix_patterns
+            )
+
     def _post_load_and_state_initialization(self, input_args: dict) -> None: ##TODO: should this be renamed?
         """ Hook for any post model-load and state initialization """
 
@@ -690,6 +709,19 @@ class xFuserModel(abc.ABC):
                         cuda_device if name in cpu_offloaded else None
                     )
 
+    def _log_fp8_overrides(self, prefixes, suffixes) -> None:
+        """Log the FP8 precision-override patterns (prefix and suffix) consistently."""
+        if prefixes:
+            log(
+                "The following layers will be quantized to FP8, to maintain output quality: "
+                f"{prefixes} (prefix match)"
+            )
+        if suffixes:
+            log(
+                "The following layers will be quantized to FP8, to maintain output quality: "
+                f"{suffixes} (suffix match)"
+            )
+
     def _build_fsdp_quantize_fn(
         self, component_name: str, wrap_attrs: list, local_rank: int
     ):
@@ -700,6 +732,9 @@ class xFuserModel(abc.ABC):
         fp8_precision_overrides entries like "5." apply to block index 5. We strip
         the block-index prefix before passing to the quantize functions so they see
         the same local FQN paths they would in the non-FSDP path.
+
+        Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed
+        through unchanged on every block; only prefix patterns are stripped.
         """
         if not (self.config.use_fp4_gemms or self.config.use_fp8_gemms):
             return None
@@ -708,6 +743,7 @@ class xFuserModel(abc.ABC):
         fp4_list = set(self.settings.fp4_gemm_module_list or [])
         fp8_list = set(self.settings.fp8_gemm_module_list or [])
         fp8_overrides = self.settings.fp8_precision_overrides or ()
+        fp8_suffix_overrides = self.settings.fp8_precision_override_suffixes
 
         paths = [f"{component_name}.{a}" for a in wrap_attrs]
 
@@ -722,6 +758,9 @@ class xFuserModel(abc.ABC):
         if not use_fp4_here and not use_fp8_here:
             return None
 
+        if use_fp4_here:
+            self._log_fp8_overrides(fp8_overrides, fp8_suffix_overrides)
+
         def quantize_fn(block, block_idx: int) -> None:
             block_prefix = f"{block_idx}."
             # Strip the block-index prefix so the quantize functions see local FQN paths.
@@ -730,11 +769,17 @@ class xFuserModel(abc.ABC):
             ) or None
             if use_fp4_here:
                 if _is_cuda():
-                    quantize_linear_layers_to_nvfp4(block, fp8_layers=local_fp8, device=device)
+                    quantize_linear_layers_to_nvfp4(
+                        block,
+                        fp8_layers=local_fp8,
+                        fp8_suffix_layers=fp8_suffix_overrides,
+                        device=device,
+                    )
                 else:
                     quantize_linear_layers_to_fp4(
                         block,
                         fp8_layers=local_fp8,
+                        fp8_suffix_layers=fp8_suffix_overrides,
                         use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                         device=device,
                     )
@@ -752,12 +797,15 @@ class xFuserModel(abc.ABC):
             # a number of transformer blocks while using FP4 for others. This mixed-precision
             # approach balances performance and output quality better than uniform quantization.
             log(f"Quantizing linear layers in {module_name} to FP4...")
-            if self.settings.fp8_precision_overrides:
-                log(f"The following blocks will be quantized to FP8, to maintain output quality: {self.settings.fp8_precision_overrides}")
+            self._log_fp8_overrides(
+                self.settings.fp8_precision_overrides,
+                self.settings.fp8_precision_override_suffixes,
+            )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_fp4(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
+                fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
                 use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                 device=f"cuda:{local_rank}",
             )
@@ -775,12 +823,15 @@ class xFuserModel(abc.ABC):
     def _setup_nvfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:
             log(f"Quantizing linear layers in {module_name} to NVFP4 (torchao)...")
-            if self.settings.fp8_precision_overrides:
-                log(f"The following blocks will use FP8 instead, to maintain output quality: {self.settings.fp8_precision_overrides}")
+            self._log_fp8_overrides(
+                self.settings.fp8_precision_overrides,
+                self.settings.fp8_precision_override_suffixes,
+            )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_nvfp4(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
+                fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
                 device=f"cuda:{local_rank}",
             )
         for module_name in self.settings.fp8_gemm_module_list:

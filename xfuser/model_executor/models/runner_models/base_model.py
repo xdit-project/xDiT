@@ -224,9 +224,26 @@ class xFuserModel(abc.ABC):
     fps: int = 0
 
     def __init__(self, config: xFuserArgs) -> None:
+        self.settings = copy.deepcopy(self.settings)
+        self._customize_settings(config)
         self._validate_config(config)
+        self._update_model_settings(config)
         self.config = config
         self.pipe = None
+
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        """Hook for subclasses to mutate self.settings before validation and CLI overrides.
+
+        Runs on the instance-local deepcopy, before _validate_config and
+        _update_model_settings, so subclass model_name/valid_tasks/overrides are in
+        place when those consumers run. Subclasses must use the `config` parameter;
+        self.config is not assigned until __init__ completes.
+        """
+        pass
+
+    def _update_model_settings(self, config: xFuserArgs) -> None:
+        if config.use_fp4_gemms:
+            self._apply_fp8_override_cli_from_config(config)
 
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
@@ -274,14 +291,14 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
-            config_value = getattr(config, key, None) # Some config options might not be set in the CLI, such as support for specific attention backends.
+            config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
-        
+
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
         supports_sparge = self.capabilities.supports_sparge_attention_backends

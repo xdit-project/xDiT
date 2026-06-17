@@ -131,9 +131,9 @@ class xFuserHunyuanvideo15Model(xFuserModel):
     )
 
 
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
-        if self.config.task == "i2v": # TODO: different model for 480p
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
+        if config.task == "i2v": # TODO: different model for 480p
             self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v"
         else:
             self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
@@ -210,8 +210,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("Hunyuanvideo-1.5-Distilled")
 class xFuserHunyuanvideo15DistilledModel(xFuserHunyuanvideo15Model):
     
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
         self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
         self.settings.output_name = "hunyuan_video_1_5_distilled"
         self.settings.valid_tasks = ["i2v"]
@@ -271,8 +271,8 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         assert len(attn_param["tile_size"]) == 3, "tile_size must be a tuple of 3 integers"
         assert np.prod(attn_param["tile_size"]) == 128 or np.prod(attn_param["tile_size"]) == 384, "product of ssta_tile_thw must be 128 or 384"
 
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
         self.settings.model_name = "tencent/HunyuanVideo-1.5"
         self.settings.output_name = "hunyuan_video_1_5_sparse"
         self.settings.valid_tasks = ["i2v"]

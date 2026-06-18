@@ -160,8 +160,18 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
             return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
         if _orig_split is not None:
             return _orig_split(func, types, args, kwargs)
-        raise NotImplementedError(
-            f"Float8Tensor split: unhandled types={types} args={args} kwargs={kwargs}"
+        # Fall back to the same unwrap-and-dispatch behavior as _patched_dispatch
+        # for anything not special-cased above (matches the pre-existing fallthrough).
+        # Limitation: for a Float8Tensor with a non-scalar (block/row) scale this
+        # unwraps to raw qdata and drops the Float8Tensor subclass + scale, so the
+        # split result is no longer fp8-aware. That scale layout does not occur on
+        # the supported static per-tensor-scale inference path (handled above);
+        # revisit if block-scaled weights are ever sharded via FSDP2.
+        def _unwrap(t):
+            return t.qdata if isinstance(t, Float8Tensor) else t
+        return func(
+            *torch.utils._pytree.tree_map(_unwrap, args),
+            **torch.utils._pytree.tree_map(_unwrap, kwargs),
         )
 
     table[split_op] = _split

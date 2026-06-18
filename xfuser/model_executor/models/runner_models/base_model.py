@@ -605,6 +605,13 @@ class xFuserModel(abc.ABC):
         """ Hook for any post model-load and state initialization """
 
         local_rank = get_world_group().local_rank
+        # Log FP8 precision overrides once here rather than per module/block in the
+        # quantization and FSDP-sharding loops below (avoids duplicate log spam).
+        if self.config.use_fp4_gemms:
+            self._log_fp8_overrides(
+                self.settings.fp8_precision_overrides,
+                self.settings.fp8_precision_override_suffixes,
+            )
         # FSDP path handles device placement and quantization (per-block for FSDP2).
         if self.config.fully_shard_degree > 1:
             self._shard_model_with_fsdp()
@@ -758,9 +765,6 @@ class xFuserModel(abc.ABC):
         if not use_fp4_here and not use_fp8_here:
             return None
 
-        if use_fp4_here:
-            self._log_fp8_overrides(fp8_overrides, fp8_suffix_overrides)
-
         def quantize_fn(block, block_idx: int) -> None:
             block_prefix = f"{block_idx}."
             # Strip the block-index prefix so the quantize functions see local FQN paths.
@@ -797,10 +801,6 @@ class xFuserModel(abc.ABC):
             # a number of transformer blocks while using FP4 for others. This mixed-precision
             # approach balances performance and output quality better than uniform quantization.
             log(f"Quantizing linear layers in {module_name} to FP4...")
-            self._log_fp8_overrides(
-                self.settings.fp8_precision_overrides,
-                self.settings.fp8_precision_override_suffixes,
-            )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_fp4(
                 module,
@@ -823,10 +823,6 @@ class xFuserModel(abc.ABC):
     def _setup_nvfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:
             log(f"Quantizing linear layers in {module_name} to NVFP4 (torchao)...")
-            self._log_fp8_overrides(
-                self.settings.fp8_precision_overrides,
-                self.settings.fp8_precision_override_suffixes,
-            )
             module = rgetattr(self.pipe, module_name)
             quantize_linear_layers_to_nvfp4(
                 module,

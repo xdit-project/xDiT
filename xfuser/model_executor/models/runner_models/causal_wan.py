@@ -158,10 +158,5 @@ class xFuserCausalWanModel(xFuserModel):
         if task == "i2v" and len(images) != 1:
             raise ValueError("Exactly one input image is required for CausalWan I2V mode.")
 
-    def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
+    def _get_compiled_pipe_components(self):
+        return ["transformer", "transformer_2"]

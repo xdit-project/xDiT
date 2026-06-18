@@ -1,7 +1,7 @@
 import copy
 import re
 import torch
-from typing import List
+from typing import List, Optional
 from PIL import Image
 from diffusers import FlowMatchEulerDiscreteScheduler, WanPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -269,14 +269,12 @@ class xFuserWan21I2VModel(xFuserModel):
         if len(images) != 1:
             raise ValueError("Exactly one input image is required for Wan I2V model.")
 
-    def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        compile_args = copy.deepcopy(input_args)
-        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        # Full warmup when a per-step attention or GEMM schedule is active,
+        # to trigger all backend paths; reduce to 2 steps otherwise.
         if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
-            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
-        self._run_timed_pipe(compile_args)
+            return 2
+        return None
 
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
@@ -316,12 +314,11 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         )
         return pipe
 
-    def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
-        # Full cycle to warmup the torch compiler
-        self._run_timed_pipe(input_args)
+    def _get_compiled_pipe_components(self):
+        return ["transformer", "transformer_2"]
+
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        return None  # full warmup cycle
 
 
 @register_model("Wan2.2-Distilled-I2V")
@@ -520,14 +517,10 @@ class xFuserWan21T2VModel(xFuserModel):
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
-    def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        compile_args = copy.deepcopy(input_args)
-        # If a per-step attention schedule is active, do a full warmup to trigger all backend paths.
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         if not get_runtime_state().has_attention_schedule() and not get_runtime_state().has_gemm_schedule():
-            compile_args["num_inference_steps"] = 2 # Reduce steps for warmup
-        self._run_timed_pipe(compile_args)
+            return 2
+        return None
 
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
@@ -566,12 +559,11 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         )
         return pipe
 
-    def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        self.pipe.transformer_2 = torch.compile(self.pipe.transformer_2, mode="default")
-        # Full cycle to warmup the torch compiler
-        self._run_timed_pipe(input_args)
+    def _get_compiled_pipe_components(self):
+        return ["transformer", "transformer_2"]
+
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        return None  # full warmup cycle
 
 
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
@@ -651,10 +643,8 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         output = self.pipe(**kwargs)
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
-    def _compile_model(self, input_args):
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        self._run_timed_pipe(input_args)
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        return None  # full warmup cycle
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)

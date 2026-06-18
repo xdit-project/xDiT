@@ -1,7 +1,7 @@
 import torch
+from typing import Optional
 from diffusers import FluxPipeline, FluxKontextPipeline, Flux2Pipeline, Flux2KleinPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.transformers.transformer_flux import xFuserFlux1Transformer2DWrapper
 from xfuser.model_executor.models.transformers.transformer_flux2 import xFuserFlux2Transformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -83,13 +83,8 @@ class xFuserFluxModel(xFuserModel):
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
 
-    def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile."""
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="reduce-overhead") # Better perf for FLUX.1
-        # two steps to warmup the torch compiler
-        input_args["num_inference_steps"] = 2
-        self._run_timed_pipe(input_args)
+    def _get_compile_mode(self) -> str:
+        return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
         if self.config.pipefusion_parallel_degree > 1:
@@ -293,22 +288,12 @@ class xFuserFlux2Model(xFuserModel):
                 f"rel_l1_thresh={rel_l1_thresh}, num_steps={num_steps}"
             )
 
-    def _compile_model(self, input_args: dict) -> None:
-        """Compile the model using torch.compile.
+    def _get_compile_mode(self) -> str:
+        # FBCache cross-step caching is incompatible with CUDA graphs.
+        return "default" if self.config.use_fbcache else "reduce-overhead"
 
-        When FBCache is enabled, uses mode="default" instead of "reduce-overhead"
-        because FBCache's cross-step tensor caching is incompatible with CUDA
-        graphs (buffer aliasing on dynamo guard changes).
-        """
-        compile_mode = "default" if self.config.use_fbcache else "reduce-overhead"
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(
-            self.pipe.transformer,
-            mode=compile_mode,
-            dynamic=False,
-        )
-        input_args["num_inference_steps"] = 2
-        self._run_timed_pipe(input_args)
+    def _get_compile_dynamic(self) -> Optional[bool]:
+        return False
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
@@ -389,22 +374,12 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
 
-    def _compile_model(self, input_args: dict) -> None:
-        """Compile the model using torch.compile.
+    def _get_compile_mode(self) -> str:
+        # FBCache cross-step caching is incompatible with CUDA graphs.
+        return "default" if self.config.use_fbcache else "reduce-overhead"
 
-        When FBCache is enabled, uses mode="default" instead of "reduce-overhead"
-        because FBCache's cross-step tensor caching is incompatible with CUDA
-        graphs (buffer aliasing on dynamo guard changes).
-        """
-        compile_mode = "default" if self.config.use_fbcache else "reduce-overhead"
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(
-            self.pipe.transformer,
-            mode=compile_mode,
-            dynamic=False,
-        )
-        input_args["num_inference_steps"] = 2
-        self._run_timed_pipe(input_args)
+    def _get_compile_dynamic(self) -> Optional[bool]:
+        return False
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(

@@ -383,14 +383,51 @@ class xFuserModel(abc.ABC):
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
 
 
+    def _get_compile_mode(self) -> str:
+        return "default"  # TODO: Configurable
+
+    def _get_compile_dynamic(self) -> Optional[bool]:
+        return None  # torch default (auto)
+
+    def _get_compiled_pipe_components(self) -> List[str]:
+        return ["transformer"]
+
+    def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
+        return 2  # None = skip step reduction, run full warmup cycle
 
     def _compile_model(self, input_args: dict) -> None:
-        """ Compile the model using torch.compile."""
+        """Compile pipe components with torch.compile.
+
+        When FSDP is active (fully_shard_degree > 1), compiles each component's
+        FSDP-wrapped block lists individually (read from fsdp_strategy wrap_attrs)
+        to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
+        the graph at every block boundary.
+        """
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default") # TODO: Configurable
-        # two steps to warmup the torch compiler
-        input_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
-        self._run_timed_pipe(input_args)
+        mode = self._get_compile_mode()
+        dynamic = self._get_compile_dynamic()
+        for component_name in self._get_compiled_pipe_components():
+            component = getattr(self.pipe, component_name, None)
+            if component is None:
+                continue
+            if self.config.fully_shard_degree > 1:
+                wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
+                compiled_any = False
+                for attr in wrap_attrs:
+                    block_list = getattr(component, attr, None)
+                    if block_list is not None:
+                        for i in range(len(block_list)):
+                            block_list[i] = torch.compile(block_list[i], mode=mode, dynamic=dynamic)
+                        compiled_any = True
+                if not compiled_any:
+                    setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
+            else:
+                setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
+        compile_args = copy.deepcopy(input_args)
+        warmup_steps = self._get_compile_warmup_steps(input_args)
+        if warmup_steps is not None:
+            compile_args["num_inference_steps"] = warmup_steps
+        self._run_timed_pipe(compile_args)
 
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:

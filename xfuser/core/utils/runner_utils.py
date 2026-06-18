@@ -98,6 +98,17 @@ def _get_fp8_kernel_preference():
     return KernelPreference.AUTO
 
 
+def _float8_tensor_op_table(float8_cls: type) -> dict:
+    """Return the mutable per-class op table (torchao 0.14+ naming varies)."""
+    for attr in ("_ATEN_OP_TABLE", "_ATEN_OP_OR_TORCH_FN_TABLE"):
+        root = getattr(float8_cls, attr, None)
+        if root is not None:
+            if float8_cls not in root:
+                root[float8_cls] = {}
+            return root[float8_cls]
+    raise AttributeError(f"{float8_cls!r} has no _ATEN_OP_* op table")
+
+
 def _patch_torchao_float8_fsdp2() -> list[str]:
     """
     Patch torchao's inference Float8Tensor for FSDP2 (fully_shard) compatibility.
@@ -123,7 +134,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     from torchao.quantization.quantize_.workflows.float8.float8_tensor import Float8Tensor
 
     aten = torch.ops.aten
-    table = Float8Tensor._ATEN_OP_TABLE.get(Float8Tensor, {})
+    table = _float8_tensor_op_table(Float8Tensor)
     patched = []
 
     def _make_float8(tensor, new_qdata, new_block_size=None):
@@ -138,18 +149,33 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     # expects 3 positional args which raises a ValueError. Also handles PerTensor
     # scale when FSDP2 flattens weights to 1D before making them a DTensor.
     split_op = aten.split.Tensor
-    if split_op in table:
-        _orig_split = table[split_op]
-        def _split(func, types, args, kwargs):
-            if len(args) == 2:
-                args = args + (kwargs.pop("dim", 0),)
-            tensor, split_size, dim = args
-            if isinstance(tensor, Float8Tensor) and tensor.scale.numel() == 1:
-                new_qdatas = aten.split.Tensor(tensor.qdata, split_size, dim)
-                return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
+    _orig_split = table.get(split_op)
+
+    def _split(func, types, args, kwargs):
+        if len(args) == 2:
+            args = args + (kwargs.pop("dim", 0),)
+        tensor, split_size, dim = args
+        if isinstance(tensor, Float8Tensor) and tensor.scale.numel() == 1:
+            new_qdatas = aten.split.Tensor(tensor.qdata, split_size, dim)
+            return tuple(_make_float8(tensor, qd, list(qd.shape)) for qd in new_qdatas)
+        if _orig_split is not None:
             return _orig_split(func, types, args, kwargs)
-        table[split_op] = _split
-        patched.append("aten.split.Tensor")
+        # Fall back to the same unwrap-and-dispatch behavior as _patched_dispatch
+        # for anything not special-cased above (matches the pre-existing fallthrough).
+        # Limitation: for a Float8Tensor with a non-scalar (block/row) scale this
+        # unwraps to raw qdata and drops the Float8Tensor subclass + scale, so the
+        # split result is no longer fp8-aware. That scale layout does not occur on
+        # the supported static per-tensor-scale inference path (handled above);
+        # revisit if block-scaled weights are ever sharded via FSDP2.
+        def _unwrap(t):
+            return t.qdata if isinstance(t, Float8Tensor) else t
+        return func(
+            *torch.utils._pytree.tree_map(_unwrap, args),
+            **torch.utils._pytree.tree_map(_unwrap, kwargs),
+        )
+
+    table[split_op] = _split
+    patched.append("aten.split.Tensor")
 
     # aten.new_empty: FSDP2 calls _chunk_with_empty which pads short chunk lists with size-0 tensors
     def _new_empty(_, _t, args, kwargs):
@@ -208,7 +234,7 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
     def _patched_dispatch(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-        inner_table = cls._ATEN_OP_TABLE.get(cls, {})
+        inner_table = _float8_tensor_op_table(cls)
         if func in inner_table:
             return inner_table[func](func, types, args, kwargs)
         def _unwrap(t):
@@ -343,7 +369,26 @@ def rgetattr(obj: object, attr: str) -> object:
     """ Recursive getattr to get nested attributes """
     return functools.reduce(getattr, [obj] + attr.split("."))
 
-def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hybrid_schedule: bool = False, device: Optional[torch.device] = None):
+def _layer_uses_fp8_override(
+    layer_fqn: str,
+    fp8_layers: tuple[str] | None,
+    fp8_suffix_layers: tuple[str] | None,
+) -> bool:
+    if fp8_layers and layer_fqn.startswith(fp8_layers):
+        return True
+    if fp8_suffix_layers and layer_fqn.endswith(fp8_suffix_layers):
+        return True
+    return False
+
+
+def quantize_linear_layers_to_fp4(
+    model,
+    parent_name='',
+    fp8_layers=None,
+    fp8_suffix_layers: tuple[str] | None = None,
+    use_hybrid_schedule: bool = False,
+    device: Optional[torch.device] = None,
+):
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
     from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
@@ -352,7 +397,7 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
-            if fp8_layers and full_name.startswith(fp8_layers):
+            if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
                 quantize_(
                       module,
                       config=Float8DynamicActivationFloat8WeightConfig(
@@ -405,12 +450,20 @@ def quantize_linear_layers_to_fp4(model, parent_name='', fp8_layers=None, use_hy
                 setattr(model, name, new_layer)
 
         elif len(list(module.children())) > 0:
-            quantize_linear_layers_to_fp4(module, full_name, fp8_layers=fp8_layers, use_hybrid_schedule=use_hybrid_schedule, device=device)
+            quantize_linear_layers_to_fp4(
+                module,
+                full_name,
+                fp8_layers=fp8_layers,
+                fp8_suffix_layers=fp8_suffix_layers,
+                use_hybrid_schedule=use_hybrid_schedule,
+                device=device,
+            )
 
 
 def quantize_linear_layers_to_nvfp4(
     module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     fp8_layers: tuple[str] = None,
+    fp8_suffix_layers: tuple[str] | None = None,
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
     use_triton_kernel: bool = True,
@@ -419,8 +472,8 @@ def quantize_linear_layers_to_nvfp4(
 
     Args:
         module_or_module_list_to_quantize: Module(s) whose linear layers will be quantized.
-        fp8_layers: FQN prefixes of layers that should use FP8 instead of NVFP4
-            for quality-sensitive blocks.
+        fp8_layers: FQN prefixes of layers that should use FP8 instead of NVFP4.
+        fp8_suffix_layers: FQN suffixes of layers that should use FP8 instead of NVFP4.
         device: Target device.
         min_layer_size: Skip NVFP4 for layers where min(out_features, in_features)
             is below this threshold (quantization overhead may exceed the speedup).
@@ -448,7 +501,7 @@ def quantize_linear_layers_to_nvfp4(
             if not isinstance(submodule, torch.nn.Linear):
                 continue
 
-            if fp8_layers and fqn.startswith(fp8_layers):
+            if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 skipped_fp8_count += 1
                 continue
 
@@ -462,7 +515,7 @@ def quantize_linear_layers_to_nvfp4(
         def nvfp4_filter_fn(mod, fqn):
             if not _is_linear(mod, fqn):
                 return False
-            if fp8_layers and fqn.startswith(fp8_layers):
+            if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 return False
             if min_layer_size > 0:
                 layer_min = min(mod.out_features, mod.in_features)
@@ -472,7 +525,7 @@ def quantize_linear_layers_to_nvfp4(
 
         quantize_(module, config=nvfp4_config, filter_fn=nvfp4_filter_fn, device=device)
 
-        if fp8_layers:
+        if fp8_layers or fp8_suffix_layers:
             from torchao.quantization.granularity import PerTensor
             from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig
 
@@ -485,7 +538,7 @@ def quantize_linear_layers_to_nvfp4(
             def fp8_filter_fn(mod, fqn):
                 if not _is_linear(mod, fqn):
                     return False
-                return fqn.startswith(fp8_layers)
+                return _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers)
 
             quantize_(module, config=fp8_config, filter_fn=fp8_filter_fn, device=device)
 

@@ -283,16 +283,16 @@ class xFuserWan21I2VModel(xFuserModel):
 @register_model("Wan2.2-I2V")
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
-    def __init__(self, config: xFuserArgs) -> None:
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_i2v"
-        super().__init__(config)
         self.settings.fsdp_strategy["transformer_2"] = {
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
-        self.settings.fp8_precision_overrides=None
+        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_precision_overrides = None
 
 
     def _load_model(self) -> DiffusionPipeline:
@@ -366,10 +366,10 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         num_hybrid_attn_high_precision_steps=1,
     )
 
-    def __init__(self, config: xFuserArgs) -> None:
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
-        super().__init__(config)
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -534,8 +534,8 @@ class xFuserWan21T2VModel(xFuserModel):
 @register_model("Wan2.2-T2V")
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
         self.settings.output_name = "wan2.2_t2v"
         self.settings.fsdp_strategy["transformer_2"] = {
@@ -613,6 +613,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         fp8_gemm_module_list=["transformer.blocks"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "28.", "29."),
+        fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
     )
@@ -724,8 +725,8 @@ class xFuserWan21VACEModel(xFuserModel):
         },
     )
 
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
+    def _customize_settings(self, config: xFuserArgs) -> None:
+        super()._customize_settings(config)
         if "14B" in config.model:
             self.settings.model_name = "Wan-AI/Wan2.1-VACE-14B-diffusers"
             self.settings.output_name = "wan.2.1_vace_14b"

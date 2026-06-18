@@ -138,6 +138,8 @@ class xFuserArgs:
     cross_attention_backend: Optional[str] = None
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
+    fp8_precision_override_prefix_patterns: Optional[str] = None
+    fp8_precision_override_suffix_patterns: Optional[str] = None
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
@@ -614,6 +616,18 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
         )
+        parser.add_argument(
+            "--fp8_precision_override_prefix_patterns",
+            type=nullable_str,
+            default=None,
+            help="Comma-delimited FQN prefix patterns to keep in FP8 during FP4 GEMMs.",
+        )
+        parser.add_argument(
+            "--fp8_precision_override_suffix_patterns",
+            type=nullable_str,
+            default=None,
+            help="Comma-delimited FQN suffix patterns to keep in FP8 during FP4 GEMMs.",
+        )
 
         parser.add_argument(
             "--num_iterations",
@@ -838,6 +852,15 @@ class xFuserArgs:
         if self.use_hybrid_gemm_schedule:
             if not self.use_fp4_gemms:
                 raise ValueError("When use_hybrid_gemm_schedule is True, use_fp4_gemms must be set.")
+
+        if (
+            self.fp8_precision_override_prefix_patterns is not None
+            or self.fp8_precision_override_suffix_patterns is not None
+        ) and not self.use_fp4_gemms:
+            raise ValueError(
+                "FP8 precision override patterns require --use_fp4_gemms: "
+                "overrides apply when quantizing linear layers for FP4 GEMMs."
+            )
 
         model_config = ModelConfig(
             model=self.model,

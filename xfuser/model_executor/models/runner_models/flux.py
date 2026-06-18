@@ -12,6 +12,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
@@ -84,6 +85,8 @@ class xFuserFluxModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
         return "reduce-overhead"
 
     def _load_model(self) -> DiffusionPipeline:
@@ -289,8 +292,11 @@ class xFuserFlux2Model(xFuserModel):
             )
 
     def _get_compile_mode(self) -> str:
-        # FBCache cross-step caching is incompatible with CUDA graphs.
-        return "default" if self.config.use_fbcache else "reduce-overhead"
+        # CUDA graphs incompatible with FBCache cross-step caching,
+        # and cause pathological re-captures on RDNA4.
+        if self.config.use_fbcache or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _get_compile_dynamic(self) -> Optional[bool]:
         return False
@@ -375,8 +381,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
-        # FBCache cross-step caching is incompatible with CUDA graphs.
-        return "default" if self.config.use_fbcache else "reduce-overhead"
+        # CUDA graphs incompatible with FBCache cross-step caching,
+        # and cause pathological re-captures on RDNA4.
+        if self.config.use_fbcache or PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
 
     def _get_compile_dynamic(self) -> Optional[bool]:
         return False

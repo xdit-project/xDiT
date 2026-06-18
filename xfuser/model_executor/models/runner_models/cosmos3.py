@@ -1,4 +1,3 @@
-import copy
 import json
 import torch
 from diffusers import UniPCMultistepScheduler
@@ -206,13 +205,6 @@ class xFuserCosmos3SuperModel(xFuserModel):
                 image = resize_and_crop_image(image, width, height, self.settings.mod_value)
             input_args["image"] = image
         return input_args
-
-    def _compile_model(self, input_args: dict) -> None:
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer = torch.compile(self.pipe.transformer, mode="default")
-        compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2
-        self._run_timed_pipe(compile_args)
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)

@@ -36,6 +36,7 @@ from xfuser.core.sparge_attention import head_balance
 _HEAD_BALANCE_BACKENDS = frozenset({
     AttentionBackendType.AITER_SPARGE,
     AttentionBackendType.AITER_SPARGE_V2,
+    AttentionBackendType.FLEX_BLOCK_SPARGE,
 })
 
 

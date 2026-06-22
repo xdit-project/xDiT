@@ -414,7 +414,10 @@ class xFuserModel(abc.ABC):
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
                 compiled_any = False
                 for attr in wrap_attrs:
-                    block_list = getattr(component, attr, None)
+                    try:
+                        block_list = rgetattr(component, attr)
+                    except AttributeError:
+                        block_list = None
                     if block_list is not None:
                         for i in range(len(block_list)):
                             block_list[i] = torch.compile(block_list[i], mode=mode, dynamic=dynamic)

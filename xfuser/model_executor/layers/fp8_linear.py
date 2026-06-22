@@ -11,7 +11,6 @@ _FP8_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
 _FP8_BLOCK = 128
 
 
-@torch.compile
 def _quantize_weight_blocks(w_blocks: torch.Tensor, w_amax: torch.Tensor) -> torch.Tensor:
     return (w_blocks / w_amax[:, None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
 

@@ -27,7 +27,10 @@ from xfuser.core.distributed.attention_backend import (
     ATTENTION_FUNCTION_REGISTRY,
     AttentionBackendType,
 )
-from xfuser.core.sparge_attention import head_balance
+from xfuser.core.sparge_attention.head_balance import (
+    apply_head_balance,
+    revert_head_balance,
+)
 
 # Sparge backends whose kernel cost can be load-balanced across Ulysses ranks.
 # These all build a block mask via _build_sparge_block_mask and write the
@@ -274,35 +277,17 @@ def USP(
 
     attention_function = _get_attention_function(backend=backend)
 
-    # ---- Ulysses block-sparse head load balancing ----
-    # Permute the heads before the input all-to-all so each rank receives a
-    # cost-balanced subset, then invert on the output. The permutation for this
-    # step is read from a per-layer buffer (filled from the previous step's
-    # per-head cost).
     hb_uly = get_ulysses_parallel_world_size()
-    hb_perm = getattr(head_balance_layer, "head_perm", None)
     hb_backend = backend if backend is not None else get_runtime_state().attention_backend
-    hb_active = (
-        get_runtime_state().runtime_config.use_spargeattn_head_balance
-        and hb_perm is not None
-        and joint_strategy is None
-        and hb_uly > 1
-        and get_ring_parallel_world_size() == 1
-        and query.shape[1] % hb_uly == 0
-        and hb_backend in _HEAD_BALANCE_BACKENDS
+    query, key, value, hb_applied, attention_kwargs = apply_head_balance(
+        query, key, value, head_balance_layer,
+        enabled=get_runtime_state().runtime_config.use_spargeattn_head_balance,
+        ulysses_world_size=hb_uly,
+        ring_world_size=get_ring_parallel_world_size(),
+        is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
+        joint_strategy=joint_strategy,
+        attention_kwargs=attention_kwargs,
     )
-    hb_applied = None
-    hb_inv = None
-    hb_cost_sink = None
-    # attention_kwargs to pass to the (sparge) attention call: identical to the
-    # caller's unless head balancing is active, in which case it carries the
-    # per-head cost sink.
-    attn_call_kwargs = attention_kwargs
-    if hb_active:
-        (query, key, value, hb_applied, hb_inv, hb_cost_sink,
-         attn_call_kwargs) = head_balance.apply_head_balance(
-            query, key, value, hb_perm, hb_uly, attention_kwargs
-        )
 
     joint_attn_kwargs = None
     if joint_strategy:
@@ -355,7 +340,7 @@ def USP(
                                         dropout_p=dropout_p,
                                         is_causal=is_causal,
                                         joint_attn_kwargs=joint_attn_kwargs,
-                                        attention_kwargs=attn_call_kwargs)
+                                        attention_kwargs=attention_kwargs)
         else: # USP
             out = ring_attn(attention_function,
                             query,
@@ -366,11 +351,11 @@ def USP(
                             joint_attn_kwargs=joint_attn_kwargs,
                             attention_kwargs=attention_kwargs)
         out = _ft_c_output_all_to_all(out)
-        if hb_active:
+        if hb_applied:
             # Restore global head order on the output, gather this step's per-head
             # costs across the Ulysses group, and plan next step's permutation.
-            out = head_balance.revert_head_balance(
-                out, hb_applied, hb_inv, hb_cost_sink, head_balance_layer, hb_uly
+            out = revert_head_balance(
+                out, attention_kwargs, head_balance_layer, hb_uly
             )
 
     return out

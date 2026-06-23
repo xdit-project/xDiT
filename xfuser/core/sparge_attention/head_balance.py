@@ -14,6 +14,10 @@ else:
 # separate global enable flag is needed).
 COST_SINK_KEY: str = "_hb_cost_sink"
 
+# Key under which the output-revert bookkeeping (applied + inverse head
+# permutation) is stashed in attention_kwargs, ignored by the backend.
+_HB_STATE_KEY: str = "_hb_revert_state"
+
 
 def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
     """Resolve an async functional-collective tensor. No-op while tracing, where
@@ -21,7 +25,6 @@ def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
     if isinstance(tensor, ft_c.AsyncCollectiveTensor):
         return tensor.wait()
     return tensor
-
 
 def compute_perm(cost: torch.Tensor, world_size: int) -> torch.Tensor:
     """Balanced equal-cardinality head permutation from per-head costs.
@@ -55,20 +58,37 @@ def scatter_to_global(full_in_applied_order: torch.Tensor,
                            full_in_applied_order)
 
 
-def apply_head_balance(query, key, value, head_perm, ulysses_world_size,
-                       attention_kwargs):
-    """Permute Q,K,V heads by ``head_perm`` (this step's plan) so each Ulysses rank
-    receives a cost-balanced head subset, before the input all-to-all.
+def apply_head_balance(query, key, value, head_balance_layer, *,
+                       enabled, ulysses_world_size, ring_world_size,
+                       is_sparge_backend, joint_strategy, attention_kwargs):
+    """Conditionally apply Ulysses block-sparse head balancing before the input
+    all-to-all.
 
-    Also attaches a per-head "cost sink" scratch tensor (shape = heads-per-rank)
-    that the sparge backend fills in place; passed via a shallow-copied
-    attention_kwargs so the head cost stays OUT of the (output, softmax_lse)
-    return contract.
+    Balancing engages only when the feature flag is set and we are on the
+    Ulysses-only sparge path with a per-layer balancing buffer present. When it
+    does, Q,K,V heads are permuted by this step's plan so each rank receives a
+    cost-balanced subset, and a per-head "cost sink" (for the backend to fill)
+    plus the revert bookkeeping (applied + inverse permutation) are stashed in a
+    shallow-copied attention_kwargs -- keeping the head cost OUT of the
+    (output, softmax_lse) contract and leaving USP with no extra locals.
 
-    Returns ``(query, key, value, applied_perm, inv_perm, cost_sink,
-    attention_kwargs)`` -- the permuted tensors plus the state needed later by
-    ``revert_head_balance``.
+    Returns ``(query, key, value, hb_applied, attention_kwargs)``; when not
+    applied the inputs are returned unchanged with ``hb_applied=False``. The gate
+    is composed of trace-time constants so it folds away cleanly under compile.
     """
+    head_perm = getattr(head_balance_layer, "head_perm", None)
+    hb_applied = (
+        enabled
+        and ulysses_world_size > 1
+        and ring_world_size == 1
+        and head_perm is not None
+        and is_sparge_backend
+        and joint_strategy is None
+        and query.shape[1] % ulysses_world_size == 0
+    )
+    if not hb_applied:
+        return query, key, value, False, attention_kwargs
+
     applied_perm = head_perm.clone()  # snapshot the permutation applied this step
     inv_perm = torch.argsort(applied_perm)
     query = query.index_select(1, applied_perm)
@@ -76,19 +96,27 @@ def apply_head_balance(query, key, value, head_perm, ulysses_world_size,
     value = value.index_select(1, applied_perm)
     cost_sink = query.new_zeros(query.shape[1] // ulysses_world_size,
                                 dtype=torch.float32)
-    attention_kwargs = {**(attention_kwargs or {}), COST_SINK_KEY: cost_sink}
-    return query, key, value, applied_perm, inv_perm, cost_sink, attention_kwargs
+    attention_kwargs = {
+        **(attention_kwargs or {}),
+        COST_SINK_KEY: cost_sink,
+        _HB_STATE_KEY: (applied_perm, inv_perm),
+    }
+    return query, key, value, True, attention_kwargs
 
 
-def revert_head_balance(out, applied_perm, inv_perm, cost_sink,
-                        head_balance_layer, ulysses_world_size):
+def revert_head_balance(out, attention_kwargs, head_balance_layer,
+                        ulysses_world_size):
     """Undo head balancing on the attention output and plan the next step.
 
-    Restores the original (global) head order on ``out``, then all-gathers this
-    step's per-head costs across the Ulysses group, maps them back to global head
-    order, and stores next step's balanced permutation into the per-layer
-    ``head_perm`` buffer. Returns the reordered ``out``.
+    Reads the cost sink and applied/inverse permutation back out of
+    ``attention_kwargs`` (stashed by ``apply_head_balance``). Restores the
+    original (global) head order on ``out``, all-gathers this step's per-head
+    costs across the Ulysses group, maps them back to global head order, and
+    stores next step's balanced permutation into the per-layer ``head_perm``
+    buffer. Returns the reordered ``out``.
     """
+    applied_perm, inv_perm = attention_kwargs[_HB_STATE_KEY]
+    cost_sink = attention_kwargs[COST_SINK_KEY]
     out = out.index_select(1, inv_perm)
     full = _maybe_wait(
         ft_c.all_gather_tensor(cost_sink, 0, PROCESS_GROUP.ULYSSES_PG)

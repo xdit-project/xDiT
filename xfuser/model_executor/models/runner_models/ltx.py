@@ -7,6 +7,7 @@ from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.ltx2.export_utils import encode_video
 from xfuser.model_executor.models.transformers.transformer_ltx2 import xFuserLTX2VideoTransformer3DWrapper
+from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -178,9 +179,14 @@ class xFuserLTX23VideoModel(xFuserModel):
 
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
+    def _get_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
     def _compile_model(self, input_args: dict) -> None:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer.compile_repeated_blocks(mode="reduce-overhead")
+        self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
@@ -307,9 +313,14 @@ class xFuserLTX2VideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
+    def _get_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
     def _compile_model(self, input_args: dict) -> None:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.pipe.transformer.compile_repeated_blocks(mode="reduce-overhead")
+        self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)

@@ -283,7 +283,7 @@ def USP(
     hb_perm = getattr(head_balance_layer, "head_perm", None)
     hb_backend = backend if backend is not None else get_runtime_state().attention_backend
     hb_active = (
-        head_balance.ENABLED
+        get_runtime_state().runtime_config.use_spargeattn_head_balance
         and hb_perm is not None
         and joint_strategy is None
         and hb_uly > 1
@@ -291,26 +291,18 @@ def USP(
         and query.shape[1] % hb_uly == 0
         and hb_backend in _HEAD_BALANCE_BACKENDS
     )
+    hb_applied = None
     hb_inv = None
     hb_cost_sink = None
-    hb_attention_kwargs = attention_kwargs
+    # attention_kwargs to pass to the (sparge) attention call: identical to the
+    # caller's unless head balancing is active, in which case it carries the
+    # per-head cost sink.
+    attn_call_kwargs = attention_kwargs
     if hb_active:
-        hb_perm = hb_perm.clone()  # snapshot the permutation applied this step
-        hb_inv = torch.argsort(hb_perm)
-        query = query.index_select(1, hb_perm)
-        key = key.index_select(1, hb_perm)
-        value = value.index_select(1, hb_perm)
-        # Scratch tensor for the sparse backend to write this rank's per-head
-        # cost into (shape = heads-per-rank). Passed via a shallow-copied
-        # attention_kwargs. Written in-place by the backend; read
-        # back below..
-        hb_cost_sink = query.new_zeros(query.shape[1] // hb_uly, dtype=torch.float32)
-        hb_attention_kwargs = {
-            **(attention_kwargs or {}),
-            head_balance.COST_SINK_KEY: hb_cost_sink,
-        }
-    else:
-        hb_perm = None
+        (query, key, value, hb_applied, hb_inv, hb_cost_sink,
+         attn_call_kwargs) = head_balance.apply_head_balance(
+            query, key, value, hb_perm, hb_uly, attention_kwargs
+        )
 
     joint_attn_kwargs = None
     if joint_strategy:
@@ -363,7 +355,7 @@ def USP(
                                         dropout_p=dropout_p,
                                         is_causal=is_causal,
                                         joint_attn_kwargs=joint_attn_kwargs,
-                                        attention_kwargs=hb_attention_kwargs)
+                                        attention_kwargs=attn_call_kwargs)
         else: # USP
             out = ring_attn(attention_function,
                             query,
@@ -375,19 +367,10 @@ def USP(
                             attention_kwargs=attention_kwargs)
         out = _ft_c_output_all_to_all(out)
         if hb_active:
-            # Restore the original (global) head order on the output.
-            out = out.index_select(1, hb_inv)
-            # hb_cost_sink now holds this rank's per-head cost (written in place
-            # by the sparse backend). Exchange across the Ulysses group via a
-            # functional collective, map back to global
-            # head order, and store next step's balanced permutation into the
-            # per-layer buffer.
-            full = _maybe_wait(
-                ft_c.all_gather_tensor(hb_cost_sink, 0, PROCESS_GROUP.ULYSSES_PG)
-            )
-            glob = head_balance.scatter_to_global(full, hb_perm)
-            head_balance_layer.head_perm.copy_(
-                head_balance.compute_perm(glob, hb_uly)
+            # Restore global head order on the output, gather this step's per-head
+            # costs across the Ulysses group, and plan next step's permutation.
+            out = head_balance.revert_head_balance(
+                out, hb_applied, hb_inv, hb_cost_sink, head_balance_layer, hb_uly
             )
 
     return out

@@ -179,10 +179,14 @@ class xFuserLTX23VideoModel(xFuserModel):
 
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
+    def _get_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
     def _compile_model(self, input_args: dict) -> None:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        compile_mode = "default" if PACKAGES_CHECKER._on_rdna4() else "reduce-overhead"
-        self.pipe.transformer.compile_repeated_blocks(mode=compile_mode)
+        self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
@@ -309,10 +313,14 @@ class xFuserLTX2VideoModel(xFuserModel):
         )
         return DiffusionOutput(videos=output, pipe_args=input_args)
 
+    def _get_compile_mode(self) -> str:
+        if PACKAGES_CHECKER._on_rdna4():
+            return "default"
+        return "reduce-overhead"
+
     def _compile_model(self, input_args: dict) -> None:
         torch._inductor.config.reorder_for_compute_comm_overlap = True
-        compile_mode = "default" if PACKAGES_CHECKER._on_rdna4() else "reduce-overhead"
-        self.pipe.transformer.compile_repeated_blocks(mode=compile_mode)
+        self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)

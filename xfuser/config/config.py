@@ -68,6 +68,7 @@ class RuntimeConfig:
     use_spargeattn_static_block_mask: bool = True
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
+    use_spargeattn_head_balance: bool = False
 
     def __post_init__(self):
         check_packages()

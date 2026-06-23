@@ -146,6 +146,7 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             value.transpose(1, 2),
             backend=backend,
             attention_kwargs=self.attention_kwargs,
+            head_balance_layer=attn,
         ).transpose(1, 2)
 
         hidden_states = hidden_states.flatten(2, 3)
@@ -204,6 +205,15 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
+            # Per-layer head permutation buffer for the Ulysses block-sparse head
+            # balancer (read/updated in-place inside USP; identity = no balancing).
+            # Registered pre-compile and non-persistent so it stays out of the
+            # state_dict and is captured as a graph input by torch.compile.
+            block.attn1.register_buffer(
+                "head_perm",
+                torch.arange(num_attention_heads, dtype=torch.long),
+                persistent=False,
+            )
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

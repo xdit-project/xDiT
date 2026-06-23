@@ -23,7 +23,24 @@ from xfuser.core.distributed import (
 
 from packaging.version import parse
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
-from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
+from xfuser.core.distributed.attention_backend import (
+    ATTENTION_FUNCTION_REGISTRY,
+    AttentionBackendType,
+)
+from xfuser.core.sparge_attention.head_balance import (
+    apply_head_balance,
+    revert_head_balance,
+)
+
+# Sparge backends whose kernel cost can be load-balanced across Ulysses ranks.
+# These all build a block mask via _build_sparge_block_mask and write the
+# per-head cost into the head-balance "cost sink". Non-sparge backends are
+# excluded so head balancing is a clean no-op for them.
+_HEAD_BALANCE_BACKENDS = frozenset({
+    AttentionBackendType.AITER_SPARGE,
+    AttentionBackendType.AITER_SPARGE_V2,
+    AttentionBackendType.FLEX_BLOCK_SPARGE,
+})
 
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=None):
@@ -241,16 +258,36 @@ def USP(
         combine_qkv_a2a: bool | None = None,
         backend=None,
         attention_kwargs: dict | None = None,
+        head_balance_layer=None,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     Explicit backend can be provided to specify the attention backend to use.
+
+    ``head_balance_layer`` (optional): a stable per-layer handle (e.g. the
+    attention module). When provided and --use_spargeattn_head_balance is set, the
+    Ulysses head dimension is permuted so each rank gets a cost-balanced subset
+    of heads (block-sparse load balancing); the permutation is inverted on the
+    output. No-op for non-sparse backends (no cost is published) and for ring/
+    joint paths.
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
 
     attention_function = _get_attention_function(backend=backend)
+
+    hb_uly = get_ulysses_parallel_world_size()
+    hb_backend = backend if backend is not None else get_runtime_state().attention_backend
+    query, key, value, hb_applied, attention_kwargs = apply_head_balance(
+        query, key, value, head_balance_layer,
+        enabled=get_runtime_state().runtime_config.use_spargeattn_head_balance,
+        ulysses_world_size=hb_uly,
+        ring_world_size=get_ring_parallel_world_size(),
+        is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
+        joint_strategy=joint_strategy,
+        attention_kwargs=attention_kwargs,
+    )
 
     joint_attn_kwargs = None
     if joint_strategy:
@@ -314,6 +351,12 @@ def USP(
                             joint_attn_kwargs=joint_attn_kwargs,
                             attention_kwargs=attention_kwargs)
         out = _ft_c_output_all_to_all(out)
+        if hb_applied:
+            # Restore global head order on the output, gather this step's per-head
+            # costs across the Ulysses group, and plan next step's permutation.
+            out = revert_head_balance(
+                out, attention_kwargs, head_balance_layer, hb_uly
+            )
 
     return out
 
@@ -326,11 +369,16 @@ def attention(
         is_causal: bool = False,
         backend=None,
         attention_kwargs=None,
+        head_balance_layer=None,
     ):
     """
     Runs attention call without any parallelism.
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
     Explicit backend can be provided to specify the attention backend to use.
+
+    ``head_balance_layer`` is accepted for call-site signature parity with
+    ``USP`` but ignored here: with no Ulysses parallelism there is no head
+    sharding to balance.
     """
     attention_function = _get_attention_function(backend=backend)
     out, _ = attention_function(

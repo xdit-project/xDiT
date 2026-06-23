@@ -18,6 +18,7 @@ from xfuser.core.sparge_attention.sparge import (
     restore_sparge_output,
     mask_padded_kv_blocks,
 )
+from xfuser.core.sparge_attention.head_balance import COST_SINK_KEY
 
 ATTENTION_FUNCTION_REGISTRY = {}
 
@@ -1017,6 +1018,12 @@ def _build_sparge_block_mask(query, key, value, is_causal, attention_kwargs, con
     )
     block_mask = mask_padded_kv_blocks(block_mask, state, config["BLOCK_N"])
     num_heads = q.shape[1]
+    # Per-head selected-block cost for the Ulysses head-balancer. USP injects a
+    # scratch "cost sink" tensor into attention_kwargs only when balancing is
+    # active.
+    cost_sink = (attention_kwargs or {}).get(COST_SINK_KEY)
+    if cost_sink is not None:
+        cost_sink.copy_(block_mask.to(torch.float32).sum(dim=(0, 2, 3)))
     return q, k, v, state, block_mask, num_heads
 
 @register_attention_function(AttentionBackendType.AITER_SPARGE)

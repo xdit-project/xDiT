@@ -384,6 +384,8 @@ class xFuserModel(abc.ABC):
 
 
     def _get_compile_mode(self) -> str:
+        # Overrides should return "default" when PACKAGES_CHECKER._on_rdna4():
+        # CUDA graphs are slow on RDNA4.
         return "default"  # TODO: Configurable
 
     def _get_compile_dynamic(self) -> Optional[bool]:

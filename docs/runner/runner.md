@@ -100,6 +100,8 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-2 | `LTX-2`, `Lightricks/LTX-2` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
+| Krea2-Raw | `krea/krea-2-raw`, `krea/Krea-2-Raw`, `Krea-2-Raw` |
+| Krea2-Turbo | `krea/krea-2-turbo`, `krea/Krea-2-Turbo`, `Krea-2-Turbo` |
 
 
 

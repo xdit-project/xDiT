@@ -804,7 +804,7 @@ class xFuserModel(abc.ABC):
         Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed
         through unchanged on every block; only prefix patterns are stripped.
         """
-        if not (self.config.use_fp4_gemms or self.config.use_fp8_gemms):
+        if not (self.config.use_fp4_gemms or self.config.use_fp8_gemms or self.config.use_int8_gemms):
             return None
 
         device = f"cuda:{local_rank}"

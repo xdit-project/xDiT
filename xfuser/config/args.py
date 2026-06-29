@@ -136,6 +136,7 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
+    use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
@@ -406,6 +407,11 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
         )
+        runtime_group.add_argument(
+            "--use_int8_gemms",
+            action="store_true",
+            help="Quantize the transformer linear layers (selected models only).",
+        )
 
         # DiTFastAttn arguments
         fast_attn_group = parser.add_argument_group("DiTFastAttn Options")
@@ -606,6 +612,11 @@ class xFuserArgs:
             "--enable_slicing",
             action="store_true",
             help="Enable VAE slicing to save GPU memory.",
+        )
+        parser.add_argument(
+            "--use_int8_gemms",
+            action="store_true",
+            help="Quantize the transformer linear layers (selected models only).",
         )
         parser.add_argument(
             "--use_fp8_gemms",

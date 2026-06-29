@@ -72,6 +72,11 @@ class xFuserZImageModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        int8_gemm_module_list=[
+            "transformer.layers", 
+            "transformer.noise_refiner", 
+            "transformer.context_refiner"
+        ],
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -130,6 +135,7 @@ class xFuserZImageTurboModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
     )
 
     def _load_model(self) -> DiffusionPipeline:

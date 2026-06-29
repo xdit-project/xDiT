@@ -292,6 +292,46 @@ except Exception as e:
     logger.debug("torchao Float8Tensor FSDP2 patches skipped (%s): %s", type(e).__name__, e)
 
 
+def quantize_linear_layers_to_int8(
+    module_or_module_list: torch.nn.Module | torch.nn.ModuleList,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    device: Optional[torch.device] = None,
+    min_layer_size: int = 0,
+) -> None:
+    from torchao.quantization.granularity import PerRow
+    from torchao.quantization.quant_primitives import MappingType
+    from torchao.quantization.quant_api import (
+        Int8DynamicActivationInt8WeightConfig,
+        quantize_,
+        _is_linear,
+    )
+
+    if filter_fn is None:
+        if min_layer_size > 0:
+            def filter_fn(mod, fqn):
+                if not _is_linear(mod, fqn):
+                    return False
+                return min(mod.out_features, mod.in_features) >= min_layer_size
+        else:
+            filter_fn = _is_linear
+
+    config = Int8DynamicActivationInt8WeightConfig(
+        granularity=PerRow(),
+        act_mapping_type=MappingType.SYMMETRIC,
+        set_inductor_config=False,
+    )
+
+    if isinstance(module_or_module_list, torch.nn.Module):
+        module_or_module_list = [module_or_module_list]
+
+    for module in module_or_module_list:
+        quantize_(
+            module,
+            config=config,
+            filter_fn=filter_fn,
+            device=device,
+        )
+
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
     device: Optional[torch.device] = None) -> None:

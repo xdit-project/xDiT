@@ -23,6 +23,7 @@ from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
+    quantize_linear_layers_to_int8,
     quantize_linear_layers_to_fp8,
     quantize_linear_layers_to_fp8_blockscale,
     quantize_linear_layers_to_fp4,
@@ -151,6 +152,7 @@ class ModelSettings:
     model_output_type: Optional[str] = None
     mod_value: Optional[int] = None
     fps: Optional[int] = None
+    int8_gemm_module_list: List[str] = None
     fp8_gemm_module_list: List[str] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
@@ -364,6 +366,12 @@ class xFuserModel(abc.ABC):
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
+        if config.use_int8_gemms:
+            if config.use_fp8_gemms or config.use_fp4_gemms:
+                raise ValueError("Cannot use int8 gemms with fp8 or fp4 gemms.")
+            if _is_hip():
+                raise ValueError("Int8 GEMMs on ROCm are not supported.")
+            
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 GEMMs on ROCm require AITER.")
@@ -683,6 +691,13 @@ class xFuserModel(abc.ABC):
                 for module_name in self.settings.fp8_gemm_module_list:
                     log(f"Quantizing {module_name} to FP8 (torchao)...")
                     quantize_linear_layers_to_fp8(rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}")
+            if self.config.use_int8_gemms:
+                for module_name in self.settings.int8_gemm_module_list:
+                    log(f"Quantizing {module_name} to W8A8 INT8 (torchao)...")
+                    quantize_linear_layers_to_int8(
+                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}",
+                        min_layer_size=512,
+                    )
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -796,6 +811,7 @@ class xFuserModel(abc.ABC):
         fp8_list = set(self.settings.fp8_gemm_module_list or [])
         fp8_overrides = self.settings.fp8_precision_overrides or ()
         fp8_suffix_overrides = self.settings.fp8_precision_override_suffixes
+        int8_list = set(self.settings.int8_gemm_module_list or [])
 
         paths = [f"{component_name}.{a}" for a in wrap_attrs]
 
@@ -806,8 +822,9 @@ class xFuserModel(abc.ABC):
         ) or (
             self.config.use_fp4_gemms and any(p in fp8_list and p not in fp4_list for p in paths)
         )
+        use_int8_here = self.config.use_int8_gemms and any(p in int8_list for p in paths)
 
-        if not use_fp4_here and not use_fp8_here:
+        if not use_fp4_here and not use_fp8_here and not use_int8_here:
             return None
 
         def quantize_fn(block, block_idx: int) -> None:
@@ -832,11 +849,14 @@ class xFuserModel(abc.ABC):
                         use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                         device=device,
                     )
-            else:
+            elif use_fp8_here:
                 if _use_aiter_fp8_rdna4():
                     quantize_linear_layers_to_fp8_blockscale(block, device=device)
                 else:
                     quantize_linear_layers_to_fp8(block, device=device)
+            else:
+                # use_int8_here
+                quantize_linear_layers_to_int8(block, device=device, min_layer_size=512)
 
         return quantize_fn
 

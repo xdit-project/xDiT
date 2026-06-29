@@ -118,6 +118,7 @@ class ModelCapabilities:
     enable_tiling: bool = False
     use_vae_channels_last_format: bool = True
     # Other features
+    use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
     use_fbcache: bool = False

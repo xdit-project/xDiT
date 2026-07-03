@@ -67,8 +67,8 @@ class xFuserKrea2AttnProcessor:
             value = value.repeat_interleave(repeat_factor, dim=1)
 
         # combined QKV all-to-all is faster with ring attention
-        # because ring uses Python-mutable rotater that adds graph
-        # breaks and prevents q,k,v A2A overlap with computation
+        # because ring adds graph breaks that prevents q,k,v A2A
+        # overlap with computation
         combine_qkv_a2a = get_ring_parallel_world_size() > 1
         out = USP(query, key, value, combine_qkv_a2a=combine_qkv_a2a)
 

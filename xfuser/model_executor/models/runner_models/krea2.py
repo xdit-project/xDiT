@@ -1,9 +1,11 @@
 import torch
+import torch.nn.functional as F
 from diffusers.pipelines.krea2 import Krea2Pipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
+from xfuser.envs import _is_hip
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
@@ -15,8 +17,39 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.model_executor.models.transformers.transformer_krea2 import (
     xFuserKrea2Transformer2DWrapper,
 )
+from transformers import Qwen3VLModel
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
+
+
+def _patch_text_encoder_linear_for_rocm(text_encoder: Qwen3VLModel) -> None:
+    """Compute all text encoder linear layers in float32, store in bfloat16.
+
+    Workaround for ROCm 7.13 bfloat16 GEMMs with large M,N,K shapes that may
+    produce NaNs when a split-K kernel is used.
+    Computing in float32 avoids the potential Nan issue in bfloat16 split-K path.
+    """
+
+    def _make_f32_forward(m: torch.nn.Linear):
+        def _f32_forward(x: torch.Tensor) -> torch.Tensor:
+            return F.linear(
+                x.float(),
+                m.weight.float(),
+                m.bias.float() if m.bias is not None else None,
+            ).to(x.dtype)
+
+        return _f32_forward
+
+    count = 0
+    for module in text_encoder.modules():
+        if isinstance(module, torch.nn.Linear):
+            module.forward = _make_f32_forward(module)
+            count += 1
+
+    log(
+        f"Patched {count} Linear layers to float32 compute "
+        "(ROCm 7.13 bfloat16 split-K NaN fix for Qwen3VL shapes)."
+    )
 
 
 class _Krea2BaseModel(xFuserModel):
@@ -33,6 +66,8 @@ class _Krea2BaseModel(xFuserModel):
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         fully_shard_degree=True,
+        enable_tiling=True,
+        enable_slicing=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -42,14 +77,26 @@ class _Krea2BaseModel(xFuserModel):
             subfolder="transformer",
             torch_dtype=torch.bfloat16,
         )
+
+        # On ROCm 7.13, Qwen3VL bfloat16 GEMM shapes (with max_sequence_length > 448)
+        # may produce non-deterministic NaN via a split-K uninitialized-output issue.
+        pipeline_kwargs: dict = {}
+        if _is_hip():
+            te = Qwen3VLModel.from_pretrained(
+                self.settings.model_name,
+                subfolder="text_encoder",
+                torch_dtype=torch.bfloat16,
+            )
+            _patch_text_encoder_linear_for_rocm(te)
+            pipeline_kwargs["text_encoder"] = te
+
         pipe = Krea2Pipeline.from_pretrained(
             self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
+            **pipeline_kwargs,
         )
         # DiTRuntimeState reads backbone_patch_size from transformer.config.patch_size.
-        # Krea2Transformer2DModel stores patch_size on the pipeline, not the transformer
-        # config, so copy it across before the runtime state is initialised.
         pipe.transformer.config.patch_size = pipe.patch_size
         return pipe
 
@@ -57,7 +104,7 @@ class _Krea2BaseModel(xFuserModel):
         batch_size = self.config.batch_size if self.config.batch_size else 1
         max_seq = input_args.get(
             "max_sequence_length",
-            self.default_input_values.max_sequence_length or 256,
+            self.default_input_values.max_sequence_length or 512,
         )
 
         get_runtime_state().set_input_parameters(
@@ -73,6 +120,7 @@ class _Krea2BaseModel(xFuserModel):
             prompt=input_args["prompt"],
             height=input_args["height"],
             width=input_args["width"],
+            negative_prompt=input_args["negative_prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             output_type=input_args.get("output_type", "pil"),
@@ -88,14 +136,14 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("krea/Krea-2-Raw")
 @register_model("Krea-2-Raw")
 class xFuserKrea2RawModel(_Krea2BaseModel):
-    """Krea-2-Raw: undistilled base checkpoint. 28 steps, guidance_scale=3.5."""
+    """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
 
     default_input_values = DefaultInputValues(
-        height=1024,
-        width=1024,
+        height=2048,
+        width=2048,
         num_inference_steps=52,
         guidance_scale=3.5,
-        max_sequence_length=256,
+        max_sequence_length=512,
     )
 
     settings = ModelSettings(
@@ -122,17 +170,17 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("krea/Krea-2-Turbo")
 @register_model("Krea-2-Turbo")
 class xFuserKrea2TurboModel(_Krea2BaseModel):
-    """Krea-2-Turbo: 8-step CFG-free distilled checkpoint. Supports up to 2048px."""
+    """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
 
     _TURBO_STEPS = 8
     _TURBO_GUIDANCE = 0.0
 
     default_input_values = DefaultInputValues(
-        height=1024,
-        width=1024,
+        height=2048,
+        width=2048,
         num_inference_steps=_TURBO_STEPS,
         guidance_scale=_TURBO_GUIDANCE,
-        max_sequence_length=256,
+        max_sequence_length=512,
     )
 
     settings = ModelSettings(

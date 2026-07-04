@@ -58,6 +58,7 @@ class xFuserZImageModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_int8_gemms=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -72,7 +73,27 @@ class xFuserZImageModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        int8_gemm_module_list=[
+            "transformer.layers", 
+            "transformer.noise_refiner", 
+            "transformer.context_refiner"
+        ],
     )
+
+    def _customize_settings(self, config) -> None:
+        """Exclude context_refiner from INT8 quant when sequence parallelism is active.
+
+        Both Ulysses and Ring attention split the sequence across GPUs.  The
+        caption features processed by ``context_refiner`` may be very short; 
+        after SP chunking each GPU may see M <= 16, which is below the minimum 
+        M required by the ``torch._int_mm`` kernel used by torch.compile.
+        """
+        sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
+        if sp_world_size > 1 and config.use_int8_gemms:
+            self.settings.int8_gemm_module_list = [
+                m for m in self.settings.int8_gemm_module_list
+                if m != "transformer.context_refiner"
+            ]
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
@@ -107,15 +128,14 @@ class xFuserZImageTurboModel(xFuserModel):
 
     capabilities = ModelCapabilities(
         use_fp8_gemms=True,
+        use_int8_gemms=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
         width=1024,
         num_inference_steps=9,
         guidance_scale=0.0,
-    )
-    capabilities = ModelCapabilities(
-        fully_shard_degree=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image-Turbo",
@@ -130,7 +150,23 @@ class xFuserZImageTurboModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
     )
+
+    def _customize_settings(self, config) -> None:
+        """Exclude context_refiner from INT8 quant when sequence parallelism is active.
+
+        Both Ulysses and Ring attention split the sequence across GPUs.  The
+        caption features processed by ``context_refiner`` may be very short; 
+        after SP chunking each GPU may see M <= 16, which is below the minimum 
+        M required by the ``torch._int_mm`` kernel used by torch.compile.
+        """
+        sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
+        if sp_world_size > 1 and config.use_int8_gemms:
+            self.settings.int8_gemm_module_list = [
+                m for m in self.settings.int8_gemm_module_list
+                if m != "transformer.context_refiner"
+            ]
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(

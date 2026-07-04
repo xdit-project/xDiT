@@ -146,6 +146,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
+        distri_cache_updated = False
         if (
             get_runtime_state().num_pipeline_patch > 1
             and not self.use_long_ctx_attn_kvcache
@@ -164,6 +165,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
             )
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=1)
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=1)
+            distri_cache_updated = True
 
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
@@ -179,14 +181,16 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                 encoder_hidden_states_key_proj = None
                 encoder_hidden_states_value_proj = None
             else:
+                num_query_tokens_q = query.shape[2] - num_encoder_hidden_states_tokens
+                num_query_tokens_kv = key.shape[2] - num_encoder_hidden_states_tokens
                 encoder_hidden_states_query_proj, query = query.split(
-                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
+                    [num_encoder_hidden_states_tokens, num_query_tokens_q], dim=2
                 )
                 encoder_hidden_states_key_proj, key = key.split(
-                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
+                    [num_encoder_hidden_states_tokens, num_query_tokens_kv], dim=2
                 )
                 encoder_hidden_states_value_proj, value = value.split(
-                    [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
+                    [num_encoder_hidden_states_tokens, num_query_tokens_kv], dim=2
                 )
             hidden_states = USP(
                 query,
@@ -198,7 +202,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                 joint_key=encoder_hidden_states_key_proj,
                 joint_value=encoder_hidden_states_value_proj,
                 joint_strategy="front",
-                attn_layer=attn,
+                attn_layer=None if distri_cache_updated else attn,
             )
             hidden_states = hidden_states.transpose(1, 2)
 

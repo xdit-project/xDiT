@@ -16,9 +16,12 @@ from xfuser.core.distributed import (
     get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
-    get_sp_group,
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.models.transformers.transformers_utils import (
+    chunk_and_pad_sequence,
+    gather_and_unpad,
+)
 
 
 class xFuserKrea2AttnProcessor:
@@ -119,26 +122,12 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         total_seq = full_seq.shape[1]
 
         pad_len = (sp_world_size - total_seq % sp_world_size) % sp_world_size
-        if pad_len > 0:
-            pad = torch.zeros(
-                full_seq.shape[0],
-                pad_len,
-                full_seq.shape[2],
-                dtype=full_seq.dtype,
-                device=full_seq.device,
-            )
-            full_seq = torch.cat([full_seq, pad], dim=1)
-
-        local_seq = full_seq.chunk(sp_world_size, dim=1)[sp_rank]
-
-        if pad_len > 0:
-            pad_pos = torch.zeros(
-                pad_len, 3, dtype=position_ids.dtype, device=position_ids.device
-            )
-            position_ids_padded = torch.cat([position_ids, pad_pos], dim=0)
-        else:
-            position_ids_padded = position_ids
-        pos_ids_local = position_ids_padded.chunk(sp_world_size, dim=0)[sp_rank]
+        local_seq = chunk_and_pad_sequence(
+            full_seq, sp_rank, sp_world_size, pad_len, dim=1
+        )
+        pos_ids_local = chunk_and_pad_sequence(
+            position_ids, sp_rank, sp_world_size, pad_len, dim=0
+        )
 
         image_rotary_emb = self.rotary_emb(pos_ids_local)
 
@@ -150,9 +139,7 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
                 attention_mask=None,
             )
 
-        full_out = get_sp_group().all_gather(local_seq, dim=1)
-        if pad_len > 0:
-            full_out = full_out[:, :total_seq, :]
+        full_out = gather_and_unpad(local_seq, pad_len, dim=1)
 
         txt_seq = text_projected.shape[1]
         image_out = self.final_layer(full_out[:, txt_seq:, :], temb_embed)

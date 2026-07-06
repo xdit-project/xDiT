@@ -69,6 +69,16 @@ class _Krea2BaseModel(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        if not has_valid_diffusers_version("krea2"):
+            raise ImportError(
+                f"Krea-2 models require diffusers>={get_minimum_diffusers_version('krea2')}."
+            )
+
+        from diffusers.pipelines.krea2 import Krea2Pipeline
+        from xfuser.model_executor.models.transformers.transformer_krea2 import (
+            xFuserKrea2Transformer2DWrapper,
+        )
+
         log(f"Loading {self.settings.model_name}")
         transformer = xFuserKrea2Transformer2DWrapper.from_pretrained(
             self.settings.model_name,
@@ -80,6 +90,8 @@ class _Krea2BaseModel(xFuserModel):
         # may produce non-deterministic NaN via a split-K uninitialized-output issue.
         pipeline_kwargs: dict = {}
         if _is_hip():
+            from transformers import Qwen3VLModel
+
             te = Qwen3VLModel.from_pretrained(
                 self.settings.model_name,
                 subfolder="text_encoder",

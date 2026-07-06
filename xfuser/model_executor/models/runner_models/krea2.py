@@ -25,8 +25,7 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: Qwen3VLModel) -> None:
 
     Workaround for ROCm 7.13 bfloat16 GEMMs with large M,N,K shapes that may
     produce NaNs when a split-K kernel is used.
-    Computing in float32 avoids the potential Nan issue in bfloat16 split-K path.
-    """
+    Computing in float32 avoids the potential NaN issue in bfloat16 split-K path.
 
     def _make_f32_forward(m: torch.nn.Linear):
         def _f32_forward(x: torch.Tensor) -> torch.Tensor:

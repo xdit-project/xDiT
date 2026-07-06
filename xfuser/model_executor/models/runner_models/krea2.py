@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
-from diffusers.pipelines.krea2 import Krea2Pipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
+from xfuser.config.diffusers import get_minimum_diffusers_version, has_valid_diffusers_version
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.envs import _is_hip
@@ -14,10 +16,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
-from xfuser.model_executor.models.transformers.transformer_krea2 import (
-    xFuserKrea2Transformer2DWrapper,
-)
-from transformers import Qwen3VLModel
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 

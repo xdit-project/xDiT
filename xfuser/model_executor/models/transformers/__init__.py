@@ -18,15 +18,23 @@ __all__ = [
     "xFuserCogVideoXTransformer3DWrapper",
     "xFuserHunyuanDiT2DWrapper",
     "xFuserConsisIDTransformer3DWrapper",
-    "xFuserSanaTransformer2DWrapper"
+    "xFuserSanaTransformer2DWrapper",
 ]
 
 # Gating some imports based on diffusers version, as they import part of diffusers
 if has_valid_diffusers_version("flux"):
-    from .transformer_flux import xFuserFluxTransformer2DWrapper
+    from .transformer_flux import xFuserFluxTransformer2DWrapper  # noqa: F401
+
     __all__.append("xFuserFluxTransformer2DWrapper")
 
 
 if has_valid_diffusers_version("zimage"):
-    from .transformer_z_image import xFuserZImageTransformer2DWrapper
+    from .transformer_z_image import xFuserZImageTransformer2DWrapper  # noqa: F401
+
     __all__.append("xFuserZImageTransformer2DWrapper")
+
+
+if has_valid_diffusers_version("krea2"):
+    from .transformer_krea2 import xFuserKrea2Transformer2DWrapper  # noqa: F401
+
+    __all__.append("xFuserKrea2Transformer2DWrapper")

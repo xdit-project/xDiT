@@ -10,13 +10,19 @@ MINIMUM_DIFFUSERS_VERSIONS = {
     "flux_kontext": "0.35.2",
     "hunyuanvideo": "0.35.2",
     "wan": "0.35.2",
+    "krea2": "0.39.0",
 }
 
-def has_valid_diffusers_version(model_name: str|None = None) -> bool:
+
+def has_valid_diffusers_version(model_name: str | None = None) -> bool:
     diffusers_version = diffusers.__version__
-    minimum_diffusers_version = MINIMUM_DIFFUSERS_VERSIONS.get(model_name, DEFAULT_MINIMUM_DIFFUSERS_VERSION)
-    return Version(diffusers_version).release >= Version(minimum_diffusers_version).release
+    minimum_diffusers_version = MINIMUM_DIFFUSERS_VERSIONS.get(
+        model_name, DEFAULT_MINIMUM_DIFFUSERS_VERSION
+    )
+    return (
+        Version(diffusers_version).release >= Version(minimum_diffusers_version).release
+    )
 
 
-def get_minimum_diffusers_version(model_name: str|None = None) -> str:
+def get_minimum_diffusers_version(model_name: str | None = None) -> str:
     return MINIMUM_DIFFUSERS_VERSIONS.get(model_name, DEFAULT_MINIMUM_DIFFUSERS_VERSION)

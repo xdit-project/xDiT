@@ -18,10 +18,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sp_group,
 )
-from xfuser.logger import init_logger
 from xfuser.model_executor.layers.usp import USP
-
-logger = init_logger(__name__)
 
 
 class xFuserKrea2AttnProcessor:

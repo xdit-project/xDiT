@@ -25,8 +25,8 @@ class xFuserKrea2AttnProcessor:
     """SP-aware attention processor for Krea2Attention.
 
     Krea-2 uses GQA (48 query heads, 12 KV heads). KV heads are expanded to
-    match Q heads before the USP call. Valid Ulysses degrees are divisors of
-    12: 1, 2, 3, 4, 6, 12.
+    match Q heads before the USP call, so Ulysses degrees must divide
+    `attn.num_heads` (typically 48).
     """
 
     def __call__(

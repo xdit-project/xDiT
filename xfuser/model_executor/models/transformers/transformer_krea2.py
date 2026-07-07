@@ -10,12 +10,12 @@ from diffusers.models.transformers.transformer_2d import Transformer2DModelOutpu
 from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.core.distributed import (
-    get_cfg_group,
-    get_classifier_free_guidance_rank,
-    get_classifier_free_guidance_world_size,
-    get_ring_parallel_world_size,
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
+)
+from xfuser.model_executor.layers.attention_mask import (
+    AttentionMaskWithMeta,
+    make_attn_mask_with_meta,
 )
 from xfuser.model_executor.layers.usp import USP
 from xfuser.model_executor.models.transformers.transformers_utils import (
@@ -66,11 +66,17 @@ class xFuserKrea2AttnProcessor:
             key = key.repeat_interleave(repeat_factor, dim=1)
             value = value.repeat_interleave(repeat_factor, dim=1)
 
-        # combined QKV all-to-all is faster with ring attention
-        # because ring adds graph breaks that prevents q,k,v A2A
-        # overlap with computation
-        combine_qkv_a2a = get_ring_parallel_world_size() > 1
-        out = USP(query, key, value, combine_qkv_a2a=combine_qkv_a2a)
+        attn_kw = (
+            {
+                "attn_mask": attention_mask.attn_mask,
+                "indices_k": attention_mask.indices_k,
+                "cu_seqlens_k": attention_mask.cu_seqlens_k,
+                "max_seqlen_k": attention_mask.max_seqlen_k,
+            }
+            if isinstance(attention_mask, AttentionMaskWithMeta)
+            else None
+        )
+        out = USP(query, key, value, attention_kwargs=attn_kw)
 
         out = out.transpose(1, 2).flatten(2, 3).to(query.dtype)
         out = out * torch.sigmoid(gate)
@@ -96,32 +102,40 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         sp_world_size = get_sequence_parallel_world_size()
         sp_rank = get_sequence_parallel_rank()
-        cfg_world_size = get_classifier_free_guidance_world_size()
-        cfg_rank = get_classifier_free_guidance_rank()
-
-        if cfg_world_size > 1:
-            hidden_states = hidden_states.chunk(cfg_world_size, dim=0)[cfg_rank]
-            encoder_hidden_states = encoder_hidden_states.chunk(cfg_world_size, dim=0)[
-                cfg_rank
-            ]
-            if encoder_attention_mask is not None:
-                encoder_attention_mask = encoder_attention_mask.chunk(
-                    cfg_world_size, dim=0
-                )[cfg_rank]
-            timestep = timestep.chunk(cfg_world_size, dim=0)[cfg_rank]
 
         temb_embed = self.time_embed(timestep, hidden_states.dtype)
         temb_mod = self.time_mod_proj(F.gelu(temb_embed, approximate="tanh"))
 
+        text_attn_mask = None
+        if encoder_attention_mask is not None:
+            text_attn_mask = encoder_attention_mask[:, None, None, :]
+
         text_projected = self.txt_in(
-            self.text_fusion(encoder_hidden_states, encoder_attention_mask)
+            self.text_fusion(encoder_hidden_states, text_attn_mask)
         )
         image_projected = self.img_in(hidden_states)
 
         full_seq = torch.cat([text_projected, image_projected], dim=1)
         total_seq = full_seq.shape[1]
-
         pad_len = (sp_world_size - total_seq % sp_world_size) % sp_world_size
+
+        # Build a [B, S] key-padding mask covering text, image, and SP pad tokens
+        # (1 = valid, 0 = excluded). nonzero runs once here via make_attn_mask_with_meta;
+        # per-layer attention uses pre-computed indices instead.
+        block_attn_mask = None
+        if encoder_attention_mask is not None:
+            B = hidden_states.shape[0]
+            combined = torch.cat(
+                [
+                    encoder_attention_mask[:, : text_projected.shape[1]],
+                    encoder_attention_mask.new_ones(B, image_projected.shape[1]),
+                ],
+                dim=1,
+            )
+            if pad_len > 0:
+                combined = torch.cat([combined, combined.new_zeros(B, pad_len)], dim=1)
+            block_attn_mask = make_attn_mask_with_meta(combined)
+
         local_seq = chunk_and_pad_sequence(
             full_seq, sp_rank, sp_world_size, pad_len, dim=1
         )
@@ -136,15 +150,13 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
                 hidden_states=local_seq,
                 temb=temb_mod,
                 image_rotary_emb=image_rotary_emb,
-                attention_mask=None,
+                attention_mask=block_attn_mask,
             )
 
         full_out = gather_and_unpad(local_seq, pad_len, dim=1)
 
         txt_seq = text_projected.shape[1]
         image_out = self.final_layer(full_out[:, txt_seq:, :], temb_embed)
-
-        image_out = get_cfg_group().all_gather(image_out, dim=0)
 
         if return_dict:
             return Transformer2DModelOutput(sample=image_out)

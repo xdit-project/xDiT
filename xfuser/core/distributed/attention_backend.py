@@ -462,11 +462,12 @@ def register_attention_function(backend_type):
         return func
     return decorator
 
-def _varlen_pack(query_bshd, key_bshd, value_bshd, attention_kwargs):
+def _varlen_pack_keys(query_bshd, key_bshd, value_bshd, attention_kwargs):
     """Pack K/V using pre-computed mask indices for varlen attention kernels.
 
     Called after BHSD->BSHD permute.  Returns a tuple with everything needed
     to call a varlen function, or None when no mask indices are present.
+    Only K/V are packed and Q is never filtered (all B*S query positions are kept).
     """
     indices_k = (attention_kwargs or {}).get("indices_k")
     if indices_k is None:
@@ -573,7 +574,7 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal, attention_kwargs
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    packed = _varlen_pack(query, key, value, attention_kwargs)
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
         output, softmax_lse = flash_attn_varlen_func_3(
@@ -651,12 +652,12 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal, attention_kwargs
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    packed = _varlen_pack(query, key, value, attention_kwargs)
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
         output, softmax_lse = flash_attn_varlen_func_4(
             q_flat, k_packed, v_packed,
-            cu_seqlens_q, cu_seqlens_k,
+            cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
             causal=is_causal,
         )
@@ -780,7 +781,7 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     key   = torch.permute(key,   [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
 
-    packed = _varlen_pack(query, key, value, attention_kwargs)
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
 
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
@@ -892,7 +893,7 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     query = torch.permute(query, [0, 2, 1, 3])
     key = torch.permute(key, [0, 2, 1, 3])
     value = torch.permute(value, [0, 2, 1, 3])
-    packed = _varlen_pack(query, key, value, attention_kwargs)
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
         output, = flash_attn_varlen_func_2(

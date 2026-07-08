@@ -243,6 +243,16 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
+    # set the local rank
+    # local_rank is not available in torch ProcessGroup,
+    # see https://github.com/pytorch/pytorch/issues/122816
+    if local_rank == -1:
+        # local rank not set, this usually happens in single-node
+        # setting, where we can use rank as local rank
+        if distributed_init_method == "env://":
+            local_rank = envs.LOCAL_RANK
+        else:
+            local_rank = rank
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -254,18 +264,9 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank,
+            device_id=envs.get_device(local_rank),
         )
-        set_device(torch.distributed.get_rank() % device_count())
-    # set the local rank
-    # local_rank is not available in torch ProcessGroup,
-    # see https://github.com/pytorch/pytorch/issues/122816
-    if local_rank == -1:
-        # local rank not set, this usually happens in single-node
-        # setting, where we can use rank as local rank
-        if distributed_init_method == "env://":
-            local_rank = envs.LOCAL_RANK
-        else:
-            local_rank = rank
+        set_device(local_rank)
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))

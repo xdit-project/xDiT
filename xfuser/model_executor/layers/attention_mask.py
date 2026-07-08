@@ -25,8 +25,9 @@ class AttentionMaskWithMeta:
 def make_attn_mask_with_meta(mask_2d: torch.Tensor) -> AttentionMaskWithMeta:
     """Build AttentionMaskWithMeta from a [B, S] key-padding mask.
 
-    sum and cumsum are graph-break-free.  nonzero breaks once here; per-layer
-    attention calls use torch.index_select on the pre-computed indices instead.
+    sum and cumsum are graph-break-free. nonzero and max().item() each create
+    one graph break. Callers should cache the returned object across denoising
+    steps so these breaks occur only once per unique mask.
     """
     seqlens_k = mask_2d.sum(-1, dtype=torch.int32)
     cu_seqlens_k = F.pad(seqlens_k.cumsum(0, dtype=torch.int32), (1, 0))

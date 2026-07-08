@@ -89,6 +89,7 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         super().__init__(*args, **kwargs)
         for block in self.transformer_blocks:
             block.attn.processor = xFuserKrea2AttnProcessor()
+        self._attn_mask_cache: tuple | None = None  # (data_ptr, shape, AttentionMaskWithMeta)
 
     def forward(
         self,
@@ -120,21 +121,27 @@ class xFuserKrea2Transformer2DWrapper(Krea2Transformer2DModel):
         pad_len = (sp_world_size - total_seq % sp_world_size) % sp_world_size
 
         # Build a [B, S] key-padding mask covering text, image, and SP pad tokens
-        # (1 = valid, 0 = excluded). nonzero runs once here via make_attn_mask_with_meta;
-        # per-layer attention uses pre-computed indices instead.
+        # (1 = valid, 0 = excluded). nonzero/item graph breaks occur only on the
+        # first step; subsequent steps hit the cache because encoder_attention_mask
+        # is the same tensor object for the entire denoising loop.
         block_attn_mask = None
         if encoder_attention_mask is not None:
-            B = hidden_states.shape[0]
-            combined = torch.cat(
-                [
-                    encoder_attention_mask[:, : text_projected.shape[1]],
-                    encoder_attention_mask.new_ones(B, image_projected.shape[1]),
-                ],
-                dim=1,
-            )
-            if pad_len > 0:
-                combined = torch.cat([combined, combined.new_zeros(B, pad_len)], dim=1)
-            block_attn_mask = make_attn_mask_with_meta(combined)
+            ptr, shape = encoder_attention_mask.data_ptr(), encoder_attention_mask.shape
+            if self._attn_mask_cache is not None and self._attn_mask_cache[:2] == (ptr, shape):
+                block_attn_mask = self._attn_mask_cache[2]
+            else:
+                B = hidden_states.shape[0]
+                combined = torch.cat(
+                    [
+                        encoder_attention_mask[:, : text_projected.shape[1]],
+                        encoder_attention_mask.new_ones(B, image_projected.shape[1]),
+                    ],
+                    dim=1,
+                )
+                if pad_len > 0:
+                    combined = torch.cat([combined, combined.new_zeros(B, pad_len)], dim=1)
+                block_attn_mask = make_attn_mask_with_meta(combined)
+                self._attn_mask_cache = (ptr, shape, block_attn_mask)
 
         local_seq = chunk_and_pad_sequence(
             full_seq, sp_rank, sp_world_size, pad_len, dim=1

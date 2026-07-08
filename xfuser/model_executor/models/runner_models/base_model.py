@@ -39,6 +39,7 @@ from xfuser.core.distributed import (
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
     get_classifier_free_guidance_rank,
+    get_pipeline_parallel_world_size,
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
@@ -418,6 +419,17 @@ class xFuserModel(abc.ABC):
         the graph at every block boundary.
         """
         torch._inductor.config.reorder_for_compute_comm_overlap = True
+
+        # torch >= ~2.13: enabling the overlap machinery activates an SPMD
+        # graph-consistency check that issues a WORLD-group all_gather_object at
+        # compile time. Pipeline parallelism is non-SPMD (stages compile different
+        # graphs at data-dependent times), so that collective deadlocks. For SPMD
+        # runs the check is a cheap, useful guard, so only disable it under PP.
+        if get_pipeline_parallel_world_size() > 1:
+            _ado = getattr(torch._inductor.config, "aten_distributed_optimizations", None)
+            if _ado is not None and hasattr(_ado, "spmd_check"):
+                _ado.spmd_check = False
+
         mode = self._get_compile_mode()
         dynamic = self._get_compile_dynamic()
         for component_name in self._get_compiled_pipe_components():

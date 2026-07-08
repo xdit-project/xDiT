@@ -33,7 +33,6 @@ _KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
         AttentionBackendType.AITER,
         AttentionBackendType.SDPA,
         AttentionBackendType.SDPA_MATH,
-        AttentionBackendType.SDPA_EFFICIENT,
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,

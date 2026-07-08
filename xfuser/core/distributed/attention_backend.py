@@ -535,12 +535,11 @@ def _sdpa_efficient_attn_call(query, key, value, dropout_p, is_causal, attention
     """
     Performs attention using Pytorch's internal memory-efficient implementation.
     """
-    attn_mask = attention_kwargs.get("attn_mask") if attention_kwargs else None
     output, softmax_lse, *rest = aten._scaled_dot_product_efficient_attention(
         query,
         key,
         value,
-        attn_mask=attn_mask,
+        attn_bias=None,
         compute_log_sumexp=True,
         dropout_p=dropout_p,
         is_causal=is_causal,
@@ -553,12 +552,11 @@ def _cudnn_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     Performs the necessary tensor permutes and
     then calls attention through cuDNN backend
     """
-    attn_mask = attention_kwargs.get("attn_mask") if attention_kwargs else None
     output, softmax_lse, *rest = aten._scaled_dot_product_cudnn_attention(
         query,
         key,
         value,
-        attn_mask=attn_mask,
+        attn_bias=None,
         compute_log_sumexp=True,
         dropout_p=dropout_p,
         is_causal=is_causal,
@@ -897,13 +895,14 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     packed = _varlen_pack(query, key, value, attention_kwargs)
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
-        output, softmax_lse, _ = flash_attn_varlen_func_2(
+        output, = flash_attn_varlen_func_2(
             q_flat, k_packed, v_packed,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
             dropout_p=dropout_p, softmax_scale=D ** -0.5,
-            causal=is_causal, return_softmax=True,
+            causal=is_causal,
         )
+        softmax_lse = None
         output = output.reshape(B, S, H, D)
     else:
         output, softmax_lse, _ = flash_attn_func_2(

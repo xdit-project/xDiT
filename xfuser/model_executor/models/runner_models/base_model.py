@@ -410,14 +410,10 @@ class xFuserModel(abc.ABC):
     def _get_compile_warmup_steps(self, input_args: dict) -> Optional[int]:
         return 2  # None = skip step reduction, run full warmup cycle
 
-    def _compile_model(self, input_args: dict) -> None:
-        """Compile pipe components with torch.compile.
-
-        When FSDP is active (fully_shard_degree > 1), compiles each component's
-        FSDP-wrapped block lists individually (read from fsdp_strategy wrap_attrs)
-        to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
-        the graph at every block boundary.
-        """
+    def _enable_compute_comm_overlap(self) -> None:
+        """Enables compute-communication overlap for the model while caring for
+        pipeline-parallel models that don't respect the SPMD assumption and could
+        deadlock in torch's compiler spmd_check()."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
 
         # torch >= ~2.13: enabling the overlap machinery activates an SPMD
@@ -429,6 +425,16 @@ class xFuserModel(abc.ABC):
             _ado = getattr(torch._inductor.config, "aten_distributed_optimizations", None)
             if _ado is not None and hasattr(_ado, "spmd_check"):
                 _ado.spmd_check = False
+
+    def _compile_model(self, input_args: dict) -> None:
+        """Compile pipe components with torch.compile.
+
+        When FSDP is active (fully_shard_degree > 1), compiles each component's
+        FSDP-wrapped block lists individually (read from fsdp_strategy wrap_attrs)
+        to avoid dynamo tracing through FSDP2 forward_pre_hooks and fragmenting
+        the graph at every block boundary.
+        """
+        self._enable_compute_comm_overlap()
 
         mode = self._get_compile_mode()
         dynamic = self._get_compile_dynamic()

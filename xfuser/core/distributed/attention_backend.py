@@ -896,7 +896,7 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
-        output, = flash_attn_varlen_func_2(
+        output = flash_attn_varlen_func_2(
             q_flat, k_packed, v_packed,
             cu_seqlens_q, cu_seqlens_k,
             max_seqlen_q=S, max_seqlen_k=max_seqlen_k,

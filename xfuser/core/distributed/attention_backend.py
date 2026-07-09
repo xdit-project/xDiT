@@ -344,6 +344,7 @@ env_info = PACKAGES_CHECKER.get_packages_info()
 if env_info["has_aiter"]:
     import aiter
     from aiter import flash_attn_func as flash_attn_func_aiter
+    from aiter import flash_attn_varlen_func as flash_attn_varlen_func_aiter
     try:
         from aiter.ops.triton.attention.fav3_sage import fav3_sage_wrapper_func, get_sage_fwd_configs
     except ImportError:
@@ -401,10 +402,13 @@ if env_info["has_aiter"]:
         pass
 if env_info["has_flash_attn"]:
     from flash_attn import flash_attn_func as flash_attn_func_2
+    from flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_2
 if env_info["has_flash_attn_3"]:
     from flash_attn_interface import flash_attn_func as flash_attn_func_3
+    from flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_3
 if env_info["has_flash_attn_4"]:
     from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4
+    from flash_attn.cute.interface import flash_attn_varlen_func as flash_attn_varlen_func_4
 if env_info["has_flash_attn_4_fp4"]:
     from flash_attn.cute.interface import flash_attn_func as flash_attn_func_4_fp4
     from xfuser.core.distributed.fp4_quantize import quantize_qk_to_fp4
@@ -458,14 +462,42 @@ def register_attention_function(backend_type):
         return func
     return decorator
 
+def _varlen_pack_keys(query_bshd, key_bshd, value_bshd, attention_kwargs):
+    """Pack K/V using pre-computed mask indices for varlen attention kernels.
+
+    Called after BHSD->BSHD permute.  Returns a tuple with everything needed
+    to call a varlen function, or None when no mask indices are present.
+    Only K/V are packed and Q is never filtered (all B*S query positions are kept).
+    """
+    indices_k = (attention_kwargs or {}).get("indices_k")
+    if indices_k is None:
+        return None
+    B, S, H, D = query_bshd.shape
+    k_flat = key_bshd.reshape(B * S, H, D)
+    v_flat = value_bshd.reshape(B * S, H, D)
+    k_packed = torch.index_select(k_flat, 0, indices_k)
+    v_packed = torch.index_select(v_flat, 0, indices_k)
+    cu_seqlens_q = torch.arange(0, B + 1, dtype=torch.int32, device=query_bshd.device) * S
+    return (
+        query_bshd.reshape(B * S, H, D),
+        k_packed,
+        v_packed,
+        cu_seqlens_q,
+        attention_kwargs["cu_seqlens_k"],
+        attention_kwargs["max_seqlen_k"],
+        B, S, H, D,
+    )
+
+
 @register_attention_function(AttentionBackendType.SDPA)
 def _sdpa_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
     Performs attention through PyTorch's scaled_dot_product_attention.
     Allows Pytorch to decide which SDPA backend to use.
     """
+    attn_mask = attention_kwargs.get("attn_mask") if attention_kwargs else None
     output = F.scaled_dot_product_attention(
-        query, key, value, dropout_p=dropout_p, is_causal=is_causal
+        query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
     )
     return output, None
 
@@ -488,10 +520,12 @@ def _sdpa_math_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     """
     Performs attention using Pytorch's internal math implementation.
     """
+    attn_mask = attention_kwargs.get("attn_mask") if attention_kwargs else None
     output, softmax_lse = aten._scaled_dot_product_attention_math(
         query,
         key,
         value,
+        attn_mask=attn_mask,
         dropout_p=dropout_p,
         is_causal=is_causal,
     )
@@ -540,13 +574,24 @@ def _flash_attn_3_call(query, key, value, dropout_p, is_causal, attention_kwargs
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output, softmax_lse = flash_attn_func_3(
-        query,
-        key,
-        value,
-        causal=is_causal,
-        return_attn_probs=True,
-    )
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+    if packed is not None:
+        q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
+        output, softmax_lse = flash_attn_varlen_func_3(
+            q_flat, k_packed, v_packed,
+            cu_seqlens_q, cu_seqlens_k,
+            max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
+            causal=is_causal, return_attn_probs=True,
+        )
+        output = output.reshape(B, S, H, D)
+    else:
+        output, softmax_lse = flash_attn_func_3(
+            query,
+            key,
+            value,
+            causal=is_causal,
+            return_attn_probs=True,
+        )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 
@@ -607,12 +652,23 @@ def _flash_attn_4_call(query, key, value, dropout_p, is_causal, attention_kwargs
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output, softmax_lse = flash_attn_func_4(
-        query,
-        key,
-        value,
-        causal=is_causal,
-    )
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+    if packed is not None:
+        q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
+        output, softmax_lse = flash_attn_varlen_func_4(
+            q_flat, k_packed, v_packed,
+            cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
+            causal=is_causal,
+        )
+        output = output.reshape(B, S, H, D)
+    else:
+        output, softmax_lse = flash_attn_func_4(
+            query,
+            key,
+            value,
+            causal=is_causal,
+        )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 
@@ -722,23 +778,48 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     then calls attention through AITER
     """
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
-    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    key   = torch.permute(key,   [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    kwargs = {
-        "dropout_p": dropout_p,
-        "causal": is_causal,
-        "return_attn_probs": False,
-        "return_lse": True,
-    }
-    if AITER_HAS_ROUND_MODE:
-        kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-    output, softmax_lse = flash_attn_func_aiter(
-        query,
-        key,
-        value,
-        **kwargs
-    )
-    output = torch.permute(output, [0, 2, 1, 3])
+
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+
+    if packed is not None:
+        q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
+        varlen_kwargs = {
+            "softmax_scale": D ** -0.5,
+            "dropout_p": dropout_p,
+            "causal": is_causal,
+            "return_lse": True,
+            "return_attn_probs": False,
+        }
+        if AITER_HAS_ROUND_MODE:
+            varlen_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+        output, softmax_lse = flash_attn_varlen_func_aiter(
+            q_flat, k_packed, v_packed,
+            cu_seqlens_q, cu_seqlens_k,
+            max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
+            **varlen_kwargs,
+        )
+        output = output.reshape(B, S, H, D)
+        output = torch.permute(output, [0, 2, 1, 3])
+
+    else:
+        kwargs = {
+            "dropout_p": dropout_p,
+            "causal": is_causal,
+            "return_attn_probs": False,
+            "return_lse": True,
+        }
+        if AITER_HAS_ROUND_MODE:
+            kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+        output, softmax_lse = flash_attn_func_aiter(
+            query,
+            key,
+            value,
+            **kwargs
+        )
+        output = torch.permute(output, [0, 2, 1, 3])
+
     return output, softmax_lse
 
 @register_attention_function(AttentionBackendType.AITER_MLA)
@@ -812,14 +893,27 @@ def _flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     query = torch.permute(query, [0, 2, 1, 3])
     key = torch.permute(key, [0, 2, 1, 3])
     value = torch.permute(value, [0, 2, 1, 3])
-    output, softmax_lse, S_mask = flash_attn_func_2(
-        query,
-        key,
-        value,
-        dropout_p=dropout_p,
-        causal=is_causal,
-        return_attn_probs=True,
-    )
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+    if packed is not None:
+        q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
+        output = flash_attn_varlen_func_2(
+            q_flat, k_packed, v_packed,
+            cu_seqlens_q, cu_seqlens_k,
+            max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
+            dropout_p=dropout_p, softmax_scale=D ** -0.5,
+            causal=is_causal,
+        )
+        softmax_lse = None
+        output = output.reshape(B, S, H, D)
+    else:
+        output, softmax_lse, _ = flash_attn_func_2(
+            query,
+            key,
+            value,
+            dropout_p=dropout_p,
+            causal=is_causal,
+            return_attn_probs=True,
+        )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, softmax_lse
 

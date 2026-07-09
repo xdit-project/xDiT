@@ -40,10 +40,10 @@ from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
-from xfuser.envs import PACKAGES_CHECKER
+from xfuser.envs import PACKAGES_CHECKER, TORCH_VERSION
 from packaging import version
 
-if version.parse(torch.__version__).release >= version.parse("2.5.0").release:
+if TORCH_VERSION >= version.parse("2.5.0"):
     from xfuser.model_executor.layers.usp import USP
 else:
     from xfuser.model_executor.layers.usp_legacy import USP

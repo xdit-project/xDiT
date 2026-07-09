@@ -400,7 +400,7 @@ class DiTRuntimeState(RuntimeState):
             )
         else:
             vae_scale_factor = getattr(pipeline, "vae_scale_factor", 0)
-            if pipeline.__class__.__name__.startswith(("Flux", "xFuserFlux")) and version.parse(diffusers.__version__) >= version.parse('0.32'):
+            if pipeline.__class__.__name__.startswith(("Flux", "xFuserFlux")) and env_info["diffusers_version"] >= version.parse('0.32'):
                 vae_scale_factor *= 2
             self._set_model_parameters(
                 vae_scale_factor=vae_scale_factor,

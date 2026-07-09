@@ -185,7 +185,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         return "reduce-overhead"
 
     def _compile_model(self, input_args: dict) -> None:
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        super()._enable_compute_comm_overlap()
         self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
 
         # two steps to warmup the torch compiler
@@ -319,7 +319,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         return "reduce-overhead"
 
     def _compile_model(self, input_args: dict) -> None:
-        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        super()._enable_compute_comm_overlap()
         self.pipe.transformer.compile_repeated_blocks(mode=self._get_compile_mode())
 
         # two steps to warmup the torch compiler

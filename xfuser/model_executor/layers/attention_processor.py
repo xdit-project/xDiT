@@ -41,8 +41,9 @@ from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
 from xfuser.envs import PACKAGES_CHECKER
+from packaging import version
 
-if torch.__version__ >= "2.5.0":
+if version.parse(torch.__version__).release >= version.parse("2.5.0").release:
     from xfuser.model_executor.layers.usp import USP
 else:
     from xfuser.model_executor.layers.usp_legacy import USP

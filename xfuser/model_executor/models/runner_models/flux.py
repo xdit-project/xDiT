@@ -51,6 +51,7 @@ class xFuserFluxModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        pipefusion_parallel_degree=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
         enable_tiling=True,

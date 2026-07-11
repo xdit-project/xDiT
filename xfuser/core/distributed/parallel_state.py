@@ -259,7 +259,8 @@ def init_distributed_environment(
     # to the correct device. Passing device_id= to init_process_group()
     # instead causes NCCL to use device-side rendezvous, which breaks
     # new_group() calls used by pipefusion and ulysses (NCCL Error 1).
-    set_device(local_rank)
+    if envs.get_device_name() in ["cuda", "musa", "npu"]:
+        set_device(local_rank)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "

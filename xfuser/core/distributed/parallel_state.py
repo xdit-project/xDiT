@@ -160,6 +160,7 @@ def get_data_parallel_rank():
     """Return my rank for the data parallel group."""
     return get_dp_group().rank_in_group
 
+
 # FS (Fully Shard)
 def get_fs_group() -> GroupCoordinator:
     assert _FS is not None, "fully sharding group is not initialized"
@@ -253,6 +254,12 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
+    # Set the device BEFORE init_process_group so that NCCL communicators
+    # (both the default group and subsequent new_group() subgroups) bind
+    # to the correct device. Passing device_id= to init_process_group()
+    # instead causes NCCL to use device-side rendezvous, which breaks
+    # new_group() calls used by pipefusion and ulysses (NCCL Error 1).
+    set_device(local_rank)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -264,9 +271,7 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank,
-            device_id=envs.get_device(local_rank),
         )
-        set_device(local_rank)
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
@@ -536,11 +541,11 @@ def initialize_model_parallel(
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     else:
         if use_parallel_vae:
-            _VAE =  init_model_parallel_group(
+            _VAE = init_model_parallel_group(
                 group_ranks=rank_generator.get_ranks("tp-sp-pp-cfg"),
                 local_rank=get_world_group().local_rank,
                 backend=backend,
-                parallel_mode="vae"
+                parallel_mode="vae",
             )
 
     init_dit_group(dit_parallel_size, backend)

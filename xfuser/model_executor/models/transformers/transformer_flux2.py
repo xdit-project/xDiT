@@ -587,14 +587,8 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
         #    (after_flags=True) while the true last stage is empty (after_flags=False).
         is_last = is_pipeline_last_stage()
         if is_last:
-            # Last stage: ensure [text, image] concatenated, then slice text, unpatchify.
-            # Empty stage (no blocks ran) may have separate encoder/hidden that need cat.
-            if (
-                len(self.single_transformer_blocks) == 0
-                and encoder_hidden_states is not None
-            ):
-                hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-            hidden_states = hidden_states[:, num_txt_tokens:, ...]
+            if len(self.single_transformer_blocks) > 0:
+                hidden_states = hidden_states[:, num_txt_tokens:, ...]
             hidden_states = self.norm_out(hidden_states, temb)
             output = (self.proj_out(hidden_states), None)
         else:

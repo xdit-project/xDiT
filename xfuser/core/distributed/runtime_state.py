@@ -10,6 +10,7 @@ from torch.cuda import manual_seed as device_manual_seed
 from torch.cuda import manual_seed_all as device_manual_seed_all
 import diffusers
 from diffusers import DiffusionPipeline
+from packaging import version
 import torch.distributed
 
 try:
@@ -399,7 +400,7 @@ class DiTRuntimeState(RuntimeState):
             )
         else:
             vae_scale_factor = getattr(pipeline, "vae_scale_factor", 0)
-            if pipeline.__class__.__name__.startswith(("Flux", "xFuserFlux")) and diffusers.__version__ >= '0.32':
+            if pipeline.__class__.__name__.startswith(("Flux", "xFuserFlux")) and env_info["diffusers_version"] >= version.parse('0.32'):
                 vae_scale_factor *= 2
             self._set_model_parameters(
                 vae_scale_factor=vae_scale_factor,

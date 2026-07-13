@@ -259,7 +259,7 @@ class PackagesEnvChecker:
                 from flash_attn import flash_attn_func
                 from flash_attn import __version__
 
-                if __version__ < "2.6.0":
+                if version.parse(__version__) < version.parse("2.6.0"):
                     raise ImportError(f"install flash_attn >= 2.6.0")
                 return True
         except ImportError:

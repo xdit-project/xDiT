@@ -454,7 +454,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 
             pipe = xFuserFlux2KleinPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.float16,
+                torch_dtype=self.engine_config.runtime_config.dtype,
                 engine_config=self.engine_config,
             )
         else:

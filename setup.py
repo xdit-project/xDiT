@@ -59,6 +59,9 @@ if __name__ == "__main__":
             "opencv-python": [
                 "opencv-python-headless", # NOTE: opencv-python is necessary if ConsisIDPipeline is used
             ],
+            "cache-dit": [
+                "cache-dit>=1.5.0",  # NOTE: cache-dit is required for --cache_method dbcache
+            ],
             "test": [
                 "pytest",
                 "imageio",

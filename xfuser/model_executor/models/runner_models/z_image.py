@@ -1,6 +1,11 @@
 import torch
 from diffusers import ZImagePipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheConfig,
+)
 from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -59,6 +64,7 @@ class xFuserZImageModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_int8_gemms=True,
+        supported_cache_methods=("dbcache",),
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -78,6 +84,14 @@ class xFuserZImageModel(xFuserModel):
             "transformer.noise_refiner", 
             "transformer.context_refiner"
         ],
+        cache_config={
+            "dbcache":DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("layers", "Pattern_3"),),
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=3, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _customize_settings(self, config) -> None:

@@ -26,6 +26,11 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheConfig,
+)
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
@@ -38,6 +43,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
+        supported_cache_methods=("dbcache",),
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -53,6 +59,16 @@ class xFuserHunyuanvideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"), ("single_transformer_blocks", "Pattern_0")),
+                    enable_separate_cfg=False,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -114,6 +130,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
         use_fp8_gemms=True,
+        supported_cache_methods=("dbcache",),
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -128,6 +145,15 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=5, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
 

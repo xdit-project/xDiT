@@ -22,7 +22,7 @@ import gc
 
 import torch
 
-from xfuser.core.distributed.parallel_state import get_fs_group
+from xfuser.core.distributed.parallel_state import get_fs_group, get_world_group
 from xfuser.core.utils.checkpoint_io import (
     host_mem_gb,
     drop_file_page_cache,
@@ -59,12 +59,14 @@ class MemoryEfficientSharder:
         # disk fill and the AITER quantize see bf16 (matching the on-disk checkpoint dtype).
         return model.to(torch.bfloat16)
 
-    def build_meta_component(self, component_name: str):
+    def build_meta_component(self, component_name: str, fp8: bool = True):
         """Instantiate a transformers pipeline component on meta from its config (no weights).
 
         Resolves the component's class from the pipeline's model_index.json and builds it under
-        init_empty_weights so every param lands on meta. When fp8-targeted (RDNA4 AITER), its
-        targeted Linears are swapped to meta fp8 layers so the model is sharded and filled as fp8.
+        init_empty_weights so every param lands on meta. When fp8-targeted (RDNA4 AITER) and
+        ``fp8`` is True, its targeted Linears are swapped to meta fp8 layers so the model is sharded
+        and filled as fp8. ``fp8=False`` keeps the component bf16 on meta (replicated broadcast path:
+        rank0 broadcasts bf16 and the per-rank fp8 walk quantizes locally afterwards).
         Returns None (caller falls back to a normal from_pretrained load) unless the component is a
         transformers model we can rebuild from config; real weights arrive later via broadcast_load.
         """
@@ -88,7 +90,7 @@ class MemoryEfficientSharder:
             # _from_config defaults to fp32; align meta params to bf16 (dtype-only .to is legal on
             # meta) so their DTensor dtype matches the broadcast source.
             component = component.to(torch.bfloat16)
-            if self.model._component_wants_fp8(component_name):
+            if fp8 and self.model._component_wants_fp8(component_name):
                 self._swap_meta_te_to_fp8(
                     component, self.model._fp8_targets_for_component(component_name)
                 )
@@ -118,6 +120,80 @@ class MemoryEfficientSharder:
                 return normal
             kwargs[name] = meta
         return kwargs, None
+
+    def meta_te_kwargs_replicated(self, normal):
+        """Text-encoder kwargs for the replicated broadcast-load path (fits-in-GPU, multi-GPU).
+
+        Returns (pipe_component_kwargs, None): te_quant is always None (bf16 — the per-rank fp8 walk
+        quantizes locally after the broadcast). rank0 loads TEs real via from_pretrained (kwargs
+        empty); peers build bf16 meta components (filled later by broadcast_fill_replicated). A
+        component that can't be meta-built is simply loaded real on that peer; the broadcast still
+        overwrites it with rank0's weights, so correctness holds (only the meta saving is lost).
+        """
+        if get_world_group().rank_in_group == 0:
+            return {}, None
+        te_components = [
+            name for name in self.model.settings.fsdp_strategy
+            if name != "transformer" and not name.startswith("transformer_")
+        ]
+        kwargs = {}
+        for name in te_components:
+            meta = self.build_meta_component(name, fp8=False)
+            if meta is not None:
+                kwargs[name] = meta
+        return kwargs, None
+
+    def broadcast_fill_replicated(self, offload: bool = False) -> None:
+        """Fill every replicated big component with rank0's real weights via GPU->GPU broadcast,
+        then fp8-quantize it in place — one component at a time.
+
+        Per component in fsdp_strategy: materialize meta params/buffers to real-empty bf16 on device
+        (and move any real-CPU tensor on-device) on every rank, broadcast each param/buffer from
+        world-rank0 in a deterministic (named_*) order (identical module structure across ranks —
+        from_pretrained on rank0, from_config-meta on peers — guarantees matching iteration order),
+        then immediately fp8-quantize the component's targeted modules on ALL ranks with the same
+        walk (identical bf16 -> identical fp8), freeing the bf16 weights before the next component.
+
+        Interleaving the quantize is what bounds VRAM: the model fits one GPU only as fp8, so holding
+        the full bf16 transformer AND text encoder resident at once OOMs (23.8 + ~9 GB > 32). Doing
+        broadcast+quantize per component keeps the peak at a single bf16 component (~24 GB), which
+        fits, then drops it to fp8 (~12 GB) before broadcasting the next.
+        """
+        from diffusers.models.model_loading_utils import set_module_tensor_to_device
+        from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp8_blockscale
+        world = get_world_group()
+        device = f"cuda:{world.local_rank}"
+        fp8_active = self.model._aiter_fp8_active()
+        fp8_modules = self.model.settings.fp8_gemm_module_list or []
+        for name in self.model.settings.fsdp_strategy:
+            component = getattr(self.model.pipe, name, None)
+            if component is None or not hasattr(component, "named_parameters"):
+                continue
+            for tname, t in (
+                list(component.named_parameters(recurse=True))
+                + list(component.named_buffers(recurse=True))
+            ):
+                if t.is_meta:
+                    set_module_tensor_to_device(
+                        component, tname, device,
+                        value=torch.empty(t.shape, dtype=t.dtype, device=device),
+                    )
+                elif t.device.type != "cuda":
+                    set_module_tensor_to_device(component, tname, device, value=t.to(device))
+            for _, p in component.named_parameters(recurse=True):
+                world.broadcast(p.data, src=0)
+            for _, b in component.named_buffers(recurse=True):
+                world.broadcast(b.data, src=0)
+            if fp8_active:
+                for module_name in fp8_modules:
+                    if module_name == name or module_name.startswith(name + "."):
+                        quantize_linear_layers_to_fp8_blockscale(
+                            rgetattr(self.model.pipe, module_name),
+                            device=device, offload_to_cpu=offload,
+                        )
+            torch.cuda.empty_cache()
+            log(f"Broadcast-filled + quantized {name} from rank0 (replicated). "
+                f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB")
 
     def build_transformer_disk_loaders(self, component, wrap_attrs, subfolder, device):
         """(load_block_fn, load_epilogue_fn) filling a meta transformer from disk (rank0-read + bcast)."""

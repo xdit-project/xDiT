@@ -355,6 +355,21 @@ class xFuserModel(abc.ABC):
         """True when the memory-efficient sharded (meta-init + rank0-broadcast) load path is on."""
         return bool(self.config.memory_efficient_sharding and self.config.fully_shard_degree > 1)
 
+    def _replicated_broadcast_load(self) -> bool:
+        """Auto-on replicated multi-GPU load: the model fits one GPU and is replicated across ranks
+        (pure sequence/CFG/data parallel), so every rank would otherwise from_pretrained a full CPU
+        copy -> host RAM = N x model -> cgroup OOM. Instead rank0 loads real weights to GPU, peers
+        build on meta and receive every param/buffer via a GPU->GPU broadcast (host peak = 1x).
+        RDNA4-only. Excludes weight-splitting parallelism (FSDP/pipefusion/TP), where per-rank
+        weights differ and a broadcast would be wrong (FSDP has its own meta-load path)."""
+        return bool(
+            PACKAGES_CHECKER._on_rdna4()
+            and get_world_group().world_size > 1
+            and self.config.fully_shard_degree == 1
+            and self.config.pipefusion_parallel_degree == 1
+            and self.config.tensor_parallel_degree == 1
+        )
+
     def _fp8_targets_for_component(self, component_name: str) -> list[str]:
         """fp8_gemm_module_list entries under this component, with the pipe-level prefix stripped
         (e.g. "text_encoder.model.language_model.layers" -> "model.language_model.layers")."""
@@ -386,11 +401,19 @@ class xFuserModel(abc.ABC):
         """
         if self._memory_efficient_fsdp_load():
             return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
+        # Replicated broadcast load: peers build on meta (filled later by GPU broadcast from rank0);
+        # rank0 loads real bf16 (no fp8 stream) so the broadcast dtype matches and the per-rank GPU
+        # fp8 walk quantizes locally afterwards.
+        if self._replicated_broadcast_load() and get_world_group().rank_in_group != 0:
+            return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
         return wrapper_cls.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder=subfolder,
-            quantization_config=self._fp8_stream_quant_config(subfolder) if stream_quant else None,
+            quantization_config=(
+                self._fp8_stream_quant_config(subfolder)
+                if stream_quant and not self._replicated_broadcast_load() else None
+            ),
             **(init_kwargs or {}),
         )
 
@@ -405,6 +428,8 @@ class xFuserModel(abc.ABC):
         transformer is unaffected either way; it keeps its own streaming-fp8 from_pretrained path.
         """
         normal = ({}, self._te_pipeline_quant_config())
+        if self._replicated_broadcast_load():
+            return self._sharder.meta_te_kwargs_replicated(normal)
         if not self._memory_efficient_fsdp_load():
             return normal
         return self._sharder.meta_te_kwargs(normal)
@@ -857,6 +882,11 @@ class xFuserModel(abc.ABC):
                 or self.config.enable_sequential_cpu_offload
                 or self.config.enable_group_cpu_offload
             )
+            # Replicated multi-GPU: rank0's real bf16 weights are broadcast to peers' meta components
+            # (GPU->GPU) and fp8-quantized per component in place. Bounds VRAM to one bf16 component.
+            # The AITER walk below then no-ops (components are already fp8).
+            if self._replicated_broadcast_load():
+                self._sharder.broadcast_fill_replicated(offload_requested)
             # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
             # All other quant paths (FP4, torchao FP8) need weights on GPU first.
             if self._aiter_fp8_active():

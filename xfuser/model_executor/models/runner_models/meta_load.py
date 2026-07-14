@@ -186,6 +186,15 @@ class MemoryEfficientSharder:
             if component is None or not hasattr(component, "named_parameters"):
                 continue
             if name == "transformer" or name.startswith("transformer_"):
+                if not any(p.is_meta for p in component.parameters()):
+                    # Unwired runner: this transformer was loaded real on every rank (its _load_model
+                    # skipped _build_transformer's meta path). _fill_transformer_replicated's to_empty()
+                    # would wipe those real weights -> NaN/black output. Skip the destructive fill; the
+                    # real replicated weights are correct and the post-load fp8 walk still quantizes
+                    # them. All-real is symmetric across ranks, so no collective divergence.
+                    log(f"{name} loaded real on all ranks (unwired for replicated meta load); "
+                        f"skipping broadcast fill, keeping real weights.")
+                    continue
                 self._fill_transformer_replicated(component, name, strategy[name], device, world)
             else:
                 self._fill_te_replicated(component, device, world, set_module_tensor_to_device)
@@ -277,15 +286,12 @@ class MemoryEfficientSharder:
     def broadcast_load(self, component, component_name: str, offload: bool) -> None:
         """Fill a meta-initialized, FSDP-sharded text-encoder component with real weights.
 
-        Dispatches to the fp8 (rank0 streams straight to fp8) or bf16 (rank0 loads once, scatters
-        block-by-block) path; both are collective. Buffers stay on the GPU regardless of offload:
-        CPUOffloadPolicy manages params only, and buffers (fp8 weight_scale, rotary caches) are tiny
-        and consumed on-device each forward.
+        rank0 loads the component once and scatters it block-by-block; the op is collective.
+        Buffers stay on the GPU regardless of
+        offload: CPUOffloadPolicy manages params only, and buffers (fp8 weight_scale, rotary caches)
+        are tiny and consumed on-device each forward.
         """
-        if self.model._component_wants_fp8(component_name):
-            self._broadcast_load_fp8_component(component, component_name, offload)
-        else:
-            self._broadcast_load_bf16_component(component, component_name, offload)
+        self._broadcast_load_component(component, component_name, offload)
 
         if offload and torch.cuda.is_available():
             dev = f"cuda:{torch.cuda.current_device()}"
@@ -316,38 +322,26 @@ class MemoryEfficientSharder:
                 # prerequisite for both the positional replicated broadcast and set_model_state_dict.
                 m.absorb_fp8_weight_from_weight_attr()
 
-    def _broadcast_load_fp8_component(
-        self, component, component_name: str, offload: bool
-    ) -> None:
-        from torch.distributed.checkpoint.state_dict import (
-            set_model_state_dict, StateDictOptions,
-        )
-        from xfuser.model_executor.quant import AiterFp8BlockScaleTEConfig
-        is_src = _is_bcast_src(get_fs_group())
-        state_dict: dict = {}
-        src = None
-        if is_src:
-            quant = AiterFp8BlockScaleTEConfig(
+    def _load_rank0_source(self, component, component_name: str):
+        """rank0's full host copy of a component, fp8-quantized when the component wants fp8.
+
+        from_pretrained resolves tied weights; the fp8 HfQuantizer streams straight to fp8 so the
+        source is fp8-sized, not bf16-sized, on rank0.
+        """
+        kwargs = {}
+        if self.model._component_wants_fp8(component_name):
+            from xfuser.model_executor.quant import AiterFp8BlockScaleTEConfig
+            kwargs["quantization_config"] = AiterFp8BlockScaleTEConfig(
                 target_modules=self.model._fp8_targets_for_component(component_name)
             )
-            src = type(component).from_pretrained(
-                self.model.settings.model_name,
-                subfolder=component_name,
-                torch_dtype=torch.bfloat16,
-                quantization_config=quant,
-            )
-            state_dict = src.state_dict()
-        set_model_state_dict(
-            component,
-            state_dict,
-            options=StateDictOptions(
-                full_state_dict=True, broadcast_from_rank0=True, cpu_offload=offload
-            ),
+        return type(component).from_pretrained(
+            self.model.settings.model_name,
+            subfolder=component_name,
+            torch_dtype=torch.bfloat16,
+            **kwargs,
         )
-        del state_dict, src
-        self._release_rank0_source(is_src, component_name)
 
-    def _broadcast_load_bf16_component(
+    def _broadcast_load_component(
         self, component, component_name: str, offload: bool
     ) -> None:
         from torch.distributed.checkpoint.state_dict import (
@@ -358,11 +352,7 @@ class MemoryEfficientSharder:
         full_sd: dict = {}
         src = None
         if is_src:
-            src = type(component).from_pretrained(
-                self.model.settings.model_name,
-                subfolder=component_name,
-                torch_dtype=torch.bfloat16,
-            )
+            src = self._load_rank0_source(component, component_name)
             full_sd = src.state_dict()
 
         # broadcast_from_rank0 scatters rank0's full tensors into each rank's DTensor shard; a
@@ -385,7 +375,7 @@ class MemoryEfficientSharder:
                 )
                 set_model_state_dict(block, block_sd, options=opts)
 
-        # Non-block params/buffers (embeddings, norms, lm_head): one small final scatter.
+        # Non-block params/buffers: embeddings, norms, lm_head.
         tail_sd = (
             {k: v for k, v in full_sd.items() if not k.startswith(block_prefixes)}
             if is_src else {}
@@ -447,6 +437,24 @@ class _TransformerDiskFiller:
             self._handle_cache[path] = h
         return h
 
+    def _ckpt_key(self, root, name):
+        """Map a live (possibly wrapped) param/buffer name to its checkpoint key.
+
+        xFuser layer/model wrappers register the real module as a submodule named
+        'module', so multi-GPU named_* emit '...module...' segments the checkpoint
+        never has. Drop each 'module' segment whose parent is an xFuser wrapper;
+        real submodules literally named 'module' are left intact.
+        """
+        from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
+        cur, out = root, []
+        for seg in name.split("."):
+            if seg == "module" and isinstance(cur, xFuserBaseWrapper):
+                cur = getattr(cur, seg)
+                continue
+            out.append(seg)
+            cur = getattr(cur, seg)
+        return ".".join(out)
+
     def _fill(self, module, local_name, key, required):
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
         path = self.weight_map.get(key)
@@ -475,9 +483,9 @@ class _TransformerDiskFiller:
         if self.is_src:
             prefix = fqn + "."
             for local_name, _ in block.named_parameters():
-                self._fill(block, local_name, prefix + local_name, required=True)
+                self._fill(block, local_name, prefix + self._ckpt_key(block, local_name), required=True)
             for local_name, _ in block.named_buffers():
-                self._fill(block, local_name, prefix + local_name, required=False)
+                self._fill(block, local_name, prefix + self._ckpt_key(block, local_name), required=False)
         self._broadcast(block)
         if i % 8 == 0:
             log(f"  self-fill {self.subfolder} block {i}: host cur/anon/file "
@@ -493,13 +501,17 @@ class _TransformerDiskFiller:
         broadcasting their garbage is harmless.
         """
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
+        # Block-membership test must run on the unwrapped name: xFuser wrappers insert 'module'
+        # segments, so a raw wrapped name (module.transformer_blocks.0...) never matches the
+        # 'transformer_blocks.' prefix and every block param would leak into the tail (then miss,
+        # e.g. runtime-only weight_fp8 which has no checkpoint key). fill_block already handled blocks.
         tail = [
             name for name, _ in comp.named_parameters(remove_duplicate=False)
-            if not name.startswith(self._block_prefixes)
+            if not self._ckpt_key(comp, name).startswith(self._block_prefixes)
         ]
         tail_bufs = [
             name for name, _ in comp.named_buffers(remove_duplicate=False)
-            if not name.startswith(self._block_prefixes)
+            if not self._ckpt_key(comp, name).startswith(self._block_prefixes)
         ]
         target_type = torch.device(self.device).type
         for name in tail + tail_bufs:
@@ -517,9 +529,9 @@ class _TransformerDiskFiller:
                 set_module_tensor_to_device(comp, name, self.device, value=t.to(self.device))
         if self.is_src:
             for name in tail:
-                self._fill(comp, name, name, required=True)
+                self._fill(comp, name, self._ckpt_key(comp, name), required=True)
             for name in tail_bufs:
-                self._fill(comp, name, name, required=False)
+                self._fill(comp, name, self._ckpt_key(comp, name), required=False)
         for name in tail + tail_bufs:
             self.group.broadcast(rgetattr(comp, name).data, src=0)
         self._stack.close()

@@ -47,13 +47,17 @@ class xFuserStableDiffusionModel(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        # SD3's wrapper is composition-style (wraps a transformer instance) and lacks
+        # ConfigMixin.load_config, so it cannot be built on meta like flux/z_image. Load real on
+        # every rank; on the replicated multi-GPU path the broadcast_fill_replicated is_meta guard
+        # keeps these real weights (skips the destructive per-block fill) and the AITER fp8 walk
+        # quantizes them CPU->GPU afterwards.
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
-        pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
+        return xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             engine_config=self.engine_config,
             torch_dtype=dtype,
         )
-        return pipe
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "text_encoder", "text_encoder_2", "text_encoder_3"]

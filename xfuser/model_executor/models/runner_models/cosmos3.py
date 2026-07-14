@@ -142,9 +142,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
     def _load_model(self) -> DiffusionPipeline:
         xFuserCosmos3OmniTransformerWrapper = get_cosmos3_transformer_wrapper_class()
 
-        transformer = self._build_transformer(
-            xFuserCosmos3OmniTransformerWrapper, stream_quant=False
-        )
+        transformer = self._build_transformer(xFuserCosmos3OmniTransformerWrapper)
 
         xFuserCosmos3OmniPipeline = get_cosmos3_pipeline_class()
 

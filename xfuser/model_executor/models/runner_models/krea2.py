@@ -123,7 +123,7 @@ class _Krea2BaseModel(xFuserModel):
         )
 
         log(f"Loading {self.settings.model_name}")
-        transformer = self._build_transformer(xFuserKrea2Transformer2DWrapper, stream_quant=False)
+        transformer = self._build_transformer(xFuserKrea2Transformer2DWrapper)
 
         # On ROCm 7.13, Qwen3VL bfloat16 GEMM shapes (with max_sequence_length > 448)
         # may produce non-deterministic NaN via a split-K uninitialized-output issue.

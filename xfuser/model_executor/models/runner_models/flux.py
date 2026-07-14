@@ -109,7 +109,7 @@ class xFuserFluxModel(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
-            transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper, stream_quant=False)
+            transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
             te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = FluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
@@ -188,7 +188,7 @@ class xFuserFluxKontextModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper, stream_quant=False)
+        transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = FluxKontextPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,

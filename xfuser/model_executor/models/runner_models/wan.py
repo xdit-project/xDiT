@@ -205,7 +205,7 @@ class xFuserWan21I2VModel(xFuserModel):
         model_output_type = "video",
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
-        fp8_gemm_module_list=["transformer.blocks"],
+        fp8_gemm_module_list=["transformer.blocks", "text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
                                  "5.", "6.", "7.", "8.", "9.",
@@ -227,10 +227,13 @@ class xFuserWan21I2VModel(xFuserModel):
             subfolder="transformer",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
         )
         return pipe
 
@@ -289,7 +292,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks", "text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides = None
 
 
@@ -306,11 +309,14 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
             subfolder="transformer_2",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
                 transformer_2=transformer_2,
+                quantization_config=te_quant,
+                **te_kwargs,
         )
         return pipe
 
@@ -474,7 +480,7 @@ class xFuserWan21T2VModel(xFuserModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
-        fp8_gemm_module_list=["transformer.blocks"],
+        fp8_gemm_module_list=["transformer.blocks", "text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
                                  "5.", "6.", "7.", "8.", "9.",
@@ -496,10 +502,13 @@ class xFuserWan21T2VModel(xFuserModel):
             subfolder="transformer",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -535,7 +544,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks", "text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
@@ -551,11 +560,14 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             subfolder="transformer_2",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
             transformer_2=transformer_2,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -602,7 +614,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         output_name="wan2.2_ti2v",
-        fp8_gemm_module_list=["transformer.blocks"],
+        fp8_gemm_module_list=["transformer.blocks", "text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "28.", "29."),
         fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
@@ -619,10 +631,13 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
             attention_kwargs=_build_attention_kwargs(self.config),
         )
         pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = pipe_class.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
         )
         return pipe
 
@@ -703,7 +718,7 @@ class xFuserWan21VACEModel(xFuserModel):
     settings = ModelSettings(
         fps=16,
         model_output_type="video",
-        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
+        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks", "text_encoder.encoder.block"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["blocks", "vace_blocks"],
@@ -730,10 +745,13 @@ class xFuserWan21VACEModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanVACEPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p
         return pipe

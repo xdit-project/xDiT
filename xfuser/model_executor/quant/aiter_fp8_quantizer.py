@@ -179,9 +179,9 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
         # host. load_and_quantize_weights moves it, produces weight_fp8 + weight_scale.
         compute_device = f"cuda:{torch.cuda.current_device()}"
         module.load_and_quantize_weights(param_value, bias=None, device=compute_device)
-        # Drop the meta `weight` placeholder added at swap time (meta tensors can't be
-        # moved with .to()); forward uses weight_fp8.
-        module.register_parameter("weight", None)
+        # load_and_quantize_weights drops the meta `weight` placeholder and installs a 0-element
+        # bf16 sentinel (plain attr); forward uses weight_fp8. Do NOT register_parameter("weight",
+        # None) here — the sentinel already occupies `weight` and register_parameter would collide.
         # Offload: move only the produced fp8 tensors to host. The meta `bias` is streamed
         # to target_device separately by the normal loader (not a quantized param).
         if target_device is not None and torch.device(target_device).type != "cuda":
@@ -299,6 +299,12 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
         return xFuserFp8BlockScaleQuantizeOp(self)
 
     def _process_model_after_weight_loading(self, model, **kwargs):
+        # The loader stores fp8 under `weight`; normalize each quantized linear to fp8 in
+        # `weight_fp8` + a bf16 `weight` sentinel so T5-family encoders don't cast activations
+        # to fp8 (see xFuserFP8BlockScaleLinear.absorb_fp8_weight_from_weight_attr).
+        for module in model.modules():
+            if isinstance(module, xFuserFP8BlockScaleLinear):
+                module.absorb_fp8_weight_from_weight_attr()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return model

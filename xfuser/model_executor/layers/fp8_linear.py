@@ -171,6 +171,8 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.preshuffle = preshuffle
+        # Dtype of the original bf16/fp16 linear, used for the `weight` sentinel.
+        self._compute_dtype = dtype or torch.bfloat16
         self.register_parameter("weight", None)
         if bias:
             self.bias = nn.Parameter(
@@ -187,6 +189,38 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         if bias is not None and self.bias is not None:
             target = device if device is not None else bias.device
             self.bias = torch.nn.Parameter(bias.to(device=target, dtype=bias.dtype).detach())
+        self._install_weight_sentinel()
+
+    def _install_weight_sentinel(self) -> None:
+        """Keep `weight` a real, 0-element, bf16 tensor once fp8 lives in `weight_fp8`.
+
+        T5-family text encoders cast activations to `wo.weight.dtype` unless it is int8; an fp8
+        `weight` would force an fp8 activation into the bf16/fp16-only AITER quant kernel (abort),
+        and a None `weight` raises AttributeError. A bf16 sentinel makes the dtype match so no cast
+        happens; forward uses `weight_fp8`.
+
+        Stored as a plain __dict__ attribute (not a param/buffer): it must stay invisible to
+        named_parameters/named_buffers so it neither inflates the replicated-broadcast tensor count
+        (rank0 vs peers must agree) nor collides with the DiT quantizer's later `weight` handling.
+        0-element ⇒ no VRAM.
+        """
+        self._parameters.pop("weight", None)
+        self._buffers.pop("weight", None)
+        dev = self.weight_fp8.device if getattr(self, "weight_fp8", None) is not None else None
+        self.__dict__["weight"] = torch.empty(0, dtype=self._compute_dtype, device=dev)
+
+    def absorb_fp8_weight_from_weight_attr(self) -> None:
+        """Move loader-stored fp8 out of `weight` into `weight_fp8`, then install the sentinel.
+
+        The transformers HfQuantizer path stores fp8 under `weight` (the loader requires that key);
+        normalize it to the DiT layout (fp8 in `weight_fp8`, bf16 sentinel in `weight`). Plain
+        layout — the TE swap uses preshuffle=False. No-op if `weight` is not fp8.
+        """
+        weight = getattr(self, "weight", None)
+        if weight is None or weight.dtype != _fp8_dtype():
+            return
+        self.weight_fp8 = nn.Parameter(weight.data, requires_grad=False)
+        self._install_weight_sentinel()
 
     def _quantize_weights(self, weight: torch.Tensor, device: Optional[torch.device] = None) -> None:
         N, K = weight.shape

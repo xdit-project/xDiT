@@ -1,9 +1,18 @@
 import torch
 from typing import Optional
-from diffusers import FluxPipeline, FluxKontextPipeline, Flux2Pipeline, Flux2KleinPipeline
+from diffusers import (
+    FluxPipeline,
+    FluxKontextPipeline,
+    Flux2Pipeline,
+    Flux2KleinPipeline,
+)
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.model_executor.models.transformers.transformer_flux import xFuserFlux1Transformer2DWrapper
-from xfuser.model_executor.models.transformers.transformer_flux2 import xFuserFlux2Transformer2DWrapper
+from xfuser.model_executor.models.transformers.transformer_flux import (
+    xFuserFlux1Transformer2DWrapper,
+)
+from xfuser.model_executor.models.transformers.transformer_flux2 import (
+    xFuserFlux2Transformer2DWrapper,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -18,18 +27,16 @@ from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     quantize_linear_layers_to_fp8,
 )
-from xfuser.core.distributed import (
-    get_runtime_state,
-    get_pipeline_parallel_world_size
-)
+from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser import xFuserFluxPipeline, xFuserArgs
 
 
 def _setup_parallel_vae(vae) -> None:
-    """ Parallalizes the VAE decoder using distvae """
+    """Parallalizes the VAE decoder using distvae"""
     try:
         from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
+
         patched_decoder = DecoderAdapter(
             vae.decoder, vae_group=get_vae_parallel_group().device_group
         ).to(vae.device)
@@ -39,7 +46,7 @@ def _setup_parallel_vae(vae) -> None:
         raise ValueError(
             "DistVAE library is missing or does not support DecoderAdapter. "
             "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE."
-            )
+        )
     except Exception as e:
         raise ValueError(f"Failed to patch VAE decoder. {e}")
 
@@ -69,7 +76,10 @@ class xFuserFluxModel(xFuserModel):
         model_name="black-forest-labs/FLUX.1-dev",
         output_name="flux_1_dev",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_gemm_module_list=[
+            "transformer.transformer_blocks",
+            "transformer.single_transformer_blocks",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -95,7 +105,7 @@ class xFuserFluxModel(xFuserModel):
             pipe = xFuserFluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.float16,
-                engine_config=self.engine_config
+                engine_config=self.engine_config,
             )
         else:
             transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
@@ -110,7 +120,6 @@ class xFuserFluxModel(xFuserModel):
             )
 
         return pipe
-
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         batch_size = self.config.batch_size if self.config.batch_size else 1
@@ -129,7 +138,7 @@ class xFuserFluxModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        images = output.images if output else [] # For legacy pipelines
+        images = output.images if output else []  # For legacy pipelines
         return DiffusionOutput(images=images, pipe_args=input_args)
 
 
@@ -158,7 +167,10 @@ class xFuserFluxKontextModel(xFuserModel):
         output_name="flux_1_kontext_dev",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_gemm_module_list=[
+            "transformer.transformer_blocks",
+            "transformer.single_transformer_blocks",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -206,26 +218,33 @@ class xFuserFluxKontextModel(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, pipe_args=input_args)
+        images = output.images if output else []  # non-last pp ranks return None
+        return DiffusionOutput(images=images, pipe_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
-        """ Preprocess input images if necessary based on task and other args """
+        """Preprocess input images if necessary based on task and other args"""
         input_args = super()._preprocess_args_images(input_args)
         image = input_args["input_images"][0]
         if input_args.get("resize_input_images", False):
-            image = resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value)
+            image = resize_and_crop_image(
+                image,
+                input_args["width"],
+                input_args["height"],
+                self.settings.mod_value,
+            )
             input_args["height"], input_args["width"] = image.height, image.width
         input_args["image"] = image
         input_args["max_area"] = input_args["height"] * input_args["width"]
         return input_args
 
     def _validate_args(self, input_args: dict) -> None:
-        """ Validate input arguments """
+        """Validate input arguments"""
         super()._validate_args(input_args)
         images = input_args.get("input_images", [])
         if len(images) != 1:
-            raise ValueError("Exactly one input image is required for Flux.1-Kontext-dev model.")
-
+            raise ValueError(
+                "Exactly one input image is required for Flux.1-Kontext-dev model."
+            )
 
 
 @register_model("black-forest-labs/FLUX.2-dev")
@@ -242,6 +261,7 @@ class xFuserFlux2Model(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
         use_fbcache=True,
+        pipefusion_parallel_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -255,8 +275,14 @@ class xFuserFlux2Model(xFuserModel):
         output_name="flux_2_dev",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
-        fp4_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_gemm_module_list=[
+            "transformer.transformer_blocks",
+            "transformer.single_transformer_blocks",
+        ],
+        fp4_gemm_module_list=[
+            "transformer.transformer_blocks",
+            "transformer.single_transformer_blocks",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -265,7 +291,7 @@ class xFuserFlux2Model(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
                 "offload_policy": "cpu",
             },
-        }
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -278,7 +304,12 @@ class xFuserFlux2Model(xFuserModel):
                 apply_cache_on_transformer as apply_flux2_cache,
             )
             from xfuser.envs import XDIT_FBCACHE_THRESH
-            rel_l1_thresh = float(XDIT_FBCACHE_THRESH) if XDIT_FBCACHE_THRESH else self.settings.fbcache_thresh
+
+            rel_l1_thresh = (
+                float(XDIT_FBCACHE_THRESH)
+                if XDIT_FBCACHE_THRESH
+                else self.settings.fbcache_thresh
+            )
             num_steps = int(input_args.get("num_inference_steps", 50))
             apply_flux2_cache(
                 self.pipe.transformer,
@@ -303,26 +334,45 @@ class xFuserFlux2Model(xFuserModel):
         return False
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
-        pipe = Flux2Pipeline.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            transformer=transformer,
-        )
+        if self.config.pipefusion_parallel_degree > 1:
+            from xfuser.model_executor.pipelines.pipeline_flux2 import (
+                xFuserFlux2Pipeline,
+            )
+
+            pipe = xFuserFlux2Pipeline.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=self.engine_config.runtime_config.dtype,
+                engine_config=self.engine_config,
+            )
+        else:
+            transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                subfolder="transformer",
+            )
+            pipe = Flux2Pipeline.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+            )
         return pipe
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
-        """ Preprocess input images if provided """
+        """Preprocess input images if provided"""
         input_args = super()._preprocess_args_images(input_args)
         images = input_args["input_images"]
         if not images:
             images = None
         elif input_args.get("resize_input_images", False):
-            images = [self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value) for image in images]
+            images = [
+                self._resize_and_crop_image(
+                    image,
+                    input_args["width"],
+                    input_args["height"],
+                    self.settings.mod_value,
+                )
+                for image in images
+            ]
         input_args["images"] = images
         return input_args
 
@@ -337,7 +387,8 @@ class xFuserFlux2Model(xFuserModel):
             max_sequence_length=input_args["max_sequence_length"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, pipe_args=input_args)
+        images = output.images if output else []  # non-last pp ranks return None
+        return DiffusionOutput(images=images, pipe_args=input_args)
 
 
 @register_model("black-forest-labs/FLUX.2-klein-9B")
@@ -353,6 +404,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         use_parallel_vae=True,
         fully_shard_degree=True,
         use_fbcache=True,
+        pipefusion_parallel_degree=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -365,7 +417,10 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         model_name="black-forest-labs/FLUX.2-klein-9B",
         output_name="flux_2_klein_9b",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_gemm_module_list=[
+            "transformer.transformer_blocks",
+            "transformer.single_transformer_blocks",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -392,16 +447,27 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         return False
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
-        pipe = Flux2KleinPipeline.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            transformer=transformer,
-        )
+        if self.config.pipefusion_parallel_degree > 1:
+            from xfuser.model_executor.pipelines.pipeline_flux2 import (
+                xFuserFlux2KleinPipeline,
+            )
+
+            pipe = xFuserFlux2KleinPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=self.engine_config.runtime_config.dtype,
+                engine_config=self.engine_config,
+            )
+        else:
+            transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                subfolder="transformer",
+            )
+            pipe = Flux2KleinPipeline.from_pretrained(
+                pretrained_model_name_or_path=self.settings.model_name,
+                torch_dtype=torch.bfloat16,
+                transformer=transformer,
+            )
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -414,16 +480,25 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
-        return DiffusionOutput(images=output.images, pipe_args=input_args)
+        images = output.images if output else []  # non-last pp ranks return None
+        return DiffusionOutput(images=images, pipe_args=input_args)
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
-        """ Preprocess input images if provided """
+        """Preprocess input images if provided"""
         input_args = super()._preprocess_args_images(input_args)
         images = input_args["input_images"]
         if not images:
             images = None
         elif input_args.get("resize_input_images", False):
-            images = [self._resize_and_crop_image(image, input_args["width"], input_args["height"], self.settings.mod_value) for image in images]
+            images = [
+                self._resize_and_crop_image(
+                    image,
+                    input_args["width"],
+                    input_args["height"],
+                    self.settings.mod_value,
+                )
+                for image in images
+            ]
         input_args["images"] = images
         return input_args
 
@@ -436,7 +511,10 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         model_name="black-forest-labs/FLUX.2-klein-4B",
         output_name="flux_2_klein_4b",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_gemm_module_list=[
+            "transformer.transformer_blocks",
+            "transformer.single_transformer_blocks",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],

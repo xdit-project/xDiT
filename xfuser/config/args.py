@@ -539,9 +539,10 @@ class xFuserArgs:
             "--memory_efficient_sharding",
             action="store_true",
             default=False,
-            help="Load transformer blocks one at a time during init to reduce peak GPU memory. "
-                 "Slightly slower at inference - only use if the model OOMs during load despite "
-                 "--fully_shard_degree. Requires --fully_shard_degree > 1.",
+            help="Reduce peak VRAM during load: shard transformer blocks one at a time on GPU "
+                 "during init, so the full unsharded component never materializes on device. "
+                 "Slightly slower to load - use if the model OOMs on GPU during init. Requires "
+                 "--fully_shard_degree > 1.",
         )
         parser.add_argument(
             "--height",

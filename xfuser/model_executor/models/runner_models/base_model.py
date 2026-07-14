@@ -20,6 +20,7 @@ from xfuser.envs import (
     _is_cuda,
 )
 from xfuser.core.distributed.parallel_state import get_fs_group
+from xfuser.core.utils.checkpoint_io import host_mem_gb
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -350,6 +351,10 @@ class xFuserModel(abc.ABC):
             },
         )
 
+    def _memory_efficient_fsdp_load(self) -> bool:
+        """True when the memory-efficient sharded (meta-init + rank0-broadcast) load path is on."""
+        return bool(self.config.memory_efficient_sharding and self.config.fully_shard_degree > 1)
+
     def _fp8_targets_for_component(self, component_name: str) -> list[str]:
         """fp8_gemm_module_list entries under this component, with the pipe-level prefix stripped
         (e.g. "text_encoder.model.language_model.layers" -> "model.language_model.layers")."""
@@ -362,13 +367,25 @@ class xFuserModel(abc.ABC):
     def _component_wants_fp8(self, component_name: str) -> bool:
         return bool(self._aiter_fp8_active() and self._fp8_targets_for_component(component_name))
 
-    def _build_transformer(self, wrapper_cls, subfolder: str = "transformer", init_kwargs: dict | None = None, stream_quant: bool = True):
-        """Load the transformer for a pipeline via from_pretrained.
+    @functools.cached_property
+    def _sharder(self):
+        """Lazy MemoryEfficientSharder bound to this model (meta-init + rank0-broadcast load)."""
+        from xfuser.model_executor.models.runner_models.meta_load import MemoryEfficientSharder
+        return MemoryEfficientSharder(self)
 
-        init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) forwarded on load.
-        stream_quant: stream-quantize to fp8 when True (models that already load fp8 today); False
-        keeps the plain bf16 load (models that load bf16 today).
+    def _build_transformer(self, wrapper_cls, subfolder: str = "transformer", init_kwargs: dict | None = None, stream_quant: bool = True):
+        """Load the transformer for a pipeline. On the memory-efficient FSDP path (multi-GPU
+        fully-shard) build it on meta — weights are then streamed per block from disk on every rank
+        during sharding, so the full model never materializes on host or any single GPU. Otherwise
+        load via from_pretrained (single-GPU / non-FSDP path, unchanged).
+
+        init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) forwarded on both paths.
+        stream_quant: on the non-meta path, stream-quantize to fp8 when True (models that already load
+        fp8 today); False keeps the plain bf16 load (models that load bf16 today). The meta path always
+        quantizes per block from fp8_gemm_module_list, so stream_quant only gates the non-meta config.
         """
+        if self._memory_efficient_fsdp_load():
+            return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
         return wrapper_cls.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -378,12 +395,19 @@ class xFuserModel(abc.ABC):
         )
 
     def _meta_te_kwargs(self):
-        """Return (pipe_component_kwargs, te_quant_config) for a pipeline's from_pretrained.
+        """Build text-encoder(s) on meta for the memory-efficient FSDP load path.
 
-        kwargs is empty (the pipe loads its own text encoders); te_quant streams the targeted
-        text encoders to fp8 when applicable (None otherwise).
+        Returns (pipe_component_kwargs, te_quant_config). On the meta path the kwargs carry meta
+        modules to hand to the pipeline's from_pretrained (so it skips loading those components)
+        and te_quant is None — the pipe does not stream the TE; instead the meta module (fp8 when
+        targeted, else bf16) is filled by the rank0-broadcast sharded load, then FSDP-sharded
+        (CPU-offloaded). On the normal path returns ({}, self._te_pipeline_quant_config()). The
+        transformer is unaffected either way; it keeps its own streaming-fp8 from_pretrained path.
         """
-        return ({}, self._te_pipeline_quant_config())
+        normal = ({}, self._te_pipeline_quant_config())
+        if not self._memory_efficient_fsdp_load():
+            return normal
+        return self._sharder.meta_te_kwargs(normal)
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
@@ -888,27 +912,53 @@ class xFuserModel(abc.ABC):
         for component_name, component in self.pipe.components.items():
             if component_name in self.settings.fsdp_strategy:
                 log(f"Sharding {component_name} with FSDP... "
-                    f"(VRAM before: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
+                    f"(host cur/anon/file: {host_mem_gb()} GB, "
+                    f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
                 strategy = self.settings.fsdp_strategy[component_name]
                 wrap_attrs = strategy.get("wrap_attrs", [])
                 dtype = strategy.get("dtype", None)
                 offload_policy = strategy.get("offload_policy", None)
-                quantize_fn = self._build_fsdp_quantize_fn(component_name, wrap_attrs, fs_local_rank)
-                reshard_after_forward = self.config.reshard_after_forward
+                # A meta component was built on-config to avoid a full bf16 copy per rank. Two meta
+                # paths: the transformer self-fills each block from disk on every rank (never full
+                # anywhere, quantized per block), while text encoders are filled by a rank0
+                # broadcast (no per-block quantize; the filled TE stays bf16/streamed-fp8 on rank0).
+                is_meta = any(p.is_meta for p in component.parameters())
+                is_transformer_selffill = is_meta and component_name.startswith("transformer")
+                load_block_fn = load_epilogue_fn = None
+                if is_transformer_selffill:
+                    quantize_fn = self._build_fsdp_quantize_fn(
+                        component_name, wrap_attrs, fs_local_rank
+                    )
+                    load_block_fn, load_epilogue_fn = self._sharder.build_transformer_disk_loaders(
+                        component, wrap_attrs, component_name, f"cuda:{fs_local_rank}"
+                    )
+                else:
+                    quantize_fn = (
+                        None if is_meta
+                        else self._build_fsdp_quantize_fn(component_name, wrap_attrs, fs_local_rank)
+                    )
                 fsdp_object = shard_component(
                     component, wrap_attrs, device_group, fs_local_rank, dtype,
                     quantize_fn=quantize_fn,
-                    reshard_after_forward=reshard_after_forward,
+                    reshard_after_forward=self.config.reshard_after_forward,
                     memory_efficient_init=self.config.memory_efficient_sharding,
                     offload_policy=offload_policy,
                     # All ranks load from the same checkpoint so states are already
                     # identical. No broadcast needed regardless of offload policy.
                     sync_module_states=False,
+                    meta_init=is_meta and not is_transformer_selffill,
+                    load_block_fn=load_block_fn,
+                    load_epilogue_fn=load_epilogue_fn,
                 )
+                if is_meta and not is_transformer_selffill:
+                    self._sharder.broadcast_load(
+                        fsdp_object, component_name, offload_policy == "cpu"
+                    )
                 setattr(self.pipe, component_name, fsdp_object)
                 torch.cuda.empty_cache()
                 log(f"Sharded {component_name}. "
-                    f"(VRAM after: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
+                    f"(host cur/anon/file: {host_mem_gb()} GB, "
+                    f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
             else:
                 log(f"Skipping FSDP wrapping for {component_name}...")
                 if hasattr(component, "to"):

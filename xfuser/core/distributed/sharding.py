@@ -199,6 +199,9 @@ def shard_component(
     quantize_fn: Optional[Callable] = None,
     memory_efficient_init: bool = False,
     offload_policy: Optional[str] = None,
+    meta_init: bool = False,
+    load_block_fn: Optional[Callable] = None,
+    load_epilogue_fn: Optional[Callable] = None,
 ) -> torch.nn.Module:
     """
     Wrap a component with FSDP, treating each block as a separate FSDP unit.
@@ -239,6 +242,24 @@ def shard_component(
             time to minimize peak GPU memory during model load. Selects FSDP2. Only use
             when the model OOMs during init with FSDP1; FSDP1 is faster at inference.
             Defaults to False.
+        offload_policy (str, optional): "cpu" wraps params in FSDP2 CPUOffloadPolicy
+            (params live on host, streamed to GPU per block); any other value / None keeps
+            params on GPU. Selects FSDP2 when "cpu". Defaults to None.
+        meta_init (bool, optional): The component's params are on the meta device (built from
+            config, no weights). Skips all host/device moves and quantization; blocks are
+            fully_shard'd while still meta. The caller must materialize real weights afterwards
+            (e.g. rank0-broadcast set_model_state_dict). Selects FSDP2. Defaults to False.
+        load_block_fn (Callable, optional): Called as load_block_fn(block, idx) per block, after the
+            block is materialized empty on device (to_empty) and before quantize_fn/fully_shard, to
+            fill that block's real weights on THIS rank (e.g. streamed per-block from disk). This is
+            the "meta, self-fill per rank" path: unlike meta_init (rank0-broadcast) every rank reads
+            its own weights, so no single machine holds the full model. Selects FSDP2. When set,
+            quantize_fn still runs (on the now-real block) and the block is sharded normally. The
+            component must already be on meta. Defaults to None.
+        load_epilogue_fn (Callable, optional): Called as load_epilogue_fn(component) after the block
+            loop but BEFORE the component-level fully_shard, to fill non-block params/buffers (which
+            would otherwise become DTensors and reject a plain assignment). Pairs with load_block_fn.
+            Defaults to None.
 
     Returns:
         nn.Module: The FSDP-wrapped component.
@@ -262,7 +283,7 @@ def shard_component(
         - Each element in wrap_attrs becomes a separate FSDP unit
         - Requires PyTorch distributed to be initialized before calling
     """
-    use_fsdp2 = quantize_fn is not None or memory_efficient_init
+    use_fsdp2 = quantize_fn is not None or memory_efficient_init or meta_init or load_block_fn is not None
 
     if device_id is None and torch.cuda.is_available():
         device_id = torch.cuda.current_device()
@@ -271,7 +292,7 @@ def shard_component(
     for wrap_attr in wrap_attrs:
         wrapped_blocks.extend(rgetattr(component, wrap_attr))
 
-    if dtype:
+    if dtype and not meta_init:
         component = component.to(dtype)
 
     if not use_fsdp2:
@@ -297,8 +318,12 @@ def shard_component(
 
     # Move non-block children to device. With CPUOffloadPolicy params stay on CPU,
     # so skip this step — fully_shard handles placement.
+    # meta_init: params can't be .to()'d (meta) and hold no real values to quantize; leave
+    # them meta and let fully_shard build meta DTensors, filled later by the caller's broadcast.
     wrap_top_names = {attr.split(".")[0] for attr in wrap_attrs}
-    if cpu_offload is None:
+    # Skip the .to() move for both meta paths: broadcast (meta_init) fills DTensors later, and
+    # self-fill (load_block_fn) materializes non-block children via load_epilogue_fn below.
+    if cpu_offload is None and not meta_init and load_block_fn is None:
         for name, child in component.named_children():
             if name not in wrap_top_names:
                 child.to(device_str)
@@ -306,10 +331,23 @@ def shard_component(
     # Sequential: after fully_shard(block) each rank holds 1/N params, freeing memory
     # for the next block. At most one full block on GPU at a time.
     for i, block in enumerate(wrapped_blocks):
-        block.to(device_str)
-        if quantize_fn is not None:
-            quantize_fn(block, i)
+        if load_block_fn is not None:
+            # Self-fill per rank: materialize the block empty on device, fill its real weights
+            # from disk on THIS rank, quantize, then shard — the full model never lands anywhere.
+            block.to_empty(device=device_str, recurse=True)
+            load_block_fn(block, i)
+            if quantize_fn is not None:
+                quantize_fn(block, i)
+        elif not meta_init:
+            block.to(device_str)
+            if quantize_fn is not None:
+                quantize_fn(block, i)
         fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
+
+    # Fill non-block params/buffers before the component-level fully_shard turns them into DTensors
+    # (a plain assignment onto a DTensor slot would diverge across ranks).
+    if load_epilogue_fn is not None:
+        load_epilogue_fn(component)
 
     fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
 

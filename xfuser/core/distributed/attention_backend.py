@@ -19,6 +19,9 @@ from xfuser.core.sparge_attention.sparge import (
     mask_padded_kv_blocks,
 )
 from xfuser.core.sparge_attention.head_balance import COST_SINK_KEY
+from xfuser.logger import init_logger
+
+logger = init_logger(__name__)
 
 ATTENTION_FUNCTION_REGISTRY = {}
 
@@ -380,17 +383,99 @@ if env_info["has_aiter"]:
         from aiter.ops.flydsl import flydsl_flash_attn_func as flydsl_flash_attn_func_aiter
         from torch.library import custom_op, register_fake
 
-        @custom_op("xfuser::flydsl_attn_kernel", mutates_args=())
-        def _flydsl_attn_kernel(
+        # Two ops mirror the AITER / AITER_FP8 split: AITER_FLYDSL -> xfuser::flydsl_attn (bf16),
+        # AITER_FLYDSL_FP8 -> xfuser::flydsl_attn_fp8. fp8 is unfused (faster e2e) so it holds fp8
+        # Q/K/V alongside the live bf16 Q/K/V -> higher peak VRAM; pick AITER_FLYDSL when tight.
+
+        # fp8 wins only above a seq crossover (quant pre-pass cost vs K/V HBM bytes saved), which
+        # depends on (head_dim, num_heads). Measured on gfx1201: D64/H38 and D128/H<=32 flip at
+        # S~2560; D128 high head-count (wan H40) at S~3584. Below: fp8 loses 7-18%; above: wins <4%.
+        def _flydsl_fp8_min_seq(head_dim: int, num_heads: int) -> int:
+            if head_dim >= 128 and num_heads > 32:
+                return 3584
+            return 2560
+
+        def _flydsl_fp8_attn(query, key, value, is_causal):
+            # flydsl_fp8_quant returns fp8 q/k/v + descales (real = fp8 * descale). Imported here,
+            # not at module load: fp8 quant ships in a newer aiter than the bf16 kernel, so a
+            # bf16-only build still registers the bf16 op above; runtime_state gates fp8 selection.
+            from aiter.ops.flydsl import flydsl_fp8_quant as flydsl_fp8_quant_aiter
+            qq, kk, vv, sq, sk, sv = flydsl_fp8_quant_aiter(query, key, value, rotation=True)
+            return flydsl_flash_attn_func_aiter(
+                qq, kk, vv, causal=is_causal,
+                q_descale=sq, k_descale=sk, v_descale=sv,
+                waves_per_eu=2, daz=True,
+            )
+
+        # Attn shape is constant across denoise steps, so log the chosen path once per shape.
+        _flydsl_logged = set()
+
+        def _flydsl_log_once(key_t, msg):
+            if key_t in _flydsl_logged:
+                return
+            _flydsl_logged.add(key_t)
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                logger.info(msg)
+
+        @custom_op("xfuser::flydsl_attn", mutates_args=())
+        def _flydsl_attn(
             query: torch.Tensor,
             key: torch.Tensor,
             value: torch.Tensor,
             is_causal: bool,
         ) -> torch.Tensor:
-            return flydsl_flash_attn_func_aiter(query, key, value, causal=is_causal)
+            B, S_real, H, D = query.shape
+            is_cross = key.shape[1] != S_real
+            _flydsl_log_once(
+                (B, S_real, H, D, is_cross, query.dtype),
+                f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16",
+            )
+            return flydsl_flash_attn_func_aiter(
+                query, key, value, causal=is_causal, waves_per_eu=2, daz=True
+            )
 
-        @register_fake("xfuser::flydsl_attn_kernel")
-        def _flydsl_attn_kernel_fake(
+        @register_fake("xfuser::flydsl_attn")
+        def _flydsl_attn_fake(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return torch.empty_like(query)
+
+        @custom_op("xfuser::flydsl_attn_fp8", mutates_args=())
+        def _flydsl_attn_fp8_kernel(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            # fp8 only for bf16 self-attn above the crossover; else fall back to the bf16 kernel.
+            B, S_real, H, D = query.shape
+            is_cross = key.shape[1] != S_real
+            min_seq = _flydsl_fp8_min_seq(D, H)
+            use_fp8 = query.dtype == torch.bfloat16 and not is_cross and S_real >= min_seq
+            if use_fp8:
+                msg = (
+                    f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> fp8 (S>={min_seq}) "
+                    "(fp8 pre-pass adds a transient QKV copy -> higher peak VRAM)"
+                )
+            elif query.dtype == torch.bfloat16 and not is_cross:
+                msg = f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 (S<{min_seq})"
+            else:
+                msg = (
+                    f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 "
+                    f"(not fp8-eligible: dtype={query.dtype}, cross={is_cross})"
+                )
+            _flydsl_log_once((B, S_real, H, D, is_cross, query.dtype), msg)
+            if use_fp8:
+                return _flydsl_fp8_attn(query, key, value, is_causal)
+            return flydsl_flash_attn_func_aiter(
+                query, key, value, causal=is_causal, waves_per_eu=2, daz=True
+            )
+
+        @register_fake("xfuser::flydsl_attn_fp8")
+        def _flydsl_attn_fp8_fake(
             query: torch.Tensor,
             key: torch.Tensor,
             value: torch.Tensor,
@@ -451,6 +536,7 @@ class AttentionBackendType(Enum):
     AITER_SPARGE_V2 = "AITER Sparge V2"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
+    AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
     NPU = "NPU"
 
 def register_attention_function(backend_type):
@@ -1158,21 +1244,37 @@ def _flex_block_sparge_attn_call(query, key, value, dropout_p, is_causal, attent
     )
     return restore_sparge_output(output, state), None
 
-@register_attention_function(AttentionBackendType.AITER_FLYDSL)
-def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    # Cross-attention is unsupported. For non-causal self-attention, this kernel raises
-    # when the seq_len padding ratio to align to 128 exceeds 0.5% (same check as the kernel).
-    if query.shape[2] != key.shape[2]:
+def _aiter_flydsl_dispatch(query, key, value, dropout_p, is_causal, attention_kwargs, attn_op):
+    # Layout here is [B, H, S, D]. Self-attn and non-causal cross-attn both hit the
+    # kernel: causal masks padded cols via col > q_row; non-causal masks them via
+    # seq_len_real (aligned) or the tail mask (unaligned); cross-attn (Phase B) loads
+    # K/V on their own length via seq_len_kv. The kernel is single-NUM_HEADS MHA, so
+    # only causal-cross (ambiguous alignment; never occurs in diffusion) and GQA / head
+    # or head_dim mismatches fall back to SDPA.
+    is_cross = query.shape[2] != key.shape[2]
+    if is_cross and (
+        is_causal
+        or query.shape[1] != key.shape[1]
+        or query.shape[3] != key.shape[3]
+    ):
         return _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs)
-    if not is_causal:
-        seq_len = query.shape[2]
-        pad = (-seq_len) % 128
-        # 199*pad > seq_len is pad/(seq_len+pad) > 0.005 (0.5%) in integer arithmetic.
-        if pad > 0 and 199 * pad > seq_len:
-            return _sdpa_flash_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output = torch.ops.xfuser.flydsl_attn_kernel(query, key, value, is_causal)
+    output = attn_op(query, key, value, is_causal)
     output = torch.permute(output, [0, 2, 1, 3])
     return output, None
+
+
+@register_attention_function(AttentionBackendType.AITER_FLYDSL)
+def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    return _aiter_flydsl_dispatch(
+        query, key, value, dropout_p, is_causal, attention_kwargs, torch.ops.xfuser.flydsl_attn
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_FLYDSL_FP8)
+def _aiter_flydsl_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    return _aiter_flydsl_dispatch(
+        query, key, value, dropout_p, is_causal, attention_kwargs, torch.ops.xfuser.flydsl_attn_fp8
+    )

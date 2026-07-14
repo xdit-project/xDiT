@@ -15,6 +15,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheConfig,
+)
 
 if TYPE_CHECKING:
     from xfuser.model_executor.models.transformers.transformer_causal_wan import (
@@ -35,6 +40,7 @@ class xFuserCausalWanModel(xFuserModel):
         use_parallel_vae=False,
         enable_tiling=True,
         enable_slicing=True,
+        supported_cache_methods=("dbcache",),
     )
     default_input_values = DefaultInputValues(
         height=512,
@@ -64,6 +70,19 @@ class xFuserCausalWanModel(xFuserModel):
             "text_encoder": {
                 "wrap_attrs": ["encoder.block"],
             },
+        },
+        # DMD 8-step: no CFG (guidance_scale=0.0). Short warmup.
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                ],
+            ),
         },
     )
 

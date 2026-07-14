@@ -1,6 +1,11 @@
 import torch
 from typing import Optional
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheConfig,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -54,6 +59,7 @@ class xFuserFluxModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
+        supported_cache_methods=("teacache", "dbcache"),
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -78,6 +84,14 @@ class xFuserFluxModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=2, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -86,7 +100,7 @@ class xFuserFluxModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
-        if PACKAGES_CHECKER._on_rdna4():
+        if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
         return "reduce-overhead"
 
@@ -150,6 +164,7 @@ class xFuserFluxKontextModel(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
         fully_shard_degree=True,
+        supported_cache_methods=("dbcache",),
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -175,6 +190,13 @@ class xFuserFluxKontextModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=2, residual_diff_threshold=0.12, scm_policy="ultra"),
+        )},
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -265,8 +287,8 @@ class xFuserFlux2Model(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
-        use_fbcache=True,
         pipefusion_parallel_degree=True,
+        supported_cache_methods=("fbcache", "dbcache"),
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -297,6 +319,14 @@ class xFuserFlux2Model(xFuserModel):
                 "offload_policy": "cpu",
             },
         },
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_2")),
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=2, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -304,34 +334,10 @@ class xFuserFlux2Model(xFuserModel):
         if self.config.use_parallel_vae:
             _setup_parallel_vae(self.pipe.vae)
 
-        if self.config.use_fbcache:
-            from xfuser.model_executor.cache.diffusers_adapters.flux2 import (
-                apply_cache_on_transformer as apply_flux2_cache,
-            )
-            from xfuser.envs import XDIT_FBCACHE_THRESH
-
-            rel_l1_thresh = (
-                float(XDIT_FBCACHE_THRESH)
-                if XDIT_FBCACHE_THRESH
-                else self.settings.fbcache_thresh
-            )
-            num_steps = int(input_args.get("num_inference_steps", 50))
-            apply_flux2_cache(
-                self.pipe.transformer,
-                rel_l1_thresh=rel_l1_thresh,
-                return_hidden_states_first=False,
-                num_steps=num_steps,
-                use_cache="Fb",
-            )
-            log(
-                f"[FBCache] Enabled for FLUX.2 with "
-                f"rel_l1_thresh={rel_l1_thresh}, num_steps={num_steps}"
-            )
-
     def _get_compile_mode(self) -> str:
-        # CUDA graphs incompatible with FBCache cross-step caching,
-        # and cause pathological re-captures on RDNA4.
-        if self.config.use_fbcache or PACKAGES_CHECKER._on_rdna4():
+        # CUDA graphs incompatible with cross-step caching, and
+        # cause pathological re-captures on RDNA4.
+        if (self.config.cache_method or PACKAGES_CHECKER._on_rdna4()):
             return "default"
         return "reduce-overhead"
 
@@ -415,8 +421,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
         fully_shard_degree=True,
-        use_fbcache=True,
         pipefusion_parallel_degree=True,
+        supported_cache_methods=("fbcache",),
     )
 
     default_input_values = DefaultInputValues(
@@ -449,9 +455,9 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
-        # CUDA graphs incompatible with FBCache cross-step caching,
-        # and cause pathological re-captures on RDNA4.
-        if self.config.use_fbcache or PACKAGES_CHECKER._on_rdna4():
+        # CUDA graphs incompatible with cross-step caching, and
+        # cause pathological re-captures on RDNA4.
+        if (self.config.cache_method or PACKAGES_CHECKER._on_rdna4()):
             return "default"
         return "reduce-overhead"
 

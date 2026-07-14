@@ -401,18 +401,17 @@ class xFuserModel(abc.ABC):
         """
         if self._memory_efficient_fsdp_load():
             return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
-        # Replicated broadcast load: peers build on meta (filled later by GPU broadcast from rank0);
-        # rank0 loads real bf16 (no fp8 stream) so the broadcast dtype matches and the per-rank GPU
-        # fp8 walk quantizes locally afterwards.
-        if self._replicated_broadcast_load() and get_world_group().rank_in_group != 0:
+        # Replicated broadcast load: build on meta on ALL ranks. Weights are streamed per block from
+        # disk on rank0 and broadcast GPU->GPU, then fp8-quantized per block (broadcast_fill_replicated),
+        # so the full bf16 transformer never materializes on host or any single GPU.
+        if self._replicated_broadcast_load():
             return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
         return wrapper_cls.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder=subfolder,
             quantization_config=(
-                self._fp8_stream_quant_config(subfolder)
-                if stream_quant and not self._replicated_broadcast_load() else None
+                self._fp8_stream_quant_config(subfolder) if stream_quant else None
             ),
             **(init_kwargs or {}),
         )

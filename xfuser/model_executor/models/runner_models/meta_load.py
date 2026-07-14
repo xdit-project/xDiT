@@ -7,8 +7,8 @@ Two fill strategies, both collective (every fs-group rank must call in identical
   on fs-rank0 ONLY and broadcast GPU->GPU to the group. rank0-only read is required because the full
   block must exist on every rank before block-128 fp8 quantization (a shard boundary splitting a
   128x128 tile invalidates the tile scale, so per-rank slice reads are impossible), and if every rank
-  read the full block from disk host anon would scale with N ranks (measured +3.5GB/block -> cgroup
-  OOM). Reading on rank0 + broadcasting keeps host disk-read anon at 1x.
+  read the full block from disk host anon would scale with N ranks (measured +3.5GB per block, enough
+  to trip the cgroup OOM killer). Reading on rank0 then broadcasting keeps host disk-read anon at 1x.
 
 * Text encoders (``MemoryEfficientSharder.broadcast_load``): rank0 loads once via from_pretrained
   (resolves tied weights), then scatters one wrapped block at a time via broadcast_from_rank0, so
@@ -30,6 +30,18 @@ from xfuser.core.utils.checkpoint_io import (
     component_shard_paths,
 )
 from xfuser.core.utils.runner_utils import log, rgetattr
+
+
+def _is_bcast_src(group) -> bool:
+    """True only on the single global rank-0 of `group` — the broadcast source.
+
+    Uses rank_in_group, not local_rank. local_rank is node-local, so on a multi-node
+    group every node's local-rank-0 would self-elect as source: each reads the full
+    checkpoint (host anon scales with node count) and every read but the group's global
+    rank-0 is silently discarded, since broadcast src=0 always means the group's global
+    rank 0.
+    """
+    return group.rank_in_group == 0
 
 
 class MemoryEfficientSharder:
@@ -124,80 +136,142 @@ class MemoryEfficientSharder:
     def meta_te_kwargs_replicated(self, normal):
         """Text-encoder kwargs for the replicated broadcast-load path (fits-in-GPU, multi-GPU).
 
-        Returns (pipe_component_kwargs, None): te_quant is always None (bf16 — the per-rank fp8 walk
-        quantizes locally after the broadcast). rank0 loads TEs real via from_pretrained (kwargs
-        empty); peers build bf16 meta components (filled later by broadcast_fill_replicated). A
-        component that can't be meta-built is simply loaded real on that peer; the broadcast still
-        overwrites it with rank0's weights, so correctness holds (only the meta saving is lost).
+        rank0 loads TEs real via the pipeline's from_pretrained, fp8-streamed when targeted
+        (te_quant = _te_pipeline_quant_config()), so its host peak is one fp8 copy. Peers build meta
+        components with the MATCHING layout (build_meta_component fp8-swaps targeted linears), so the
+        later broadcast fills fp8 shards param-for-param with no re-quantize.
+
+        A peer that cannot meta-build a component raises: the per-tensor broadcast walks
+        named_parameters/buffers in lockstep, so a real bf16 fallback (no fp8 weight_scale buffers)
+        against rank0's fp8 source would diverge the tensor count and desync the collective.
         """
-        if get_world_group().rank_in_group == 0:
-            return {}, None
+        if _is_bcast_src(get_world_group()):
+            return {}, self.model._te_pipeline_quant_config()
         te_components = [
             name for name in self.model.settings.fsdp_strategy
             if name != "transformer" and not name.startswith("transformer_")
         ]
         kwargs = {}
         for name in te_components:
-            meta = self.build_meta_component(name, fp8=False)
-            if meta is not None:
-                kwargs[name] = meta
+            meta = self.build_meta_component(name, fp8=True)
+            if meta is None:
+                raise RuntimeError(
+                    f"replicated broadcast-load: peer failed to meta-build text encoder "
+                    f"'{name}'; its layout would diverge from rank0's and hang the broadcast"
+                )
+            kwargs[name] = meta
         return kwargs, None
 
     def broadcast_fill_replicated(self, offload: bool = False) -> None:
         """Fill every replicated big component with rank0's real weights via GPU->GPU broadcast,
-        then fp8-quantize it in place — one component at a time.
+        one component at a time. Bounds both host and VRAM peak to ~1x the model.
 
-        Per component in fsdp_strategy: materialize meta params/buffers to real-empty bf16 on device
-        (and move any real-CPU tensor on-device) on every rank, broadcast each param/buffer from
-        world-rank0 in a deterministic (named_*) order (identical module structure across ranks —
-        from_pretrained on rank0, from_config-meta on peers — guarantees matching iteration order),
-        then immediately fp8-quantize the component's targeted modules on ALL ranks with the same
-        walk (identical bf16 -> identical fp8), freeing the bf16 weights before the next component.
+        Transformer: built on meta on every rank. Filled per block: rank0 reads one block off disk,
+        broadcasts it over the world group, then ALL ranks fp8-quantize that block (symmetric, since
+        the same bf16 yields the same fp8) before the next block. Peak = accumulating fp8 model + one
+        transient bf16 block, so it fits a single GPU where the full bf16 model would not (~24 vs
+        ~12 GB). No fully_shard: replicated keeps the full quantized block on every rank. Reuses the
+        FSDP disk filler (_TransformerDiskFiller) and per-block quantize_fn (_build_fsdp_quantize_fn).
 
-        Interleaving the quantize is what bounds VRAM: the model fits one GPU only as fp8, so holding
-        the full bf16 transformer AND text encoder resident at once OOMs (23.8 + ~9 GB > 32). Doing
-        broadcast+quantize per component keeps the peak at a single bf16 component (~24 GB), which
-        fits, then drops it to fp8 (~12 GB) before broadcasting the next.
+        Text encoders: rank0 loaded them real (fp8-streamed when targeted) via the pipeline; peers
+        built matching-layout meta. Materialize peer meta to real-empty on device, then broadcast
+        every param/buffer from rank0. No re-quantize, since both sides already carry the fp8 layout.
         """
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
-        from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp8_blockscale
         world = get_world_group()
         device = f"cuda:{world.local_rank}"
-        fp8_active = self.model._aiter_fp8_active()
-        fp8_modules = self.model.settings.fp8_gemm_module_list or []
-        for name in self.model.settings.fsdp_strategy:
+        strategy = self.model.settings.fsdp_strategy
+        for name in strategy:
             component = getattr(self.model.pipe, name, None)
             if component is None or not hasattr(component, "named_parameters"):
                 continue
-            for tname, t in (
-                list(component.named_parameters(recurse=True))
-                + list(component.named_buffers(recurse=True))
-            ):
-                if t.is_meta:
-                    set_module_tensor_to_device(
-                        component, tname, device,
-                        value=torch.empty(t.shape, dtype=t.dtype, device=device),
-                    )
-                elif t.device.type != "cuda":
-                    set_module_tensor_to_device(component, tname, device, value=t.to(device))
-            for _, p in component.named_parameters(recurse=True):
-                world.broadcast(p.data, src=0)
-            for _, b in component.named_buffers(recurse=True):
-                world.broadcast(b.data, src=0)
-            if fp8_active:
-                for module_name in fp8_modules:
-                    if module_name == name or module_name.startswith(name + "."):
-                        quantize_linear_layers_to_fp8_blockscale(
-                            rgetattr(self.model.pipe, module_name),
-                            device=device, offload_to_cpu=offload,
-                        )
+            if name == "transformer" or name.startswith("transformer_"):
+                self._fill_transformer_replicated(component, name, strategy[name], device, world)
+            else:
+                self._fill_te_replicated(component, device, world, set_module_tensor_to_device)
             torch.cuda.empty_cache()
-            log(f"Broadcast-filled + quantized {name} from rank0 (replicated). "
+            log(f"Broadcast-filled {name} from rank0 (replicated). "
                 f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB")
 
-    def build_transformer_disk_loaders(self, component, wrap_attrs, subfolder, device):
-        """(load_block_fn, load_epilogue_fn) filling a meta transformer from disk (rank0-read + bcast)."""
-        filler = _TransformerDiskFiller(self.model, component, wrap_attrs, subfolder, device)
+    def _fill_transformer_replicated(self, component, name, strategy, device, world) -> None:
+        """Per-block rank0-disk-read + world broadcast + symmetric per-block fp8 quantize (no shard)."""
+        wrap_attrs = strategy.get("wrap_attrs", [])
+        fill_block, finalize = self.build_transformer_disk_loaders(
+            component, wrap_attrs, name, device, group=world
+        )
+        quantize_fn = self.model._build_fsdp_quantize_fn(name, wrap_attrs, world.local_rank)
+        wrapped = []
+        for attr in wrap_attrs:
+            wrapped.extend(rgetattr(component, attr))
+        for i, block in enumerate(wrapped):
+            block.to_empty(device=device, recurse=True)
+            fill_block(block, i)
+            if quantize_fn is not None:
+                quantize_fn(block, i)
+            torch.cuda.empty_cache()
+        finalize(component)
+
+    def _fill_te_replicated(self, component, device, world, set_module_tensor_to_device) -> None:
+        """Materialize peer meta to real-empty on device (move any real-CPU tensor on-device), then
+        broadcast every param/buffer from world-rank0. Layout already matches (rank0 fp8-streamed,
+        peers meta fp8-swapped), so no re-quantize.
+
+        Capture the param/buffer name lists ONCE and drive both the materialize and broadcast passes
+        off those fixed names (via rgetattr), mirroring _TransformerDiskFiller.finalize. Re-enumerating
+        named_parameters() for the broadcast is unsafe: set_module_tensor_to_device replaces param
+        objects, so a re-enumeration can hand back a different (still-CPU) object than the one the
+        materialize pass moved, and world.broadcast on a CPU tensor aborts the NCCL group.
+
+        remove_duplicate=False: T5-family TEs tie shared.weight to encoder.embed_tokens.weight.
+        rank0 (from_pretrained) keeps the tie -> dedup yields one name; peers (_from_config on meta)
+        build them untied -> two names. Enumerating with duplicates makes both sides emit the SAME
+        ordered name list (the tied weight simply broadcasts twice, same data), so the per-tensor
+        broadcast stays in lockstep across ranks instead of drifting one collective apart -> hang.
+        """
+        param_names = [n for n, _ in component.named_parameters(recurse=True, remove_duplicate=False)]
+        buffer_names = [n for n, _ in component.named_buffers(recurse=True, remove_duplicate=False)]
+        for name in param_names + buffer_names:
+            t = rgetattr(component, name)
+            if t.is_meta:
+                set_module_tensor_to_device(
+                    component, name, device,
+                    value=torch.empty(t.shape, dtype=t.dtype, device=device),
+                )
+            elif t.device.type != "cuda":
+                set_module_tensor_to_device(component, name, device, value=t.to(device))
+        self._assert_tensor_count_agrees(component, world, device)
+        for name in param_names + buffer_names:
+            world.broadcast(rgetattr(component, name).data, src=0)
+
+    def _assert_tensor_count_agrees(self, module, group, device) -> None:
+        """Collective guard that every rank sees the same param+buffer count for `module`.
+
+        Broadcasts rank0's count and compares. A peer whose meta tree diverged (e.g. an uneven
+        fp8 swap that added or dropped weight_scale buffers) raises here, before the per-tensor
+        broadcast loop, turning a silent NCCL hang into a clear error.
+
+        Counts with remove_duplicate=False to match the broadcast loop's enumeration exactly:
+        counting deduped while broadcasting non-deduped would let a tied-weight mismatch (rank0
+        tied, peer untied) pass this guard yet still hang the per-tensor loop."""
+        local_n = (
+            sum(1 for _ in module.named_parameters(recurse=True, remove_duplicate=False))
+            + sum(1 for _ in module.named_buffers(recurse=True, remove_duplicate=False))
+        )
+        ref = torch.tensor([local_n], device=device)
+        group.broadcast(ref, src=0)
+        if int(ref.item()) != local_n:
+            raise RuntimeError(
+                f"replicated broadcast-load: param/buffer count mismatch "
+                f"(rank0={int(ref.item())}, local={local_n}); meta layout diverged from rank0"
+            )
+
+    def build_transformer_disk_loaders(self, component, wrap_attrs, subfolder, device, group=None):
+        """(load_block_fn, load_epilogue_fn) filling a meta transformer from disk (rank0-read + bcast).
+
+        group: broadcast group (default get_fs_group() for the FSDP path). The replicated path passes
+        get_world_group() — get_fs_group() has world_size 1 when fully_shard_degree==1, so its
+        broadcast would be a no-op and peers would receive garbage."""
+        filler = _TransformerDiskFiller(self.model, component, wrap_attrs, subfolder, device, group)
         return filler.fill_block, filler.finalize
 
     def broadcast_load(self, component, component_name: str, offload: bool) -> None:
@@ -235,6 +309,12 @@ class MemoryEfficientSharder:
         for m in module.modules():
             if isinstance(m, xFuserFP8BlockScaleLinear) and m.weight is not None and m.weight.is_meta:
                 m.weight = nn.Parameter(m.weight.to(fp8), requires_grad=False)
+                # Normalize to rank0's post-load layout: fp8 in `weight_fp8` (param) + `weight_scale`
+                # (buffer) + a plain-attr `weight` sentinel. rank0 builds the real component via the
+                # HfQuantizer whose _process_model_after_weight_loading absorbs the same way, so peers
+                # and rank0 expose identical named_parameters/named_buffers (name, order, shape) — a
+                # prerequisite for both the positional replicated broadcast and set_model_state_dict.
+                m.absorb_fp8_weight_from_weight_attr()
 
     def _broadcast_load_fp8_component(
         self, component, component_name: str, offload: bool
@@ -243,7 +323,7 @@ class MemoryEfficientSharder:
             set_model_state_dict, StateDictOptions,
         )
         from xfuser.model_executor.quant import AiterFp8BlockScaleTEConfig
-        is_src = get_fs_group().local_rank == 0
+        is_src = _is_bcast_src(get_fs_group())
         state_dict: dict = {}
         src = None
         if is_src:
@@ -274,7 +354,7 @@ class MemoryEfficientSharder:
             set_model_state_dict, StateDictOptions,
         )
         wrap_attrs = self.model.settings.fsdp_strategy[component_name].get("wrap_attrs", [])
-        is_src = get_fs_group().local_rank == 0
+        is_src = _is_bcast_src(get_fs_group())
         full_sd: dict = {}
         src = None
         if is_src:
@@ -336,14 +416,14 @@ class _TransformerDiskFiller:
     handle ExitStack across the per-block fill and the epilogue. See module docstring for why the
     read is rank0-only (block-128 fp8 tile constraint + host-anon N-scaling)."""
 
-    def __init__(self, model, component, wrap_attrs, subfolder, device) -> None:
+    def __init__(self, model, component, wrap_attrs, subfolder, device, group=None) -> None:
         from contextlib import ExitStack
 
         self.model = model
         self.subfolder = subfolder
         self.device = device
-        self.fs_group = get_fs_group()
-        self.is_src = self.fs_group.local_rank == 0
+        self.group = group or get_fs_group()
+        self.is_src = _is_bcast_src(self.group)
         # Only rank0 reads the checkpoint; peers receive via broadcast and never open a file
         # (no per-peer mmap page cache, no redundant hub revalidation HEADs).
         self.weight_map = (
@@ -379,12 +459,13 @@ class _TransformerDiskFiller:
         )
 
     def _broadcast(self, module):
-        # Collective: all fs ranks must call in the same order. Module structure is identical
-        # across ranks (meta -> to_empty), so named_* iteration order matches.
-        for _, p in module.named_parameters(recurse=True):
-            self.fs_group.broadcast(p.data, src=0)
-        for _, b in module.named_buffers(recurse=True):
-            self.fs_group.broadcast(b.data, src=0)
+        # Collective: all group ranks must call in the same order. Module structure is identical
+        # across ranks (meta -> to_empty), so named_* iteration order matches. remove_duplicate=False
+        # so tied weights emit the same name count on every rank regardless of per-rank tie state.
+        for _, p in module.named_parameters(recurse=True, remove_duplicate=False):
+            self.group.broadcast(p.data, src=0)
+        for _, b in module.named_buffers(recurse=True, remove_duplicate=False):
+            self.group.broadcast(b.data, src=0)
 
     def fill_block(self, block, i):
         """Fill + broadcast one wrapped block. Missing keys (non-persistent buffers) skipped."""
@@ -413,10 +494,12 @@ class _TransformerDiskFiller:
         """
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
         tail = [
-            name for name, _ in comp.named_parameters() if not name.startswith(self._block_prefixes)
+            name for name, _ in comp.named_parameters(remove_duplicate=False)
+            if not name.startswith(self._block_prefixes)
         ]
         tail_bufs = [
-            name for name, _ in comp.named_buffers() if not name.startswith(self._block_prefixes)
+            name for name, _ in comp.named_buffers(remove_duplicate=False)
+            if not name.startswith(self._block_prefixes)
         ]
         target_type = torch.device(self.device).type
         for name in tail + tail_bufs:
@@ -438,7 +521,7 @@ class _TransformerDiskFiller:
             for name in tail_bufs:
                 self._fill(comp, name, name, required=False)
         for name in tail + tail_bufs:
-            self.fs_group.broadcast(rgetattr(comp, name).data, src=0)
+            self.group.broadcast(rgetattr(comp, name).data, src=0)
         self._stack.close()
         if self.is_src:
             drop_file_page_cache(self.shard_paths)

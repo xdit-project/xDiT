@@ -120,6 +120,7 @@ class xFuserArgs:
     flow_shift: Optional[float] = None
     enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
+    enable_group_cpu_offload: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
     # DiTFastAttn arguments
@@ -388,6 +389,12 @@ class xFuserArgs:
             help="Offloading the weights to the CPU.",
         )
         runtime_group.add_argument(
+            "--enable_group_cpu_offload",
+            action="store_true",
+            help="Async leaf-level group CPU offload (streamed, per-group pinned). Overlaps H2D "
+                 "transfer with compute; upstream diffusers group offloading.",
+        )
+        runtime_group.add_argument(
             "--enable_tiling",
             action="store_true",
             help="Making VAE decode a tile at a time to save GPU memory.",
@@ -602,6 +609,11 @@ class xFuserArgs:
             "--enable_model_cpu_offload",
             action="store_true",
             help="Offloading the weights to the CPU.",
+        )
+        parser.add_argument(
+            "--enable_group_cpu_offload",
+            action="store_true",
+            help="Async leaf-level group CPU offload (streamed).",
         )
         parser.add_argument(
             "--enable_tiling",

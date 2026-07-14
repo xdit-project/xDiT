@@ -33,6 +33,7 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 
+from xfuser.model_executor.quant import AiterFp8BlockScaleConfig  # noqa: F401  (import registers the quantizer)
 from xfuser.core.distributed import (
     get_world_group,
     get_data_parallel_rank,
@@ -249,6 +250,25 @@ class xFuserModel(abc.ABC):
     def _update_model_settings(self, config: xFuserArgs) -> None:
         if config.use_fp4_gemms:
             self._apply_fp8_override_cli_from_config(config)
+        self._gate_te_fp8_to_rdna4()
+
+    def _gate_te_fp8_to_rdna4(self) -> None:
+        """Keep text-encoder entries in fp8_gemm_module_list only on RDNA4.
+
+        TE fp8 is worthwhile only via the AITER block-scale path (RDNA4). Off RDNA4 the
+        list is consumed by the torchao / fp4 walks, which would then quantize a text
+        encoder we don't want touched, so strip every non-transformer entry there. Runs
+        after _customize_settings (which may rebuild the list, e.g. Wan2.2 dual), so the
+        gate covers runtime-assigned lists too.
+        """
+        if _is_hip() and PACKAGES_CHECKER._on_rdna4():
+            return
+        lst = self.settings.fp8_gemm_module_list
+        if not lst:
+            return
+        self.settings.fp8_gemm_module_list = [
+            m for m in lst if m.split(".", 1)[0].startswith("transformer")
+        ]
 
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
@@ -275,6 +295,96 @@ class xFuserModel(abc.ABC):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)
 
+    def _aiter_fp8_active(self) -> bool:
+        """True when RDNA4 AITER FP8 quantization applies (fp8 gemms requested + supported)."""
+        return bool(self.config.use_fp8_gemms and _use_aiter_fp8_rdna4())
+
+    def _fp8_stream_quant_config(
+        self, attr_prefix: str = "transformer"
+    ) -> Optional[AiterFp8BlockScaleConfig]:
+        """Config for streaming FP8 quantize-on-load, or None when not applicable.
+
+        Passing this config to the transformer's from_pretrained quantizes each weight as it
+        streams off disk, so the full bf16 transformer never materializes (peak ~= one weight
+        + accumulating fp8) — cheaper than loading bf16 then quantizing in the _post_load walk.
+        Targets exactly the fp8_gemm_module_list sub-modules for this transformer (stripping
+        the pipe-level prefix, e.g. "transformer." / "transformer_2."), so the later
+        _post_load AITER walk is a safe no-op (leaves are already fp8, not nn.Linear).
+        Applies to both single-GPU and FSDP: the streamed fp8 module is what FSDP shards,
+        so the per-block quantize_fn is a no-op on those leaves.
+        """
+        if not self._aiter_fp8_active():
+            return None
+        targets = self._fp8_targets_for_component(attr_prefix)
+        if not targets:
+            return None
+        return AiterFp8BlockScaleConfig(target_modules=targets)
+
+    def _te_pipeline_quant_config(self):
+        """PipelineQuantizationConfig routing the AITER FP8 streaming quantizer to the pipeline's
+        transformers sub-models (text encoders), or None when not applicable.
+
+        A text encoder is a transformers model loaded by the diffusers pipeline; streaming it to
+        fp8 (instead of loading full bf16 then quantizing post-load) is the load-time host-RAM win
+        on multi-GPU FSDP, where every node-local rank would otherwise hold a full bf16 copy.
+        Groups fp8_gemm_module_list entries by pipeline component, excluding the transformer(s)
+        (the DiT streams via _fp8_stream_quant_config), and keys the mapping by whatever the pipe
+        names each component. The later _post_load AITER walk is a safe no-op on those leaves.
+        """
+        if not self._aiter_fp8_active():
+            return None
+        component_targets: dict[str, list[str]] = {}
+        for entry in (self.settings.fp8_gemm_module_list or []):
+            component, _, rest = entry.partition(".")
+            if not rest or component.startswith("transformer"):
+                continue
+            component_targets.setdefault(component, []).append(rest)
+        if not component_targets:
+            return None
+        from diffusers.quantizers import PipelineQuantizationConfig
+        from xfuser.model_executor.quant import AiterFp8BlockScaleTEConfig
+        return PipelineQuantizationConfig(
+            quant_mapping={
+                component: AiterFp8BlockScaleTEConfig(target_modules=targets)
+                for component, targets in component_targets.items()
+            },
+        )
+
+    def _fp8_targets_for_component(self, component_name: str) -> list[str]:
+        """fp8_gemm_module_list entries under this component, with the pipe-level prefix stripped
+        (e.g. "text_encoder.model.language_model.layers" -> "model.language_model.layers")."""
+        prefix = f"{component_name}."
+        return [
+            m[len(prefix):] for m in (self.settings.fp8_gemm_module_list or [])
+            if m.startswith(prefix)
+        ]
+
+    def _component_wants_fp8(self, component_name: str) -> bool:
+        return bool(self._aiter_fp8_active() and self._fp8_targets_for_component(component_name))
+
+    def _build_transformer(self, wrapper_cls, subfolder: str = "transformer", init_kwargs: dict | None = None, stream_quant: bool = True):
+        """Load the transformer for a pipeline via from_pretrained.
+
+        init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) forwarded on load.
+        stream_quant: stream-quantize to fp8 when True (models that already load fp8 today); False
+        keeps the plain bf16 load (models that load bf16 today).
+        """
+        return wrapper_cls.from_pretrained(
+            self.settings.model_name,
+            torch_dtype=torch.bfloat16,
+            subfolder=subfolder,
+            quantization_config=self._fp8_stream_quant_config(subfolder) if stream_quant else None,
+            **(init_kwargs or {}),
+        )
+
+    def _meta_te_kwargs(self):
+        """Return (pipe_component_kwargs, te_quant_config) for a pipeline's from_pretrained.
+
+        kwargs is empty (the pipe loads its own text encoders); te_quant streams the targeted
+        text encoders to fp8 when applicable (None otherwise).
+        """
+        return ({}, self._te_pipeline_quant_config())
+
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
         if getattr(self.config, "use_spargeattn_head_balance", False):
@@ -288,7 +398,37 @@ class xFuserModel(abc.ABC):
             log("Enabling VAE tiling...")
             self.pipe.vae.enable_tiling()
 
-        if self.config.enable_sequential_cpu_offload:
+        if self.config.enable_group_cpu_offload:
+            # block_level groups only top-level ModuleLists: fits compiled transformers
+            # (blocks are top-level) and avoids the per-block-compile recompile storm that
+            # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
+            # model.language_model.layers) where block_level can't reach -> whole component in
+            # one unmatched group -> OOM; they use leaf_level, which recurses.
+            from diffusers.hooks import apply_group_offloading
+            log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
+            local_rank = get_world_group().local_rank
+            low_cpu_mem_usage = PACKAGES_CHECKER._on_rdna4()
+            onload_device = torch.device(f"cuda:{local_rank}")
+            block_level_names = set(self._get_compiled_pipe_components())
+            for name, component in self.pipe.components.items():
+                if not isinstance(component, torch.nn.Module):
+                    continue
+                offload_type = "block_level" if name in block_level_names else "leaf_level"
+                kwargs = dict(
+                    onload_device=onload_device,
+                    offload_type=offload_type,
+                    use_stream=True,
+                    record_stream=True,
+                    low_cpu_mem_usage=low_cpu_mem_usage,
+                    non_blocking=True,
+                )
+                if offload_type == "block_level":
+                    kwargs["num_blocks_per_group"] = 1
+                if hasattr(component, "enable_group_offload"):
+                    component.enable_group_offload(**kwargs)
+                else:
+                    apply_group_offloading(module=component, **kwargs)
+        elif self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
             self.pipe.enable_sequential_cpu_offload()
         elif self.config.enable_model_cpu_offload:
@@ -689,16 +829,22 @@ class xFuserModel(abc.ABC):
             self._shard_model_with_fsdp()
         else:
             offload_requested = (
-                self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload
+                self.config.enable_model_cpu_offload
+                or self.config.enable_sequential_cpu_offload
+                or self.config.enable_group_cpu_offload
             )
             # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
             # All other quant paths (FP4, torchao FP8) need weights on GPU first.
-            if self.config.use_fp8_gemms and _use_aiter_fp8_rdna4():
+            if self._aiter_fp8_active():
                 for module_name in self.settings.fp8_gemm_module_list:
-                    log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
-                    quantize_linear_layers_to_fp8_blockscale(
-                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}"
+                    replaced = quantize_linear_layers_to_fp8_blockscale(
+                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}",
+                        offload_to_cpu=offload_requested,
                     )
+                    if replaced:
+                        log(f"Quantized {replaced} layers in {module_name} to FP8 block-scale (AITER).")
+                    else:
+                        log(f"{module_name} already FP8 (streamed quantize-on-load); post-load walk no-op.")
             if not offload_requested:
                 self.pipe = self.pipe.to(f"cuda:{local_rank}")
             if self.config.use_fp4_gemms:
@@ -991,6 +1137,14 @@ class xFuserModel(abc.ABC):
             return output
 
         self.pipe.vae.decode = decode_wrapper
+
+    def _make_generator(self, seed: int) -> torch.Generator:
+        """Generator on the pipe's execution device (cuda normally, cpu under offload).
+
+        randn_tensor requires the generator device to match the tensor's; hardcoding cuda
+        breaks when CPU offload runs the pipeline on cpu.
+        """
+        return torch.Generator(device=self.pipe._execution_device).manual_seed(seed)
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

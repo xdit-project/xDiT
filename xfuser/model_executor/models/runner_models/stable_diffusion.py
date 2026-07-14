@@ -43,7 +43,7 @@ class xFuserStableDiffusionModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder_3.encoder.block"],
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -65,7 +65,7 @@ class xFuserStableDiffusionModel(xFuserModel):
             prompt=input_args["prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []
         return DiffusionOutput(images=images, pipe_args=input_args)

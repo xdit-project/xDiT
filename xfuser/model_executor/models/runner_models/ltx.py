@@ -117,7 +117,7 @@ class xFuserLTX23VideoModel(xFuserModel):
             self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
+        generator = self._make_generator(input_args["seed"])
 
         # self.pipe and self.second_pipe share the same transformer object, so the
         # stage 2 distilled LoRA loaded on second_pipe is also visible to pipe.
@@ -294,7 +294,7 @@ class xFuserLTX2VideoModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             output_type="latent",
             return_dict=False,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
 
         video_latent = self.upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
@@ -309,7 +309,7 @@ class xFuserLTX2VideoModel(xFuserModel):
             noise_scale=STAGE_2_DISTILLED_SIGMA_VALUES[0],
             sigmas=STAGE_2_DISTILLED_SIGMA_VALUES,
             output_type="np",
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output, pipe_args=input_args)
 

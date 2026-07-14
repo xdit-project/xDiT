@@ -13,6 +13,30 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
+
+def required_dist_specifier(name: str):
+    """Version specifier declared for `name` in xfuser's package metadata (from setup.py
+    install_requires / extras), so runtime dependency-floor checks read the specifier from
+    setup.py instead of a duplicated hardcoded string. Returns None when metadata is
+    unavailable (e.g. running from source without an install) or `name` isn't declared.
+
+    Only use this for real dependency floors that mirror setup.py. Feature/capability gates
+    (e.g. "this code path needs a torch 2.5 feature" while the install floor is torch 2.4.1)
+    are NOT setup.py floors and must stay hardcoded at the version the feature landed.
+    """
+    try:
+        from importlib.metadata import requires, PackageNotFoundError
+        from packaging.requirements import Requirement, InvalidRequirement
+
+        for r in requires("xfuser") or []:
+            req = Requirement(r)
+            if req.name == name:
+                return req.specifier
+    except (PackageNotFoundError, InvalidRequirement) as e:
+        logger.debug(f"required_dist_specifier({name!r}) unavailable: {e}")
+    return None
+
+
 if TYPE_CHECKING:
     MASTER_ADDR: str = ""
     MASTER_PORT: Optional[int] = None
@@ -259,8 +283,9 @@ class PackagesEnvChecker:
                 from flash_attn import flash_attn_func
                 from flash_attn import __version__
 
-                if version.parse(__version__) < version.parse("2.6.0"):
-                    raise ImportError(f"install flash_attn >= 2.6.0")
+                spec = required_dist_specifier("flash-attn")
+                if spec is not None and __version__ not in spec:
+                    raise ImportError(f"install flash_attn {spec}")
                 return True
         except ImportError:
             return False

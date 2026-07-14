@@ -1,4 +1,3 @@
-from xfuser.config.diffusers import has_valid_diffusers_version
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 from .pixart_transformer_2d import xFuserPixArtTransformer2DWrapper
@@ -21,20 +20,27 @@ __all__ = [
     "xFuserSanaTransformer2DWrapper",
 ]
 
-# Gating some imports based on diffusers version, as they import part of diffusers
-if has_valid_diffusers_version("flux"):
+# These wrappers import diffusers pipeline symbols that only exist on newer
+# diffusers versions; skip them when unavailable instead of crashing the package.
+try:
     from .transformer_flux import xFuserFluxTransformer2DWrapper  # noqa: F401
 
     __all__.append("xFuserFluxTransformer2DWrapper")
+except ImportError:
+    pass
 
 
-if has_valid_diffusers_version("zimage"):
+try:
     from .transformer_z_image import xFuserZImageTransformer2DWrapper  # noqa: F401
 
     __all__.append("xFuserZImageTransformer2DWrapper")
+except ImportError:
+    pass
 
 
-if has_valid_diffusers_version("krea2"):
+try:
     from .transformer_krea2 import xFuserKrea2Transformer2DWrapper  # noqa: F401
 
     __all__.append("xFuserKrea2Transformer2DWrapper")
+except ImportError:
+    pass

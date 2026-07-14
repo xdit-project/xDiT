@@ -22,10 +22,11 @@ HAS_FLASH_ATTN = env_info["has_flash_attn"]
 def check_packages():
     import diffusers
 
-    if not version.parse(diffusers.__version__) > version.parse("0.30.2"):
+    specifier = envs.required_dist_specifier("diffusers")
+    if specifier is not None and diffusers.__version__ not in specifier:
         raise RuntimeError(
-            "This project requires diffusers version > 0.30.2. Currently, you can not install a correct version of diffusers by pip install."
-            "Please install it from source code!"
+            f"This project requires diffusers {specifier}, "
+            f"but {diffusers.__version__} is installed."
         )
 
 

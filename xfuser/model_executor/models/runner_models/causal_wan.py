@@ -20,6 +20,8 @@ from xfuser.model_executor.models.runner_models.base_model import (
 @register_model("CausalWan")
 class xFuserCausalWanModel(xFuserModel):
 
+    min_diffusers_version = "0.35.2"
+
     capabilities = ModelCapabilities(
         ulysses_degree=False,   # SP incompatible with KV cache initially
         ring_degree=False,

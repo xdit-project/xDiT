@@ -1,5 +1,4 @@
 import torch
-from diffusers import ZImagePipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -45,6 +44,8 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
 class xFuserZImageModel(xFuserModel):
+
+    min_diffusers_version = "0.36.0"
 
     default_input_values = DefaultInputValues(
         height=1024,
@@ -96,6 +97,7 @@ class xFuserZImageModel(xFuserModel):
             ]
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import ZImagePipeline
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -125,6 +127,8 @@ class xFuserZImageModel(xFuserModel):
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
 class xFuserZImageTurboModel(xFuserModel):
+
+    min_diffusers_version = "0.36.0"
 
     capabilities = ModelCapabilities(
         use_fp8_gemms=True,
@@ -169,6 +173,7 @@ class xFuserZImageTurboModel(xFuserModel):
             ]
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import ZImagePipeline
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,

@@ -1,11 +1,7 @@
 import torch
 import copy
 from diffusers import FlowMatchEulerDiscreteScheduler
-from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline, LTX2LatentUpsamplePipeline
-from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
-from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.ltx2.export_utils import encode_video
 from xfuser.model_executor.models.transformers.transformer_ltx2 import xFuserLTX2VideoTransformer3DWrapper
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -37,6 +33,9 @@ DEFAULT_NEGATIVE_PROMPT = "" \
 @register_model("dg845/LTX-2.3-Diffusers")
 @register_model("LTX-2.3")
 class xFuserLTX23VideoModel(xFuserModel):
+
+    min_diffusers_version = "0.37.0"
+
     default_input_values = DefaultInputValues(
         height=1024,
         width=1536,
@@ -71,6 +70,8 @@ class xFuserLTX23VideoModel(xFuserModel):
     _AUDIO_GUIDANCE_RESCALE = 0.7
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -117,6 +118,7 @@ class xFuserLTX23VideoModel(xFuserModel):
             self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
         generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
 
         # self.pipe and self.second_pipe share the same transformer object, so the
@@ -194,6 +196,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
+        from diffusers.pipelines.ltx2.export_utils import encode_video
         pipe_args = output.pipe_args
         output = output.videos
         audio_sample_rate = self.pipe.vocoder.config.output_sampling_rate
@@ -215,6 +218,8 @@ class xFuserLTX23VideoModel(xFuserModel):
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
 class xFuserLTX2VideoModel(xFuserModel):
+
+    min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
         height=1024,
@@ -241,6 +246,8 @@ class xFuserLTX2VideoModel(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -282,6 +289,7 @@ class xFuserLTX2VideoModel(xFuserModel):
             self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
         video_latent, audio_latent = self.pipe(
             prompt=input_args["prompt"],
             negative_prompt=input_args["negative_prompt"],
@@ -328,6 +336,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
+        from diffusers.pipelines.ltx2.export_utils import encode_video
         pipe_args = output.pipe_args
         output = output.videos
         for i, video_object in enumerate(output):

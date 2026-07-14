@@ -2,7 +2,6 @@
 adapted from https://github.com/ali-vilab/TeaCache.git
 adapted from https://github.com/chengzeyi/ParaAttention.git
 """
-from xfuser.config.diffusers import has_valid_diffusers_version
 from typing import Type, Dict
 
 TRANSFORMER_ADAPTER_REGISTRY: Dict[Type, str] = {}
@@ -10,7 +9,9 @@ TRANSFORMER_ADAPTER_REGISTRY: Dict[Type, str] = {}
 def register_transformer_adapter(transformer_class: Type, adapter_name: str):
     TRANSFORMER_ADAPTER_REGISTRY[transformer_class] = adapter_name
 
-if has_valid_diffusers_version("flux"):
+# Flux transformer symbols only exist on newer diffusers versions; skip
+# registration when unavailable instead of crashing the package.
+try:
     from diffusers.models.transformers.transformer_flux import FluxTransformer2DModel
     from xfuser.model_executor.models.transformers.transformer_flux import xFuserFluxTransformer2DWrapper
     register_transformer_adapter(FluxTransformer2DModel, "flux")
@@ -26,4 +27,5 @@ if has_valid_diffusers_version("flux"):
         register_transformer_adapter(xFuserFlux2Transformer2DWrapper, "flux2")
     except ImportError:
         pass  # FLUX.2 not available in this diffusers version
-
+except ImportError:
+    pass  # FLUX not available in this diffusers version

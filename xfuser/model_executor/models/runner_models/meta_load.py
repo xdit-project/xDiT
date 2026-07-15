@@ -197,6 +197,17 @@ class MemoryEfficientSharder:
                     continue
                 self._fill_transformer_replicated(component, name, strategy[name], device, world)
             else:
+                if not any(p.is_meta for p in component.parameters()):
+                    # Same unwired-runner case as the transformer branch above: this TE was loaded
+                    # real on every rank (the runner's _load_model built the whole pipeline real, e.g.
+                    # SD3.5's xFuserStableDiffusion3Pipeline). _fill_te_replicated broadcasts rank0's
+                    # tensor bytes into each peer slot; when peers are real (not meta) that overwrite
+                    # can diverge from the peer's own correct weights -> corrupt conditioning ->
+                    # NaN/black at multi-rank while 1-GPU (no fill) stays green. Skip it: the per-rank
+                    # real weights are already correct and symmetric across ranks.
+                    log(f"{name} loaded real on all ranks (unwired for replicated meta load); "
+                        f"skipping broadcast fill, keeping real weights.")
+                    continue
                 self._fill_te_replicated(component, device, world, set_module_tensor_to_device)
             torch.cuda.empty_cache()
             log(f"Broadcast-filled {name} from rank0 (replicated). "
@@ -225,17 +236,33 @@ class MemoryEfficientSharder:
         broadcast every param/buffer from world-rank0. Layout already matches (rank0 fp8-streamed,
         peers meta fp8-swapped), so no re-quantize.
 
-        Capture the param/buffer name lists ONCE and drive both the materialize and broadcast passes
-        off those fixed names (via rgetattr), mirroring _TransformerDiskFiller.finalize. Re-enumerating
-        named_parameters() for the broadcast is unsafe: set_module_tensor_to_device replaces param
-        objects, so a re-enumeration can hand back a different (still-CPU) object than the one the
-        materialize pass moved, and world.broadcast on a CPU tensor aborts the NCCL group.
+        Two hazards, because rank0 builds the TE real via the pipeline's from_pretrained while peers
+        build it on meta via _from_config (build_meta_component):
 
-        remove_duplicate=False: T5-family TEs tie shared.weight to encoder.embed_tokens.weight.
-        rank0 (from_pretrained) keeps the tie -> dedup yields one name; peers (_from_config on meta)
-        build them untied -> two names. Enumerating with duplicates makes both sides emit the SAME
-        ordered name list (the tied weight simply broadcasts twice, same data), so the per-tensor
-        broadcast stays in lockstep across ranks instead of drifting one collective apart -> hang.
+        1. dtype divergence (the fix below). The meta build instantiates at the pipeline's compute
+           dtype (bf16), so auto-computed buffers can differ from the real build -- Qwen3 rotary
+           inv_freq / original_inv_freq are fp32 real but bf16 on meta. world.broadcast copies rank0's
+           element bytes into the peer tensor's EXISTING storage, so a bf16 slot receiving fp32 bytes
+           is silently corrupted -> garbage RoPE frequencies -> NaN/black (survived ulysses<=2, broke
+           at ulysses=4 where the SP chunk amplifies the corrupt rotary positions). Broadcast rank0's
+           (shape, dtype) per name and reallocate any mismatched peer tensor before the data broadcast.
+
+        2. enumeration order. The two builders are not guaranteed to enumerate named_* in the same
+           order, so drive the broadcast off a sorted name order: every rank iterates an identical
+           sequence over the (count-guarded, class-identical) name set, landing each broadcast into the
+           peer tensor of the same name regardless of per-builder registration order.
+
+        Capture the name lists ONCE and drive the materialize pass off them (via rgetattr), mirroring
+        _TransformerDiskFiller.finalize. Re-enumerating named_parameters() for the broadcast is unsafe:
+        set_module_tensor_to_device replaces param objects, so a re-enumeration can hand back a
+        different (still-CPU) object than the one the materialize pass moved, and world.broadcast on a
+        CPU tensor aborts the NCCL group.
+
+        remove_duplicate=False: T5-family TEs tie shared.weight to encoder.embed_tokens.weight. rank0
+        (from_pretrained) keeps the tie -> dedup yields one name; peers (_from_config on meta) build
+        them untied -> two names. Enumerating with duplicates makes both sides expose the SAME name
+        SET; each tied name then broadcasts rank0's shared tensor into the matching peer name, leaving
+        every peer alias holding rank0's value (effectively tied) instead of desyncing the collective.
         """
         param_names = [n for n, _ in component.named_parameters(recurse=True, remove_duplicate=False)]
         buffer_names = [n for n, _ in component.named_buffers(recurse=True, remove_duplicate=False)]
@@ -249,7 +276,34 @@ class MemoryEfficientSharder:
             elif t.device.type != "cuda":
                 set_module_tensor_to_device(component, name, device, value=t.to(device))
         self._assert_tensor_count_agrees(component, world, device)
-        for name in param_names + buffer_names:
+        ordered = sorted(param_names) + sorted(buffer_names)
+        # dtype/shape realign before the byte-level broadcast. rank0 builds the TE real via
+        # from_pretrained while peers build it on meta at the pipeline's compute dtype (bf16), so
+        # auto-computed buffers can diverge in dtype -- e.g. Qwen3 rotary inv_freq is fp32 on the
+        # real build but bf16 on the meta build. world.broadcast copies rank0's element bytes into
+        # the peer tensor's existing storage; a bf16 slot receiving fp32 bytes is silently corrupted
+        # (garbage RoPE frequencies -> black output). Broadcast rank0's (shape, dtype) per name and
+        # reallocate any peer tensor that differs so every broadcast lands into a matching-layout slot.
+        spec = (
+            {n: (tuple(rgetattr(component, n).shape), rgetattr(component, n).dtype) for n in ordered}
+            if world.rank_in_group == 0 else None
+        )
+        box = [spec]
+        world.broadcast_object_list(box, src=0)
+        spec = box[0]
+        if world.rank_in_group != 0:
+            for name in ordered:
+                t = rgetattr(component, name)
+                shape, dtype = spec[name]
+                if tuple(t.shape) != shape or t.dtype != dtype:
+                    # dtype= is required: set_module_tensor_to_device otherwise casts `value` back to
+                    # the EXISTING buffer dtype (bf16), silently no-oping the fp32 realloc.
+                    set_module_tensor_to_device(
+                        component, name, device,
+                        value=torch.empty(shape, dtype=dtype, device=device),
+                        dtype=dtype,
+                    )
+        for name in ordered:
             world.broadcast(rgetattr(component, name).data, src=0)
 
     def _assert_tensor_count_agrees(self, module, group, device) -> None:

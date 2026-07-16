@@ -186,25 +186,19 @@ class MemoryEfficientSharder:
             if component is None or not hasattr(component, "named_parameters"):
                 continue
             if name == "transformer" or name.startswith("transformer_"):
-                if not any(p.is_meta for p in component.parameters()):
-                    # Unwired runner: this transformer was loaded real on every rank (its _load_model
-                    # skipped _build_transformer's meta path). _fill_transformer_replicated's to_empty()
-                    # would wipe those real weights -> NaN/black output. Skip the destructive fill; the
-                    # real replicated weights are correct and the post-load fp8 walk still quantizes
-                    # them. All-real is symmetric across ranks, so no collective divergence.
+                if self._all_ranks_loaded_real(component, world, device):
+                    # Unwired runner: loaded real on EVERY rank (e.g. a composition-wrapper pipeline
+                    # whose _load_model built the whole pipeline real). _fill_transformer_replicated's
+                    # to_empty() would wipe those weights; skip the destructive fill and keep the real
+                    # all-rank-symmetric weights (the post-load fp8 walk still quantizes them).
                     log(f"{name} loaded real on all ranks (unwired for replicated meta load); "
                         f"skipping broadcast fill, keeping real weights.")
                     continue
                 self._fill_transformer_replicated(component, name, strategy[name], device, world)
             else:
-                if not any(p.is_meta for p in component.parameters()):
-                    # Same unwired-runner case as the transformer branch above: this TE was loaded
-                    # real on every rank (the runner's _load_model built the whole pipeline real, e.g.
-                    # SD3.5's xFuserStableDiffusion3Pipeline). _fill_te_replicated broadcasts rank0's
-                    # tensor bytes into each peer slot; when peers are real (not meta) that overwrite
-                    # can diverge from the peer's own correct weights -> corrupt conditioning ->
-                    # NaN/black at multi-rank while 1-GPU (no fill) stays green. Skip it: the per-rank
-                    # real weights are already correct and symmetric across ranks.
+                if self._all_ranks_loaded_real(component, world, device):
+                    # Same unwired-runner case: TE loaded real on EVERY rank; skipping avoids
+                    # broadcasting rank0's bytes over each peer's already-correct weights.
                     log(f"{name} loaded real on all ranks (unwired for replicated meta load); "
                         f"skipping broadcast fill, keeping real weights.")
                     continue
@@ -212,6 +206,17 @@ class MemoryEfficientSharder:
             torch.cuda.empty_cache()
             log(f"Broadcast-filled {name} from rank0 (replicated). "
                 f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB")
+
+    def _all_ranks_loaded_real(self, component, world, device) -> bool:
+        """True only if EVERY rank has this component fully real (no meta params).
+
+        A per-rank `any(is_meta)` check diverges in the replicated path: rank0 loads the TEs real
+        (fp8-streamed) while peers build them on meta, so rank0 would skip the fill's collectives
+        while peers enter them -> the count-guard broadcast reads garbage and aborts (or hangs).
+        All-reduce the local real flag so the skip decision is identical on every rank."""
+        local_real = 0 if any(p.is_meta for p in component.parameters()) else 1
+        flag = torch.tensor([local_real], device=device)
+        return int(world.all_reduce(flag).item()) == world.world_size
 
     def _fill_transformer_replicated(self, component, name, strategy, device, world) -> None:
         """Per-block rank0-disk-read + world broadcast + symmetric per-block fp8 quantize (no shard)."""
@@ -304,7 +309,10 @@ class MemoryEfficientSharder:
                         dtype=dtype,
                     )
         for name in ordered:
-            world.broadcast(rgetattr(component, name).data, src=0)
+            # .contiguous() on the src: rank0's from_pretrained real tensors are trusted as-is and a
+            # non-contiguous buffer (strided/transposed view) would broadcast the wrong element bytes
+            # into peers. No-op on peers (freshly materialized -> already contiguous, filled in place).
+            world.broadcast(rgetattr(component, name).data.contiguous(), src=0)
 
     def _assert_tensor_count_agrees(self, module, group, device) -> None:
         """Collective guard that every rank sees the same param+buffer count for `module`.

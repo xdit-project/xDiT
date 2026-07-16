@@ -129,7 +129,7 @@ Individual model classes that inherit from `xFuserModel`:
 | `--use_parallel_vae` | Enable parallel VAE | False |
 | `--fully_shard_degree` | FSDP sharding degree; set to number of GPUs to shard across. 1 disables sharding. | 1 |
 | `--no_reshard_after_forward` | Keep parameters gathered after each block forward; trades memory for latency | False |
-| `--memory_efficient_sharding` | Load transformer blocks one at a time during init to reduce peak GPU memory; requires `--fully_shard_degree > 1` | False |
+| `--memory_efficient_sharding` | Reduce peak VRAM during load: shard transformer blocks one at a time on GPU during init, so the full unsharded component never materializes on device. Slightly slower to load. Use if the model OOMs on GPU during init. Requires `--fully_shard_degree > 1` | False |
 
 ### Input Parameters
 

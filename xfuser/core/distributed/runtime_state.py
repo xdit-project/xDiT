@@ -127,7 +127,7 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8, AttentionBackendType.FLASH_4_FP4, AttentionBackendType.AITER_MLA]:
+        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8, AttentionBackendType.FLASH_4_FP4, AttentionBackendType.AITER_MLA, AttentionBackendType.AITER_FLYDSL_FP8]:
             logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
@@ -219,6 +219,7 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_SPARSE_SAGE_V2,
                                  AttentionBackendType.AITER_SPARGE_V2,
                                  AttentionBackendType.AITER_FLYDSL,
+                                 AttentionBackendType.AITER_FLYDSL_FP8,
                                  AttentionBackendType.FLEX_BLOCK_ATTN,
                                  AttentionBackendType.FLEX_BLOCK_SPARGE]:
             if self.parallel_config.ring_degree > 1:
@@ -317,6 +318,13 @@ class RuntimeState(metaclass=ABCMeta):
                 from aiter.ops.flydsl import flydsl_flash_attn_func
             except ImportError:
                 raise RuntimeError("AITER FlyDSL attention is not available, please update AITER") from None
+        elif attention_backend == AttentionBackendType.AITER_FLYDSL_FP8:
+            # fp8 quant lands in a newer aiter than the bf16 flydsl kernel, so check it
+            # separately -- a build can ship bf16 flydsl without flydsl_fp8_quant.
+            try:
+                from aiter.ops.flydsl import flydsl_flash_attn_func, flydsl_fp8_quant
+            except ImportError:
+                raise RuntimeError("AITER FlyDSL FP8 attention is not available, please update AITER") from None
         elif attention_backend in (AttentionBackendType.FLEX_BLOCK_ATTN,
                                    AttentionBackendType.FLEX_BLOCK_SPARGE):
             if not env_info["has_flex_block_attn"]:

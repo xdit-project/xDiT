@@ -142,11 +142,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
     def _load_model(self) -> DiffusionPipeline:
         xFuserCosmos3OmniTransformerWrapper = get_cosmos3_transformer_wrapper_class()
 
-        transformer = xFuserCosmos3OmniTransformerWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self._build_transformer(xFuserCosmos3OmniTransformerWrapper)
 
         xFuserCosmos3OmniPipeline = get_cosmos3_pipeline_class()
 
@@ -185,7 +181,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             fps=float(self.settings.fps),
             enable_sound=False,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             output_type="np",
             add_resolution_template=False,
             add_duration_template=False,

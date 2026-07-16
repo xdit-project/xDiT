@@ -43,17 +43,25 @@ class xFuserStableDiffusionModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder_3.encoder.block"],
     )
 
+    def _supports_replicated_meta_load(self) -> bool:
+        # Composition wrapper (no ConfigMixin.load_config): loads real on every rank, so the
+        # rank0-broadcast meta path never applies. Keep it off the gate rather than entering and
+        # no-op'ing (which only logs a misleading "skipping broadcast fill").
+        return False
+
     def _load_model(self) -> DiffusionPipeline:
+        # SD3's wrapper is composition-style (wraps a transformer instance) and lacks
+        # ConfigMixin.load_config, so it cannot be built on meta like flux/z_image. Load real on
+        # every rank; the per-rank AITER fp8 walk quantizes the real weights CPU->GPU afterwards.
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
-        pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
+        return xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             engine_config=self.engine_config,
             torch_dtype=dtype,
         )
-        return pipe
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "text_encoder", "text_encoder_2", "text_encoder_3"]
@@ -65,7 +73,7 @@ class xFuserStableDiffusionModel(xFuserModel):
             prompt=input_args["prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []
         return DiffusionOutput(images=images, pipe_args=input_args)

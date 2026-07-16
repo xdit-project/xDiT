@@ -79,6 +79,7 @@ class xFuserFluxModel(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+            "text_encoder_2.encoder.block",
         ],
         fsdp_strategy={
             "transformer": {
@@ -108,15 +109,14 @@ class xFuserFluxModel(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
-            transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer",
-            )
+            transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
+            te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = FluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
             )
 
         return pipe
@@ -136,7 +136,7 @@ class xFuserFluxModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # For legacy pipelines
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -170,6 +170,7 @@ class xFuserFluxKontextModel(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+            "text_encoder_2.encoder.block",
         ],
         fsdp_strategy={
             "transformer": {
@@ -187,15 +188,14 @@ class xFuserFluxKontextModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = FluxKontextPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -216,7 +216,7 @@ class xFuserFluxKontextModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # non-last pp ranks return None
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -278,6 +278,7 @@ class xFuserFlux2Model(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+            "text_encoder.model.language_model.layers",
         ],
         fp4_gemm_module_list=[
             "transformer.transformer_blocks",
@@ -345,15 +346,14 @@ class xFuserFlux2Model(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
-            transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer",
-            )
+            transformer = self._build_transformer(xFuserFlux2Transformer2DWrapper)
+            te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = Flux2Pipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
             )
         return pipe
 
@@ -385,7 +385,7 @@ class xFuserFlux2Model(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # non-last pp ranks return None
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -420,6 +420,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+            "text_encoder.model.layers",
         ],
         fsdp_strategy={
             "transformer": {
@@ -458,15 +459,14 @@ class xFuserFlux2Klein9BModel(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
-            transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer",
-            )
+            transformer = self._build_transformer(xFuserFlux2Transformer2DWrapper)
+            te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = Flux2KleinPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
             )
         return pipe
 
@@ -478,7 +478,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             image=input_args["images"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # non-last pp ranks return None
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -514,6 +514,7 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+            "text_encoder.model.layers",
         ],
         fsdp_strategy={
             "transformer": {

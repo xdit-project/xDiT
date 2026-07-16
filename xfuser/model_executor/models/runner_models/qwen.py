@@ -45,7 +45,7 @@ class xFuserQwenImageEditModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder.model.language_model.layers"],
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -58,15 +58,14 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.output_name = "qwen_image_edit_2509"
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserQwenImageTransformerWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self._build_transformer(xFuserQwenImageTransformerWrapper)
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = QwenImageEditPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -77,7 +76,7 @@ class xFuserQwenImageEditModel(xFuserModel):
             "negative_prompt": input_args["negative_prompt"],
             "num_inference_steps": input_args["num_inference_steps"],
             "true_cfg_scale": input_args["guidance_scale"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
         }
         if "height" in input_args: kwargs["height"] = input_args["height"]
         if "width" in input_args: kwargs["width"] = input_args["width"]
@@ -115,7 +114,7 @@ class xFuserQwenImageModel(xFuserModel):
         model_name="Qwen/Qwen-Image",
         output_name="qwen_image",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder.model.language_model.layers"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
@@ -133,15 +132,14 @@ class xFuserQwenImageModel(xFuserModel):
             self.settings.output_name = "qwen_image_2512"
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserQwenImageTransformerWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self._build_transformer(xFuserQwenImageTransformerWrapper)
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = QwenImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -153,7 +151,7 @@ class xFuserQwenImageModel(xFuserModel):
             "negative_prompt": input_args["negative_prompt"],
             "num_inference_steps": input_args["num_inference_steps"],
             "true_cfg_scale": input_args["guidance_scale"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
         }
 
         output = self.pipe(**kwargs)

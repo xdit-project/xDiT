@@ -79,7 +79,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             num_frames=input_args["num_frames"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -158,7 +158,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         kwargs = {
             "num_inference_steps": input_args["num_inference_steps"],
             "num_frames": input_args["num_frames"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
             "prompt": input_args["prompt"],
         }
         if self.config.task == "i2v":

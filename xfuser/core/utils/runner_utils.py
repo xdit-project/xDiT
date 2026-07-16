@@ -360,14 +360,18 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
 def quantize_linear_layers_to_fp8_blockscale(
     model: torch.nn.Module,
     device: Optional[torch.device] = None,
-) -> None:
+    offload_to_cpu: bool = False,
+) -> int:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
 
     Mirrors quantize_linear_layers_to_fp4 structure: recursive tree walk, in-place
     setattr replacement. Pre-quantizes weights to FP8 block-128 at call time.
+    Returns the number of nn.Linear leaves replaced (0 when leaves are already FP8, e.g.
+    after streaming quantize-on-load).
     """
     from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
 
+    replaced = 0
     for name, module in list(model.named_children()):
         if isinstance(module, torch.nn.Linear):
             weight = module.weight.data
@@ -385,9 +389,16 @@ def quantize_linear_layers_to_fp8_blockscale(
                 module.bias = None
             fp8_layer.load_and_quantize_weights(weight, bias, device=device)
             del weight, bias
+            # Under offload, quantize on GPU then evict to CPU immediately so peak VRAM
+            # during quantization stays at one layer, not the whole component. The offload
+            # manager streams these fp8 leaves back on demand.
+            if offload_to_cpu:
+                fp8_layer.to("cpu")
             setattr(model, name, fp8_layer)
+            replaced += 1
         elif next(module.children(), None) is not None:
-            quantize_linear_layers_to_fp8_blockscale(module, device=device)
+            replaced += quantize_linear_layers_to_fp8_blockscale(module, device=device, offload_to_cpu=offload_to_cpu)
+    return replaced
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:

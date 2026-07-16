@@ -120,6 +120,7 @@ class xFuserArgs:
     flow_shift: Optional[float] = None
     enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
+    enable_group_cpu_offload: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
     # DiTFastAttn arguments
@@ -388,6 +389,12 @@ class xFuserArgs:
             help="Offloading the weights to the CPU.",
         )
         runtime_group.add_argument(
+            "--enable_group_cpu_offload",
+            action="store_true",
+            help="Async leaf-level group CPU offload (streamed, per-group pinned). Overlaps H2D "
+                 "transfer with compute; upstream diffusers group offloading.",
+        )
+        runtime_group.add_argument(
             "--enable_tiling",
             action="store_true",
             help="Making VAE decode a tile at a time to save GPU memory.",
@@ -532,9 +539,10 @@ class xFuserArgs:
             "--memory_efficient_sharding",
             action="store_true",
             default=False,
-            help="Load transformer blocks one at a time during init to reduce peak GPU memory. "
-                 "Slightly slower at inference - only use if the model OOMs during load despite "
-                 "--fully_shard_degree. Requires --fully_shard_degree > 1.",
+            help="Reduce peak VRAM during load: shard transformer blocks one at a time on GPU "
+                 "during init, so the full unsharded component never materializes on device. "
+                 "Slightly slower to load - use if the model OOMs on GPU during init. Requires "
+                 "--fully_shard_degree > 1.",
         )
         parser.add_argument(
             "--height",
@@ -602,6 +610,11 @@ class xFuserArgs:
             "--enable_model_cpu_offload",
             action="store_true",
             help="Offloading the weights to the CPU.",
+        )
+        parser.add_argument(
+            "--enable_group_cpu_offload",
+            action="store_true",
+            help="Async leaf-level group CPU offload (streamed).",
         )
         parser.add_argument(
             "--enable_tiling",

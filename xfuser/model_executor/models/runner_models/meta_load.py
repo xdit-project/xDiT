@@ -244,8 +244,8 @@ class MemoryEfficientSharder:
         Two hazards, because rank0 builds the TE real via the pipeline's from_pretrained while peers
         build it on meta via _from_config (build_meta_component):
 
-        1. dtype divergence (the fix below). The meta build instantiates at the pipeline's compute
-           dtype (bf16), so auto-computed buffers can differ from the real build -- Qwen3 rotary
+        1. dtype divergence. The meta build instantiates at the pipeline's compute dtype (bf16),
+           so auto-computed buffers can differ from the real build -- Qwen3 rotary
            inv_freq / original_inv_freq are fp32 real but bf16 on meta. world.broadcast copies rank0's
            element bytes into the peer tensor's EXISTING storage, so a bf16 slot receiving fp32 bytes
            is silently corrupted -> garbage RoPE frequencies -> NaN/black (survived ulysses<=2, broke
@@ -282,13 +282,8 @@ class MemoryEfficientSharder:
                 set_module_tensor_to_device(component, name, device, value=t.to(device))
         self._assert_tensor_count_agrees(component, world, device)
         ordered = sorted(param_names) + sorted(buffer_names)
-        # dtype/shape realign before the byte-level broadcast. rank0 builds the TE real via
-        # from_pretrained while peers build it on meta at the pipeline's compute dtype (bf16), so
-        # auto-computed buffers can diverge in dtype -- e.g. Qwen3 rotary inv_freq is fp32 on the
-        # real build but bf16 on the meta build. world.broadcast copies rank0's element bytes into
-        # the peer tensor's existing storage; a bf16 slot receiving fp32 bytes is silently corrupted
-        # (garbage RoPE frequencies -> black output). Broadcast rank0's (shape, dtype) per name and
-        # reallocate any peer tensor that differs so every broadcast lands into a matching-layout slot.
+        # dtype/shape realign: broadcast rank0's (shape, dtype) per name and reallocate any peer
+        # tensor that differs so every broadcast lands into a matching-layout slot (hazard 1 above).
         spec = (
             {n: (tuple(rgetattr(component, n).shape), rgetattr(component, n).dtype) for n in ordered}
             if world.rank_in_group == 0 else None

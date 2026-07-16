@@ -221,11 +221,9 @@ class xFuserWan21I2VModel(xFuserModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+        transformer = self._build_transformer(
+            xFuserWanTransformer3DWrapper,
+            init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
@@ -248,7 +246,7 @@ class xFuserWan21I2VModel(xFuserModel):
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
             guidance_scale_2=input_args["guidance_scale_2"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -297,17 +295,10 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
-        )
-        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer_2",
-            attention_kwargs=_build_attention_kwargs(self.config),
+        attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
+        transformer = self._build_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
+        transformer_2 = self._build_transformer(
+            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
         )
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
@@ -435,7 +426,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             num_frames=input_args["num_frames"],
             guidance_scale=1.0,
             guidance_scale_2=None,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -496,11 +487,9 @@ class xFuserWan21T2VModel(xFuserModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+        transformer = self._build_transformer(
+            xFuserWanTransformer3DWrapper,
+            init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanPipeline.from_pretrained(
@@ -522,7 +511,7 @@ class xFuserWan21T2VModel(xFuserModel):
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
             guidance_scale_2=input_args["guidance_scale_2"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -548,17 +537,10 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
-        )
-        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer_2",
-            attention_kwargs=_build_attention_kwargs(self.config),
+        attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
+        transformer = self._build_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
+        transformer_2 = self._build_transformer(
+            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
         )
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanPipeline.from_pretrained(
@@ -624,11 +606,9 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 
     def _load_model(self) -> DiffusionPipeline:
         torch.set_float32_matmul_precision('high')
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+        transformer = self._build_transformer(
+            xFuserWanTransformer3DWrapper,
+            init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
         pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
         te_kwargs, te_quant = self._meta_te_kwargs()
@@ -651,7 +631,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
             "num_frames": input_args["num_frames"],
             "guidance_scale": input_args["guidance_scale"],
             "guidance_scale_2": input_args["guidance_scale_2"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
         }
         if self.config.task == "i2v":
             kwargs["image"] = input_args["image"]
@@ -740,11 +720,7 @@ class xFuserWan21VACEModel(xFuserModel):
             self.settings.output_name = "wan.2.1_vace_1.3b"
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserWanVACETransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self._build_transformer(xFuserWanVACETransformer3DWrapper)
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanVACEPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -790,7 +766,7 @@ class xFuserWan21VACEModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             video=input_args["video"],
             mask=input_args["mask"],
         )

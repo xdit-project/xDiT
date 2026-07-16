@@ -363,12 +363,20 @@ class xFuserModel(abc.ABC):
         RDNA4-only. Excludes weight-splitting parallelism (FSDP/pipefusion/TP), where per-rank
         weights differ and a broadcast would be wrong (FSDP has its own meta-load path)."""
         return bool(
-            PACKAGES_CHECKER._on_rdna4()
+            self._supports_replicated_meta_load()
+            and PACKAGES_CHECKER._on_rdna4()
             and get_world_group().world_size > 1
             and self.config.fully_shard_degree == 1
             and self.config.pipefusion_parallel_degree == 1
             and self.config.tensor_parallel_degree == 1
         )
+
+    def _supports_replicated_meta_load(self) -> bool:
+        """Whether peers can build this model's components on meta for the rank0-broadcast path.
+        Composition-wrapper pipelines (e.g. SD3) lack ConfigMixin.load_config, so they load real on
+        every rank and must stay off the meta/broadcast path — it no-ops for them (broadcast_fill
+        skips real components) and only emits misleading 'skipping broadcast fill' logs."""
+        return True
 
     def _fp8_targets_for_component(self, component_name: str) -> list[str]:
         """fp8_gemm_module_list entries under this component, with the pipe-level prefix stripped

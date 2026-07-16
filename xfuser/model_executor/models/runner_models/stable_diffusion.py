@@ -46,12 +46,16 @@ class xFuserStableDiffusionModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder_3.encoder.block"],
     )
 
+    def _supports_replicated_meta_load(self) -> bool:
+        # Composition wrapper (no ConfigMixin.load_config): loads real on every rank, so the
+        # rank0-broadcast meta path never applies. Keep it off the gate rather than entering and
+        # no-op'ing (which only logs a misleading "skipping broadcast fill").
+        return False
+
     def _load_model(self) -> DiffusionPipeline:
         # SD3's wrapper is composition-style (wraps a transformer instance) and lacks
         # ConfigMixin.load_config, so it cannot be built on meta like flux/z_image. Load real on
-        # every rank; on the replicated multi-GPU path the broadcast_fill_replicated is_meta guard
-        # keeps these real weights (skips the destructive per-block fill) and the AITER fp8 walk
-        # quantizes them CPU->GPU afterwards.
+        # every rank; the per-rank AITER fp8 walk quantizes the real weights CPU->GPU afterwards.
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
         return xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,

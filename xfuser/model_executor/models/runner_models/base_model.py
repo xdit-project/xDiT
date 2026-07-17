@@ -287,6 +287,12 @@ class xFuserModel(abc.ABC):
         if self.config.enable_tiling:
             log("Enabling VAE tiling...")
             self.pipe.vae.enable_tiling()
+            self._apply_vae_tile_size_overrides()
+            self._install_vae_decode_oom_guard()
+        elif (self.config.vae_tile_latent_size is not None
+              or self.config.vae_tile_sample_size is not None):
+            log("WARNING: --vae_tile_latent_size / --vae_tile_sample_size ignored without "
+                "--enable_tiling.")
 
         if self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
@@ -991,6 +997,61 @@ class xFuserModel(abc.ABC):
             return output
 
         self.pipe.vae.decode = decode_wrapper
+
+    def _apply_vae_tile_size_overrides(self) -> None:
+        # Default tile size tracks the VAE's training sample_size and never shrinks for
+        # above-training-res decodes, so one tile can exceed free VRAM. CLI shrinks it.
+        # Image VAEs (AutoencoderKL) expose tile_latent_min_size/tile_sample_min_size.
+        # Video VAEs key tiling off tile_sample_min_height/_width/_num_frames instead, so
+        # setattr here would take on a dead attribute and silently do nothing.
+        vae = self.pipe.vae
+        want_latent = self.config.vae_tile_latent_size is not None
+        want_sample = self.config.vae_tile_sample_size is not None
+        if (want_latent or want_sample) and not hasattr(vae, "tile_latent_min_size"):
+            log(f"WARNING: --vae_tile_latent_size / --vae_tile_sample_size unsupported for "
+                f"{type(vae).__name__} (no tile_latent_min_size); override ignored.")
+            return
+        if want_latent != want_sample:
+            log("WARNING: only one of --vae_tile_latent_size / --vae_tile_sample_size set. "
+                "Set both together to preserve the VAE downscale ratio (usually 8x); "
+                "mismatched tile sizes produce grid seams in the decoded output.")
+        if want_latent:
+            vae.tile_latent_min_size = self.config.vae_tile_latent_size
+            log(f"VAE tile_latent_min_size set to {vae.tile_latent_min_size}")
+        if want_sample:
+            vae.tile_sample_min_size = self.config.vae_tile_sample_size
+            log(f"VAE tile_sample_min_size set to {vae.tile_sample_min_size}")
+
+    def _install_vae_decode_oom_guard(self) -> None:
+        # Point a VAE-decode OOM at the tile-size args. Success path untouched.
+        original_decode = self.pipe.vae.decode
+        vae = self.pipe.vae
+
+        @functools.wraps(original_decode)
+        def decode_oom_guard(*args, **kwargs):
+            try:
+                return original_decode(*args, **kwargs)
+            except torch.cuda.OutOfMemoryError as e:
+                latent = getattr(vae, "tile_latent_min_size", None)
+                sample = getattr(vae, "tile_sample_min_size", None)
+                if isinstance(latent, int) and latent > 0 and isinstance(sample, int):
+                    # diffusers blends adjacent pixel-space tiles using sample/latent, which must
+                    # equal the VAE downscale (usually 8). Shrink both together or the blend
+                    # windows go wrong and grid seams appear.
+                    ratio = max(1, round(sample / latent))
+                    new_latent = max(1, latent // 2)
+                    rec = f"--vae_tile_latent_size {new_latent} --vae_tile_sample_size {new_latent * ratio}"
+                else:
+                    rec = "--vae_tile_latent_size 64 --vae_tile_sample_size 512"
+                raise torch.cuda.OutOfMemoryError(
+                    f"{e}\n\nVAE tiled decode ran out of memory (current "
+                    f"tile_latent_min_size={latent}, tile_sample_min_size={sample}). "
+                    f"Shrink the per-tile window, keeping tile_sample_min_size = "
+                    f"tile_latent_min_size x the VAE downscale (usually 8) or tiles won't "
+                    f"blend and you'll see grid seams. E.g. {rec}, then re-run."
+                ) from e
+
+        self.pipe.vae.decode = decode_oom_guard
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

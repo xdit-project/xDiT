@@ -122,6 +122,8 @@ class xFuserArgs:
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
+    vae_tile_latent_size: Optional[int] = None
+    vae_tile_sample_size: Optional[int] = None
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8
@@ -398,6 +400,23 @@ class xFuserArgs:
             help="Making VAE decode a tile at a time to save GPU memory.",
         )
         runtime_group.add_argument(
+            "--vae_tile_latent_size",
+            type=int,
+            default=None,
+            help="Override VAE tile_latent_min_size (latent window). Smaller = less peak "
+                 "VRAM at VAE decode, more tiles. Pair with --vae_tile_sample_size = this x "
+                 "VAE downscale (usually 8) or tiles won't blend (grid seams). Requires "
+                 "--enable_tiling.",
+        )
+        runtime_group.add_argument(
+            "--vae_tile_sample_size",
+            type=int,
+            default=None,
+            help="Override VAE tile_sample_min_size (pixel window for blend/overlap). Keep "
+                 "tile_sample_min_size = tile_latent_min_size x VAE downscale (usually 8) or "
+                 "tiles won't blend (grid seams). Requires --enable_tiling.",
+        )
+        runtime_group.add_argument(
             "--use_fp8_t5_encoder",
             action="store_true",
             help="Quantize the T5 text encoder.",
@@ -612,6 +631,23 @@ class xFuserArgs:
             "--enable_slicing",
             action="store_true",
             help="Enable VAE slicing to save GPU memory.",
+        )
+        parser.add_argument(
+            "--vae_tile_latent_size",
+            type=int,
+            default=None,
+            help="Override VAE tile_latent_min_size (latent window). Smaller = less peak "
+                 "VRAM at VAE decode, more tiles. Pair with --vae_tile_sample_size = this x "
+                 "VAE downscale (usually 8) or tiles won't blend (grid seams). Requires "
+                 "--enable_tiling.",
+        )
+        parser.add_argument(
+            "--vae_tile_sample_size",
+            type=int,
+            default=None,
+            help="Override VAE tile_sample_min_size (pixel window for blend/overlap). Keep "
+                 "tile_sample_min_size = tile_latent_min_size x VAE downscale (usually 8) or "
+                 "tiles won't blend (grid seams). Requires --enable_tiling.",
         )
         parser.add_argument(
             "--use_int8_gemms",

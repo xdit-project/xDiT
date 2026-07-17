@@ -80,7 +80,9 @@ def _build_config(
     if cache_config_json:
         try:
             overrides = json.loads(cache_config_json)
-        except json.JSONDecodeError as e:
+            if not isinstance(overrides, dict):
+                raise TypeError("cache_config must be a JSON object")
+        except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"--cache_config is not valid JSON: {e}") from e
 
     if isinstance(preset_kwargs, DBCachePreset):
@@ -211,6 +213,8 @@ def _install_sp_can_cache_sync() -> None:
     @torch.compiler.disable
     def can_cache(self, *args, **kwargs):
         result = orig_can_cache(self, *args, **kwargs)
+        if not (dist.is_available() and dist.is_initialized()):
+            return result
         t = torch.tensor(
             [1 if result else 0], device=torch.cuda.current_device(), dtype=torch.int32)
         get_world_group().broadcast(t, src=0)

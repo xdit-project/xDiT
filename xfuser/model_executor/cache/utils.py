@@ -234,6 +234,8 @@ class TeaCachedTransformerBlocks(CachedTransformerBlocks):
     def are_two_tensor_similar(self, t1: torch.Tensor, t2: torch.Tensor, threshold: float) -> torch.Tensor:
         diff = self.l1_distance(t1, t2)
         device = t1.device
+        if isinstance(threshold, torch.Tensor):
+            threshold = threshold.to(device)
         accum = self.accumulated_rel_l1_distance.to(device)
         cnt = self.cnt.to(device)
         new_accum = accum + self.rescale_func(diff)

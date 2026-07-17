@@ -34,7 +34,9 @@ def _resolve_threshold(
     if cache_config:
         try:
             override = json.loads(cache_config)
-        except json.JSONDecodeError as e:
+            if not isinstance(override, dict):
+                raise TypeError("cache_config must be a JSON object")
+        except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"--cache_config is not valid JSON: {e}") from e
         threshold = override.get("residual_diff_threshold", threshold)
     return threshold

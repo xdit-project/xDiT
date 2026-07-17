@@ -33,6 +33,7 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 
+from xfuser.model_executor.cache.presets import ModelCacheConfig
 from xfuser.core.distributed import (
     get_world_group,
     get_data_parallel_rank,
@@ -122,7 +123,7 @@ class ModelCapabilities:
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
-    use_fbcache: bool = False
+    supported_cache_methods: Tuple[str, ...] = ()
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -160,6 +161,7 @@ class ModelSettings:
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_suffixes: Tuple[str] = None
     fbcache_thresh: float = 0.12
+    cache_config: Optional[ModelCacheConfig] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
@@ -174,6 +176,7 @@ class ModelSettings:
     })
     valid_tasks: List[str] = field(default_factory=list)
     resolution_divisor: Optional[int] = None
+    transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -275,6 +278,9 @@ class xFuserModel(abc.ABC):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)
 
+        if self.config.cache_method:
+            self._apply_step_cache()
+
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
         if getattr(self.config, "use_spargeattn_head_balance", False):
@@ -295,10 +301,36 @@ class xFuserModel(abc.ABC):
             log("Enabling model CPU offload...")
             self.pipe.enable_model_cpu_offload()
 
+    def _apply_step_cache(self) -> None:
+        from xfuser.core.distributed import get_tensor_model_parallel_world_size
+        from xfuser.model_executor.cache.adapters import apply_cache
+        cache_method = self.config.cache_method
+        if cache_method == "dbcache" and get_pipeline_parallel_world_size() > 1:
+            raise ValueError(
+                f"dbcache is incompatible with PipeFusion (PP={get_pipeline_parallel_world_size()}): "
+                "the residual-diff skip decision is computed via a collective that only runs on the "
+                "stage holding the cached block, so the world collective deadlocks. Disable dbcache "
+                "or set --pipefusion_parallel_degree 1."
+            )
+        if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
+            raise RuntimeError("teacache requires TP=1")
+        method_cfg = (self.settings.cache_config or {}).get(cache_method)
+        apply_cache(
+            cache_method=cache_method,
+            num_steps=self.config.num_inference_steps,
+            pipe=self.pipe,
+            preset_kwargs=method_cfg.preset if method_cfg else None,
+            adapter_config=method_cfg.adapter if method_cfg else None,
+            cache_config=self.config.cache_config,
+            transformer_attr=self.settings.transformer_attr_names[0],
+        )
+        log(f"Step cache applied: method={cache_method}")
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
+            if key == "supported_cache_methods":
+                continue  # handled separately below
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
@@ -306,6 +338,17 @@ class xFuserModel(abc.ABC):
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
+
+        if config.cache_method:
+            if not self.capabilities.supported_cache_methods:
+                raise ValueError(
+                    f"Model {self.settings.model_name} does not support step caching (no supported_cache_methods declared)."
+                )
+            if config.cache_method not in self.capabilities.supported_cache_methods:
+                raise ValueError(
+                    f"Model {self.settings.model_name} does not support --cache_method {config.cache_method}. "
+                    f"Supported: {', '.join(self.capabilities.supported_cache_methods)}"
+                )
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
@@ -442,7 +485,9 @@ class xFuserModel(abc.ABC):
             component = getattr(self.pipe, component_name, None)
             if component is None:
                 continue
-            if self.config.fully_shard_degree > 1:
+            if self.config.fully_shard_degree > 1 or self.config.cache_method:
+                # Per-block compile: leaves transformer as original object so cache-dit's
+                # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
                 compiled_any = False
                 for attr in wrap_attrs:
@@ -755,6 +800,10 @@ class xFuserModel(abc.ABC):
                     reshard_after_forward=reshard_after_forward,
                     memory_efficient_init=self.config.memory_efficient_sharding,
                     offload_policy=offload_policy,
+                    # Disable prefetch when step-caching is active: on cache-hit steps
+                    # transformer blocks are not called, so prefetching their all-gathers
+                    # wastes communication. Blocks that ARE called still all-gather on demand.
+                    forward_prefetch=not bool(self.config.cache_method),
                     # All ranks load from the same checkpoint so states are already
                     # identical. No broadcast needed regardless of offload policy.
                     sync_module_states=False,

@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from packaging import version
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import sys
 import torch
 import torch.distributed
@@ -52,7 +52,7 @@ PACKAGES_CHECKER.check_diffusers_version()
 from xfuser.model_executor.schedulers import *
 from xfuser.model_executor.models.transformers import *
 from xfuser.model_executor.layers.attention_processor import *
-from xfuser.model_executor.cache.diffusers_adapters import apply_cache_on_transformer
+from xfuser.model_executor.cache.adapters import apply_cache
 from xfuser.config.config import ParallelConfig
 try:
     import os
@@ -165,6 +165,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         if transformer is not None:
             pipeline.transformer = self._convert_transformer_backbone(
                 transformer,
+                pipe=pipeline,
                 enable_torch_compile=engine_config.runtime_config.use_torch_compile,
                 enable_onediff=engine_config.runtime_config.use_onediff,
                 cache_args=cache_args,
@@ -364,7 +365,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         initialize_fast_attn_state(pipeline=pipeline, single_config=engine_config.fast_attn_config)
 
     def _convert_transformer_backbone(
-        self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool, cache_args: Optional[Dict] = None,
+        self, transformer: nn.Module, pipe: Optional[Any] = None, enable_torch_compile: bool = False, enable_onediff: bool = False, cache_args: Optional[Dict] = None,
     ):
         if (
             get_pipeline_parallel_world_size() == 1
@@ -387,27 +388,62 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 f"apply --use_torch_compile and --use_onediff togather. we use torch compile only"
             )
         if cache_args:
-            use_teacache = cache_args["use_teacache"]
-            use_fbcache = cache_args["use_fbcache"]
-            cache_args.pop("use_teacache")
-            cache_args.pop("use_fbcache")
-            use_cache = use_teacache or use_fbcache
-            use_cache = (
-                use_cache
-                and get_pipeline_parallel_world_size() == 1
-                and get_classifier_free_guidance_world_size() == 1
-                and get_tensor_model_parallel_world_size() == 1
-            )
-            if use_cache:
-                if use_teacache and use_fbcache:
-                    logger.warning(f"apply --use_teacache and --use_fbcache togather. we use FBCache")
-                    cache_args["use_cache"] = "Fb"
+            cache_args = dict(cache_args)
+            cache_method = cache_args.pop("cache_method", None)
+            if cache_method is None:
+                use_teacache = cache_args.pop("use_teacache", False)
+                use_fbcache = cache_args.pop("use_fbcache", False)
+                if use_fbcache:
+                    if use_teacache:
+                        logger.warning("apply --use_teacache and --use_fbcache together. we use FBCache")
+                    cache_method = "fbcache"
                 elif use_teacache:
-                    cache_args["use_cache"] = "Tea"
-                elif use_fbcache:
-                    cache_args["use_cache"] = "Fb"
+                    cache_method = "teacache"
+            else:
+                cache_args.pop("use_teacache", None)
+                cache_args.pop("use_fbcache", None)
 
-                transformer = apply_cache_on_transformer(transformer, **cache_args)
+            if cache_method == "dbcache":
+                raise ValueError(
+                    "dbcache is not supported on the legacy pipeline path: it needs a "
+                    "per-model adapter_config (block layout) that this path never supplies, "
+                    "so it would silently fall back to auto-detection with the wrong layout. "
+                    "Drive dbcache through the runner path "
+                    "(xfuser/model_executor/models/runner_models). teacache/fbcache work here."
+                )
+
+            if cache_method is not None:
+                # dbcache is rank-aware and has no such restriction.
+                in_tree = cache_method in ("teacache", "fbcache")
+                parallel_ok = (
+                    get_pipeline_parallel_world_size() == 1
+                    and get_classifier_free_guidance_world_size() == 1
+                    and get_tensor_model_parallel_world_size() == 1
+                )
+                use_cache = (not in_tree) or parallel_ok
+                if in_tree and not parallel_ok:
+                    logger.warning(
+                        f"{cache_method} requires PP=CFG=TP=1; skipping cache (current config is not single-process)"
+                    )
+            else:
+                use_cache = False
+
+            if use_cache:
+                num_steps = cache_args.pop("num_steps", 28)
+                rel_l1_thresh = cache_args.pop("rel_l1_thresh", None)
+                cache_args.pop("return_hidden_states_first", None)
+                preset_kwargs = cache_args.pop("preset_kwargs", None)
+                if rel_l1_thresh is not None and preset_kwargs is None:
+                    preset_kwargs = {"residual_diff_threshold": rel_l1_thresh}
+                cache_config = cache_args.pop("cache_config", None)
+                apply_cache(
+                    cache_method=cache_method,
+                    num_steps=num_steps,
+                    pipe=pipe,
+                    preset_kwargs=preset_kwargs,
+                    cache_config=cache_config,
+                )
+                transformer = pipe.transformer
         self.original_transformer = transformer
         if enable_torch_compile or enable_onediff:
             if getattr(transformer, "forward") is not None:

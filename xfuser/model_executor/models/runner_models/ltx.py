@@ -20,6 +20,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.utils.runner_utils import (
     log,
 )
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheConfig,
+)
 
 DEFAULT_NEGATIVE_PROMPT = "" \
 "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, " \
@@ -52,6 +57,15 @@ class xFuserLTX23VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     capabilities = ModelCapabilities(
@@ -59,6 +73,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        supported_cache_methods=("dbcache",),
     )
 
     _STG_SCALE = 1.0
@@ -231,6 +246,15 @@ class xFuserLTX2VideoModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fps=24,
         resolution_divisor=64,
+        cache_config={
+            "dbcache": DBCacheConfig(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -238,6 +262,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
+        supported_cache_methods=("dbcache",),
     )
 
     def _load_model(self) -> DiffusionPipeline:

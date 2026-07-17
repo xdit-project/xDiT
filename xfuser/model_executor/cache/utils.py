@@ -98,7 +98,7 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         self.cache_context = CacheContext()
         self.callback_handler = CallbackHandler(callbacks)
 
-        self.rel_l1_thresh = torch.tensor(rel_l1_thresh).to(get_device(0))
+        self.register_buffer("rel_l1_thresh", torch.tensor(rel_l1_thresh))
         self.return_hidden_states_first = return_hidden_states_first
         self.num_steps = num_steps
         self.name = name
@@ -132,10 +132,8 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
             hidden, encoder = (hidden, encoder) if self.return_hidden_states_first else (encoder, hidden)
 
         if self.single_transformer_blocks:
-            hidden = torch.cat([encoder, hidden], dim=1)
             for block in self.single_transformer_blocks:
-                hidden = block(hidden, *args, **kwargs)
-            encoder, hidden = hidden.split([encoder.shape[1], hidden.shape[1] - encoder.shape[1]], dim=1)
+                encoder, hidden = block(hidden, encoder, *args, **kwargs)
 
         self.cache_context.hidden_states_residual = hidden - self.cache_context.original_hidden_states
         self.cache_context.encoder_hidden_states_residual = encoder - self.cache_context.original_encoder_hidden_states
@@ -190,6 +188,8 @@ class FBCachedTransformerBlocks(CachedTransformerBlocks):
         return 1
 
     def are_two_tensor_similar(self, t1: torch.Tensor, t2: torch.Tensor, threshold: torch.Tensor) -> torch.Tensor:
+        if isinstance(threshold, torch.Tensor):
+            threshold = threshold.to(t1.device)
         return self.l1_distance(t1, t2) < threshold
 
     def get_modulated_inputs(self, hidden_states, encoder_hidden_states, *args, **kwargs):
@@ -233,11 +233,16 @@ class TeaCachedTransformerBlocks(CachedTransformerBlocks):
 
     def are_two_tensor_similar(self, t1: torch.Tensor, t2: torch.Tensor, threshold: float) -> torch.Tensor:
         diff = self.l1_distance(t1, t2)
-        new_accum = self.accumulated_rel_l1_distance + self.rescale_func(diff)
-        reset_mask = (self.cnt == 0) or (self.cnt == self.num_steps - 1)
+        device = t1.device
+        if isinstance(threshold, torch.Tensor):
+            threshold = threshold.to(device)
+        accum = self.accumulated_rel_l1_distance.to(device)
+        cnt = self.cnt.to(device)
+        new_accum = accum + self.rescale_func(diff)
+        reset_mask = torch.logical_or(cnt == 0, cnt == self.num_steps - 1)
         self.use_cache = torch.logical_and(new_accum < threshold, torch.logical_not(reset_mask))
-        self.accumulated_rel_l1_distance[0] = torch.where(self.use_cache, new_accum[0], 0.0)
-        self.cnt = torch.where(self.cnt + 1 < self.num_steps, self.cnt + 1, 0)
+        self.accumulated_rel_l1_distance[0] = torch.where(self.use_cache, new_accum[0], torch.zeros(1, device=device))[0]
+        self.cnt = torch.where(cnt + 1 < self.num_steps, cnt + 1, torch.zeros(1, dtype=cnt.dtype, device=device))
 
         return self.use_cache
 

@@ -23,11 +23,20 @@ def check_packages():
     import diffusers
 
     specifier = envs.required_dist_specifier("diffusers")
-    if specifier is not None and diffusers.__version__ not in specifier:
-        raise RuntimeError(
-            f"This project requires diffusers {specifier}, "
-            f"but {diffusers.__version__} is installed."
-        )
+    if specifier is not None:
+        if diffusers.__version__ not in specifier:
+            raise RuntimeError(
+                f"This project requires diffusers {specifier}, "
+                f"but {diffusers.__version__} is installed."
+            )
+    else:
+        # Fallback when running from source (no installed package metadata).
+        # Keep this floor in sync with setup.py install_requires["diffusers"].
+        if version.parse(diffusers.__version__) < version.parse("0.33.0"):
+            raise RuntimeError(
+                "This project requires diffusers >= 0.33.0, "
+                f"but {diffusers.__version__} is installed."
+            )
 
 
 def check_env():

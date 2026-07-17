@@ -284,8 +284,14 @@ class PackagesEnvChecker:
                 from flash_attn import __version__
 
                 spec = required_dist_specifier("flash-attn")
-                if spec is not None and __version__ not in spec:
-                    raise ImportError(f"install flash_attn {spec}")
+                if spec is not None:
+                    if __version__ not in spec:
+                        raise ImportError(f"install flash_attn {spec}")
+                else:
+                    # Fallback floor when running from source (no installed metadata).
+                    # Keep in sync with setup.py extras_require["flash-attn"].
+                    if version.parse(__version__) < version.parse("2.6.0"):
+                        raise ImportError("install flash_attn >= 2.6.0")
                 return True
         except ImportError:
             return False

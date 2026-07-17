@@ -22,25 +22,29 @@ __all__ = [
 
 # These wrappers import diffusers pipeline symbols that only exist on newer
 # diffusers versions; skip them when unavailable instead of crashing the package.
+# Re-raise ImportErrors that originate inside xfuser so developer bugs aren't hidden.
 try:
     from .transformer_flux import xFuserFluxTransformer2DWrapper  # noqa: F401
 
     __all__.append("xFuserFluxTransformer2DWrapper")
-except ImportError:
-    pass
+except ImportError as e:
+    if e.name is None or "diffusers" not in e.name:
+        raise
 
 
 try:
     from .transformer_z_image import xFuserZImageTransformer2DWrapper  # noqa: F401
 
     __all__.append("xFuserZImageTransformer2DWrapper")
-except ImportError:
-    pass
+except ImportError as e:
+    if e.name is None or "diffusers" not in e.name:
+        raise
 
 
 try:
     from .transformer_krea2 import xFuserKrea2Transformer2DWrapper  # noqa: F401
 
     __all__.append("xFuserKrea2Transformer2DWrapper")
-except ImportError:
-    pass
+except ImportError as e:
+    if e.name is None or "diffusers" not in e.name:
+        raise

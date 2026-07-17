@@ -14,6 +14,11 @@ for importer, modname, ispkg in pkgutil.iter_modules(__path__):
         try:
             importlib.import_module(f'.{modname}', package=__name__)
         except ImportError as e:
+            # Only swallow errors that originate from diffusers (missing symbol /
+            # wrong version). Re-raise anything internal to xfuser so developer
+            # bugs (typos, missing modules) aren't silently hidden.
+            if e.name is None or "diffusers" not in e.name:
+                raise
             logger.warning(
                 f"Skipping runner module '{modname}': {e}. Models it provides will be "
                 "unavailable (often a diffusers version mismatch; run with "

@@ -21,7 +21,7 @@ from xfuser.core.distributed import (
     get_runtime_state,
 )
 
-from packaging.version import parse
+from packaging.version import Version
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.attention_backend import (
     ATTENTION_FUNCTION_REGISTRY,
@@ -50,7 +50,7 @@ def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=Fa
         "joint_attn_kwargs": joint_attn_kwargs,
         "attention_kwargs": attention_kwargs,
     }
-    if parse(torch.__version__).release >= parse("2.6.0").release:
+    if Version(torch.__version__) >= Version("2.6.0"):
         from torch.distributed.tensor.experimental._attention import _cp_options
         _cp_options.enable_load_balance = False
         out, *_ = _templated_ring_attention(

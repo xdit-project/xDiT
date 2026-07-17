@@ -5,6 +5,7 @@ import torch
 from torch import nn
 import torch.distributed
 from torch.nn import functional as F
+from packaging.version import Version
 from diffusers.utils import deprecate
 from diffusers.models.attention import Attention
 from diffusers.models.embeddings import apply_rotary_emb
@@ -40,10 +41,9 @@ from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.model_executor.layers import xFuserLayerBaseWrapper
 from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
-from xfuser.envs import PACKAGES_CHECKER, TORCH_VERSION
-from packaging import version
+from xfuser.envs import PACKAGES_CHECKER
 
-if TORCH_VERSION >= version.parse("2.5.0"):
+if Version(torch.__version__) >= Version("2.5.0"):
     from xfuser.model_executor.layers.usp import USP
 else:
     from xfuser.model_executor.layers.usp_legacy import USP

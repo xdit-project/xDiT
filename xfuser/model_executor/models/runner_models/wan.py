@@ -3,9 +3,8 @@ import re
 import torch
 from typing import List, Optional
 from PIL import Image
-from diffusers import FlowMatchEulerDiscreteScheduler, WanPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers import AutoencoderKLWan, WanVACEPipeline
 from diffusers.utils import load_image
 from safetensors.torch import load_file
 
@@ -166,6 +165,8 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
 class xFuserWan21I2VModel(xFuserModel):
+
+    min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
@@ -438,6 +439,8 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 @register_model("Wan2.1-T2V")
 class xFuserWan21T2VModel(xFuserModel):
 
+    min_diffusers_version = "0.35.2"
+
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
         if do_cfg:
@@ -496,6 +499,7 @@ class xFuserWan21T2VModel(xFuserModel):
             subfolder="transformer",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        from diffusers import WanPipeline
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -551,6 +555,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             subfolder="transformer_2",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        from diffusers import WanPipeline
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -618,6 +623,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
             subfolder="transformer",
             attention_kwargs=_build_attention_kwargs(self.config),
         )
+        from diffusers import WanPipeline
         pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
         pipe = pipe_class.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
@@ -681,6 +687,8 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan2.1-VACE-1.3B")
 class xFuserWan21VACEModel(xFuserModel):
 
+    min_diffusers_version = "0.35.2"
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -730,6 +738,7 @@ class xFuserWan21VACEModel(xFuserModel):
             torch_dtype=torch.bfloat16,
             subfolder="transformer",
         )
+        from diffusers import WanVACEPipeline
         pipe = WanVACEPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,

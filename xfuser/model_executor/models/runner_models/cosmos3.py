@@ -93,6 +93,8 @@ def _setup_parallel_vae(vae, enable_parallel_encoder=True):
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
 
+    min_diffusers_version = "0.36.0"
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,

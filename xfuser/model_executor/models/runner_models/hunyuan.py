@@ -5,11 +5,9 @@ import numpy as np
 from safetensors.torch import load_file
 from huggingface_hub import hf_hub_download
 from collections import OrderedDict
-from diffusers import HunyuanVideoPipeline, HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.transformers.transformer_hunyuan_video import xFuserHunyuanVideoTransformer3DWrapper
-from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import xFuserHunyuanVideo15Transformer3DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -30,6 +28,8 @@ from xfuser.compile import install_inductor_passes
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
+
+    min_diffusers_version = "0.35.2"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -56,6 +56,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import HunyuanVideoPipeline
         transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -108,6 +109,8 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
 
+    min_diffusers_version = "0.36.0"
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -140,6 +143,10 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import HunyuanVideo15Pipeline, HunyuanVideo15ImageToVideoPipeline
+        from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import (
+            xFuserHunyuanVideo15Transformer3DWrapper,
+        )
         task = self.config.task
         pipeline = HunyuanVideo15Pipeline if task == "t2v" else HunyuanVideo15ImageToVideoPipeline
         transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(
@@ -280,6 +287,10 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import HunyuanVideo15ImageToVideoPipeline
+        from xfuser.model_executor.models.transformers.transformer_hunyuan_video15 import (
+            xFuserHunyuanVideo15Transformer3DWrapper,
+        )
         pipeline = HunyuanVideo15ImageToVideoPipeline
         # Load the distilled transformer (diffusers format) to get non-block weights
         distilled_transformer = xFuserHunyuanVideo15Transformer3DWrapper.from_pretrained(

@@ -4,10 +4,6 @@ import torch
 import torch.nn.functional as F
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser.config.diffusers import (
-    get_minimum_diffusers_version,
-    has_valid_diffusers_version,
-)
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.envs import _is_hip
@@ -73,6 +69,8 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
 
+    min_diffusers_version = "0.39.0"
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -112,11 +110,6 @@ class _Krea2BaseModel(xFuserModel):
                 )
 
     def _load_model(self) -> DiffusionPipeline:
-        if not has_valid_diffusers_version("krea2"):
-            raise ImportError(
-                f"Krea-2 models require diffusers>={get_minimum_diffusers_version('krea2')}."
-            )
-
         from diffusers.pipelines.krea2 import Krea2Pipeline
         from xfuser.model_executor.models.transformers.transformer_krea2 import (
             xFuserKrea2Transformer2DWrapper,

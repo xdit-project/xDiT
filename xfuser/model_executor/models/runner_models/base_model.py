@@ -8,6 +8,8 @@ from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
 from torch.profiler import profile, record_function, ProfilerActivity
+import diffusers
+from packaging.version import Version
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
@@ -227,9 +229,12 @@ class xFuserModel(abc.ABC):
     settings: ModelSettings = ModelSettings()
     model_output_type: str = ""
     fps: int = 0
+    # Minimum diffusers version this runner's pipeline imports need. None = the
+    # setup.py baseline (enforced at startup by check_packages) is enough.
+    min_diffusers_version: Optional[str] = None
 
     def __init__(self, config: xFuserArgs) -> None:
-        self.settings = copy.deepcopy(self.settings)
+        self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
         self._validate_config(config)
         self._update_model_settings(config)
@@ -250,6 +255,14 @@ class xFuserModel(abc.ABC):
         if config.use_fp4_gemms:
             self._apply_fp8_override_cli_from_config(config)
 
+    def _require_diffusers_version(self) -> None:
+        floor = self.min_diffusers_version
+        if floor is not None and Version(diffusers.__version__) < Version(floor):
+            raise ImportError(
+                f"{self.settings.model_name} requires diffusers>={floor}, "
+                f"but diffusers {diffusers.__version__} is installed."
+            )
+
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
 
@@ -259,6 +272,7 @@ class xFuserModel(abc.ABC):
 
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
+        self._require_diffusers_version()
         self.pipe = self._load_model()
 
         log("Initializing runtime state...")

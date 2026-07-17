@@ -1011,6 +1011,10 @@ class xFuserModel(abc.ABC):
             log(f"WARNING: --vae_tile_latent_size / --vae_tile_sample_size unsupported for "
                 f"{type(vae).__name__} (no tile_latent_min_size); override ignored.")
             return
+        if want_latent != want_sample:
+            log("WARNING: only one of --vae_tile_latent_size / --vae_tile_sample_size set. "
+                "Set both together to preserve the VAE downscale ratio (usually 8x); "
+                "mismatched tile sizes produce grid seams in the decoded output.")
         if want_latent:
             vae.tile_latent_min_size = self.config.vae_tile_latent_size
             log(f"VAE tile_latent_min_size set to {vae.tile_latent_min_size}")

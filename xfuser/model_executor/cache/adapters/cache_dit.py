@@ -197,7 +197,17 @@ def _install_sp_can_cache_sync() -> None:
     the world group -- matching the group cache_dit reduces over, so it also covers the FSDP
     dimension (fully_shard) and pure-FSDP configs with ulysses=1, which an SP-only broadcast
     missed. dbcache bans PP, and these paths run no data parallelism, so world-wide agreement
-    is correct. Idempotent; patched once.
+    is correct.
+
+    Compile-path desync: torch.compile only traces paths that actually execute. During warmup
+    max_warmup_steps forces can_cache=False, so only the full-compute graph is compiled. The
+    first True result triggers compilation of the skip-path graph -- if ranks reach a
+    distributed collective while one rank is compiling, the others time out. We insert a
+    one-time world barrier at the warmup->cache transition (first True per instance) so all
+    ranks synchronize before any collective fires inside the newly compiled path.
+    Barrier fires at most once per CachedContextManager instance; steady-state overhead is zero.
+
+    Idempotent; patched once.
     """
     global _SP_SYNC_PATCHED
     if _SP_SYNC_PATCHED:
@@ -215,10 +225,17 @@ def _install_sp_can_cache_sync() -> None:
         result = orig_can_cache(self, *args, **kwargs)
         if not (dist.is_available() and dist.is_initialized()):
             return result
+        wg = get_world_group()
         t = torch.tensor(
             [1 if result else 0], device=torch.cuda.current_device(), dtype=torch.int32)
-        get_world_group().broadcast(t, src=0)
-        return bool(t.item())
+        wg.broadcast(t, src=0)
+        agreed = bool(t.item())
+        if agreed and not getattr(self, '_xdit_cache_warmed', False):
+            # First skip step: barrier so all ranks finish compiling the skip-path
+            # graph before any collective fires inside it.
+            dist.barrier(group=wg.device_group)
+            self._xdit_cache_warmed = True
+        return agreed
 
     CachedContextManager.can_cache = can_cache
     _SP_SYNC_PATCHED = True

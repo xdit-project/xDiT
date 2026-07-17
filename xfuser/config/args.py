@@ -211,6 +211,8 @@ class xFuserArgs:
             )
             try:
                 existing = _json.loads(self.cache_config) if self.cache_config else {}
+                if not isinstance(existing, dict):
+                    raise TypeError("cache_config must be a JSON object")
             except (_json.JSONDecodeError, TypeError):
                 warnings.warn(
                     f"--cache_config is not valid JSON and will be ignored: {self.cache_config!r}",

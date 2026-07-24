@@ -218,6 +218,7 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.AITER_SAGE_V2,
                                  AttentionBackendType.AITER_SPARSE_SAGE_V2,
                                  AttentionBackendType.AITER_SPARGE_V2,
+                                 AttentionBackendType.AITER_VSA,
                                  AttentionBackendType.AITER_FLYDSL,
                                  AttentionBackendType.FLEX_BLOCK_ATTN,
                                  AttentionBackendType.FLEX_BLOCK_SPARGE]:
@@ -312,6 +313,14 @@ class RuntimeState(metaclass=ABCMeta):
                     raise RuntimeError(msg) from None
             except ImportError:
                 raise RuntimeError(msg) from None
+        elif attention_backend == AttentionBackendType.AITER_VSA:
+            try:
+                from aiter.ops.jenga_sparse_attention import vsa_sparse_attention
+            except ImportError:
+                raise RuntimeError(
+                    "AITER VSA CK attention is not available; install the "
+                    "AITER build containing jenga_sparse_attention"
+                ) from None
         elif attention_backend == AttentionBackendType.AITER_FLYDSL:
             try:
                 from aiter.ops.flydsl import flydsl_flash_attn_func

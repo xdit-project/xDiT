@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from xfuser.core.sparge_attention.block_mask import get_block_map_meansim
 from xfuser.core.sparge_attention.gilbert import (
     curve as gilbert_curve,
+    sliced_curve,
+    sliced_gilbert_mapping,
     sliced_gilbert_block_neighbor_mapping,
 )
 
@@ -19,6 +21,7 @@ _GILBERT_PERM_CACHE: dict[tuple, Tuple[torch.Tensor, torch.Tensor]] = {}
 # Block-neighbor static mask keyed on ((t, h, w), block_m, block_n,
 # (device.type, idx)). Bool tensor of shape (n_image_q, n_image_k) on device.
 _STATIC_BLOCK_MASK_CACHE: dict[tuple, torch.Tensor] = {}
+_PADDED_STATIC_BLOCK_MASK_CACHE: dict[tuple, torch.Tensor] = {}
 
 
 def _device_key(device: torch.device) -> tuple:
@@ -51,12 +54,28 @@ class SpargeState:
 
 def get_gilbert_perm(thw: Tuple[int, int, int], device: torch.device
                      ) -> Tuple[torch.Tensor, torch.Tensor]:
-    key = (tuple(thw), _device_key(device))
+    key = ("3d", tuple(thw), _device_key(device))
     cached = _GILBERT_PERM_CACHE.get(key)
     if cached is not None:
         return cached
     t, h, w = thw
     inv_perm, fwd_perm = gilbert_curve(t, h, w, device)
+    _GILBERT_PERM_CACHE[key] = (fwd_perm, inv_perm)
+    return fwd_perm, inv_perm
+
+
+def get_sliced_gilbert_perm(
+    thw: Tuple[int, int, int], device: torch.device
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    key = ("sliced", tuple(thw), _device_key(device))
+    cached = _GILBERT_PERM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    t, h, w = thw
+    linear_to_gilbert, gilbert_to_linear = sliced_gilbert_mapping(t, h, w)
+    inv_perm, fwd_perm = sliced_curve(
+        linear_to_gilbert, gilbert_to_linear, device
+    )
     _GILBERT_PERM_CACHE[key] = (fwd_perm, inv_perm)
     return fwd_perm, inv_perm
 
@@ -134,6 +153,7 @@ def setup_sparge(
     block_m: int = 128,
     block_n: int = 128,
     pad_block_divisible: bool = False,
+    use_sliced_gilbert: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
            SpargeState, Optional[torch.Tensor]]:
 
@@ -177,12 +197,21 @@ def setup_sparge(
             )
 
     if reorder_sequence:
-        fwd_perm, inv_perm = get_gilbert_perm(thw, query.device)
+        perm_builder = (
+            get_sliced_gilbert_perm
+            if use_sliced_gilbert
+            else get_gilbert_perm
+        )
+        fwd_perm, inv_perm = perm_builder(thw, query.device)
         if use_static_block_mask:
             static_mask = get_static_block_neighbor_mask(
                 thw, block_m, block_n, query.device,
                 gilbert_mapping=(inv_perm, fwd_perm),
-                mapping_kind="gilbert",
+                mapping_kind=(
+                    "sliced_gilbert"
+                    if use_sliced_gilbert
+                    else "gilbert"
+                ),
             )
     elif use_static_block_mask:
         # Linear (row-major) order: feed the neighbour builder an identity
@@ -229,11 +258,24 @@ def setup_sparge(
         if static_mask is not None:
             n_iq = (image_len + img_pad) // block_m
             n_ik = (image_len + img_pad) // block_n
-            padded_static = torch.zeros(
-                (n_iq, n_ik), dtype=static_mask.dtype, device=static_mask.device
+            padded_key = (
+                static_mask.data_ptr(),
+                n_iq,
+                n_ik,
+                _device_key(static_mask.device),
             )
-            padded_static[: static_mask.shape[0], : static_mask.shape[1]] = static_mask
-            static_mask = padded_static
+            cached_padded = _PADDED_STATIC_BLOCK_MASK_CACHE.get(padded_key)
+            if cached_padded is None:
+                cached_padded = torch.zeros(
+                    (n_iq, n_ik),
+                    dtype=static_mask.dtype,
+                    device=static_mask.device,
+                )
+                cached_padded[
+                    : static_mask.shape[0], : static_mask.shape[1]
+                ] = static_mask
+                _PADDED_STATIC_BLOCK_MASK_CACHE[padded_key] = cached_padded
+            static_mask = cached_padded
 
     # Re-concatenate text tail.
     if text_q is not None:

@@ -130,6 +130,8 @@ class xFuserArgs:
     coco_path: Optional[str] = None
     use_cache: bool = False
     use_teacache: bool = False
+    wan_teacache_thresh: float = 0.2
+    wan_teacache_use_ret_steps: bool = False
     use_fbcache: bool = False
     # Other arguments
     use_fp8_t5_encoder: bool = False
@@ -176,6 +178,16 @@ class xFuserArgs:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    # AITER CK-Tile VSA attention
+    vsa_block_size: int = 128
+    vsa_top_k: int = 1
+    vsa_top_k_ratio: float = 0.0
+    vsa_drop_rates: Optional[List[float]] = None
+    vsa_calls_per_step: int = 2
+    vsa_prob_threshold: float = 0.9
+    vsa_reorder_sequence: bool = True
+    use_vsa_static_block_mask: bool = True
+    use_vsa_first_frame_mask: bool = True
     # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
@@ -225,7 +237,18 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--use_teacache",
             action="store_true",
-            help="Enable teacache to accelerate inference in a single card",
+            help="Enable TeaCache. Wan supports sequence parallel TeaCache.",
+        )
+        runtime_group.add_argument(
+            "--wan_teacache_thresh",
+            type=float,
+            default=0.2,
+            help="Wan TeaCache accumulated relative-L1 threshold.",
+        )
+        runtime_group.add_argument(
+            "--wan_teacache_use_ret_steps",
+            action="store_true",
+            help="Use Wan TeaCache retention-step coefficients and warmup.",
         )
         runtime_group.add_argument(
             "--use_fbcache",
@@ -800,6 +823,64 @@ class xFuserArgs:
                  "effect with ulysses_degree>1 and a Sparge attention backend.",
         )
         parser.add_argument(
+            "--vsa_block_size",
+            type=int,
+            default=128,
+            help="Query/KV block size for the AITER CK-Tile VSA backend.",
+        )
+        parser.add_argument(
+            "--vsa_top_k",
+            type=int,
+            default=1,
+            help="Minimum KV blocks selected per query block by AITER VSA.",
+        )
+        parser.add_argument(
+            "--vsa_top_k_ratio",
+            type=float,
+            default=0.0,
+            help="Minimum selected KV-block fraction for AITER VSA. "
+                 "For Jenga drop rate r, set this to 1-r.",
+        )
+        parser.add_argument(
+            "--vsa_drop_rates",
+            type=float,
+            nargs="+",
+            default=None,
+            help="Enable Jenga's per-step sparse schedule. One value applies "
+                 "to all steps; two values switch after the midpoint. "
+                 "Drop rates <=0.25 use dense AITER attention.",
+        )
+        parser.add_argument(
+            "--vsa_calls_per_step",
+            type=int,
+            default=2,
+            help="Legacy override; Wan infers calls per step from CFG mode.",
+        )
+        parser.add_argument(
+            "--vsa_prob_threshold",
+            type=float,
+            default=0.9,
+            help="Jenga cumulative probability threshold for AITER VSA.",
+        )
+        parser.add_argument(
+            "--vsa_reorder_sequence",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Reorder Wan video tokens with the sliced Gilbert curve before VSA.",
+        )
+        parser.add_argument(
+            "--use_vsa_static_block_mask",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Union Gilbert physical-neighbor blocks into the dynamic VSA mask.",
+        )
+        parser.add_argument(
+            "--use_vsa_first_frame_mask",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Preserve first-frame block relations in the VSA mask.",
+        )
+        parser.add_argument(
             "--distilled_transformer_path",
             type=nullable_str,
             default=None,
@@ -893,6 +974,10 @@ class xFuserArgs:
             use_parallel_vae=self.use_parallel_vae,
             use_torch_compile=self.use_torch_compile,
             use_onediff=self.use_onediff,
+            use_teacache=self.use_teacache,
+            wan_teacache_thresh=self.wan_teacache_thresh,
+            wan_teacache_use_ret_steps=self.wan_teacache_use_ret_steps,
+            use_fbcache=self.use_fbcache,
             # use_profiler=self.use_profiler,
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
@@ -902,6 +987,15 @@ class xFuserArgs:
             spargeattn_simthreshold=self.spargeattn_simthreshold,
             spargeattn_cdfthreshold=self.spargeattn_cdfthreshold,
             use_spargeattn_head_balance=self.use_spargeattn_head_balance,
+            vsa_block_size=self.vsa_block_size,
+            vsa_top_k=self.vsa_top_k,
+            vsa_top_k_ratio=self.vsa_top_k_ratio,
+            vsa_drop_rates=self.vsa_drop_rates,
+            vsa_calls_per_step=self.vsa_calls_per_step,
+            vsa_prob_threshold=self.vsa_prob_threshold,
+            vsa_reorder_sequence=self.vsa_reorder_sequence,
+            use_vsa_static_block_mask=self.use_vsa_static_block_mask,
+            use_vsa_first_frame_mask=self.use_vsa_first_frame_mask,
         )
 
         parallel_config = ParallelConfig(

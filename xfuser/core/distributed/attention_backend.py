@@ -449,6 +449,7 @@ class AttentionBackendType(Enum):
     AITER_SPARSE_SAGE_V2 = "AITER Sparse Sage V2"
     AITER_SPARGE = "AITER Sparge"
     AITER_SPARGE_V2 = "AITER Sparge V2"
+    AITER_VSA = "AITER VSA CK"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     NPU = "NPU"
@@ -821,6 +822,104 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
         output = torch.permute(output, [0, 2, 1, 3])
 
     return output, softmax_lse
+
+
+@register_attention_function(AttentionBackendType.AITER_VSA)
+@torch.compiler.disable
+def _aiter_vsa_attn_call(
+    query,
+    key,
+    value,
+    dropout_p,
+    is_causal,
+    attention_kwargs=None,
+):
+    """Jenga mask selection backed by AITER's CK-Tile VSA kernel.
+
+    VSA is a non-causal self-attention backend. Calls without Wan's ``thw``
+    metadata, including text/image cross-attention, use dense AITER attention.
+    """
+    attention_kwargs = attention_kwargs or {}
+    thw = attention_kwargs.get("thw")
+    is_self_attention = query.shape == key.shape == value.shape
+    if thw is None or not is_self_attention:
+        return _aiter_attn_call(
+            query,
+            key,
+            value,
+            dropout_p,
+            is_causal,
+            attention_kwargs,
+        )
+    if is_causal:
+        raise ValueError("AITER VSA CK does not support causal attention")
+    if dropout_p not in (None, 0.0):
+        raise ValueError("AITER VSA CK does not support attention dropout")
+
+    from xfuser.core.vsa_attention import (
+        aiter_vsa_attention,
+        jenga_scheduled_drop_rate,
+    )
+
+    drop_rate = None
+    drop_rates = attention_kwargs.get("vsa_drop_rates")
+    if drop_rates:
+        drop_rate = attention_kwargs.get("vsa_effective_drop_rate")
+        if drop_rate is None:
+            drop_rate = jenga_scheduled_drop_rate(
+                int(attention_kwargs.get("vsa_step_index", 0)),
+                int(attention_kwargs.get("vsa_num_steps", 1)),
+                drop_rates,
+            )
+        use_dense = bool(
+            attention_kwargs.get("vsa_use_dense", drop_rate <= 0.25)
+        )
+        attention_kwargs["vsa_effective_drop_rate"] = drop_rate
+        attention_kwargs["vsa_use_dense"] = use_dense
+        if use_dense:
+            return _aiter_attn_call(
+                query,
+                key,
+                value,
+                dropout_p,
+                is_causal,
+                attention_kwargs,
+            )
+
+    density_sink = attention_kwargs.get("vsa_density_sink")
+    collect_density = bool(
+        density_sink is not None
+        or attention_kwargs.get("vsa_collect_density", False)
+    )
+    output, density = aiter_vsa_attention(
+        query,
+        key,
+        value,
+        thw=tuple(thw),
+        sp_size=get_ulysses_parallel_world_size(),
+        block_size=int(attention_kwargs.get("vsa_block_size", 128)),
+        top_k=int(attention_kwargs.get("vsa_top_k", 1)),
+        top_k_ratio=float(attention_kwargs.get("vsa_top_k_ratio", 0.0)),
+        drop_rate=drop_rate,
+        prob_threshold=float(
+            attention_kwargs.get("vsa_prob_threshold", 0.8)
+        ),
+        reorder_sequence=bool(
+            attention_kwargs.get("vsa_reorder_sequence", True)
+        ),
+        use_static_block_mask=bool(
+            attention_kwargs.get("use_vsa_static_block_mask", True)
+        ),
+        use_first_frame_mask=bool(
+            attention_kwargs.get("use_vsa_first_frame_mask", True)
+        ),
+        collect_density=collect_density,
+    )
+    if density_sink is not None and density is not None:
+        density_sink.copy_(density)
+    if density is not None:
+        attention_kwargs["vsa_last_density"] = density.detach()
+    return output, None
 
 @register_attention_function(AttentionBackendType.AITER_MLA)
 def _aiter_mla_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):

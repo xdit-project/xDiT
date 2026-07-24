@@ -61,6 +61,8 @@ class RuntimeConfig:
     use_onediff: bool = False
     use_fp8_t5_encoder: bool = False
     use_teacache: bool = False
+    wan_teacache_thresh: float = 0.2
+    wan_teacache_use_ret_steps: bool = False
     use_fbcache: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
@@ -69,6 +71,15 @@ class RuntimeConfig:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    vsa_block_size: int = 128
+    vsa_top_k: int = 1
+    vsa_top_k_ratio: float = 0.0
+    vsa_drop_rates: Optional[List[float]] = None
+    vsa_calls_per_step: int = 2
+    vsa_prob_threshold: float = 0.9
+    vsa_reorder_sequence: bool = True
+    use_vsa_static_block_mask: bool = True
+    use_vsa_first_frame_mask: bool = True
 
     def __post_init__(self):
         check_packages()

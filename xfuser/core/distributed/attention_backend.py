@@ -886,11 +886,7 @@ def _aiter_vsa_attn_call(
                 attention_kwargs,
             )
 
-    density_sink = attention_kwargs.get("vsa_density_sink")
-    collect_density = bool(
-        density_sink is not None
-        or attention_kwargs.get("vsa_collect_density", False)
-    )
+    collect_density = bool(attention_kwargs.get("vsa_collect_density", False))
     output, density = aiter_vsa_attention(
         query,
         key,
@@ -902,7 +898,7 @@ def _aiter_vsa_attn_call(
         top_k_ratio=float(attention_kwargs.get("vsa_top_k_ratio", 0.0)),
         drop_rate=drop_rate,
         prob_threshold=float(
-            attention_kwargs.get("vsa_prob_threshold", 0.8)
+            attention_kwargs.get("vsa_prob_threshold", 0.9)
         ),
         reorder_sequence=bool(
             attention_kwargs.get("vsa_reorder_sequence", True)
@@ -915,8 +911,6 @@ def _aiter_vsa_attn_call(
         ),
         collect_density=collect_density,
     )
-    if density_sink is not None and density is not None:
-        density_sink.copy_(density)
     if density is not None:
         attention_kwargs["vsa_last_density"] = density.detach()
     return output, None

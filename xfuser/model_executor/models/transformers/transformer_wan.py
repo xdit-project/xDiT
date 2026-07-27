@@ -203,12 +203,9 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
            pos_embed_seq_len,
         )
         self.attention_kwargs = attention_kwargs
-        self._vsa_call_index = 0
         self._vsa_denoising_step = -1
         self._vsa_last_timestep = None
         self._vsa_num_steps = None
-        self._vsa_calls_per_step = 1
-        self._wan_teacache_states = {}
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
@@ -223,16 +220,11 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             )
 
 
-    def reset_wan_inference_state(
-        self, num_inference_steps: int, calls_per_step: int
-    ) -> None:
-        """Reset VSA/TeaCache state at a pipeline-run boundary."""
-        self._vsa_call_index = 0
+    def reset_wan_inference_state(self, num_inference_steps: int) -> None:
+        """Reset VSA schedule state at a pipeline-run boundary."""
         self._vsa_denoising_step = -1
         self._vsa_last_timestep = None
         self._vsa_num_steps = int(num_inference_steps)
-        self._vsa_calls_per_step = max(int(calls_per_step), 1)
-        self._wan_teacache_states.clear()
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
@@ -276,49 +268,38 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
 
 
         runtime_state = get_runtime_state()
-        call_index = 0
-        calls_per_step = self._vsa_calls_per_step
         num_steps = (
             self._vsa_num_steps
             if self._vsa_num_steps is not None
             else int(runtime_state.input_config.num_inference_steps)
         )
-        track_wan_calls = (
+        track_vsa_steps = (
             self.attention_kwargs is not None
-            and (
-                self.attention_kwargs.get("vsa_drop_rates")
-                or self.attention_kwargs.get("use_wan_teacache")
-            )
+            and self.attention_kwargs.get("vsa_drop_rates")
         )
-        if track_wan_calls:
-            total_calls = max(num_steps * calls_per_step, 1)
-            call_index = self._vsa_call_index % total_calls
-            if self.attention_kwargs.get("vsa_drop_rates"):
-                current_timestep = float(timestep.reshape(-1)[0].item())
-                if (
-                    self._vsa_last_timestep is None
-                    or current_timestep != self._vsa_last_timestep
-                ):
-                    self._vsa_denoising_step = (
-                        self._vsa_denoising_step + 1
-                    ) % max(num_steps, 1)
-                    self._vsa_last_timestep = current_timestep
-                self.attention_kwargs["vsa_step_index"] = (
-                    self._vsa_denoising_step
-                )
-                self.attention_kwargs["vsa_num_steps"] = num_steps
-                effective_drop_rate = jenga_scheduled_drop_rate(
-                    self._vsa_denoising_step,
-                    num_steps,
-                    self.attention_kwargs["vsa_drop_rates"],
-                )
-                self.attention_kwargs["vsa_effective_drop_rate"] = (
-                    effective_drop_rate
-                )
-                self.attention_kwargs["vsa_use_dense"] = (
-                    effective_drop_rate <= 0.25
-                )
-            self._vsa_call_index = (call_index + 1) % total_calls
+        if track_vsa_steps:
+            current_timestep = float(timestep.reshape(-1)[0].item())
+            if (
+                self._vsa_last_timestep is None
+                or current_timestep != self._vsa_last_timestep
+            ):
+                self._vsa_denoising_step = (
+                    self._vsa_denoising_step + 1
+                ) % max(num_steps, 1)
+                self._vsa_last_timestep = current_timestep
+            self.attention_kwargs["vsa_step_index"] = self._vsa_denoising_step
+            self.attention_kwargs["vsa_num_steps"] = num_steps
+            effective_drop_rate = jenga_scheduled_drop_rate(
+                self._vsa_denoising_step,
+                num_steps,
+                self.attention_kwargs["vsa_drop_rates"],
+            )
+            self.attention_kwargs["vsa_effective_drop_rate"] = (
+                effective_drop_rate
+            )
+            self.attention_kwargs["vsa_use_dense"] = (
+                effective_drop_rate <= 0.25
+            )
 
         runtime_state.increment_step_counter()
 
@@ -384,87 +365,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
 
 
         # 4. Transformer blocks
-        use_wan_teacache = (
-            self.attention_kwargs is not None
-            and self.attention_kwargs.get("use_wan_teacache", False)
-            and not torch.is_grad_enabled()
-        )
-        if use_wan_teacache:
-            if getattr(self.config, "in_channels", 16) != 16:
-                raise NotImplementedError(
-                    "xDiT Wan TeaCache currently supports Wan2.1 T2V only"
-                )
-            use_ret_steps = bool(
-                self.attention_kwargs.get(
-                    "wan_teacache_use_ret_steps", False
-                )
-            )
-            is_1_3b = len(self.blocks) <= 30
-            if use_ret_steps:
-                coefficients = (
-                    [-5.21862437e4, 9.23041404e3, -5.28275948e2,
-                     1.36987616e1, -4.99875664e-2]
-                    if is_1_3b
-                    else [-3.03318725e5, 4.90537029e4, -2.65530556e3,
-                          5.87365115e1, -3.15583525e-1]
-                )
-            else:
-                coefficients = (
-                    [2.39676752e3, -1.31110545e3, 2.01331979e2,
-                     -8.29855975, 1.37887774e-1]
-                    if is_1_3b
-                    else [-5784.54975374, 5449.50911966, -1811.16591783,
-                          256.27178429, -13.02252404]
-                )
-
-            lane = call_index % calls_per_step
-            state = self._wan_teacache_states.setdefault(
-                lane, {"previous": None, "residual": None, "accumulated": 0.0}
-            )
-            modulated = timestep_proj if use_ret_steps else temb
-            total_calls = max(num_steps * calls_per_step, 1)
-            retention_calls = (5 if use_ret_steps else 1) * calls_per_step
-            cutoff_calls = (
-                total_calls
-                if use_ret_steps
-                else max(total_calls - calls_per_step, 0)
-            )
-            should_calculate = (
-                call_index < retention_calls
-                or call_index >= cutoff_calls
-                or state["previous"] is None
-                or state["residual"] is None
-            )
-            if not should_calculate:
-                relative_l1 = (
-                    (modulated - state["previous"]).abs().mean()
-                    / state["previous"].abs().mean().clamp_min(1e-12)
-                ).float().item()
-                rescaled = 0.0
-                for coefficient in coefficients:
-                    rescaled = rescaled * relative_l1 + coefficient
-                state["accumulated"] += rescaled
-                should_calculate = state["accumulated"] >= float(
-                    self.attention_kwargs.get("wan_teacache_thresh", 0.2)
-                )
-            state["previous"] = modulated.detach().clone()
-
-            if should_calculate:
-                original_hidden_states = hidden_states.clone()
-                for block in self.blocks:
-                    hidden_states = block(
-                        hidden_states,
-                        encoder_hidden_states,
-                        timestep_proj,
-                        rotary_emb,
-                    )
-                state["residual"] = (
-                    hidden_states - original_hidden_states
-                ).detach()
-                state["accumulated"] = 0.0
-            else:
-                hidden_states = hidden_states + state["residual"]
-        elif torch.is_grad_enabled() and self.gradient_checkpointing:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
             for block in self.blocks:
                 hidden_states = self._gradient_checkpointing_func(
                     block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb

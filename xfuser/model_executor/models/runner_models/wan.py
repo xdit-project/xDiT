@@ -66,19 +66,16 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
         "vsa_top_k": config.vsa_top_k,
         "vsa_top_k_ratio": config.vsa_top_k_ratio,
         "vsa_drop_rates": drop_rates,
-        "vsa_calls_per_step": config.vsa_calls_per_step,
         "vsa_prob_threshold": config.vsa_prob_threshold,
         "vsa_reorder_sequence": config.vsa_reorder_sequence,
         "use_vsa_static_block_mask": config.use_vsa_static_block_mask,
         "use_vsa_first_frame_mask": config.use_vsa_first_frame_mask,
-        "use_wan_teacache": config.use_teacache,
-        "wan_teacache_thresh": config.wan_teacache_thresh,
-        "wan_teacache_use_ret_steps": config.wan_teacache_use_ret_steps,
+        "vsa_collect_density": config.vsa_collect_density,
     }
 
 
-def _prepare_wan_inference_run(pipe, config, input_args: dict) -> None:
-    """Publish actual run dimensions and reset per-run sparse/cache state."""
+def _prepare_wan_inference_run(pipe, input_args: dict) -> None:
+    """Publish actual run dimensions and reset per-run VSA state."""
     num_steps = int(input_args["num_inference_steps"])
     get_runtime_state().set_video_input_parameters(
         height=int(input_args["height"]),
@@ -88,17 +85,23 @@ def _prepare_wan_inference_run(pipe, config, input_args: dict) -> None:
         num_inference_steps=num_steps,
         seed=int(input_args["seed"]),
     )
-    calls_per_step = (
-        1
-        if config.use_cfg_parallel
-        or float(input_args.get("guidance_scale", 1.0)) <= 1.0
-        else 2
-    )
     for name in ("transformer", "transformer_2"):
         transformer = getattr(pipe, name, None)
         reset = getattr(transformer, "reset_wan_inference_state", None)
         if reset is not None:
-            reset(num_steps, calls_per_step)
+            reset(num_steps)
+
+
+class xFuserWanModel(xFuserModel):
+    """Common lifecycle hooks for Wan runners."""
+
+    def _prepare_inference_run(self, input_args: dict) -> None:
+        _prepare_wan_inference_run(self.pipe, input_args)
+
+    def _setup_hybrid_attn_schedule(self, input_args: dict) -> None:
+        if self.config.attention_backend == "AITER_VSA":
+            return
+        super()._setup_hybrid_attn_schedule(input_args)
 
 
 def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
@@ -207,15 +210,7 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
-class xFuserWan21I2VModel(xFuserModel):
-
-    def preprocess_args(self, input_args: dict) -> dict:
-        args = super().preprocess_args(input_args)
-        if self.config.attention_backend == "AITER_VSA":
-            # The Jenga schedule performs its own early dense warmup.
-            args["num_hybrid_attn_high_precision_steps"] = 0
-            self.config.num_hybrid_attn_high_precision_steps = 0
-        return args
+class xFuserWan21I2VModel(xFuserWanModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
@@ -285,7 +280,6 @@ class xFuserWan21I2VModel(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        _prepare_wan_inference_run(self.pipe, self.config, input_args)
         output = self.pipe(
             image=input_args["image"],
             height=input_args["height"],
@@ -471,7 +465,6 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps
         # do_classifier_free_guidance=False, so negative_prompt has no effect.
-        _prepare_wan_inference_run(self.pipe, self.config, input_args)
         output = self.pipe(
             image=input_args["image"],
             height=input_args["height"],
@@ -488,15 +481,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
-class xFuserWan21T2VModel(xFuserModel):
-
-    def preprocess_args(self, input_args: dict) -> dict:
-        args = super().preprocess_args(input_args)
-        if self.config.attention_backend == "AITER_VSA":
-            # Avoid stacking xDiT's five-step warmup on Jenga's dynamic one.
-            args["num_hybrid_attn_high_precision_steps"] = 0
-            self.config.num_hybrid_attn_high_precision_steps = 0
-        return args
+class xFuserWan21T2VModel(xFuserWanModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
@@ -564,7 +549,6 @@ class xFuserWan21T2VModel(xFuserModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        _prepare_wan_inference_run(self.pipe, self.config, input_args)
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],
@@ -688,7 +672,6 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        _prepare_wan_inference_run(self.pipe, self.config, input_args)
         kwargs = {
             "height": input_args["height"],
             "width": input_args["width"],
@@ -741,7 +724,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
-class xFuserWan21VACEModel(xFuserModel):
+class xFuserWan21VACEModel(xFuserWanModel):
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -826,7 +809,6 @@ class xFuserWan21VACEModel(xFuserModel):
         return input_args
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
-        _prepare_wan_inference_run(self.pipe, self.config, input_args)
         output = self.pipe(
             height=input_args["height"],
             width=input_args["width"],

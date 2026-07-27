@@ -130,8 +130,6 @@ class xFuserArgs:
     coco_path: Optional[str] = None
     use_cache: bool = False
     use_teacache: bool = False
-    wan_teacache_thresh: float = 0.2
-    wan_teacache_use_ret_steps: bool = False
     use_fbcache: bool = False
     # Other arguments
     use_fp8_t5_encoder: bool = False
@@ -183,11 +181,11 @@ class xFuserArgs:
     vsa_top_k: int = 1
     vsa_top_k_ratio: float = 0.0
     vsa_drop_rates: Optional[List[float]] = None
-    vsa_calls_per_step: int = 2
     vsa_prob_threshold: float = 0.9
     vsa_reorder_sequence: bool = True
     use_vsa_static_block_mask: bool = True
     use_vsa_first_frame_mask: bool = True
+    vsa_collect_density: bool = False
     # Distilled model weight paths
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
@@ -237,18 +235,7 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--use_teacache",
             action="store_true",
-            help="Enable TeaCache. Wan supports sequence parallel TeaCache.",
-        )
-        runtime_group.add_argument(
-            "--wan_teacache_thresh",
-            type=float,
-            default=0.2,
-            help="Wan TeaCache accumulated relative-L1 threshold.",
-        )
-        runtime_group.add_argument(
-            "--wan_teacache_use_ret_steps",
-            action="store_true",
-            help="Use Wan TeaCache retention-step coefficients and warmup.",
+            help="Enable teacache to accelerate inference in a single card",
         )
         runtime_group.add_argument(
             "--use_fbcache",
@@ -851,12 +838,6 @@ class xFuserArgs:
                  "Drop rates <=0.25 use dense AITER attention.",
         )
         parser.add_argument(
-            "--vsa_calls_per_step",
-            type=int,
-            default=2,
-            help="Legacy override; Wan infers calls per step from CFG mode.",
-        )
-        parser.add_argument(
             "--vsa_prob_threshold",
             type=float,
             default=0.9,
@@ -879,6 +860,11 @@ class xFuserArgs:
             action=argparse.BooleanOptionalAction,
             default=True,
             help="Preserve first-frame block relations in the VSA mask.",
+        )
+        parser.add_argument(
+            "--vsa_collect_density",
+            action="store_true",
+            help="Record the selected VSA block density for profiling.",
         )
         parser.add_argument(
             "--distilled_transformer_path",
@@ -974,10 +960,6 @@ class xFuserArgs:
             use_parallel_vae=self.use_parallel_vae,
             use_torch_compile=self.use_torch_compile,
             use_onediff=self.use_onediff,
-            use_teacache=self.use_teacache,
-            wan_teacache_thresh=self.wan_teacache_thresh,
-            wan_teacache_use_ret_steps=self.wan_teacache_use_ret_steps,
-            use_fbcache=self.use_fbcache,
             # use_profiler=self.use_profiler,
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
             attention_backend=self.attention_backend,
@@ -991,11 +973,11 @@ class xFuserArgs:
             vsa_top_k=self.vsa_top_k,
             vsa_top_k_ratio=self.vsa_top_k_ratio,
             vsa_drop_rates=self.vsa_drop_rates,
-            vsa_calls_per_step=self.vsa_calls_per_step,
             vsa_prob_threshold=self.vsa_prob_threshold,
             vsa_reorder_sequence=self.vsa_reorder_sequence,
             use_vsa_static_block_mask=self.use_vsa_static_block_mask,
             use_vsa_first_frame_mask=self.use_vsa_first_frame_mask,
+            vsa_collect_density=self.vsa_collect_density,
         )
 
         parallel_config = ParallelConfig(

@@ -154,7 +154,10 @@ def jenga_scheduled_drop_rate(
         raise ValueError(f"drop rates must be in [0,1], got {drop_rates}")
 
     step_index = min(max(int(step_index), 0), total_steps - 1)
-    if len(drop_rates) == 1 or step_index <= 25:
+    # Jenga switches after step 25 in its 50-step reference schedule. Express
+    # that boundary relative to the requested run length so short runs also
+    # exercise both configured rates while preserving the 50-step behavior.
+    if len(drop_rates) == 1 or step_index <= total_steps // 2:
         base_drop_rate = float(drop_rates[0])
     else:
         base_drop_rate = float(drop_rates[1])
@@ -168,13 +171,25 @@ def jenga_scheduled_drop_rate(
     return min(base_drop_rate, progress_x10 * base_drop_rate)
 
 
+def _first_frame_block_count(
+    thw: tuple[int, int, int], block_size: int
+) -> int:
+    """Count blocks fully contained in the first temporal slice."""
+    if block_size <= 0:
+        raise ValueError(f"VSA block size must be positive, got {block_size}")
+    time, height, width = map(int, thw)
+    if time <= 0 or height <= 0 or width <= 0:
+        raise ValueError(f"VSA thw dimensions must be positive, got {thw}")
+    return (height * width) // block_size
+
+
 def build_jenga_block_mask(
     query: torch.Tensor,
     key: torch.Tensor,
     *,
     block_size: int = 128,
     top_k: int = 1,
-    prob_threshold: float = 0.8,
+    prob_threshold: float = 0.9,
     static_block_mask: Optional[torch.Tensor] = None,
     first_frame_blocks: int = 0,
 ) -> torch.Tensor:
@@ -259,7 +274,7 @@ def aiter_vsa_attention(
     top_k: int = 1,
     top_k_ratio: float = 0.0,
     drop_rate: Optional[float] = None,
-    prob_threshold: float = 0.8,
+    prob_threshold: float = 0.9,
     reorder_sequence: bool = True,
     use_static_block_mask: bool = True,
     use_first_frame_mask: bool = True,
@@ -311,11 +326,14 @@ def aiter_vsa_attention(
 
     first_frame_blocks = 0
     if use_first_frame_mask:
-        # Match Jenga's decoupled first-frame rule: divide the padded block
-        # count evenly across temporal slices and keep the first slice local.
-        num_blocks = query.shape[2] // block_size
-        first_frame_blocks = num_blocks // int(thw[0])
+        # Sliced Gilbert order keeps each temporal slice contiguous. Protect
+        # only blocks fully contained in the first frame; a partial boundary
+        # block remains dynamic because it also contains the next frame.
+        first_frame_blocks = _first_frame_block_count(thw, block_size)
 
+    # The probability mask depends on the current Q/K tensors and therefore
+    # cannot be cached. Layout permutations and static-neighbor masks are
+    # cached separately by setup_sparge().
     block_mask = build_jenga_block_mask(
         query,
         key,

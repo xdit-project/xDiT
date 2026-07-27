@@ -82,15 +82,13 @@ def main():
         warmup_steps=0,
         vsa_drop_rates=args.vsa_drop_rates,
         vsa_prob_threshold=args.vsa_prob_threshold,
+        vsa_collect_density=True,
         input_images=[],
     )
     runner = xFuserModelRunner(vars(config))
     runner.model.settings.model_name = args.model_path
     input_args = runner.preprocess_args(vars(config))
     runner.initialize(input_args)
-    runner.model.pipe.transformer.attention_kwargs[
-        "vsa_collect_density"
-    ] = True
 
     reference = None
     if rank == 0 and args.mode == "compare":

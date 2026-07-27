@@ -1,14 +1,22 @@
+import inspect
 import math
 
-import torch
 import pytest
+import torch
 
+from xfuser.config.args import xFuserArgs
+from xfuser.config.config import RuntimeConfig
 from xfuser.core.vsa_attention import (
+    _first_frame_block_count,
+    aiter_vsa_attention,
     block_mask_to_delta_lut,
     build_jenga_block_mask,
     jenga_scheduled_drop_rate,
 )
-from xfuser.core.sparge_attention.sparge import get_sliced_gilbert_perm
+from xfuser.core.sparge_attention.sparge import (
+    get_sliced_gilbert_perm,
+    setup_sparge,
+)
 
 
 def _reference_jenga_mask(query, key, block_size, top_k, threshold):
@@ -102,8 +110,83 @@ def test_jenga_scheduled_drop_rate_matches_reference():
     )
     assert jenga_scheduled_drop_rate(25, 50, rates) == 0.75
     assert jenga_scheduled_drop_rate(26, 50, rates) == 0.85
-    assert jenga_scheduled_drop_rate(19, 20, rates) == 0.75
-    assert jenga_scheduled_drop_rate(26, 30, rates) == 0.85
+    assert jenga_scheduled_drop_rate(10, 20, rates) == 0.75
+    assert jenga_scheduled_drop_rate(11, 20, rates) == 0.85
+    assert jenga_scheduled_drop_rate(15, 30, rates) == 0.75
+    assert jenga_scheduled_drop_rate(16, 30, rates) == 0.85
+
+
+def test_vsa_probability_defaults_match_benchmark():
+    assert (
+        xFuserArgs.__dataclass_fields__["vsa_prob_threshold"].default
+        == 0.9
+    )
+    assert (
+        RuntimeConfig.__dataclass_fields__["vsa_prob_threshold"].default
+        == 0.9
+    )
+    assert (
+        RuntimeConfig.__dataclass_fields__["vsa_collect_density"].default
+        is False
+    )
+    assert (
+        inspect.signature(build_jenga_block_mask)
+        .parameters["prob_threshold"]
+        .default
+        == 0.9
+    )
+
+
+def test_first_frame_blocks_ignore_cross_frame_partial_block():
+    # Wan 480x832 has a 21x30x52 post-patch grid. Twelve 128-token
+    # blocks fit wholly in the first frame; the remaining 24 tokens share
+    # a boundary block with the next frame.
+    assert _first_frame_block_count((21, 30, 52), 128) == 12
+    with pytest.raises(ValueError, match="positive"):
+        _first_frame_block_count((0, 30, 52), 128)
+
+
+def test_padded_static_mask_cache_uses_layout_identity():
+    query = torch.randn(1, 1, 24, 4)
+    kwargs = {
+        "thw": (2, 3, 4),
+        "sp_size": 1,
+        "reorder_sequence": True,
+        "use_static_block_mask": True,
+        "block_m": 16,
+        "block_n": 16,
+        "pad_block_divisible": True,
+        "use_sliced_gilbert": True,
+    }
+    first = setup_sparge(query, query, query, **kwargs)[-1]
+    second = setup_sparge(query.clone(), query, query, **kwargs)[-1]
+    assert first is second
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires AITER GPU")
+def test_vsa_density_collection_is_opt_in():
+    query = torch.randn(
+        1, 4, 256, 128, device="cuda", dtype=torch.bfloat16
+    )
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    kwargs = {
+        "thw": (1, 16, 16),
+        "sp_size": 1,
+        "drop_rate": 0.5,
+        "reorder_sequence": False,
+        "use_static_block_mask": False,
+        "use_first_frame_mask": False,
+    }
+    _, disabled_density = aiter_vsa_attention(
+        query, key, value, collect_density=False, **kwargs
+    )
+    _, enabled_density = aiter_vsa_attention(
+        query, key, value, collect_density=True, **kwargs
+    )
+    assert disabled_density is None
+    assert enabled_density is not None
+    assert 0.0 < float(enabled_density) <= 1.0
 
 
 def test_sliced_gilbert_permutation_matches_jenga_reference():

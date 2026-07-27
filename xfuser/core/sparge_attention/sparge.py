@@ -171,6 +171,7 @@ def setup_sparge(
     fwd_perm: Optional[torch.Tensor] = None
     inv_perm: Optional[torch.Tensor] = None
     static_mask: Optional[torch.Tensor] = None
+    static_mask_cache_key: Optional[tuple] = None
     sp_pad_len = 0
 
     # Both reorder and the static mask operate on the spatial (thw) layout,
@@ -204,14 +205,22 @@ def setup_sparge(
         )
         fwd_perm, inv_perm = perm_builder(thw, query.device)
         if use_static_block_mask:
+            mapping_kind = (
+                "sliced_gilbert"
+                if use_sliced_gilbert
+                else "gilbert"
+            )
             static_mask = get_static_block_neighbor_mask(
                 thw, block_m, block_n, query.device,
                 gilbert_mapping=(inv_perm, fwd_perm),
-                mapping_kind=(
-                    "sliced_gilbert"
-                    if use_sliced_gilbert
-                    else "gilbert"
-                ),
+                mapping_kind=mapping_kind,
+            )
+            static_mask_cache_key = (
+                tuple(thw),
+                int(block_m),
+                int(block_n),
+                _device_key(query.device),
+                mapping_kind,
             )
     elif use_static_block_mask:
         # Linear (row-major) order: feed the neighbour builder an identity
@@ -219,6 +228,13 @@ def setup_sparge(
         static_mask = get_static_block_neighbor_mask(
             thw, block_m, block_n, query.device,
             mapping_kind="linear",
+        )
+        static_mask_cache_key = (
+            tuple(thw),
+            int(block_m),
+            int(block_n),
+            _device_key(query.device),
+            "linear",
         )
 
     # Split off image part (without SP padding) and text part.
@@ -258,12 +274,9 @@ def setup_sparge(
         if static_mask is not None:
             n_iq = (image_len + img_pad) // block_m
             n_ik = (image_len + img_pad) // block_n
-            padded_key = (
-                static_mask.data_ptr(),
-                n_iq,
-                n_ik,
-                _device_key(static_mask.device),
-            )
+            if static_mask_cache_key is None:
+                raise RuntimeError("Static block mask cache metadata is missing")
+            padded_key = (*static_mask_cache_key, n_iq, n_ik)
             cached_padded = _PADDED_STATIC_BLOCK_MASK_CACHE.get(padded_key)
             if cached_padded is None:
                 cached_padded = torch.zeros(

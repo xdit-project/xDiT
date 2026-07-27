@@ -81,6 +81,11 @@ def _metrics(reference, actual, lpips_metric=None) -> dict:
     return result
 
 
+def _measured_timings(timings: list[float]) -> list[float]:
+    """Discard the first iteration as warmup when repeats are available."""
+    return timings[1:] if len(timings) > 1 else timings
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -133,15 +138,21 @@ def main():
             runtime.attention_backend = AttentionBackendType.AITER_VSA
             sparse, sparse_time = runner.run(run_args)
             if rank == 0:
+                dense_measured = _measured_timings(dense_time)
+                sparse_measured = _measured_timings(sparse_time)
+                dense_seconds = float(np.mean(dense_measured))
+                sparse_seconds = float(np.mean(sparse_measured))
                 rows.append({
                     "prompt": prompt,
                     "seed": seed,
                     "metrics": _metrics(
                         dense.videos, sparse.videos, lpips_metric
                     ),
-                    "dense_seconds": dense_time[-1],
-                    "vsa_seconds": sparse_time[-1],
-                    "speedup": dense_time[-1] / sparse_time[-1],
+                    "dense_timings": dense_measured,
+                    "vsa_timings": sparse_measured,
+                    "dense_seconds": dense_seconds,
+                    "vsa_seconds": sparse_seconds,
+                    "speedup": dense_seconds / sparse_seconds,
                 })
 
     if rank == 0:

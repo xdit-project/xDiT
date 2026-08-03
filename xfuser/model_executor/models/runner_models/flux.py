@@ -1,7 +1,6 @@
 import torch
 from typing import Optional
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.model_executor.models.transformers.transformer_flux import xFuserFlux1Transformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -100,6 +99,9 @@ class xFuserFluxModel(xFuserModel):
             )
         else:
             from diffusers import FluxPipeline
+            from xfuser.model_executor.models.transformers.transformer_flux import (
+                xFuserFlux1Transformer2DWrapper,
+            )
             transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
@@ -182,6 +184,9 @@ class xFuserFluxKontextModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline
+        from xfuser.model_executor.models.transformers.transformer_flux import (
+            xFuserFlux1Transformer2DWrapper,
+        )
         transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -246,6 +251,9 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
 
+    # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
+    # PipeFusion additionally needs 0.37, because xfuser's FLUX.2 pipeline module also
+    # binds Flux2KleinPipeline.
     min_diffusers_version = "0.36.0"
 
     capabilities = ModelCapabilities(
@@ -396,7 +404,8 @@ class xFuserFlux2Model(xFuserModel):
 @register_model("FLUX.2-klein-9B")
 class xFuserFlux2Klein9BModel(xFuserModel):
 
-    min_diffusers_version = "0.36.0"
+    # Flux2KleinPipeline landed in 0.37, one release after Flux2Pipeline.
+    min_diffusers_version = "0.37.0"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,

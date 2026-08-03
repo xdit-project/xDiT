@@ -598,8 +598,8 @@ def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretra
     See https://github.com/huggingface/transformers/pull/45345
     """
     import transformers
-    from packaging.version import Version
-    if Version(transformers.__version__) < Version("5.0.0"):
+    from xfuser.compat import version_at_least
+    if not version_at_least(transformers.__version__, "5.0.0"):
         return
 
     from transformers import PreTrainedTokenizerFast

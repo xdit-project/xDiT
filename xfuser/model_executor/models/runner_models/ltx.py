@@ -2,7 +2,6 @@ import torch
 import copy
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.model_executor.models.transformers.transformer_ltx2 import xFuserLTX2VideoTransformer3DWrapper
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -72,6 +71,9 @@ class xFuserLTX23VideoModel(xFuserModel):
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+        from xfuser.model_executor.models.transformers.transformer_ltx2 import (
+            xFuserLTX2VideoTransformer3DWrapper,
+        )
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -248,6 +250,9 @@ class xFuserLTX2VideoModel(xFuserModel):
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+        from xfuser.model_executor.models.transformers.transformer_ltx2 import (
+            xFuserLTX2VideoTransformer3DWrapper,
+        )
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,

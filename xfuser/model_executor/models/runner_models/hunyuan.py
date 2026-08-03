@@ -7,7 +7,6 @@ from huggingface_hub import hf_hub_download
 from collections import OrderedDict
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_hunyuan_video import xFuserHunyuanVideoTransformer3DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -29,7 +28,9 @@ from xfuser.compile import install_inductor_passes
 @register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
 
-    min_diffusers_version = "0.35.2"
+    # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
+    # install floor, so there is nothing extra to ask for here.
+    min_diffusers_version = None
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -57,6 +58,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideoPipeline
+        from xfuser.model_executor.models.transformers.transformer_hunyuan_video import (
+            xFuserHunyuanVideoTransformer3DWrapper,
+        )
         transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,

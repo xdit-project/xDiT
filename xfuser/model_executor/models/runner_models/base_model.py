@@ -9,10 +9,10 @@ from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
-from packaging.version import Version
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
+from xfuser.compat import is_diffusers_import_error
 from xfuser.config import args, xFuserArgs
 from xfuser.envs import (
     PACKAGES_CHECKER,
@@ -54,6 +54,12 @@ from xfuser.core.distributed.attention_schedule import AttentionSchedule, create
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
 MODEL_REGISTRY = {}
+
+# Value for min_diffusers_version when a model needs diffusers symbols that no release
+# ships yet, so the only way to run it is a source install of diffusers. Distinct from
+# None, which means no particular floor is known.
+DIFFUSERS_FROM_SOURCE = "source"
+
 
 def register_model(name: str) -> Callable:
     """ Decorator to register a model in the registry. """
@@ -229,8 +235,13 @@ class xFuserModel(abc.ABC):
     settings: ModelSettings = ModelSettings()
     model_output_type: str = ""
     fps: int = 0
-    # Minimum diffusers version this runner's pipeline imports need. None = the
-    # setup.py baseline (enforced at startup by check_packages) is enough.
+
+    # Lowest diffusers release this model is expected to run on, used only to name an
+    # upgrade target when a load fails. It never gates a load, so a value above the
+    # true minimum costs an over-stated recommendation and blocks nothing, while a
+    # value below it is a bug that tests/core/test_diffusers_floors.py catches. Use
+    # DIFFUSERS_FROM_SOURCE when the model's support has not been released yet, and
+    # leave None when no floor is known.
     min_diffusers_version: Optional[str] = None
 
     def __init__(self, config: xFuserArgs) -> None:
@@ -255,13 +266,33 @@ class xFuserModel(abc.ABC):
         if config.use_fp4_gemms:
             self._apply_fp8_override_cli_from_config(config)
 
-    def _require_diffusers_version(self) -> None:
-        floor = self.min_diffusers_version
-        if floor is not None and Version(diffusers.__version__) < Version(floor):
+    def _load_model_checked(self) -> DiffusionPipeline:
+        """Load the pipeline, reporting a missing diffusers symbol as a version problem.
+
+        Runner modules import their pipelines and transformer wrappers inside
+        _load_model, so a model too new for the installed diffusers still registers,
+        and fails here instead. The error names the model and the symbol that is
+        missing; min_diffusers_version, when set, adds where to get a diffusers
+        that has it.
+        """
+        try:
+            return self._load_model()
+        except ImportError as e:
+            if not is_diffusers_import_error(e):
+                raise
+            if self.min_diffusers_version == DIFFUSERS_FROM_SOURCE:
+                remedy = (
+                    "Support for this model has not landed in a diffusers release yet; "
+                    "it needs diffusers installed from source."
+                )
+            elif self.min_diffusers_version:
+                remedy = f"Requires diffusers>={self.min_diffusers_version}."
+            else:
+                remedy = "A newer diffusers is required."
             raise ImportError(
-                f"{self.settings.model_name} requires diffusers>={floor}, "
-                f"but diffusers {diffusers.__version__} is installed."
-            )
+                f"{self.settings.model_name} is unavailable with diffusers "
+                f"{diffusers.__version__}: {e}. {remedy}"
+            ) from e
 
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
@@ -272,8 +303,7 @@ class xFuserModel(abc.ABC):
 
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
-        self._require_diffusers_version()
-        self.pipe = self._load_model()
+        self.pipe = self._load_model_checked()
 
         log("Initializing runtime state...")
         initialize_runtime_state(self.pipe, self.engine_config)

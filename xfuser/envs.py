@@ -9,33 +9,10 @@ try:
 except ModuleNotFoundError:
     pass
 
+from xfuser.compat import declared_floor, version_at_least
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def required_dist_specifier(name: str):
-    """Version specifier declared for `name` in xfuser's package metadata (from setup.py
-    install_requires / extras), so runtime dependency-floor checks read the specifier from
-    setup.py instead of a duplicated hardcoded string. Returns None when metadata is
-    unavailable (e.g. running from source without an install) or `name` isn't declared.
-
-    Only use this for real dependency floors that mirror setup.py. Feature/capability gates
-    (e.g. "this code path needs a torch 2.5 feature" while the install floor is torch 2.4.1)
-    are NOT setup.py floors and must stay hardcoded at the version the feature landed.
-    """
-    try:
-        from importlib.metadata import requires, PackageNotFoundError
-        from packaging.requirements import Requirement, InvalidRequirement
-
-        for r in requires("xfuser") or []:
-            req = Requirement(r)
-            if req.name == name:
-                return req.specifier
-    except (PackageNotFoundError, InvalidRequirement) as e:
-        logger.debug(f"required_dist_specifier({name!r}) unavailable: {e}")
-    return None
-
 
 if TYPE_CHECKING:
     MASTER_ADDR: str = ""
@@ -283,15 +260,9 @@ class PackagesEnvChecker:
                 from flash_attn import flash_attn_func
                 from flash_attn import __version__
 
-                spec = required_dist_specifier("flash-attn")
-                if spec is not None:
-                    if __version__ not in spec:
-                        raise ImportError(f"install flash_attn {spec}")
-                else:
-                    # Fallback floor when running from source (no installed metadata).
-                    # Keep in sync with setup.py extras_require["flash-attn"].
-                    if version.parse(__version__) < version.parse("2.6.0"):
-                        raise ImportError("install flash_attn >= 2.6.0")
+                floor = declared_floor("flash-attn")
+                if floor is not None and not version_at_least(__version__, floor):
+                    raise ImportError(f"install flash_attn >= {floor}")
                 return True
         except ImportError:
             return False

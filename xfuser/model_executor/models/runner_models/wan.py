@@ -9,8 +9,6 @@ from diffusers.utils import load_image
 from safetensors.torch import load_file
 
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
-from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
     xFuserWanImageToVideoPipeline,
 )
@@ -222,6 +220,9 @@ class xFuserWan21I2VModel(xFuserModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -295,6 +296,9 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -370,6 +374,9 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         self.settings.output_name = "wan2.2_distilled_i2v"
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self._BASE_MODEL,
             torch_dtype=torch.bfloat16,
@@ -493,6 +500,9 @@ class xFuserWan21T2VModel(xFuserModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -543,6 +553,9 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -616,6 +629,9 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         torch.set_float32_matmul_precision('high')
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -733,6 +749,9 @@ class xFuserWan21VACEModel(xFuserModel):
             self.settings.output_name = "wan.2.1_vace_1.3b"
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan_vace import (
+            xFuserWanVACETransformer3DWrapper,
+        )
         transformer = xFuserWanVACETransformer3DWrapper.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,

@@ -4,13 +4,8 @@ from diffusers import UniPCMultistepScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_cosmos3 import (
-    get_cosmos3_transformer_wrapper_class,
-)
-from xfuser.model_executor.pipelines.pipeline_cosmos3_omni import (
-    get_cosmos3_pipeline_class,
-)
 from xfuser.model_executor.models.runner_models.base_model import (
+    DIFFUSERS_FROM_SOURCE,
     ModelSettings,
     xFuserModel,
     register_model,
@@ -93,7 +88,8 @@ def _setup_parallel_vae(vae, enable_parallel_encoder=True):
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
 
-    min_diffusers_version = "0.36.0"
+    # No released diffusers ships pipeline_cosmos3_omni yet.
+    min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -142,6 +138,13 @@ class xFuserCosmos3SuperModel(xFuserModel):
             )
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_cosmos3 import (
+            get_cosmos3_transformer_wrapper_class,
+        )
+        from xfuser.model_executor.pipelines.pipeline_cosmos3_omni import (
+            get_cosmos3_pipeline_class,
+        )
+
         xFuserCosmos3OmniTransformerWrapper = get_cosmos3_transformer_wrapper_class()
 
         transformer = xFuserCosmos3OmniTransformerWrapper.from_pretrained(

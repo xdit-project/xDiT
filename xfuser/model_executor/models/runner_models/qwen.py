@@ -8,7 +8,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.model_executor.models.transformers.transformer_qwen import xFuserQwenImageTransformerWrapper
 from xfuser import xFuserArgs
 
 @register_model("Qwen/Qwen-Image-Edit-2511")
@@ -19,7 +18,7 @@ from xfuser import xFuserArgs
 @register_model("Qwen-Image-Edit")
 class xFuserQwenImageEditModel(xFuserModel):
 
-    min_diffusers_version = "0.36.0"
+    min_diffusers_version = "0.37.0"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -60,6 +59,9 @@ class xFuserQwenImageEditModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImageEditPipeline
+        from xfuser.model_executor.models.transformers.transformer_qwen import (
+            xFuserQwenImageTransformerWrapper,
+        )
         transformer = xFuserQwenImageTransformerWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -101,7 +103,7 @@ class xFuserQwenImageEditModel(xFuserModel):
 @register_model("Qwen-Image")
 class xFuserQwenImageModel(xFuserModel):
 
-    min_diffusers_version = "0.36.0"
+    min_diffusers_version = "0.37.0"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -138,6 +140,9 @@ class xFuserQwenImageModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImagePipeline
+        from xfuser.model_executor.models.transformers.transformer_qwen import (
+            xFuserQwenImageTransformerWrapper,
+        )
         transformer = xFuserQwenImageTransformerWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,

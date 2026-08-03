@@ -1,6 +1,5 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -98,6 +97,9 @@ class xFuserZImageModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline
+        from xfuser.model_executor.models.transformers.transformer_z_image import (
+            xFuserZImageTransformer2DWrapper,
+        )
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -174,6 +176,9 @@ class xFuserZImageTurboModel(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline
+        from xfuser.model_executor.models.transformers.transformer_z_image import (
+            xFuserZImageTransformer2DWrapper,
+        )
         transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,

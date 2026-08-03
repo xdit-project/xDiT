@@ -1,6 +1,6 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
-from packaging import version
+from xfuser.compat import version_at_least
 from typing import Callable, Dict, List, Optional, Tuple, Union
 import sys
 import torch
@@ -414,7 +414,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 if enable_torch_compile:
                     if "flash_attn" in sys.modules:
                         import flash_attn
-                        if version.parse(flash_attn.__version__) < version.parse("2.7.0") or version.parse(torch.__version__) < version.parse("2.4.0"):
+                        if not version_at_least(flash_attn.__version__, "2.7.0") or not version_at_least(torch.__version__, "2.4.0"):
                             logger.warning(
                                 "flash-attn or torch version is too old, performance with torch.compile may be suboptimal due to too many graph breaks"
                             )

@@ -6,8 +6,8 @@ from dataclasses import dataclass, fields
 
 from torch import distributed as dist
 
+from xfuser.compat import declared_floor, version_at_least
 from xfuser.logger import init_logger
-import xfuser.envs as envs
 from xfuser.envs import CUDA_VERSION, TORCH_VERSION, PACKAGES_CHECKER
 
 logger = init_logger(__name__)
@@ -22,10 +22,11 @@ HAS_FLASH_ATTN = env_info["has_flash_attn"]
 def check_packages():
     import diffusers
 
-    if not version.parse(diffusers.__version__) > version.parse("0.30.2"):
+    floor = declared_floor("diffusers")
+    if floor is not None and not version_at_least(diffusers.__version__, floor):
         raise RuntimeError(
-            "This project requires diffusers version > 0.30.2. Currently, you can not install a correct version of diffusers by pip install."
-            "Please install it from source code!"
+            f"This project requires diffusers >= {floor}, "
+            f"but {diffusers.__version__} is installed."
         )
 
 

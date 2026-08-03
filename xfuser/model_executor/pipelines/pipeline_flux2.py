@@ -1,9 +1,15 @@
-"""xFuser pipeline wrapper for Flux2 with PipeFusion support.
+"""xFuser pipeline wrappers for FLUX.2 dev and klein, with PipeFusion support.
 
 Modeled on pipeline_flux.py. The denoising loop is replaced by the sync/async
 patch-level pipeline (_sync_pipeline / _async_pipeline) inherited from the
 Flux1 implementation, adapted to Flux2's transformer signature (guidance
 embedding instead of pooled projections, modulation parameters).
+
+Both variants live here because the PipeFusion logic is identical. Note that this couples
+their availability: Flux2KleinPipeline landed in diffusers 0.37 and Flux2Pipeline in 0.36,
+so binding both here means neither wrapper is exported on 0.36, and FLUX.2 dev falls back
+to its non-PipeFusion path there. Importing this module is what tells the package whether
+either is available; see xfuser.compat.optional_exporter.
 """
 
 import math
@@ -11,8 +17,11 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from diffusers import Flux2Pipeline, Flux2KleinPipeline
-from diffusers.pipelines.flux2.pipeline_flux2 import Flux2PipelineOutput
+from diffusers import Flux2KleinPipeline, Flux2Pipeline
+from diffusers.pipelines.flux2.pipeline_flux2 import (
+    Flux2PipelineOutput,
+    retrieve_timesteps,
+)
 from diffusers.utils import is_torch_xla_available
 
 from xfuser.config import EngineConfig, InputConfig
@@ -28,6 +37,14 @@ from xfuser.core.distributed import (
     is_dp_last_group,
 )
 from xfuser.logger import init_logger
+
+# Imported for its registration side effect: from_pretrained looks up a wrapper for the
+# FLUX.2 backbone to parallelise it, so a pipeline exported without this registered
+# would fail deep inside from_pretrained with no mention of diffusers. Importing it here
+# keeps both halves of FLUX.2 support gated on the same diffusers release.
+from xfuser.model_executor.models.transformers.transformer_flux2 import (  # noqa: F401
+    xFuserFlux2Transformer2DWrapper,
+)
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .register import xFuserPipelineWrapperRegister
 
@@ -202,7 +219,6 @@ class xFuserFlux2PipelineBase(xFuserPipelineBaseWrapper):
             )
         except Exception:
             mu = None
-        from diffusers.pipelines.flux2.pipeline_flux2 import retrieve_timesteps
 
         timesteps, num_inference_steps = retrieve_timesteps(
             self.scheduler, num_inference_steps, device, sigmas=sigmas, mu=mu
@@ -628,4 +644,6 @@ class xFuserFlux2Pipeline(xFuserFlux2PipelineBase):
 
 @xFuserPipelineWrapperRegister.register(Flux2KleinPipeline)
 class xFuserFlux2KleinPipeline(xFuserFlux2PipelineBase):
+    """Klein differs only in the diffusers class it binds; the PipeFusion logic is shared."""
+
     _diffusers_cls = Flux2KleinPipeline

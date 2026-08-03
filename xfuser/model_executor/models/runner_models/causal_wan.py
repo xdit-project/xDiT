@@ -1,10 +1,11 @@
 import copy
 import os
+from typing import TYPE_CHECKING
+
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser.model_executor.models.transformers.transformer_causal_wan import xFuserCausalWanTransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_causal_wan import xFuserCausalWanPipeline
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
@@ -15,10 +16,16 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 
+if TYPE_CHECKING:
+    from xfuser.model_executor.models.transformers.transformer_causal_wan import (
+        xFuserCausalWanTransformer3DWrapper,
+    )
 
 
 @register_model("CausalWan")
 class xFuserCausalWanModel(xFuserModel):
+
+    min_diffusers_version = "0.35.2"
 
     capabilities = ModelCapabilities(
         ulysses_degree=False,   # SP incompatible with KV cache initially
@@ -70,8 +77,11 @@ class xFuserCausalWanModel(xFuserModel):
     _FLOW_SHIFT = 3
 
 
-    def _load_transformer(self, subfolder: str) -> xFuserCausalWanTransformer3DWrapper:
+    def _load_transformer(self, subfolder: str) -> "xFuserCausalWanTransformer3DWrapper":
         """Load transformer, falling back to manual loading if weight index is mismatched."""
+        from xfuser.model_executor.models.transformers.transformer_causal_wan import (
+            xFuserCausalWanTransformer3DWrapper,
+        )
         try:
             return xFuserCausalWanTransformer3DWrapper.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,

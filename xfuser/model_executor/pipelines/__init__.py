@@ -1,9 +1,10 @@
+from xfuser.compat import optional_exporter
+
 from .base_pipeline import xFuserPipelineBaseWrapper
 from .pipeline_pixart_alpha import xFuserPixArtAlphaPipeline
 from .pipeline_pixart_sigma import xFuserPixArtSigmaPipeline
 from .pipeline_stable_diffusion_3 import xFuserStableDiffusion3Pipeline
 from .pipeline_flux import xFuserFluxPipeline
-from .pipeline_flux2 import xFuserFlux2Pipeline, xFuserFlux2KleinPipeline
 from .pipeline_latte import xFuserLattePipeline
 from .pipeline_cogvideox import xFuserCogVideoXPipeline
 from .pipeline_consisid import xFuserConsisIDPipeline
@@ -19,8 +20,6 @@ __all__ = [
     "xFuserPixArtSigmaPipeline",
     "xFuserStableDiffusion3Pipeline",
     "xFuserFluxPipeline",
-    "xFuserFlux2Pipeline",
-    "xFuserFlux2KleinPipeline",
     "xFuserLattePipeline",
     "xFuserHunyuanDiTPipeline",
     "xFuserCogVideoXPipeline",
@@ -30,3 +29,8 @@ __all__ = [
     "xFuserSanaSprintPipeline",
     "xFuserCausalWanPipeline",
 ]
+
+# These need diffusers symbols newer than the install floor, so they are gated on their
+# module importing.
+_optional = optional_exporter(globals())
+_optional(".pipeline_flux2", "xFuserFlux2Pipeline", "xFuserFlux2KleinPipeline")

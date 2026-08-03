@@ -355,6 +355,8 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        enable_tiling=True,
+        enable_slicing=True,
         supports_distilled_weights=True,
     )
     default_input_values = DefaultInputValues(

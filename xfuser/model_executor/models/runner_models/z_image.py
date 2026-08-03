@@ -133,6 +133,8 @@ class xFuserZImageTurboModel(xFuserModel):
     min_diffusers_version = "0.36.0"
 
     capabilities = ModelCapabilities(
+        enable_tiling=True,
+        enable_slicing=True,
         use_fp8_gemms=True,
         use_int8_gemms=True,
         fully_shard_degree=True,

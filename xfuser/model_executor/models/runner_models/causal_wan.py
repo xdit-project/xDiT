@@ -32,7 +32,7 @@ class xFuserCausalWanModel(xFuserModel):
         ring_degree=False,
         fully_shard_degree=True,
         use_fp8_gemms=True,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -130,6 +130,11 @@ class xFuserCausalWanModel(xFuserModel):
             scheduler=scheduler,
         )
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(

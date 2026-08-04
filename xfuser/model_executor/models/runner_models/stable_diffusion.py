@@ -24,6 +24,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -54,6 +55,11 @@ class xFuserStableDiffusionModel(xFuserModel):
             torch_dtype=dtype,
         )
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "text_encoder", "text_encoder_2", "text_encoder_3"]

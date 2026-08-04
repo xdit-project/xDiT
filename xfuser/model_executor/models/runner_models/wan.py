@@ -672,6 +672,7 @@ class xFuserWan21VACEModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
+        use_parallel_vae=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -724,6 +725,11 @@ class xFuserWan21VACEModel(xFuserModel):
         )
         pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _prepare_video_and_mask(self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int) -> tuple[List[Image.Image], List[Image.Image]]:
         """ Prepare video and mask for Wan VACE model """

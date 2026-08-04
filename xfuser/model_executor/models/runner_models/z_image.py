@@ -59,6 +59,7 @@ class xFuserZImageModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_int8_gemms=True,
+        use_parallel_vae=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -113,6 +114,11 @@ class xFuserZImageModel(xFuserModel):
         )
         return pipe
 
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
+
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = _normalize_prompt(input_args["prompt"])
         output = self.pipe(
@@ -138,6 +144,7 @@ class xFuserZImageTurboModel(xFuserModel):
         use_fp8_gemms=True,
         use_int8_gemms=True,
         fully_shard_degree=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -193,6 +200,11 @@ class xFuserZImageTurboModel(xFuserModel):
             torch_dtype=torch.bfloat16,
         )
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         prompt = _normalize_prompt(input_args["prompt"])

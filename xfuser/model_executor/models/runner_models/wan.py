@@ -21,7 +21,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
@@ -54,48 +53,6 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
         "spargeattn_reorder_sequence": config.spargeattn_reorder_sequence,
         "use_spargeattn_static_block_mask": config.use_spargeattn_static_block_mask,
     }
-
-
-def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
-    """ Parallelizes VAE en-/decoder using distvae """
-    # Handle encoder
-    if enable_parallel_encoder:
-        try:
-            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
-            vae_scale_factor = getattr(vae.config, 'scaling_factor', 8)
-            if hasattr(vae.config, 'vae_scale_factor_spatial'):
-                vae_scale_factor = vae.config.vae_scale_factor_spatial
-            patched_encoder = WanEncoderAdapter(
-                vae.encoder,
-                vae_group=get_vae_parallel_group().device_group,
-                vae_scale_factor=vae_scale_factor,
-            ).to(vae.device)
-            vae.encoder = patched_encoder
-            log(f"Parallel VAE encoder enabled successfully.")
-        except ImportError:
-            log(
-                "DistVAE library is missing or does not support WanEncoderAdapter. "
-                "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
-                "Defaulting to single-rank encoder."
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to patch VAE encoder. {e}")
-    # Handle decoder
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
-        patched_decoder = WanDecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group().device_group
-        ).to(vae.device)
-        vae.decoder = patched_decoder
-        log(f"Parallel VAE decoder enabled successfully.")
-    except ImportError:
-        log(
-            "DistVAE library is missing or does not support WanDecoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
-            "Defaulting to single-rank decoder."
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE decoder. {e}")
 
 
 def _remap_lightx2v_to_diffusers(k: str) -> str:
@@ -216,7 +173,7 @@ class xFuserWan21I2VModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
+            self._setup_parallel_vae()
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -498,7 +455,7 @@ class xFuserWan21T2VModel(xFuserModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
+            self._setup_parallel_vae()
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:

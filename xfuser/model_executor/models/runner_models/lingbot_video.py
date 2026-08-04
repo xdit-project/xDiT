@@ -23,7 +23,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import log
 
 
@@ -76,32 +75,6 @@ def _load_json_prompt(prompt: str) -> str:
             return json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
         return str(caption)
     return prompt
-
-
-def _setup_parallel_vae(vae, use_encoder=False):
-    import torch.distributed as dist
-    vae_group = get_vae_parallel_group().device_group
-    log(f"VAE parallel group: world_size={dist.get_world_size(vae_group)}, "
-        f"rank={dist.get_rank(vae_group)}, vae.device={vae.device}")
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
-        vae.decoder = WanDecoderAdapter(vae.decoder, vae_group=vae_group).to(vae.device)
-        log("Parallel VAE decoder enabled.")
-    except ImportError:
-        log("distvae WanDecoderAdapter not available, skipping parallel VAE decoder.")
-        return
-    except Exception as e:
-        log(f"Failed to patch VAE decoder: {e}")
-        return
-    if use_encoder:
-        try:
-            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
-            vae.encoder = WanEncoderAdapter(vae.encoder, vae_group=vae_group).to(vae.device)
-            log("Parallel VAE encoder enabled.")
-        except ImportError:
-            log("distvae WanEncoderAdapter not available, skipping parallel VAE encoder.")
-        except Exception as e:
-            log(f"Failed to patch VAE encoder: {e}")
 
 
 @register_model("robbyant/lingbot-video-moe-30b-a3b")
@@ -199,7 +172,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
                 if hasattr(block, "_cached_bulk_dtype"):
                     _patch_block_bulk_dtype(block)
         if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
+            self._setup_parallel_vae()
 
         # Cache pre-transposed expert weights to eliminate per-call copies
         self.pipe.transformer.cache_expert_weights()

@@ -23,6 +23,7 @@ from xfuser.envs import (
 )
 from xfuser.core.distributed.parallel_state import (
     get_fs_group,
+    get_vae_parallel_group,
     get_vae_parallel_world_size,
 )
 from xfuser.core.utils.runner_utils import (
@@ -37,7 +38,7 @@ from xfuser.core.utils.runner_utils import (
     _use_aiter_fp8_rdna4,
     rgetattr,
 )
-from xfuser.core.utils import vae_tiling
+from xfuser.core.utils import vae_parallel, vae_tiling
 
 from xfuser.core.distributed import (
     get_world_group,
@@ -370,6 +371,20 @@ class xFuserModel(abc.ABC):
             if vae is not None and not any(vae is seen for seen in vaes):
                 vaes.append(vae)
         return vaes
+
+    def _setup_parallel_vae(self) -> None:
+        """ Shard VAE decode, and encode where the model declares it, across the VAE group """
+        vae_group = get_vae_parallel_group().device_group
+        log(f"VAE parallel group: world_size={torch.distributed.get_world_size(vae_group)}, "
+            f"rank={torch.distributed.get_rank(vae_group)}", debug=True)
+        for vae in self._decoding_vaes():
+            adapter = vae_parallel.parallelize_decoder(vae, vae_group)
+            log(f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}.")
+            # Only an I2V or V2V model encodes anything worth sharding, so this is a capability
+            # rather than a flag: there is nothing for a user to decide.
+            if self.capabilities.use_parallel_vae_encoder:
+                adapter = vae_parallel.parallelize_encoder(vae, vae_group)
+                log(f"Parallel VAE encoder enabled on {type(vae).__name__} via {adapter}.")
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """

@@ -125,8 +125,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         config.task = saved_task
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
-        do_cfg = input_args["guidance_scale"] > 1.0
-        return 2 if do_cfg else 1
+        if input_args["guidance_scale"] > 1.0 and not self.config.use_cfg_parallel:
+            return 2
+        return 1
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,

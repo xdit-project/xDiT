@@ -59,8 +59,8 @@ class xFuserLingBotVideoPipeline:
         cfg_rank = get_classifier_free_guidance_rank()
         do_cfg_parallel = guidance_scale > 1.0 and get_classifier_free_guidance_world_size() == 2
 
-        if do_cfg_parallel and "image" not in kwargs:
-            # T2V CFG parallel: custom path with xDiT's all_gather
+        if do_cfg_parallel:
+            # CFG parallel: custom path with xDiT's all_gather (T2V and TI2V)
             return self._call_with_xdit_cfg_parallel(
                 prompt=prompt,
                 negative_prompt=negative_prompt,

@@ -83,6 +83,31 @@ class TestSupportProbe(unittest.TestCase):
         )
 
 
+class TestTilePaddingError(unittest.TestCase):
+    """The padding failure a too-thin tile causes, told apart from failures with other causes"""
+
+    # Verbatim from AutoencoderKLLTX2Video decoding a 16x16 latent at a 128px window.
+    REAL = (
+        "Argument #4: Padding size should be less than the corresponding input dimension, "
+        "but got: padding (1, 1) at dimension 4 of input [1, 8, 3, 4, 1]"
+    )
+
+    def test_the_padding_failure_is_recognised(self):
+        self.assertTrue(vae_tiling.is_tile_padding_error(RuntimeError(self.REAL)))
+
+    def test_other_decode_failures_are_not(self):
+        for message in (
+            "expected scalar type BFloat16 but found Float",
+            "Expected all tensors to be on the same device",
+            "shape '[1, 8, 16, 16]' is invalid for input of size 1024",
+            "CUDA error: an illegal memory access was encountered",
+        ):
+            with self.subTest(error=message):
+                self.assertFalse(
+                    vae_tiling.is_tile_padding_error(RuntimeError(message))
+                )
+
+
 class TestTileWindow(unittest.TestCase):
 
     def test_reads_the_pixel_window_of_each_family(self):

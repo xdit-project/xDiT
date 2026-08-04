@@ -340,11 +340,14 @@ class xFuserModel(abc.ABC):
                 log(f"Enabling VAE slicing on {type(vae).__name__}...")
                 vae.enable_slicing()
 
+            tile_window = None
             if tiling:
                 vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                 log(f"Enabling VAE tiling on {type(vae).__name__}...")
                 vae.enable_tiling()
-                self._apply_vae_tile_size(vae)
+                tile_window = self._apply_vae_tile_size(vae)
+            # Installed either way, so a decode that OOMs with tiling off still says so.
+            self._install_vae_decode_guard(vae, tile_window)
 
         if self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
@@ -1071,13 +1074,13 @@ class xFuserModel(abc.ABC):
 
         self.pipe.vae.decode = decode_wrapper
 
-    def _apply_vae_tile_size(self, vae) -> None:
-        """ Narrow this VAE's tile window to --vae_tile_size, where one was asked for """
+    def _apply_vae_tile_size(self, vae) -> Optional[int]:
+        """ The window set on this VAE, None where the VAE keeps its own """
         # The default window tracks the VAE's training resolution and never shrinks for an
         # above-training-res decode, so a single tile can outgrow free VRAM. This shrinks it.
         requested = self.config.vae_tile_size
         if requested is None:
-            return
+            return None
         window = vae_tiling.tile_window(vae)
         if window is None:
             raise ValueError(
@@ -1087,7 +1090,7 @@ class xFuserModel(abc.ABC):
         if requested > window:
             log(f"--vae_tile_size {requested} is larger than this VAE's {window}px tile window, "
                 f"which would raise peak memory rather than lower it; leaving it at {window}px.")
-            return
+            return None
         pixels, plan = vae_tiling.snap_tile_window(vae, requested)
         if plan is None:
             smallest = vae_tiling.smallest_tile_window(vae, requested, window)
@@ -1104,6 +1107,7 @@ class xFuserModel(abc.ABC):
         vae_tiling.apply_tile_plan(vae, plan)
         log(f"VAE tile window set to {pixels}px "
             f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})")
+        return pixels
 
     def _check_vae_tile_size_against_parallel_vae(
         self, vae, pixels: int, plan: dict, window: int
@@ -1127,6 +1131,57 @@ class xFuserModel(abc.ABC):
              f", and no size up to this VAE's own {window}px window gives them one each.")
         )
 
+    def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
+        # Point a failed VAE decode at the knob that fixes it. Success path untouched.
+        original_decode = vae.decode
+
+        @functools.wraps(original_decode)
+        def decode_guard(*args, **kwargs):
+            try:
+                return original_decode(*args, **kwargs)
+            except torch.cuda.OutOfMemoryError as e:
+                raise torch.cuda.OutOfMemoryError(f"{self._vae_decode_oom_hint(vae)}\n{e}") from e
+            except RuntimeError as e:
+                # Two things have to hold before the window gets the blame: this run narrowed it,
+                # and the decoder failed the way a narrow window makes it fail. A dtype or device
+                # error is failing for reasons of its own, as is a VAE still at its own window.
+                if tile_window is None or not vae_tiling.is_tile_padding_error(e):
+                    raise
+                # Whether a window leaves a tile the decoder cannot pad depends on the output size,
+                # so this cannot be caught when the window is set; name the window, being the part
+                # the caller can change, and keep the decoder's own words underneath.
+                raise RuntimeError(
+                    f"VAE tiled decode failed at the {tile_window}px tile window set by "
+                    f"--vae_tile_size: at this output size the window leaves a tile too thin for "
+                    f"the decoder to pad. A larger window can fail where a smaller one works, so "
+                    f"try another --vae_tile_size, or drop it to decode at this VAE's own "
+                    f"window.\n{e}"
+                ) from e
+
+        vae.decode = decode_guard
+
+    def _vae_decode_oom_hint(self, vae) -> str:
+        # Read from the VAE, since a model can arrive with tiling on and no flag set.
+        if not getattr(vae, "use_tiling", False):
+            if self.capabilities.enable_tiling:
+                return ("VAE decode ran out of memory with tiling disabled. Re-run with "
+                        "--enable_tiling to decode in tiles.")
+            return (f"VAE decode ran out of memory, and model {self.settings.model_name} does not "
+                    "support VAE tiling.")
+
+        window = vae_tiling.tile_window(vae)
+        if window is None:
+            return ("VAE tiled decode ran out of memory. This model's VAE "
+                    f"({type(vae).__name__}) has no single tile window to size, so "
+                    "--vae_tile_size does not apply.")
+        # Halve the window through the same snap the override uses, so the guard can never name a
+        # size that the next run would turn around and refuse.
+        target, _ = vae_tiling.snap_tile_window(vae, max(window // 2, 1))
+        if target is None:
+            return (f"VAE tiled decode ran out of memory at a {window}px tile window, the smallest "
+                    "this VAE can tile with.")
+        return (f"VAE tiled decode ran out of memory at a {window}px tile window. Shrink it with "
+                f"--vae_tile_size {target}, then re-run.")
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

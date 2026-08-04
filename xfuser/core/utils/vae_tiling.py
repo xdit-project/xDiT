@@ -52,6 +52,16 @@ def require_vae_support(vae, feature: str, flag: str) -> None:
         )
 
 
+def is_tile_padding_error(error: BaseException) -> bool:
+    """Whether a decode failure is the padding error a too-narrow tile window causes"""
+    # Torch raises this from a pad deep inside the decoder, where a tile arrives thinner than the
+    # convolution's own padding: "Padding size should be less than the corresponding input
+    # dimension, but got: padding (1, 1) at dimension 4 of input [1, 8, 3, 4, 1]". Text is all
+    # there is to key on, and a rewording upstream only costs the hint, since anything unmatched
+    # reaches the caller as the decoder wrote it.
+    return "padding size should be less than" in str(error).lower()
+
+
 def tile_window(vae) -> Optional[int]:
     """The VAE's pixel-space tile edge, None if one number cannot describe it"""
     windows = [

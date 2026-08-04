@@ -122,6 +122,7 @@ class xFuserArgs:
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
+    vae_tile_size: Optional[int] = None
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8
@@ -399,6 +400,15 @@ class xFuserArgs:
                  "batch size 1.",
         )
         runtime_group.add_argument(
+            "--vae_tile_size",
+            type=int,
+            default=None,
+            help="Edge, in output pixels, of each tile the VAE decodes. Smaller = less peak VRAM "
+                 "at VAE decode, more tiles. Turns tiling on by itself. A size the VAE cannot tile "
+                 "with exactly is rounded down to the next one that works, and a size above the "
+                 "VAE's own window is ignored.",
+        )
+        runtime_group.add_argument(
             "--use_fp8_t5_encoder",
             action="store_true",
             help="Quantize the T5 text encoder.",
@@ -614,6 +624,15 @@ class xFuserArgs:
             action="store_true",
             help="Making VAE decode one batch item at a time to save GPU memory. No effect at "
                  "batch size 1.",
+        )
+        parser.add_argument(
+            "--vae_tile_size",
+            type=int,
+            default=None,
+            help="Edge, in output pixels, of each tile the VAE decodes. Smaller = less peak VRAM "
+                 "at VAE decode, more tiles. Turns tiling on by itself. A size the VAE cannot tile "
+                 "with exactly is rounded down to the next one that works, and a size above the "
+                 "VAE's own window is ignored.",
         )
         parser.add_argument(
             "--use_int8_gemms",

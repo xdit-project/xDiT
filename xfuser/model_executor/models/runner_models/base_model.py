@@ -21,8 +21,10 @@ from xfuser.envs import (
     _is_hip,
     _is_cuda,
 )
-from xfuser.core.distributed.parallel_state import get_fs_group
-from xfuser.core.utils import vae_tiling
+from xfuser.core.distributed.parallel_state import (
+    get_fs_group,
+    get_vae_parallel_world_size,
+)
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -35,6 +37,7 @@ from xfuser.core.utils.runner_utils import (
     _use_aiter_fp8_rdna4,
     rgetattr,
 )
+from xfuser.core.utils import vae_tiling
 
 from xfuser.core.distributed import (
     get_world_group,
@@ -325,16 +328,23 @@ class xFuserModel(abc.ABC):
         if getattr(self.config, "use_spargeattn_head_balance", False):
             log("Enabling Sparge block-sparse head balancing...")
 
+        # A tile size is a request to tile, so it turns tiling on by itself. LTX 2.3 tiles its
+        # stage-2 VAE at load, and without this the only way to size that window would be
+        # --enable_tiling, which tiles every stage to reach the one that ran out of memory.
+        tiling = self.config.enable_tiling or self.config.vae_tile_size is not None
+        tiling_flag = "--enable_tiling" if self.config.enable_tiling else "--vae_tile_size"
+
         for vae in self._decoding_vaes():
             if self.config.enable_slicing:
                 vae_tiling.require_vae_support(vae, "slicing", "--enable_slicing")
                 log(f"Enabling VAE slicing on {type(vae).__name__}...")
                 vae.enable_slicing()
 
-            if self.config.enable_tiling:
-                vae_tiling.require_vae_support(vae, "tiling", "--enable_tiling")
+            if tiling:
+                vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                 log(f"Enabling VAE tiling on {type(vae).__name__}...")
                 vae.enable_tiling()
+                self._apply_vae_tile_size(vae)
 
         if self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
@@ -343,12 +353,13 @@ class xFuserModel(abc.ABC):
             log("Enabling model CPU offload...")
             self.pipe.enable_model_cpu_offload()
 
+
     def _decoding_vaes(self) -> List:
         """ Every VAE a run decodes through, staged models included """
         # A model that decodes in stages loads a second pipeline with its own VAE, and the later
-        # stage is the one at full resolution, so leaving it out would aim VAE options at the
+        # stage is the one at full resolution, so leaving it out would aim --vae_tile_size at the
         # smaller decode. Collected here by name rather than left to each subclass, since a
-        # subclass that forgets gets no error, only options that miss the largest decode.
+        # subclass that forgets gets no error, only a flag that misses the largest decode.
         vaes = []
         for pipe in (self.pipe, getattr(self, "second_pipe", None)):
             vae = getattr(pipe, "vae", None)
@@ -361,8 +372,6 @@ class xFuserModel(abc.ABC):
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
-            # bool subclasses int, so a boolean flag reaching the degree branch below is
-            # tested with True > 1 and never refused.
             if isinstance(config_value, int) and not isinstance(config_value, bool):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
@@ -457,6 +466,13 @@ class xFuserModel(abc.ABC):
         if config.distilled_transformer_path or config.distilled_transformer_2_path:
             if not self.capabilities.supports_distilled_weights:
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
+
+        if config.vae_tile_size is not None:
+            if config.vae_tile_size <= 0:
+                raise ValueError(f"--vae_tile_size must be positive, got {config.vae_tile_size}.")
+            if not self.capabilities.enable_tiling:
+                raise ValueError(f"--vae_tile_size decodes the VAE in tiles, which model "
+                                 f"{self.settings.model_name} does not support.")
 
 
     def _get_compile_mode(self) -> str:
@@ -1054,6 +1070,63 @@ class xFuserModel(abc.ABC):
             return output
 
         self.pipe.vae.decode = decode_wrapper
+
+    def _apply_vae_tile_size(self, vae) -> None:
+        """ Narrow this VAE's tile window to --vae_tile_size, where one was asked for """
+        # The default window tracks the VAE's training resolution and never shrinks for an
+        # above-training-res decode, so a single tile can outgrow free VRAM. This shrinks it.
+        requested = self.config.vae_tile_size
+        if requested is None:
+            return
+        window = vae_tiling.tile_window(vae)
+        if window is None:
+            raise ValueError(
+                f"Model {self.settings.model_name} does not support --vae_tile_size: its VAE "
+                f"({type(vae).__name__}) has no single pixel-space tile window that one size sets."
+            )
+        if requested > window:
+            log(f"--vae_tile_size {requested} is larger than this VAE's {window}px tile window, "
+                f"which would raise peak memory rather than lower it; leaving it at {window}px.")
+            return
+        pixels, plan = vae_tiling.snap_tile_window(vae, requested)
+        if plan is None:
+            smallest = vae_tiling.smallest_tile_window(vae, requested, window)
+            raise ValueError(
+                f"--vae_tile_size {requested} is not a window this VAE ({type(vae).__name__}) "
+                f"can tile with" + (f"; the smallest that works is {smallest}px."
+                                    if smallest else
+                                    f", and neither is any size up to its own {window}px window.")
+            )
+        if pixels != requested:
+            log(f"--vae_tile_size {requested} is not a window this VAE can tile with exactly; "
+                f"using the next one down at {pixels}px.")
+        self._check_vae_tile_size_against_parallel_vae(vae, pixels, plan, window)
+        vae_tiling.apply_tile_plan(vae, plan)
+        log(f"VAE tile window set to {pixels}px "
+            f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})")
+
+    def _check_vae_tile_size_against_parallel_vae(
+        self, vae, pixels: int, plan: dict, window: int
+    ) -> None:
+        # The two knobs divide the same axis: diffusers hands the decoder one tile, and DistVAE
+        # then splits that tile's latent rows across the VAE group. Under a row per rank it splits
+        # into fewer patches than there are ranks, and the surplus ranks index off the end of the
+        # split rather than reporting anything.
+        if not (self.config.use_parallel_vae and self.capabilities.use_parallel_vae):
+            return
+        ranks = get_vae_parallel_world_size()
+        rows = vae_tiling.latent_rows(vae, plan)
+        if ranks < 2 or rows is None or rows >= ranks:
+            return
+        smallest = vae_tiling.smallest_tile_window(vae, pixels, window, min_latent_rows=ranks)
+        raise ValueError(
+            f"--vae_tile_size {pixels} leaves {rows} latent rows for the {ranks} ranks "
+            f"--use_parallel_vae splits each tile across" +
+            (f"; the smallest window with a row per rank is {smallest}px."
+             if smallest else
+             f", and no size up to this VAE's own {window}px window gives them one each.")
+        )
+
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

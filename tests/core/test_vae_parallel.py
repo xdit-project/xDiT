@@ -7,6 +7,8 @@ when diffusers reworks a decoder.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import diffusers
 import torch.nn as nn
@@ -77,6 +79,45 @@ class TestEncoderScaleFactor(unittest.TestCase):
         vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
         vae.register_to_config(scale_factor_spatial=None)
         self.assertEqual(vae_parallel.encoder_scale_factor(vae), 8)
+
+
+class _StubAdapter(nn.Module):
+    """Stands in for a DistVAE adapter, which needs a process group to build"""
+
+    def __init__(self, decoder, vae_group=None, **kwargs):
+        super().__init__()
+        self.wrapped = decoder
+        self.kwargs = kwargs
+        # WanDecoderAdapter crops by the factor it upsamples; the 2D one has no such step.
+        self.patchify = SimpleNamespace(scale_factor=1)
+
+
+class TestWrappingReadsEveryVAEConfig(unittest.TestCase):
+    """Wrapping reads the VAE's config, so it has to survive how each class spells it"""
+
+    def _parallelize(self, vae):
+        with mock.patch.object(vae_parallel, "_adapter", return_value=_StubAdapter):
+            vae_parallel.parallelize_decoder(vae, vae_group=None)
+        return vae.decoder
+
+    def test_every_shardable_vae_class_can_be_wrapped(self):
+        for name, adapter in EXPECTED.items():
+            if adapter is None:
+                continue
+            with self.subTest(vae=name):
+                vae = getattr(diffusers, name)(**CONFIGS[name])
+                self.assertIsInstance(self._parallelize(vae), _StubAdapter)
+
+    def test_a_patching_vae_tells_the_adapter_its_factor(self):
+        vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
+        vae.register_to_config(patch_size=2)
+        self.assertEqual(self._parallelize(vae).patchify.scale_factor, 2)
+
+    def test_flux_2s_patching_is_not_read_as_a_factor(self):
+        # Flux 2 declares patch_size (2, 2) for the pixel unshuffle at its boundary, which is not
+        # the single factor an adapter's patchify takes.
+        vae = diffusers.AutoencoderKLFlux2(**CONFIGS["AutoencoderKLFlux2"])
+        self.assertEqual(self._parallelize(vae).patchify.scale_factor, 1)
 
 
 class TestUnshardableIsRefused(unittest.TestCase):

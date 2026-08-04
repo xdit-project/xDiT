@@ -6,6 +6,8 @@ import torch
 
 from xfuser.config.args import xFuserArgs
 from xfuser.config.config import RuntimeConfig
+from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.runtime_state import DiTRuntimeState
 from xfuser.core.vsa_attention import (
     _first_frame_block_count,
     aiter_vsa_attention,
@@ -137,6 +139,26 @@ def test_vsa_probability_defaults_match_benchmark():
     )
 
 
+def test_vsa_rejects_hybrid_attention_schedule():
+    state = DiTRuntimeState.__new__(DiTRuntimeState)
+    state.runtime_config = RuntimeConfig(use_hybrid_attn_schedule=True)
+
+    with pytest.raises(RuntimeError, match="hybrid attention schedule"):
+        state._check_if_backend_compatible_with_current_configuration(
+            AttentionBackendType.AITER_VSA
+        )
+
+
+def test_runtime_state_tracks_vsa_schedule_per_timestep():
+    state = DiTRuntimeState.__new__(DiTRuntimeState)
+    state.reset_vsa_schedule_state(2)
+
+    assert state.advance_vsa_schedule(1000.0) == (0, 2)
+    assert state.advance_vsa_schedule(1000.0) == (0, 2)
+    assert state.advance_vsa_schedule(500.0) == (1, 2)
+    assert state.advance_vsa_schedule(0.0) == (0, 2)
+
+
 def test_first_frame_blocks_ignore_cross_frame_partial_block():
     # Wan 480x832 has a 21x30x52 post-patch grid. Twelve 128-token
     # blocks fit wholly in the first frame; the remaining 24 tokens share
@@ -161,6 +183,26 @@ def test_padded_static_mask_cache_uses_layout_identity():
     first = setup_sparge(query, query, query, **kwargs)[-1]
     second = setup_sparge(query.clone(), query, query, **kwargs)[-1]
     assert first is second
+
+
+@pytest.mark.parametrize("reorder_sequence", [False, True])
+def test_existing_sparge_paths_keep_padded_mask_allocation(reorder_sequence):
+    query = torch.randn(1, 1, 24, 4)
+    kwargs = {
+        "thw": (2, 3, 4),
+        "sp_size": 1,
+        "reorder_sequence": reorder_sequence,
+        "use_static_block_mask": True,
+        "block_m": 16,
+        "block_n": 16,
+        "pad_block_divisible": True,
+        "use_sliced_gilbert": False,
+    }
+    first = setup_sparge(query, query, query, **kwargs)[-1]
+    second = setup_sparge(query.clone(), query, query, **kwargs)[-1]
+
+    assert first is not second
+    torch.testing.assert_close(first, second)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires AITER GPU")

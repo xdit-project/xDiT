@@ -203,9 +203,6 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
            pos_embed_seq_len,
         )
         self.attention_kwargs = attention_kwargs
-        self._vsa_denoising_step = -1
-        self._vsa_last_timestep = None
-        self._vsa_num_steps = None
         for block in self.blocks:
             block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(use_ulysses_parallel_attention=False, is_cross_attention=True)
@@ -220,11 +217,29 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             )
 
 
-    def reset_wan_inference_state(self, num_inference_steps: int) -> None:
-        """Reset VSA schedule state at a pipeline-run boundary."""
-        self._vsa_denoising_step = -1
-        self._vsa_last_timestep = None
-        self._vsa_num_steps = int(num_inference_steps)
+    def _update_vsa_attention_kwargs(
+        self, timestep: torch.LongTensor
+    ) -> None:
+        """Publish the current AITER VSA schedule values to its backend."""
+        if (
+            self.attention_kwargs is None
+            or not self.attention_kwargs.get("vsa_drop_rates")
+        ):
+            return
+
+        runtime_state = get_runtime_state()
+        step_index, num_steps = runtime_state.advance_vsa_schedule(
+            float(timestep.reshape(-1)[0].item())
+        )
+        self.attention_kwargs["vsa_step_index"] = step_index
+        self.attention_kwargs["vsa_num_steps"] = num_steps
+        effective_drop_rate = jenga_scheduled_drop_rate(
+            step_index,
+            num_steps,
+            self.attention_kwargs["vsa_drop_rates"],
+        )
+        self.attention_kwargs["vsa_effective_drop_rate"] = effective_drop_rate
+        self.attention_kwargs["vsa_use_dense"] = effective_drop_rate <= 0.25
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
@@ -267,41 +282,8 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             lora_scale = 1.0
 
 
-        runtime_state = get_runtime_state()
-        num_steps = (
-            self._vsa_num_steps
-            if self._vsa_num_steps is not None
-            else int(runtime_state.input_config.num_inference_steps)
-        )
-        track_vsa_steps = (
-            self.attention_kwargs is not None
-            and self.attention_kwargs.get("vsa_drop_rates")
-        )
-        if track_vsa_steps:
-            current_timestep = float(timestep.reshape(-1)[0].item())
-            if (
-                self._vsa_last_timestep is None
-                or current_timestep != self._vsa_last_timestep
-            ):
-                self._vsa_denoising_step = (
-                    self._vsa_denoising_step + 1
-                ) % max(num_steps, 1)
-                self._vsa_last_timestep = current_timestep
-            self.attention_kwargs["vsa_step_index"] = self._vsa_denoising_step
-            self.attention_kwargs["vsa_num_steps"] = num_steps
-            effective_drop_rate = jenga_scheduled_drop_rate(
-                self._vsa_denoising_step,
-                num_steps,
-                self.attention_kwargs["vsa_drop_rates"],
-            )
-            self.attention_kwargs["vsa_effective_drop_rate"] = (
-                effective_drop_rate
-            )
-            self.attention_kwargs["vsa_use_dense"] = (
-                effective_drop_rate <= 0.25
-            )
-
-        runtime_state.increment_step_counter()
+        self._update_vsa_attention_kwargs(timestep)
+        get_runtime_state().increment_step_counter()
 
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()

@@ -274,21 +274,35 @@ def setup_sparge(
         if static_mask is not None:
             n_iq = (image_len + img_pad) // block_m
             n_ik = (image_len + img_pad) // block_n
-            if static_mask_cache_key is None:
-                raise RuntimeError("Static block mask cache metadata is missing")
-            padded_key = (*static_mask_cache_key, n_iq, n_ik)
-            cached_padded = _PADDED_STATIC_BLOCK_MASK_CACHE.get(padded_key)
-            if cached_padded is None:
-                cached_padded = torch.zeros(
+            if use_sliced_gilbert:
+                if static_mask_cache_key is None:
+                    raise RuntimeError(
+                        "Static block mask cache metadata is missing"
+                    )
+                padded_key = (*static_mask_cache_key, n_iq, n_ik)
+                padded_static = _PADDED_STATIC_BLOCK_MASK_CACHE.get(padded_key)
+                if padded_static is None:
+                    padded_static = torch.zeros(
+                        (n_iq, n_ik),
+                        dtype=static_mask.dtype,
+                        device=static_mask.device,
+                    )
+                    padded_static[
+                        : static_mask.shape[0], : static_mask.shape[1]
+                    ] = static_mask
+                    _PADDED_STATIC_BLOCK_MASK_CACHE[padded_key] = padded_static
+            else:
+                # Preserve the existing Sparge backends' allocation behavior;
+                # only VSA's sliced-Gilbert path caches this padded mask.
+                padded_static = torch.zeros(
                     (n_iq, n_ik),
                     dtype=static_mask.dtype,
                     device=static_mask.device,
                 )
-                cached_padded[
+                padded_static[
                     : static_mask.shape[0], : static_mask.shape[1]
                 ] = static_mask
-                _PADDED_STATIC_BLOCK_MASK_CACHE[padded_key] = cached_padded
-            static_mask = cached_padded
+            static_mask = padded_static
 
     # Re-concatenate text tail.
     if text_q is not None:

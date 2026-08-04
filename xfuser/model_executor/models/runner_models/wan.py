@@ -24,6 +24,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
     log,
@@ -48,13 +49,15 @@ COMMON_FSDP_STRATEGY = {
 }
 
 WAN_VSA_ACCURACY_FIRST_DROP_RATES = (0.25, 0.40)
-WAN_VSA_JENGA_REFERENCE_DROP_RATES = (0.75, 0.85)
 
 
 def _build_attention_kwargs(config: "xFuserArgs") -> dict:
     """Build shared layout and sparse-attention options for Wan."""
     drop_rates = config.vsa_drop_rates
-    if config.attention_backend == "AITER_VSA" and not drop_rates:
+    backend = config.attention_backend
+    if isinstance(backend, str):
+        backend = AttentionBackendType[backend.upper()]
+    if backend == AttentionBackendType.AITER_VSA and not drop_rates:
         drop_rates = list(WAN_VSA_ACCURACY_FIRST_DROP_RATES)
     return {
         "thw": None,
@@ -74,34 +77,13 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
     }
 
 
-def _prepare_wan_inference_run(pipe, input_args: dict) -> None:
-    """Publish actual run dimensions and reset per-run VSA state."""
-    num_steps = int(input_args["num_inference_steps"])
-    get_runtime_state().set_video_input_parameters(
-        height=int(input_args["height"]),
-        width=int(input_args["width"]),
-        num_frames=int(input_args["num_frames"]),
-        batch_size=1,
-        num_inference_steps=num_steps,
-        seed=int(input_args["seed"]),
-    )
-    for name in ("transformer", "transformer_2"):
-        transformer = getattr(pipe, name, None)
-        reset = getattr(transformer, "reset_wan_inference_state", None)
-        if reset is not None:
-            reset(num_steps)
-
-
 class xFuserWanModel(xFuserModel):
     """Common lifecycle hooks for Wan runners."""
 
     def _prepare_inference_run(self, input_args: dict) -> None:
-        _prepare_wan_inference_run(self.pipe, input_args)
-
-    def _setup_hybrid_attn_schedule(self, input_args: dict) -> None:
-        if self.config.attention_backend == "AITER_VSA":
-            return
-        super()._setup_hybrid_attn_schedule(input_args)
+        get_runtime_state().reset_vsa_schedule_state(
+            int(input_args["num_inference_steps"])
+        )
 
 
 def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:

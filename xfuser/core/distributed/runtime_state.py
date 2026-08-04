@@ -2,7 +2,7 @@ from abc import ABCMeta
 import importlib
 import inspect
 import random
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -206,6 +206,15 @@ class RuntimeState(metaclass=ABCMeta):
         """
         Check if the selected attention backend is compatible with the current configuration.
         """
+        if (
+            attention_backend == AttentionBackendType.AITER_VSA
+            and self.runtime_config.use_hybrid_attn_schedule
+        ):
+            raise RuntimeError(
+                "AITER_VSA manages its own denoising-step schedule and cannot "
+                "be used with a hybrid attention schedule."
+            )
+
         if attention_backend in [AttentionBackendType.SDPA,
                                  AttentionBackendType.SDPA_MATH,
                                  AttentionBackendType.FLASH_4,
@@ -368,6 +377,9 @@ class DiTRuntimeState(RuntimeState):
         self.gemm_schedule_total_steps: Optional[int] = None
         self.use_high_precision_gemm: bool = True
         self.step_counter: Optional[int] = None
+        self._vsa_denoising_step = -1
+        self._vsa_last_timestep: Optional[float] = None
+        self._vsa_num_steps: Optional[int] = None
         super().__init__(config)
         self.patch_mode = False
         self.pipeline_patch_idx = 0
@@ -426,6 +438,26 @@ class DiTRuntimeState(RuntimeState):
     def has_gemm_schedule(self) -> bool:
         """True if a per-step GEMM precision schedule is active (e.g. for warmup/compile logic)."""
         return self.gemm_schedule is not None
+
+    def reset_vsa_schedule_state(self, num_inference_steps: int) -> None:
+        """Reset AITER VSA's denoising schedule at a pipeline-run boundary."""
+        if num_inference_steps <= 0:
+            raise ValueError("VSA num_inference_steps must be positive.")
+        self._vsa_denoising_step = -1
+        self._vsa_last_timestep = None
+        self._vsa_num_steps = int(num_inference_steps)
+
+    def advance_vsa_schedule(self, timestep: float) -> Tuple[int, int]:
+        """Advance AITER VSA once for each distinct denoising timestep."""
+        num_steps = self._vsa_num_steps
+        if num_steps is None:
+            num_steps = int(self.input_config.num_inference_steps)
+        if self._vsa_last_timestep is None or timestep != self._vsa_last_timestep:
+            self._vsa_denoising_step = (
+                self._vsa_denoising_step + 1
+            ) % max(num_steps, 1)
+            self._vsa_last_timestep = timestep
+        return self._vsa_denoising_step, num_steps
 
     def _get_active_total_steps(self) -> Optional[int]:
         attn_steps = self.schedule_total_steps

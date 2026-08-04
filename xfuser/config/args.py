@@ -957,6 +957,7 @@ class xFuserArgs:
         runtime_config = RuntimeConfig(
             warmup_steps=self.warmup_steps,
             # use_cuda_graph=self.use_cuda_graph,
+            use_hybrid_attn_schedule=self.use_hybrid_attn_schedule,
             use_parallel_vae=self.use_parallel_vae,
             use_torch_compile=self.use_torch_compile,
             use_onediff=self.use_onediff,

@@ -39,6 +39,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -75,6 +76,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision="refs/pr/18")
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
@@ -121,6 +127,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -164,6 +171,11 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             torch_dtype=torch.bfloat16,
         )
         return pipe
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         kwargs = {
@@ -275,6 +287,7 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         enable_slicing=True,
         enable_tiling=True,
         supports_sparse_attention_backends=True,
+        use_parallel_vae=True,
     )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:

@@ -79,7 +79,7 @@ class _Krea2BaseModel(xFuserModel):
         pipefusion_parallel_degree=False,
         data_parallel_degree=True,
         use_cfg_parallel=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
@@ -87,6 +87,11 @@ class _Krea2BaseModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
     )
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)

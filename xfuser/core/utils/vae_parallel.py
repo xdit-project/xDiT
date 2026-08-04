@@ -18,21 +18,45 @@ ENCODER_MODULE = "distvae.modules.adapters.vae.encoder_adapters"
 # the adapter it lacks instead of on importing this module.
 TWO_D = "DecoderAdapter"
 WAN = "WanDecoderAdapter"
+QWEN_IMAGE = "QwenImageDecoderAdapter"
+HUNYUAN_VIDEO = "HunyuanVideoDecoderAdapter"
+HUNYUAN_VIDEO_15 = "HunyuanVideo15DecoderAdapter"
+LTX2_VIDEO = "LTX2VideoDecoderAdapter"
 WAN_ENCODER = "WanEncoderAdapter"
 
+# Each family's decoder is recognised by the classes its up blocks and mid block are built from,
+# named here rather than imported: a VAE that arrived after the installed diffusers leaves its
+# entry empty and matches nothing, instead of failing this module's import for every other VAE.
+_FAMILIES = (
+    (WAN, "autoencoder_kl_wan", ("WanUpBlock", "WanResidualUpBlock"), ("WanMidBlock",)),
+    (QWEN_IMAGE, "autoencoder_kl_qwenimage", ("QwenImageUpBlock",), ("QwenImageMidBlock",)),
+    (
+        HUNYUAN_VIDEO,
+        "autoencoder_kl_hunyuan_video",
+        ("HunyuanVideoUpBlock3D",),
+        ("HunyuanVideoMidBlock3D",),
+    ),
+    (
+        HUNYUAN_VIDEO_15,
+        "autoencoder_kl_hunyuanvideo15",
+        ("HunyuanVideo15UpBlock3D",),
+        ("HunyuanVideo15MidBlock",),
+    ),
+    (LTX2_VIDEO, "autoencoder_kl_ltx2", ("LTX2VideoUpBlock3d",), ("LTX2VideoMidBlock3d",)),
+)
 
-def _wan_blocks() -> Tuple[type, ...]:
-    """The Wan decoder's block classes present in the installed diffusers"""
-    # Wan's VAE arrived in 0.34 and its residual up block later still, so both are optional.
+
+def _blocks(module: str, names: Tuple[str, ...]) -> Tuple[type, ...]:
+    """Those of these block classes the installed diffusers has"""
     try:
-        from diffusers.models.autoencoders import autoencoder_kl_wan
+        found = importlib.import_module(f"diffusers.models.autoencoders.{module}")
     except ImportError:
         return ()
-    found = (
-        getattr(autoencoder_kl_wan, name, None)
-        for name in ("WanUpBlock", "WanResidualUpBlock", "WanMidBlock")
+    return tuple(
+        block
+        for block in (getattr(found, name, None) for name in names)
+        if isinstance(block, type)
     )
-    return tuple(block for block in found if isinstance(block, type))
 
 
 def decoder_adapter_name(vae) -> Optional[str]:
@@ -52,11 +76,28 @@ def decoder_adapter_name(vae) -> Optional[str]:
     ):
         return TWO_D
 
-    wan_blocks = _wan_blocks()
-    if wan_blocks and all(isinstance(block, wan_blocks) for block in up_blocks):
-        if isinstance(getattr(decoder, "mid_block", None), wan_blocks):
-            return WAN
+    mid_block = getattr(decoder, "mid_block", None)
+    for name, module, up_names, mid_names in _FAMILIES:
+        up_types = _blocks(module, up_names)
+        mid_types = _blocks(module, mid_names)
+        # The mid block is checked too because these families fork one another closely enough
+        # that up blocks alone would not tell two of them apart.
+        if up_types and mid_types and all(isinstance(b, up_types) for b in up_blocks):
+            if isinstance(mid_block, mid_types):
+                return None if name == LTX2_VIDEO and _injects_noise(decoder) else name
     return None
+
+
+def _injects_noise(decoder) -> bool:
+    """Whether an LTX-2 decoder adds noise inside its residual blocks"""
+    # DistVAE cannot shard one that does: each rank would draw noise for its own rows, and the
+    # ranks together would not reconstruct what one rank draws. It refuses from inside a decoder
+    # it has already half-replaced, so this asks first. No released LTX-2 checkpoint turns it on.
+    return any(
+        getattr(block, "per_channel_scale1", None) is not None
+        or getattr(block, "per_channel_scale2", None) is not None
+        for block in decoder.modules()
+    )
 
 
 def _patch_size(vae) -> Optional[int]:

@@ -27,15 +27,17 @@ CONFIGS = {
 }
 
 # The adapter each class needs, or None where DistVAE has nothing for its decoder. A None here is
-# what --use_parallel_vae refuses, and what a new DistVAE adapter would change.
+# what --use_parallel_vae refuses. Every class a runner model loads is shardable as of DistVAE's
+# QwenImage, HunyuanVideo and LTX-2 adapters, so a None appearing here again would mean a newly
+# supported model arrived ahead of the adapter for its VAE.
 EXPECTED = {
     "AutoencoderKL": vae_parallel.TWO_D,
     "AutoencoderKLFlux2": vae_parallel.TWO_D,
     "AutoencoderKLWan": vae_parallel.WAN,
-    "AutoencoderKLQwenImage": None,
-    "AutoencoderKLHunyuanVideo": None,
-    "AutoencoderKLHunyuanVideo15": None,
-    "AutoencoderKLLTX2Video": None,
+    "AutoencoderKLQwenImage": vae_parallel.QWEN_IMAGE,
+    "AutoencoderKLHunyuanVideo": vae_parallel.HUNYUAN_VIDEO,
+    "AutoencoderKLHunyuanVideo15": vae_parallel.HUNYUAN_VIDEO_15,
+    "AutoencoderKLLTX2Video": vae_parallel.LTX2_VIDEO,
 }
 
 
@@ -52,6 +54,15 @@ class TestDecoderAdapterChoice(unittest.TestCase):
             pass
 
         self.assertIsNone(vae_parallel.decoder_adapter_name(Bare()))
+
+    def test_an_ltx2_decoder_that_injects_noise_is_not_shardable(self):
+        # Every rank would draw noise for its own rows, and together they would not reconstruct
+        # what one rank draws, so the decode could not match an unsharded one. No released LTX-2
+        # checkpoint enables this, which is why the shardable config above is the shipped shape.
+        vae = diffusers.AutoencoderKLLTX2Video(
+            **CONFIGS["AutoencoderKLLTX2Video"], decoder_inject_noise=True
+        )
+        self.assertIsNone(vae_parallel.decoder_adapter_name(vae))
 
     def test_a_two_d_decoder_without_group_norm_is_not_shardable(self):
         # DecoderAdapter replaces conv_norm_out with a sharded GroupNorm and asserts it found one,
@@ -123,7 +134,10 @@ class TestWrappingReadsEveryVAEConfig(unittest.TestCase):
 class TestUnshardableIsRefused(unittest.TestCase):
 
     def test_it_names_the_flag_and_points_at_the_alternative(self):
-        vae = diffusers.AutoencoderKLQwenImage(**CONFIGS["AutoencoderKLQwenImage"])
+        # DistVAE now fits every VAE class a runner model loads, so the refusal is provoked with
+        # a decoder taken out of the shape its adapter needs rather than with a real VAE.
+        vae = diffusers.AutoencoderKL(**CONFIGS["AutoencoderKL"])
+        vae.decoder.conv_norm_out = nn.Identity()
         decoder = vae.decoder
         with self.assertRaises(ValueError) as caught:
             vae_parallel.parallelize_decoder(vae, vae_group=None)

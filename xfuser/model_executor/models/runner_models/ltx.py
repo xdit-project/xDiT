@@ -57,6 +57,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_parallel_vae=True,
     )
 
     _STG_SCALE = 1.0
@@ -210,6 +211,9 @@ class xFuserLTX23VideoModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.upsample_pipe.to(self.pipe.device)
         self.second_pipe.to(self.pipe.device)
+        # After both pipelines land on their device, since sharding a decoder rebuilds it there.
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
 
 @register_model("Lightricks/LTX-2")
@@ -240,6 +244,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -345,3 +350,6 @@ class xFuserLTX2VideoModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.upsample_pipe.to(self.pipe.device)
         self.second_pipe.to(self.pipe.device)
+        # After both pipelines land on their device, since sharding a decoder rebuilds it there.
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()

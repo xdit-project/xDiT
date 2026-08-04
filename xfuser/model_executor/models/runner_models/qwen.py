@@ -25,6 +25,7 @@ class xFuserQwenImageEditModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -56,6 +57,11 @@ class xFuserQwenImageEditModel(xFuserModel):
         elif "2509" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2509"
             self.settings.output_name = "qwen_image_edit_2509"
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImageEditPipeline
@@ -110,6 +116,7 @@ class xFuserQwenImageModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -139,6 +146,11 @@ class xFuserQwenImageModel(xFuserModel):
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"
+
+    def _post_load_and_state_initialization(self, input_args: dict) -> None:
+        super()._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._setup_parallel_vae()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImagePipeline

@@ -556,6 +556,9 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
+        # The i2v task loads the image-to-video pipeline, which encodes the first frame. The t2v
+        # task loads one that encodes nothing, and pays nothing for a sharded encoder.
+        use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
         enable_tiling=True,
@@ -673,6 +676,9 @@ class xFuserWan21VACEModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        # VACE encodes the conditioning video, its inactive and reactive halves, and any reference
+        # image, all of which its pipeline holds to a multiple of the VAE ratio.
+        use_parallel_vae_encoder=True,
     )
 
     default_input_values = DefaultInputValues(

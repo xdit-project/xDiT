@@ -112,6 +112,10 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         use_hybrid_gemm_schedule=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        # The refiner encodes the whole base video at the final output resolution, which is the
+        # largest encode any of these models does. It runs through this VAE, which _run_refiner
+        # takes from the pipeline that has already been sharded.
+        use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
     )

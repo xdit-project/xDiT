@@ -128,6 +128,10 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_tiling=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
+        # The i2v task encodes its conditioning frame at the generation size, which mod_value
+        # holds to a multiple of the VAE's spatial ratio. The t2v task encodes nothing, and
+        # sharding an encoder it never calls costs it nothing.
+        use_parallel_vae_encoder=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -288,6 +292,8 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         enable_tiling=True,
         supports_sparse_attention_backends=True,
         use_parallel_vae=True,
+        # This one only runs i2v, so the conditioning frame is always encoded.
+        use_parallel_vae_encoder=True,
     )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:

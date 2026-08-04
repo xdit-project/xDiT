@@ -33,6 +33,9 @@ class xFuserCausalWanModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
+        # The i2v task encodes its first frame to seed the KV cache, at the generation size, which
+        # mod_value holds to a multiple of the VAE ratio.
+        use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
     )

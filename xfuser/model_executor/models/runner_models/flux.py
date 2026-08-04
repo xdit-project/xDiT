@@ -129,6 +129,8 @@ class xFuserFluxKontextModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        # Kontext encodes the image it is editing, sized to a multiple of the VAE ratio.
+        use_parallel_vae_encoder=True,
         fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
@@ -245,6 +247,9 @@ class xFuserFlux2Model(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        # FLUX.2 encodes any reference images it is given, cropped to a multiple of the VAE
+        # ratio. A prompt-only generation passes none and the sharded encoder never runs.
+        use_parallel_vae_encoder=True,
         use_fbcache=True,
         pipefusion_parallel_degree=True,
     )
@@ -394,6 +399,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        # Klein encodes reference images the same way FLUX.2 does, when it is given any.
+        use_parallel_vae_encoder=True,
         fully_shard_degree=True,
         use_fbcache=True,
         pipefusion_parallel_degree=True,

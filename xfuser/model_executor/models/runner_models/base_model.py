@@ -344,7 +344,9 @@ class xFuserModel(abc.ABC):
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
-            if isinstance(config_value, int):
+            # bool subclasses int, so a boolean flag reaching the degree branch below is
+            # tested with True > 1 and never refused.
+            if isinstance(config_value, int) and not isinstance(config_value, bool):
                 if not getattr(self.capabilities, key) and config_value > 1:
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
             else:

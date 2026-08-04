@@ -395,7 +395,8 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Making VAE decode a tile at a time to save GPU memory.",
+            help="Making VAE decode one batch item at a time to save GPU memory. No effect at "
+                 "batch size 1.",
         )
         runtime_group.add_argument(
             "--use_fp8_t5_encoder",
@@ -611,7 +612,8 @@ class xFuserArgs:
         parser.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Enable VAE slicing to save GPU memory.",
+            help="Making VAE decode one batch item at a time to save GPU memory. No effect at "
+                 "batch size 1.",
         )
         parser.add_argument(
             "--use_int8_gemms",

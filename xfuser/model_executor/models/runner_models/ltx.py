@@ -114,11 +114,6 @@ class xFuserLTX23VideoModel(xFuserModel):
 
         return pipe
 
-    def _enable_options(self) -> None:
-        super()._enable_options()
-        if self.config.enable_slicing:
-            self.second_pipe.vae.enable_slicing()
-
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
         generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
@@ -285,13 +280,6 @@ class xFuserLTX2VideoModel(xFuserModel):
         self.upsample_pipe = upsample_pipe
 
         return pipe
-
-    def _enable_options(self) -> None:
-        super()._enable_options()
-        if self.config.enable_tiling:
-            self.second_pipe.vae.enable_tiling()
-        if self.config.enable_slicing:
-            self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES

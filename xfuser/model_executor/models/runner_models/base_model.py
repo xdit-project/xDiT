@@ -325,15 +325,16 @@ class xFuserModel(abc.ABC):
         if getattr(self.config, "use_spargeattn_head_balance", False):
             log("Enabling Sparge block-sparse head balancing...")
 
-        if self.config.enable_slicing:
-            vae_tiling.require_vae_support(self.pipe.vae, "slicing", "--enable_slicing")
-            log("Enabling VAE slicing...")
-            self.pipe.vae.enable_slicing()
+        for vae in self._decoding_vaes():
+            if self.config.enable_slicing:
+                vae_tiling.require_vae_support(vae, "slicing", "--enable_slicing")
+                log(f"Enabling VAE slicing on {type(vae).__name__}...")
+                vae.enable_slicing()
 
-        if self.config.enable_tiling:
-            vae_tiling.require_vae_support(self.pipe.vae, "tiling", "--enable_tiling")
-            log("Enabling VAE tiling...")
-            self.pipe.vae.enable_tiling()
+            if self.config.enable_tiling:
+                vae_tiling.require_vae_support(vae, "tiling", "--enable_tiling")
+                log(f"Enabling VAE tiling on {type(vae).__name__}...")
+                vae.enable_tiling()
 
         if self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
@@ -342,6 +343,19 @@ class xFuserModel(abc.ABC):
             log("Enabling model CPU offload...")
             self.pipe.enable_model_cpu_offload()
 
+    def _decoding_vaes(self) -> List:
+        """ Every VAE a run decodes through, staged models included """
+        # A model that decodes in stages loads a second pipeline with its own VAE, and the later
+        # stage is the one at full resolution, so leaving it out would aim VAE options at the
+        # smaller decode. Collected here by name rather than left to each subclass, since a
+        # subclass that forgets gets no error, only options that miss the largest decode.
+        vaes = []
+        for pipe in (self.pipe, getattr(self, "second_pipe", None)):
+            vae = getattr(pipe, "vae", None)
+            # Stages sometimes share one VAE, which must not be wrapped or sized twice.
+            if vae is not None and not any(vae is seen for seen in vaes):
+                vaes.append(vae)
+        return vaes
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """

@@ -1,16 +1,18 @@
-"""Which VAE classes DistVAE can shard, checked against real decoders rather than a list.
+"""Which VAE classes DistVAE can shard, checked against real VAEs rather than a list.
 
-The adapters assert their block types from inside a half-built replacement decoder, so a VAE they
-cannot take has to be recognised before wrapping. These build each VAE class a runner model loads
-and demand the answer, so a model declaring use_parallel_vae cannot quietly become unshardable
-when diffusers reworks a decoder.
+The adapters assert their block types from inside a half-built replacement, so a VAE they cannot
+take has to be recognised before wrapping. These build each VAE class a runner model loads and
+demand the answer for both halves of it, so a model declaring use_parallel_vae or
+use_parallel_vae_encoder cannot quietly become unshardable when diffusers reworks a block.
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 import diffusers
+import torch.distributed as dist
 import torch.nn as nn
 
 from xfuser.core.utils import vae_parallel
@@ -38,6 +40,18 @@ EXPECTED = {
     "AutoencoderKLHunyuanVideo": vae_parallel.HUNYUAN_VIDEO,
     "AutoencoderKLHunyuanVideo15": vae_parallel.HUNYUAN_VIDEO_15,
     "AutoencoderKLLTX2Video": vae_parallel.LTX2_VIDEO,
+}
+
+# The encoder adapter each class needs. DistVAE reached full encoder coverage alongside its
+# decoders, so a None here would mean an encoder adapter was lost rather than never written.
+EXPECTED_ENCODERS = {
+    "AutoencoderKL": vae_parallel.TWO_D_ENCODER,
+    "AutoencoderKLFlux2": vae_parallel.TWO_D_ENCODER,
+    "AutoencoderKLWan": "WanEncoderAdapter",
+    "AutoencoderKLQwenImage": "QwenImageEncoderAdapter",
+    "AutoencoderKLHunyuanVideo": "HunyuanVideoEncoderAdapter",
+    "AutoencoderKLHunyuanVideo15": "HunyuanVideo15EncoderAdapter",
+    "AutoencoderKLLTX2Video": "LTX2VideoEncoderAdapter",
 }
 
 
@@ -72,6 +86,33 @@ class TestDecoderAdapterChoice(unittest.TestCase):
         self.assertIsNone(vae_parallel.decoder_adapter_name(vae))
 
 
+class TestEncoderAdapterChoice(unittest.TestCase):
+    """Which adapter shards each class's encoder, read off the family its decoder names"""
+
+    def test_every_vae_class_gets_the_encoder_adapter_it_needs(self):
+        for name, expected in EXPECTED_ENCODERS.items():
+            with self.subTest(vae=name):
+                vae = getattr(diffusers, name)(**CONFIGS[name])
+                self.assertEqual(vae_parallel.encoder_adapter_name(vae), expected)
+
+    def test_an_encoder_with_no_down_blocks_is_not_shardable(self):
+        class Bare:
+            pass
+
+        self.assertIsNone(vae_parallel.encoder_adapter_name(Bare()))
+
+    def test_the_two_halves_are_recognised_independently(self):
+        # Sharding either half replaces its blocks with adapters, so an encoder read off the
+        # decoder would come back unrecognised once the decoder had been done first, which is the
+        # order the runner models shard them in.
+        vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
+        expected = vae_parallel.encoder_adapter_name(vae)
+        vae.decoder.conv_norm_out = nn.Identity()
+        vae.decoder.up_blocks = nn.ModuleList()
+        self.assertIsNone(vae_parallel.decoder_adapter_name(vae))
+        self.assertEqual(vae_parallel.encoder_adapter_name(vae), expected)
+
+
 class TestEncoderScaleFactor(unittest.TestCase):
     """The number the encoder adapter shards by, which used to be derived per model"""
 
@@ -90,6 +131,24 @@ class TestEncoderScaleFactor(unittest.TestCase):
         vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
         vae.register_to_config(scale_factor_spatial=None)
         self.assertEqual(vae_parallel.encoder_scale_factor(vae), 8)
+
+    def test_flux2s_pair_of_patch_sizes_is_not_mistaken_for_a_ratio(self):
+        # Flux.2 names patch_size for how its latents are packed for the transformer, which its
+        # convolutions know nothing about, and names it as a pair. Dividing by that both divides
+        # by the wrong thing and cannot be compared against a number in the first place.
+        vae = diffusers.AutoencoderKLFlux2(**CONFIGS["AutoencoderKLFlux2"])
+        self.assertEqual(vae.config.patch_size, (2, 2))
+        self.assertEqual(vae_parallel.encoder_scale_factor(vae), 8)
+
+    def test_a_two_d_encoder_is_counted_off_its_stages(self):
+        # These VAEs record no ratio, so the four-stage 8 has to be counted rather than assumed.
+        # A three-stage one narrows by 4, and sizing its bands by 8 would leave its last stage
+        # halving a band into a row belonging to the next rank.
+        config = dict(CONFIGS["AutoencoderKL"])
+        config["block_out_channels"] = [8, 8, 16]
+        config["down_block_types"] = ["DownEncoderBlock2D"] * 3
+        config["up_block_types"] = ["UpDecoderBlock2D"] * 3
+        self.assertEqual(vae_parallel.encoder_scale_factor(diffusers.AutoencoderKL(**config)), 4)
 
 
 class _StubAdapter(nn.Module):
@@ -147,13 +206,60 @@ class TestUnshardableIsRefused(unittest.TestCase):
         # Refused before touching anything, so the caller is left a working decode to fall back on.
         self.assertIs(vae.decoder, decoder)
 
-    def test_encoding_is_refused_for_a_vae_the_one_encoder_adapter_does_not_fit(self):
-        # DistVAE has only WanEncoderAdapter, so a 2D VAE it can decode with it cannot encode with.
+    def test_encoding_is_refused_for_a_vae_no_encoder_adapter_fits(self):
+        # Provoked with an encoder taken out of the shape its adapter needs, since DistVAE fits
+        # every VAE class a runner model loads.
         vae = diffusers.AutoencoderKL(**CONFIGS["AutoencoderKL"])
+        vae.encoder.down_blocks = nn.ModuleList()
         encoder = vae.encoder
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             vae_parallel.parallelize_encoder(vae, vae_group=None)
+        self.assertIn("Parallel VAE encoding is not available", str(caught.exception))
+        # Refused before touching anything, so the caller is left a working encode.
         self.assertIs(vae.encoder, encoder)
+
+
+class TestBothHalvesShardTogether(unittest.TestCase):
+    """Every VAE class a runner model loads has both halves replaced, in the runner's order
+
+    Naming an adapter and installing it are different things: the adapters rebuild a half in
+    place, so the half done first no longer answers to the blocks it was recognised by. Choosing
+    both names off intact blocks and then wrapping is what these check, over a one-rank gloo
+    group, since a name that resolves is no use if the wrapping it is chosen for cannot run.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.owns_group = not dist.is_initialized()
+        if cls.owns_group:
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("MASTER_PORT", "24118")
+            os.environ.setdefault("RANK", "0")
+            os.environ.setdefault("WORLD_SIZE", "1")
+            dist.init_process_group(backend="gloo", init_method="env://")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.owns_group:
+            dist.destroy_process_group()
+
+    def test_every_vae_class_shards_both_halves(self):
+        for name, config in CONFIGS.items():
+            with self.subTest(vae=name):
+                vae = getattr(diffusers, name)(**config).eval()
+                expected = vae_parallel.encoder_adapter_name(vae)
+                encoder, decoder = vae.encoder, vae.decoder
+                # The runner models shard the decoder first, which is what makes the order matter.
+                self.assertEqual(
+                    vae_parallel.parallelize_decoder(vae, vae_group=None), EXPECTED[name]
+                )
+                self.assertEqual(vae_parallel.encoder_adapter_name(vae), expected)
+                self.assertEqual(
+                    vae_parallel.parallelize_encoder(vae, vae_group=None),
+                    EXPECTED_ENCODERS[name],
+                )
+                self.assertIsNot(vae.decoder, decoder)
+                self.assertIsNot(vae.encoder, encoder)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ declaring it rather than by carrying its own copy of the wiring.
 """
 
 import importlib
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import torch.nn as nn
 
@@ -22,27 +22,69 @@ QWEN_IMAGE = "QwenImageDecoderAdapter"
 HUNYUAN_VIDEO = "HunyuanVideoDecoderAdapter"
 HUNYUAN_VIDEO_15 = "HunyuanVideo15DecoderAdapter"
 LTX2_VIDEO = "LTX2VideoDecoderAdapter"
-WAN_ENCODER = "WanEncoderAdapter"
 
-# Each family's decoder is recognised by the classes its up blocks and mid block are built from,
-# named here rather than imported: a VAE that arrived after the installed diffusers leaves its
-# entry empty and matches nothing, instead of failing this module's import for every other VAE.
+TWO_D_ENCODER = "EncoderAdapter"
+
+
+class _Family(NamedTuple):
+    """One VAE family: the adapters that fit its two halves, and the blocks that identify them"""
+
+    decoder: str
+    encoder: str
+    module: str
+    up_blocks: Tuple[str, ...]
+    down_blocks: Tuple[str, ...]
+    mid_block: Tuple[str, ...]
+
+
+# Each half of a family is recognised by the classes its blocks are built from, named here rather
+# than imported: a VAE that arrived after the installed diffusers leaves its entry empty and
+# matches nothing, instead of failing this module's import for every other VAE. The two halves are
+# recognised separately rather than one from the other, because sharding either one replaces its
+# blocks with adapters, and the half already sharded would no longer answer to anything.
 _FAMILIES = (
-    (WAN, "autoencoder_kl_wan", ("WanUpBlock", "WanResidualUpBlock"), ("WanMidBlock",)),
-    (QWEN_IMAGE, "autoencoder_kl_qwenimage", ("QwenImageUpBlock",), ("QwenImageMidBlock",)),
-    (
+    _Family(
+        WAN,
+        "WanEncoderAdapter",
+        "autoencoder_kl_wan",
+        ("WanUpBlock", "WanResidualUpBlock"),
+        # Wan 2.2 groups each encoder stage into a WanResidualDownBlock; 2.1 lays the same
+        # residual blocks, attentions and resamples out flat in one list.
+        ("WanResidualDownBlock", "WanResidualBlock", "WanAttentionBlock", "WanResample"),
+        ("WanMidBlock",),
+    ),
+    _Family(
+        QWEN_IMAGE,
+        "QwenImageEncoderAdapter",
+        "autoencoder_kl_qwenimage",
+        ("QwenImageUpBlock",),
+        ("QwenImageResidualBlock", "QwenImageAttentionBlock", "QwenImageResample"),
+        ("QwenImageMidBlock",),
+    ),
+    _Family(
         HUNYUAN_VIDEO,
+        "HunyuanVideoEncoderAdapter",
         "autoencoder_kl_hunyuan_video",
         ("HunyuanVideoUpBlock3D",),
+        ("HunyuanVideoDownBlock3D",),
         ("HunyuanVideoMidBlock3D",),
     ),
-    (
+    _Family(
         HUNYUAN_VIDEO_15,
+        "HunyuanVideo15EncoderAdapter",
         "autoencoder_kl_hunyuanvideo15",
         ("HunyuanVideo15UpBlock3D",),
+        ("HunyuanVideo15DownBlock3D",),
         ("HunyuanVideo15MidBlock",),
     ),
-    (LTX2_VIDEO, "autoencoder_kl_ltx2", ("LTX2VideoUpBlock3d",), ("LTX2VideoMidBlock3d",)),
+    _Family(
+        LTX2_VIDEO,
+        "LTX2VideoEncoderAdapter",
+        "autoencoder_kl_ltx2",
+        ("LTX2VideoUpBlock3d",),
+        ("LTX2VideoDownBlock3D",),
+        ("LTX2VideoMidBlock3d",),
+    ),
 )
 
 
@@ -57,6 +99,25 @@ def _blocks(module: str, names: Tuple[str, ...]) -> Tuple[type, ...]:
         for block in (getattr(found, name, None) for name in names)
         if isinstance(block, type)
     )
+
+
+def _family_of(half, attr: str) -> Optional[_Family]:
+    """The family this half of a VAE belongs to, by the blocks it is assembled from
+
+    Named for the attribute holding them, up_blocks or down_blocks, which is what _Family calls
+    the classes it expects to find there too.
+    """
+    blocks = tuple(getattr(half, attr, None) or ())
+    mid_block = getattr(half, "mid_block", None)
+    for family in _FAMILIES:
+        types = _blocks(family.module, getattr(family, attr))
+        mid_types = _blocks(family.module, family.mid_block)
+        # The mid block is checked too because these families fork one another closely enough
+        # that the blocks either side of it would not tell two of them apart.
+        if types and mid_types and all(isinstance(block, types) for block in blocks):
+            if isinstance(mid_block, mid_types):
+                return family
+    return None
 
 
 def decoder_adapter_name(vae) -> Optional[str]:
@@ -76,27 +137,43 @@ def decoder_adapter_name(vae) -> Optional[str]:
     ):
         return TWO_D
 
-    mid_block = getattr(decoder, "mid_block", None)
-    for name, module, up_names, mid_names in _FAMILIES:
-        up_types = _blocks(module, up_names)
-        mid_types = _blocks(module, mid_names)
-        # The mid block is checked too because these families fork one another closely enough
-        # that up blocks alone would not tell two of them apart.
-        if up_types and mid_types and all(isinstance(b, up_types) for b in up_blocks):
-            if isinstance(mid_block, mid_types):
-                return None if name == LTX2_VIDEO and _injects_noise(decoder) else name
-    return None
+    family = _family_of(decoder, "up_blocks")
+    if family is None:
+        return None
+    return None if _injects_noise(decoder) else family.decoder
 
 
-def _injects_noise(decoder) -> bool:
-    """Whether an LTX-2 decoder adds noise inside its residual blocks"""
+def encoder_adapter_name(vae) -> Optional[str]:
+    """The DistVAE adapter that fits this VAE's encoder, None when none does"""
+    encoder = getattr(vae, "encoder", None)
+    down_blocks = tuple(getattr(encoder, "down_blocks", None) or ())
+    if not down_blocks:
+        return None
+
+    from diffusers.models.unets.unet_2d_blocks import DownEncoderBlock2D
+
+    # The 2D encoder adapter asks only this of it: everything after the down blocks runs whole on
+    # every rank, so the norm it ends on is its own business in a way the decoder's is not.
+    if all(isinstance(block, DownEncoderBlock2D) for block in down_blocks):
+        return TWO_D_ENCODER
+
+    family = _family_of(encoder, "down_blocks")
+    if family is None:
+        return None
+    # No LTX-2 encoder injects noise, since only its decoder is offered the option, but the
+    # residual block adapter refuses either half that does and this is what asks first.
+    return None if _injects_noise(encoder) else family.encoder
+
+
+def _injects_noise(half) -> bool:
+    """Whether this half of an LTX-2 VAE adds noise inside its residual blocks"""
     # DistVAE cannot shard one that does: each rank would draw noise for its own rows, and the
-    # ranks together would not reconstruct what one rank draws. It refuses from inside a decoder
-    # it has already half-replaced, so this asks first. No released LTX-2 checkpoint turns it on.
+    # ranks together would not reconstruct what one rank draws. It refuses from inside a half it
+    # has already half-replaced, so this asks first. No released LTX-2 checkpoint turns it on.
     return any(
         getattr(block, "per_channel_scale1", None) is not None
         or getattr(block, "per_channel_scale2", None) is not None
-        for block in decoder.modules()
+        for block in half.modules()
     )
 
 
@@ -109,8 +186,24 @@ def _patch_size(vae) -> Optional[int]:
     return patch_size if isinstance(patch_size, int) and patch_size > 1 else None
 
 
+def _two_d_scale_factor(vae) -> Optional[int]:
+    """A 2D encoder's ratio, counted off its stages rather than read from its config"""
+    # These VAEs record no spatial ratio, and the 8 every shipped one comes to is a consequence of
+    # having four stages rather than a number stated anywhere. Counting the stages that downsample
+    # gets it right for a checkpoint with some other number of them.
+    from diffusers.models.unets.unet_2d_blocks import DownEncoderBlock2D
+
+    blocks = tuple(getattr(getattr(vae, "encoder", None), "down_blocks", None) or ())
+    if not blocks or not all(isinstance(block, DownEncoderBlock2D) for block in blocks):
+        return None
+    return 2 ** sum(1 for block in blocks if block.downsamplers)
+
+
 def encoder_scale_factor(vae) -> int:
     """The encoder's own spatial downsampling, which is what the encoder adapter shards by"""
+    counted = _two_d_scale_factor(vae)
+    if counted is not None:
+        return counted
     # A VAE that patches folds that factor into its spatial ratio, and the adapter needs the conv
     # stack's share of it alone: Cosmos 3's 16 is 8 from the encoder and 2 from patching.
     factor = getattr(vae.config, "scale_factor_spatial", None) or 8
@@ -150,15 +243,14 @@ def parallelize_decoder(vae, vae_group) -> str:
 
 def parallelize_encoder(vae, vae_group) -> str:
     """Replace this VAE's encoder with a sharded one, returning the adapter that did it"""
-    # DistVAE ships one encoder adapter, written for Wan's blocks, so the VAEs it can encode with
-    # are the ones it can decode with.
-    if decoder_adapter_name(vae) != WAN:
+    name = encoder_adapter_name(vae)
+    if name is None:
         raise ValueError(
-            f"Parallel VAE encoding is not available for this VAE ({type(vae).__name__}): DistVAE "
-            f"only has {WAN_ENCODER}."
+            f"Parallel VAE encoding is not available for this VAE ({type(vae).__name__}): "
+            f"DistVAE has no adapter for its encoder blocks."
         )
-    adapter = _adapter(ENCODER_MODULE, WAN_ENCODER, vae)
+    adapter = _adapter(ENCODER_MODULE, name, vae)
     vae.encoder = adapter(
         vae.encoder, vae_group=vae_group, vae_scale_factor=encoder_scale_factor(vae)
     ).to(vae.device)
-    return WAN_ENCODER
+    return name

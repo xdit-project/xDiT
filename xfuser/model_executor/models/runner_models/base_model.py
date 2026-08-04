@@ -22,6 +22,7 @@ from xfuser.envs import (
     _is_cuda,
 )
 from xfuser.core.distributed.parallel_state import get_fs_group
+from xfuser.core.utils import vae_tiling
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -325,10 +326,12 @@ class xFuserModel(abc.ABC):
             log("Enabling Sparge block-sparse head balancing...")
 
         if self.config.enable_slicing:
+            vae_tiling.require_vae_support(self.pipe.vae, "slicing", "--enable_slicing")
             log("Enabling VAE slicing...")
             self.pipe.vae.enable_slicing()
 
         if self.config.enable_tiling:
+            vae_tiling.require_vae_support(self.pipe.vae, "tiling", "--enable_tiling")
             log("Enabling VAE tiling...")
             self.pipe.vae.enable_tiling()
 

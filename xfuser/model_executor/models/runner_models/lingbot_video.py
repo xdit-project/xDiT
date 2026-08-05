@@ -7,9 +7,6 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
-    xFuserLingBotVideoTransformer3DWrapper,
-)
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -189,6 +186,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def _load_refiner(self, input_args):
         from lingbot_video.scheduling_flow_unipc import FlowUniPCMultistepScheduler
+        from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
+            xFuserLingBotVideoTransformer3DWrapper,
+        )
 
         log("Loading refiner transformer...")
         model_name = self.settings.model_name
@@ -263,6 +263,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def _build_pipe(self, model_name, transformer_subfolder="transformer", use_i2v=False):
         from lingbot_video.scheduling_flow_unipc import FlowUniPCMultistepScheduler
+        from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
+            xFuserLingBotVideoTransformer3DWrapper,
+        )
 
         transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
             model_name, torch_dtype=torch.bfloat16, subfolder=transformer_subfolder,

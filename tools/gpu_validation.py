@@ -1,0 +1,1157 @@
+#!/usr/bin/env python3
+"""Plan, execute, and record the external xDiT GPU validation matrix."""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Mapping
+import datetime as dt
+import hashlib
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from typing import Any
+import uuid
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MATRIX = ROOT / "tests/gpu_validation/matrix.json"
+ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+REQUIRED_CASE_FIELDS = {
+    "id",
+    "tags",
+    "model",
+    "model_family",
+    "hardware",
+    "placement",
+    "quantization",
+    "te_fp8",
+    "offload",
+    "transformers",
+    "checkpoint",
+    "world_size",
+    "args",
+    "expected",
+    "quality_notes",
+}
+BACKENDS = {
+    "rdna4_aiter",
+    "rocm_torchao",
+    "cuda_ada_torchao",
+    "cuda_hopper_torchao",
+    "cuda_blackwell_torchao",
+}
+PLACEMENTS = {"eager", "replicated", "fsdp_blockwise"}
+QUANTIZATION = {"none", "fp8", "fp4", "int8", "hybrid_fp8_fp4"}
+OFFLOADS = {"none", "model", "sequential", "group", "group_low_cpu_mem"}
+EXPECTED_OUTCOMES = {"inference_success", "preflight_failure"}
+GENERATED_ARTIFACT_EXTENSIONS = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm", ".mov"}
+)
+PACKAGE_NAMES = (
+    "torch",
+    "torchao",
+    "aiter",
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "huggingface-hub",
+    "xfuser",
+)
+
+
+def load_matrix(path: Path | str) -> dict[str, Any]:
+    with Path(path).open(encoding="utf-8") as handle:
+        matrix = json.load(handle)
+    validate_matrix(matrix)
+    return matrix
+
+
+def validate_matrix(matrix: dict[str, Any]) -> None:
+    if matrix.get("schema_version") != 2:
+        raise ValueError("matrix schema_version must be 2")
+    if matrix.get("validation_status") != "NOT RUN":
+        raise ValueError("checked-in matrix validation_status must remain 'NOT RUN'")
+    if not isinstance(matrix.get("defaults"), dict):
+        raise ValueError("matrix defaults must be an object")
+    cases = matrix.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("matrix cases must be a non-empty list")
+
+    seen: set[str] = set()
+    for index, case in enumerate(cases):
+        missing = REQUIRED_CASE_FIELDS - set(case)
+        if missing:
+            raise ValueError(f"case {index} missing fields: {sorted(missing)}")
+        case_id = case["id"]
+        if not isinstance(case_id, str) or not ID_PATTERN.fullmatch(case_id):
+            raise ValueError(f"invalid case id: {case_id!r}")
+        if case_id in seen:
+            raise ValueError(f"duplicate case id: {case_id}")
+        seen.add(case_id)
+        if not isinstance(case["tags"], list) or not all(
+            isinstance(tag, str) and tag for tag in case["tags"]
+        ):
+            raise ValueError(f"{case_id}: tags must be non-empty strings")
+        hardware = case["hardware"]
+        if (
+            not isinstance(hardware, dict)
+            or hardware.get("backend") not in BACKENDS
+            or not hardware.get("accelerator")
+        ):
+            raise ValueError(f"{case_id}: invalid hardware declaration")
+        if case["placement"] not in PLACEMENTS:
+            raise ValueError(f"{case_id}: invalid placement")
+        if case["quantization"] not in QUANTIZATION:
+            raise ValueError(f"{case_id}: invalid quantization")
+        if not isinstance(case["te_fp8"], bool):
+            raise ValueError(f"{case_id}: te_fp8 must be boolean")
+        if case["te_fp8"] and case["quantization"] not in {
+            "fp8",
+            "hybrid_fp8_fp4",
+        }:
+            raise ValueError(f"{case_id}: te_fp8 requires FP8 quantization")
+        if case["offload"] not in OFFLOADS:
+            raise ValueError(f"{case_id}: invalid offload")
+        if case["transformers"] not in {"4.x", "5.x"}:
+            raise ValueError(f"{case_id}: transformers must be 4.x or 5.x")
+        checkpoint = case["checkpoint"]
+        if not isinstance(checkpoint, dict) or checkpoint.get("source") not in {
+            "hub",
+            "local",
+        }:
+            raise ValueError(f"{case_id}: invalid checkpoint")
+        if not checkpoint.get("value"):
+            raise ValueError(f"{case_id}: checkpoint value is required")
+        if checkpoint["source"] == "local" and not checkpoint.get("env"):
+            raise ValueError(f"{case_id}: local checkpoint requires env")
+        if not isinstance(case["world_size"], int) or case["world_size"] < 1:
+            raise ValueError(f"{case_id}: world_size must be positive")
+        if case["placement"] == "eager" and case["world_size"] != 1:
+            raise ValueError(f"{case_id}: eager placement requires world_size 1")
+        if case["placement"] != "eager" and case["world_size"] < 2:
+            raise ValueError(
+                f"{case_id}: distributed placement requires multiple ranks"
+            )
+        if not isinstance(case["args"], list) or not all(
+            isinstance(arg, str) for arg in case["args"]
+        ):
+            raise ValueError(f"{case_id}: args must be strings")
+        expected = case["expected"]
+        if (
+            not isinstance(expected, dict)
+            or expected.get("outcome") not in EXPECTED_OUTCOMES
+        ):
+            raise ValueError(f"{case_id}: invalid expected outcome")
+        if (
+            expected["outcome"] == "preflight_failure"
+            and not expected.get("error_pattern")
+        ):
+            raise ValueError(
+                f"{case_id}: preflight failure needs error_pattern"
+            )
+        if expected.get("error_pattern"):
+            re.compile(expected["error_pattern"])
+
+
+def _model_matches(case: dict[str, Any], requested: str) -> bool:
+    needle = requested.casefold()
+    return needle in {
+        case["model"].casefold(),
+        case["model_family"].casefold(),
+        case["checkpoint"]["value"].casefold(),
+    }
+
+
+def select_cases(
+    cases: list[dict[str, Any]],
+    *,
+    tags: list[str],
+    models: list[str],
+    backends: list[str],
+    case_ids: list[str],
+) -> list[dict[str, Any]]:
+    return [
+        case
+        for case in cases
+        if (not tags or all(tag in case["tags"] for tag in tags))
+        and (not models or any(_model_matches(case, model) for model in models))
+        and (
+            not backends
+            or case["hardware"]["backend"] in set(backends)
+        )
+        and (not case_ids or case["id"] in set(case_ids))
+    ]
+
+
+def build_command(
+    case: dict[str, Any],
+    defaults: dict[str, Any],
+    *,
+    run_id: str | None = None,
+) -> list[str]:
+    command: list[str] = []
+    checkpoint = case["checkpoint"]
+    if checkpoint["source"] == "local":
+        command.extend(
+            [
+                "env",
+                "HF_HUB_OFFLINE=1",
+                f"HF_HOME=${{{checkpoint['env']}}}",
+            ]
+        )
+
+    if case["world_size"] > 1:
+        command.extend(
+            [
+                "torchrun",
+                f"--nproc_per_node={case['world_size']}",
+                "-m",
+                "xfuser.runner",
+            ]
+        )
+    else:
+        command.append("xdit")
+
+    output_root = Path(
+        defaults.get("output_root", "gpu-validation-output")
+    ).expanduser().resolve()
+    if run_id is None:
+        timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        run_id = f"{timestamp}-{uuid.uuid4().hex[:12]}"
+    command.extend(
+        [
+            "--model",
+            case["model"],
+            "--prompt",
+            str(defaults["prompt"]),
+            "--seed",
+            str(defaults["seed"]),
+            "--num_inference_steps",
+            str(defaults["num_inference_steps"]),
+            "--height",
+            str(defaults["height"]),
+            "--width",
+            str(defaults["width"]),
+            "--output_directory",
+            str(output_root / case["id"] / run_id),
+        ]
+    )
+
+    if case["placement"] == "replicated":
+        command.extend(
+            [
+                "--ulysses_degree",
+                str(case["world_size"]),
+                "--memory_efficient_replicated_load",
+            ]
+        )
+    elif case["placement"] == "fsdp_blockwise":
+        command.extend(
+            [
+                "--fully_shard_degree",
+                str(case["world_size"]),
+                "--memory_efficient_sharding",
+            ]
+        )
+
+    quantization_flags = {
+        "none": [],
+        "fp8": ["--use_fp8_gemms"],
+        "fp4": ["--use_fp4_gemms"],
+        "int8": ["--use_int8_gemms"],
+        "hybrid_fp8_fp4": [
+            "--use_fp8_gemms",
+            "--use_fp4_gemms",
+            "--use_hybrid_gemm_schedule",
+        ],
+    }
+    command.extend(quantization_flags[case["quantization"]])
+    if case["te_fp8"]:
+        command.append("--use_fp8_text_encoder")
+
+    offload_flags = {
+        "none": [],
+        "model": ["--enable_model_cpu_offload"],
+        "sequential": ["--enable_sequential_cpu_offload"],
+        "group": ["--enable_group_cpu_offload"],
+        "group_low_cpu_mem": [
+            "--enable_group_cpu_offload",
+            "--group_offload_low_cpu_mem",
+        ],
+    }
+    command.extend(offload_flags[case["offload"]])
+    command.extend(case["args"])
+    return command
+
+
+def format_command(command: list[str]) -> str:
+    """Render a copyable shell command while preserving env placeholders."""
+    rendered = []
+    placeholder = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+    assignment = re.compile(
+        r"^([A-Za-z_][A-Za-z0-9_]*)=(\$\{[A-Za-z_][A-Za-z0-9_]*\})$"
+    )
+    for argument in command:
+        match = assignment.fullmatch(argument)
+        if match:
+            rendered.append(f'{match.group(1)}="{match.group(2)}"')
+        elif placeholder.fullmatch(argument):
+            rendered.append(f'"{argument}"')
+        else:
+            rendered.append(shlex.quote(argument))
+    return " ".join(rendered)
+
+
+def classify_outcome(
+    exit_status: int,
+    log: str,
+    first_forward: str,
+    expected: dict[str, Any],
+    output: dict[str, Any],
+) -> str:
+    if expected["outcome"] == "inference_success":
+        if exit_status != 0 or first_forward != "succeeded":
+            return "failed_inference"
+        files = output.get("files", [])
+        if not any(
+            item.get("bytes", 0) > 0 and item.get("sha256")
+            for item in files
+        ):
+            return "failed_missing_output"
+        return "passed"
+    if exit_status == 0:
+        return "failed_missing_rejection"
+    if first_forward != "not_reached":
+        return "failed_late_rejection"
+    if not re.search(expected["error_pattern"], log, flags=re.IGNORECASE):
+        return "failed_wrong_rejection"
+    return "passed_expected_rejection"
+
+
+def make_result_record(
+    *,
+    case: dict[str, Any],
+    command: list[str],
+    environment: dict[str, Any],
+    exit_status: int,
+    metrics: dict[str, Any],
+    output: dict[str, Any],
+    log: str,
+    quality_notes: str,
+    reference: str | None,
+) -> dict[str, Any]:
+    status = classify_outcome(
+        exit_status,
+        log,
+        metrics["first_forward"],
+        case["expected"],
+        output,
+    )
+    return {
+        "schema_version": 2,
+        "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "case_id": case["id"],
+        "case": case,
+        "status": status,
+        "execution": "RAN",
+        "expected": case["expected"],
+        "command": command,
+        "environment": environment,
+        "exit_status": exit_status,
+        "metrics": metrics,
+        "output": output,
+        "quality": {
+            "matrix_notes": case["quality_notes"],
+            "operator_notes": quality_notes,
+            "reference": reference,
+        },
+    }
+
+
+def append_result(path: Path | str, record: dict[str, Any]) -> None:
+    result_path = Path(path)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    with result_path.open("a", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.write("\n")
+
+
+def _run_text(command: list[str]) -> str | None:
+    if not shutil.which(command[0]):
+        return None
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = (completed.stdout + completed.stderr).strip()
+    return text or None
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def probe_environment(
+    *,
+    command_runner=_run_text,
+    version_getter=_package_version,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    if environ is None:
+        environ = os.environ
+    nvidia = command_runner(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,compute_cap",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    rocminfo = command_runner(["rocminfo"])
+    rocm_smi = command_runner(
+        ["rocm-smi", "--showproductname", "--json"]
+    )
+    accelerators: list[str] = []
+    platform_name = "unknown"
+    visibility_variable = None
+    visibility_value = None
+    if nvidia:
+        platform_name = "cuda"
+        devices = []
+        for fallback_index, line in enumerate(nvidia.splitlines()):
+            parts = [part.strip() for part in line.split(",")]
+            capability = next(
+                (
+                    value
+                    for value in reversed(parts)
+                    if re.fullmatch(r"\d+\.\d+", value)
+                ),
+                None,
+            )
+            if capability is None:
+                continue
+            index = (
+                parts[0]
+                if len(parts) >= 3 and parts[0].isdigit()
+                else str(fallback_index)
+            )
+            device_uuid = parts[1] if len(parts) >= 3 else None
+            major, minor = capability.split(".", 1)
+            devices.append(
+                {
+                    "index": index,
+                    "uuid": device_uuid,
+                    "accelerator": f"sm{major}{minor}",
+                }
+            )
+        if "CUDA_VISIBLE_DEVICES" in environ:
+            visibility_variable = "CUDA_VISIBLE_DEVICES"
+            visibility_value = environ["CUDA_VISIBLE_DEVICES"]
+            tokens = [
+                token.strip()
+                for token in visibility_value.split(",")
+                if token.strip() and token.strip() != "-1"
+            ]
+            devices = [
+                device
+                for token in tokens
+                for device in devices
+                if token == device["index"]
+                or (
+                    device["uuid"] is not None
+                    and device["uuid"].startswith(token)
+                )
+            ]
+        accelerators.extend(device["accelerator"] for device in devices)
+    elif rocminfo or rocm_smi:
+        platform_name = "rocm"
+        accelerator_text = "\n".join(
+            value for value in (rocminfo, rocm_smi) if value
+        )
+        accelerators.extend(
+            re.findall(
+                r"(?im)^\s*Name:\s*(gfx\d+)\s*$", accelerator_text
+            )
+        )
+        for variable in (
+            "ROCR_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+        ):
+            if variable in environ:
+                visibility_variable = variable
+                visibility_value = environ[variable]
+                tokens = [
+                    token.strip()
+                    for token in visibility_value.split(",")
+                    if token.strip() and token.strip() != "-1"
+                ]
+                accelerators = [
+                    accelerators[int(token)]
+                    for token in tokens
+                    if token.isdigit()
+                    and int(token) < len(accelerators)
+                ]
+                break
+
+    transformers_version = version_getter("transformers")
+    transformers_major = None
+    if transformers_version:
+        match = re.match(r"(\d+)", transformers_version)
+        if match:
+            transformers_major = int(match.group(1))
+    return {
+        "platform": platform_name,
+        "accelerators": accelerators,
+        "device_count": len(accelerators),
+        "visibility": {
+            "variable": visibility_variable,
+            "value": visibility_value,
+        },
+        "transformers_version": transformers_version,
+        "transformers_major": transformers_major,
+        "aiter_available": version_getter("aiter") is not None,
+        "torchao_available": version_getter("torchao") is not None,
+        "raw": {
+            "nvidia_compute_capability": nvidia,
+            "rocminfo": rocminfo,
+            "rocm_smi": rocm_smi,
+        },
+    }
+
+
+def _cuda_capability(accelerator: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"sm(\d+)", accelerator)
+    if not match:
+        return None
+    digits = match.group(1)
+    if len(digits) < 2:
+        return None
+    return int(digits[:-1]), int(digits[-1])
+
+
+def environment_mismatches(
+    case: dict[str, Any], observed: dict[str, Any]
+) -> list[str]:
+    backend = case["hardware"]["backend"]
+    accelerators = observed.get("accelerators", [])
+    mismatches = []
+    expected_major = int(case["transformers"].split(".", 1)[0])
+    if observed.get("transformers_major") != expected_major:
+        mismatches.append(
+            f"requires Transformers {case['transformers']}; observed "
+            f"{observed.get('transformers_version') or 'not installed'}"
+        )
+
+    if backend.startswith("cuda_"):
+        if observed.get("platform") != "cuda":
+            mismatches.append(
+                f"requires CUDA; observed {observed.get('platform', 'unknown')}"
+            )
+        capabilities = [
+            capability
+            for accelerator in accelerators
+            if (capability := _cuda_capability(accelerator)) is not None
+        ]
+        if backend == "cuda_ada_torchao":
+            matching_capabilities = [
+                capability
+                for capability in capabilities
+                if capability == (8, 9)
+            ]
+            requirement = "sm89"
+        elif backend == "cuda_hopper_torchao":
+            matching_capabilities = [
+                capability
+                for capability in capabilities
+                if capability[0] == 9
+            ]
+            requirement = "sm90-sm99"
+        else:
+            matching_capabilities = [
+                capability
+                for capability in capabilities
+                if capability[0] >= 10
+            ]
+            requirement = "sm100 or newer"
+        valid_accelerator = bool(capabilities) and len(
+            matching_capabilities
+        ) == len(capabilities)
+        matching_device_count = len(matching_capabilities)
+        if not valid_accelerator:
+            mismatches.append(
+                f"requires {requirement}; observed {accelerators or ['unknown']}"
+            )
+        if not observed.get("torchao_available"):
+            mismatches.append("requires installed TorchAO")
+    else:
+        if observed.get("platform") != "rocm":
+            mismatches.append(
+                f"requires ROCm; observed {observed.get('platform', 'unknown')}"
+            )
+        rdna4 = bool(accelerators) and all(
+            accelerator in {"gfx1200", "gfx1201"}
+            for accelerator in accelerators
+        )
+        if backend == "rdna4_aiter":
+            matching_device_count = sum(
+                accelerator in {"gfx1200", "gfx1201"}
+                for accelerator in accelerators
+            )
+            if not rdna4:
+                mismatches.append(
+                    f"requires gfx1200 or gfx1201; observed "
+                    f"{accelerators or ['unknown']}"
+                )
+            if not observed.get("aiter_available"):
+                mismatches.append("requires installed AITER")
+        else:
+            matching_device_count = sum(
+                accelerator not in {"gfx1200", "gfx1201"}
+                for accelerator in accelerators
+            )
+            if not accelerators or any(
+                accelerator in {"gfx1200", "gfx1201"}
+                for accelerator in accelerators
+            ):
+                mismatches.append(
+                    f"requires non-RDNA4 ROCm accelerator; observed "
+                    f"{accelerators or ['unknown']}"
+                )
+            if not observed.get("torchao_available"):
+                mismatches.append("requires installed TorchAO")
+    if matching_device_count < case["world_size"]:
+        mismatches.append(
+            f"world_size {case['world_size']} requires "
+            f"{case['world_size']} matching devices; observed "
+            f"{matching_device_count}"
+        )
+    return mismatches
+
+
+def collect_environment(
+    validation_probe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    versions = {}
+    for name in PACKAGE_NAMES:
+        versions[name] = _package_version(name)
+    commit = _run_text(["git", "-C", str(ROOT), "rev-parse", "HEAD"])
+    dirty = _run_text(["git", "-C", str(ROOT), "status", "--porcelain"])
+    device_info = {
+        "nvidia_smi": _run_text(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,uuid,driver_version,memory.total,compute_cap",
+                "--format=csv,noheader",
+            ]
+        ),
+        "rocm_smi": _run_text(
+            [
+                "rocm-smi",
+                "--showproductname",
+                "--showdriverversion",
+                "--showmeminfo",
+                "vram",
+                "--json",
+            ]
+        ),
+    }
+    return {
+        "commit_sha": commit,
+        "git_dirty": bool(dirty),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "packages": versions,
+        "devices": device_info,
+        "validation_probe": validation_probe or probe_environment(),
+    }
+
+
+def _proc_tree(root_pid: int) -> set[int]:
+    parents: dict[int, int] = {}
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat_path.read_text().split()
+            parents[int(fields[0])] = int(fields[3])
+        except (OSError, ValueError, IndexError):
+            continue
+    selected = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent in parents.items():
+            if parent in selected and pid not in selected:
+                selected.add(pid)
+                changed = True
+    return selected
+
+
+def _process_tree_rss(pids: set[int]) -> int:
+    total_kib = 0
+    for pid in pids:
+        try:
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    total_kib += int(line.split()[1])
+                    break
+        except (OSError, ValueError, IndexError):
+            continue
+    return total_kib * 1024
+
+
+def _cgroup_memory() -> int | None:
+    for path in (
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        try:
+            return int(path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _nvidia_process_memory(pids: set[int]) -> int | None:
+    output = _run_text(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=pid,used_gpu_memory",
+            "--format=csv,noheader,nounits",
+        ]
+    )
+    if output is None:
+        return None
+    total_mib = 0
+    for line in output.splitlines():
+        try:
+            pid_text, memory_text = (part.strip() for part in line.split(",", 1))
+            if int(pid_text) in pids:
+                total_mib += int(memory_text)
+        except (ValueError, TypeError):
+            continue
+    return total_mib * 1024 * 1024
+
+
+def _rocm_global_memory() -> int | None:
+    output = _run_text(["rocm-smi", "--showmeminfo", "vram", "--json"])
+    if output is None:
+        return None
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    values: list[int] = []
+
+    def visit(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                visit(child, child_key)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, key)
+        elif "used" in key.casefold() and "memory" in key.casefold():
+            try:
+                values.append(int(value))
+            except (TypeError, ValueError):
+                pass
+
+    visit(data)
+    return sum(values) if values else None
+
+
+class ResourceMonitor:
+    def __init__(self, root_pid: int, interval: float = 0.25) -> None:
+        self.root_pid = root_pid
+        self.interval = interval
+        self.peak_host_rss = 0
+        self.peak_cgroup = 0
+        self.peak_gpu: int | None = None
+        self.gpu_scope: str | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=max(2.0, self.interval * 4))
+
+    def _sample(self) -> None:
+        while not self._stop.is_set():
+            pids = _proc_tree(self.root_pid)
+            self.peak_host_rss = max(
+                self.peak_host_rss, _process_tree_rss(pids)
+            )
+            cgroup = _cgroup_memory()
+            if cgroup is not None:
+                self.peak_cgroup = max(self.peak_cgroup, cgroup)
+            gpu = _nvidia_process_memory(pids)
+            scope = "process_tree"
+            if gpu is None:
+                gpu = _rocm_global_memory()
+                scope = "device_global"
+            if gpu is not None:
+                self.peak_gpu = max(self.peak_gpu or 0, gpu)
+                self.gpu_scope = scope
+            self._stop.wait(self.interval)
+
+
+def _placeholder_names(command: list[str]) -> list[str]:
+    return sorted(
+        {
+            name
+            for argument in command
+            for name in re.findall(
+                r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", argument
+            )
+        }
+    )
+
+
+def placeholder_mismatches(
+    command: list[str],
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    if environ is None:
+        environ = os.environ
+    return [
+        f"required environment variable {name} is unset"
+        for name in _placeholder_names(command)
+        if not environ.get(name)
+    ]
+
+
+def expand_command(command: list[str]) -> list[str]:
+    missing = placeholder_mismatches(command)
+    if missing:
+        raise ValueError("; ".join(missing))
+    expanded = [os.path.expandvars(arg) for arg in command]
+    return expanded
+
+
+def _redactions(command: list[str]) -> dict[str, str]:
+    return {
+        value: f"${{{name}}}"
+        for name in _placeholder_names(command)
+        if (value := os.environ.get(name))
+    }
+
+
+def _redact(text: str, redactions: dict[str, str]) -> str:
+    for value in sorted(redactions, key=len, reverse=True):
+        text = text.replace(value, redactions[value])
+    return text
+
+
+def _output_directory(command: list[str]) -> Path:
+    index = command.index("--output_directory")
+    return Path(command[index + 1])
+
+
+def reserve_output_directory(output_dir: Path) -> None:
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir()
+
+
+def hash_outputs(output_dir: Path) -> dict[str, Any]:
+    if not output_dir.exists():
+        return {
+            "path": None,
+            "sha256": None,
+            "bytes": None,
+            "files": [],
+        }
+    candidates = sorted(
+        path
+        for path in output_dir.rglob("*")
+        if path.is_file()
+        and path.stat().st_size > 0
+        and path.suffix.casefold() in GENERATED_ARTIFACT_EXTENSIONS
+    )
+    files = []
+    for path in candidates:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files.append(
+            {
+                "path": str(path),
+                "sha256": digest.hexdigest(),
+                "bytes": path.stat().st_size,
+            }
+        )
+    primary = files[-1] if files else {}
+    return {
+        "path": primary.get("path"),
+        "sha256": primary.get("sha256"),
+        "bytes": primary.get("bytes"),
+        "files": files,
+    }
+
+
+def make_environment_mismatch_record(
+    *,
+    case: dict[str, Any],
+    command: list[str],
+    environment: dict[str, Any],
+    mismatches: list[str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "case_id": case["id"],
+        "case": case,
+        "status": "environment_mismatch",
+        "execution": "NOT RUN",
+        "expected": case["expected"],
+        "command": command,
+        "environment": environment,
+        "environment_mismatches": mismatches,
+        "exit_status": None,
+        "metrics": {
+            "wall_duration_seconds": None,
+            "load_duration_seconds": None,
+            "first_forward": "not_reached",
+            "peak_host_rss_bytes": None,
+            "peak_cgroup_memory_bytes": None,
+            "peak_gpu_memory_bytes": None,
+            "gpu_memory_scope": None,
+        },
+        "output": {
+            "path": None,
+            "sha256": None,
+            "bytes": None,
+            "files": [],
+        },
+        "quality": {
+            "matrix_notes": case["quality_notes"],
+            "operator_notes": "",
+            "reference": None,
+        },
+    }
+
+
+def aggregate_exit_code(statuses: list[str]) -> int:
+    if any(
+        status not in {
+            "passed",
+            "passed_expected_rejection",
+            "environment_mismatch",
+        }
+        for status in statuses
+    ):
+        return 1
+    if any(status == "environment_mismatch" for status in statuses):
+        return 2
+    return 0
+
+
+def execute_case(
+    case: dict[str, Any],
+    command: list[str],
+    *,
+    results_path: Path,
+    quality_notes: str,
+    reference: str | None,
+    environment: dict[str, Any],
+) -> dict[str, Any]:
+    expanded = expand_command(command)
+    redactions = _redactions(command)
+    output_dir = _output_directory(expanded)
+    reserve_output_directory(output_dir)
+    log_path = output_dir / "validation.log"
+    markers: dict[str, float] = {}
+    log_lines: list[str] = []
+
+    started = time.monotonic()
+    process = subprocess.Popen(
+        expanded,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    monitor = ResourceMonitor(process.pid)
+    monitor.start()
+    assert process.stdout is not None
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        for line in process.stdout:
+            now = time.monotonic()
+            line = _redact(line, redactions)
+            stamped = (
+                f"{dt.datetime.now(dt.timezone.utc).isoformat()} {line}"
+            )
+            print(stamped, end="")
+            log_handle.write(stamped)
+            log_lines.append(line)
+            if "Initializing model:" in line:
+                markers.setdefault("load_start", now)
+            if "Model initialization complete." in line:
+                markers.setdefault("load_end", now)
+            if "Running model..." in line:
+                markers.setdefault("forward_start", now)
+    exit_status = process.wait()
+    monitor.stop()
+    elapsed = time.monotonic() - started
+
+    if "forward_start" not in markers:
+        first_forward = "not_reached"
+    elif exit_status == 0:
+        first_forward = "succeeded"
+    else:
+        first_forward = "failed"
+    load_duration = None
+    if "load_start" in markers and "load_end" in markers:
+        load_duration = markers["load_end"] - markers["load_start"]
+    metrics = {
+        "wall_duration_seconds": round(elapsed, 3),
+        "load_duration_seconds": (
+            round(load_duration, 3) if load_duration is not None else None
+        ),
+        "first_forward": first_forward,
+        "peak_host_rss_bytes": monitor.peak_host_rss or None,
+        "peak_cgroup_memory_bytes": monitor.peak_cgroup or None,
+        "peak_gpu_memory_bytes": monitor.peak_gpu,
+        "gpu_memory_scope": monitor.gpu_scope,
+    }
+    record = make_result_record(
+        case=case,
+        command=command,
+        environment=environment,
+        exit_status=exit_status,
+        metrics=metrics,
+        output=hash_outputs(output_dir),
+        log="".join(log_lines),
+        quality_notes=quality_notes,
+        reference=reference,
+    )
+    record["log_path"] = str(log_path)
+    append_result(results_path, record)
+    return record
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="External GPU validation matrix runner (dry-run by default)."
+    )
+    parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    parser.add_argument("--case", action="append", default=[], dest="case_ids")
+    parser.add_argument("--tag", action="append", default=[])
+    parser.add_argument("--model", action="append", default=[])
+    parser.add_argument(
+        "--backend", action="append", choices=sorted(BACKENDS), default=[]
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--list", action="store_true")
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--results",
+        type=Path,
+        default=Path("gpu-validation-results/results.jsonl"),
+    )
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--quality-note", default="")
+    parser.add_argument("--reference")
+    parser.add_argument("--continue-on-error", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    matrix = load_matrix(args.matrix)
+    defaults = dict(matrix["defaults"])
+    if args.output_root is not None:
+        defaults["output_root"] = str(args.output_root)
+    defaults["output_root"] = str(
+        Path(defaults["output_root"]).expanduser().resolve()
+    )
+    selected = select_cases(
+        matrix["cases"],
+        tags=args.tag,
+        models=args.model,
+        backends=args.backend,
+        case_ids=args.case_ids,
+    )
+    if not selected:
+        print("No validation cases matched the requested filters.", file=sys.stderr)
+        return 2
+
+    validation_probe = probe_environment() if args.execute else None
+    environment = (
+        collect_environment(validation_probe) if validation_probe else None
+    )
+    statuses: list[str] = []
+    for case in selected:
+        command = build_command(case, defaults)
+        expected = case["expected"]["outcome"]
+        print(f"{case['id']} [{expected}]")
+        print(f"  {format_command(command)}")
+        if args.list:
+            continue
+        if args.execute:
+            assert validation_probe is not None
+            assert environment is not None
+            mismatches = environment_mismatches(
+                case, validation_probe
+            ) + placeholder_mismatches(command)
+            if mismatches:
+                record = make_environment_mismatch_record(
+                    case=case,
+                    command=command,
+                    environment=environment,
+                    mismatches=mismatches,
+                )
+                append_result(args.results, record)
+                statuses.append(record["status"])
+                print("  result: environment_mismatch (NOT RUN)")
+                for mismatch in mismatches:
+                    print(f"    - {mismatch}")
+                if not args.continue_on_error:
+                    return aggregate_exit_code(statuses)
+                continue
+            record = execute_case(
+                case,
+                command,
+                results_path=args.results,
+                quality_notes=args.quality_note,
+                reference=args.reference,
+                environment=environment,
+            )
+            statuses.append(record["status"])
+            print(f"  result: {record['status']}")
+            if (
+                not args.continue_on_error
+                and not record["status"].startswith("passed")
+            ):
+                return 1
+    if not args.execute and not args.list:
+        print(
+            f"Dry run only: {len(selected)} case(s), GPU validation NOT RUN."
+        )
+    return aggregate_exit_code(statuses)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

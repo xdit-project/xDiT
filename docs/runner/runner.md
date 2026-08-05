@@ -297,6 +297,11 @@ These examples show the loading contract, not universal performance recommendati
 
 #### Validation Status
 
+The reproducible external execution matrix, recorder, result schema, and
+operator workflow are in the
+[GPU Validation Handoff](gpu_validation_handoff.md). Its checked-in status is
+**NOT RUN**; dry-runs and repository tests are not GPU end-to-end evidence.
+
 | Contract area | Implementation status | Static / unit-test evidence in the repository | GPU end-to-end status |
 |---------------|-----------------------|----------------------------------------------|-----------------------|
 | FP8 target selection and explicit `--use_fp8_text_encoder` opt-in | Implemented | Unit tests directly exercise target inclusion/exclusion and component-prefix routing. CLI validation and each runner's exact target declarations are verified by static inspection; the registry test only guards against text-encoder targets leaking into the always-on transformer list. | Unvalidated across the documented GPU/model combinations |

@@ -88,7 +88,7 @@ Individual model classes that inherit from `xFuserModel`:
 | FLUX.1-dev | `FLUX.1-dev`, `black-forest-labs/FLUX.1-dev` |
 | FLUX.1-Kontext | `FLUX.1-Kontext-dev`, `black-forest-labs/FLUX.1-Kontext-dev` |
 | FLUX.2 | `FLUX.2-dev`, `black-forest-labs/FLUX.2-dev` |
-| FLUX.2-klein | `FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-9B` |
+| FLUX.2-klein | `FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-9B`, `FLUX.2-klein-4B`, `black-forest-labs/FLUX.2-klein-4B` |
 | HunyuanVideo | `HunyuanVideo`, `tencent/HunyuanVideo` |
 | HunyuanVideo-1.5 | `HunyuanVideo-1.5`, `tencent/HunyuanVideo-1.5` |
 | Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
@@ -98,6 +98,10 @@ Individual model classes that inherit from `xFuserModel`:
 | Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3.5-large` |
 | Z-Image-Turbo | `Z-Image-Turbo`, `Tongyi-MAI/Z-Image-Turbo` |
 | LTX-2 | `LTX-2`, `Lightricks/LTX-2` |
+| LTX-2.3 | `LTX-2.3`, `dg845/LTX-2.3-Diffusers` |
+| Cosmos3-Super | `Cosmos3-Super`, `nvidia/Cosmos3-Super` |
+| Cosmos3-Nano | `Cosmos3-Nano`, `nvidia/Cosmos3-Nano` |
+| CausalWan | `CausalWan` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
 | Krea2-Raw | `krea/krea-2-raw`, `krea/Krea-2-Raw`, `Krea-2-Raw` |
@@ -130,6 +134,7 @@ Individual model classes that inherit from `xFuserModel`:
 | `--fully_shard_degree` | FSDP sharding degree; set to number of GPUs to shard across. 1 disables sharding. | 1 |
 | `--no_reshard_after_forward` | Keep parameters gathered after each block forward; trades memory for latency | False |
 | `--memory_efficient_sharding` | Reduce peak VRAM during load: shard transformer blocks one at a time on GPU during init, so the full unsharded component never materializes on device. Slightly slower to load. Use if the model OOMs on GPU during init. Requires `--fully_shard_degree > 1` | False |
+| `--memory_efficient_replicated_load` | Reduce host RAM used by replicated model weights when a model that fits one GPU is replicated across ranks (pure sequence/CFG/data parallelism): rank 0 loads the real weights and peers receive them over a GPU→GPU broadcast, so the replicated-weight contribution to host peak is approximately 1× the model instead of N×. Tokenizers, framework state, checkpoint page cache, and other process-local allocations remain per rank. | False |
 
 ### Input Parameters
 
@@ -151,12 +156,152 @@ Individual model classes that inherit from `xFuserModel`:
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--use_torch_compile` | Enable torch.compile acceleration | False |
-| `--use_fp8_gemms` | Enable FP8 GEMM quantization | False |
+| `--use_fp8_gemms` | Enable FP8 GEMM quantization for the transformer | False |
+| `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well (requires `--use_fp8_gemms`). Frees several GB for models with large bf16 text encoders. | False |
+| `--use_fp4_gemms` | Enable FP4 GEMM quantization for declared transformer targets (ROCm MXFP4 or CUDA NVFP4) | False |
+| `--use_hybrid_gemm_schedule` | Enable the explicit FP8/FP4 hybrid schedule. Requires `--use_fp4_gemms`; also required when `--use_fp8_gemms` and `--use_fp4_gemms` are both set. | False |
+| `--use_int8_gemms` | Enable torchao W8A8 INT8 quantization for declared transformer targets. Cannot be combined with FP8, FP4, or hybrid FP8/FP4 mode. | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |
 | `--enable_model_cpu_offload` | Enable model CPU offload | False |
 | `--enable_sequential_cpu_offload` | Enable sequential CPU offload | False |
+| `--enable_group_cpu_offload` | Group CPU offload: parameters live on the host and are streamed to the GPU a group at a time, overlapping transfer with compute | False |
+| `--group_offload_low_cpu_mem` | With `--enable_group_cpu_offload`, pin each tensor as it is offloaded rather than pre-pinning whole components. Keeps host RAM flat at the cost of some of the streaming speedup | False |
 | `--attention_backend` | Attention backend selection | None |
+
+### Loading and Quantization Contract
+
+The quantization flags select model-declared linear-layer targets; they do not quantize every pipeline component. Unless noted below, the VAE and untargeted text encoders retain the pipeline dtype.
+
+#### Backend and Format Semantics
+
+This matrix records the implemented dispatch and rejection paths in the runner. It is not a GPU-validation claim; the listed hardware/model combinations remain pending GPU end-to-end validation as detailed under [Validation Status](#validation-status). Model capability checks and target declarations still apply on top of the hardware dispatch.
+
+| Hardware / available backend | FP8 (`--use_fp8_gemms`) | FP4 (`--use_fp4_gemms`) | INT8 (`--use_int8_gemms`) |
+|------------------------------|--------------------------|--------------------------|-----------------------------|
+| ROCm RDNA4 (`gfx1200`/`gfx1201`) + AITER | AITER block-scale W8A8 FP8 (block size 128); streaming load where the runner is wired for it, otherwise layer-by-layer post-load | AITER MXFP4 | Excluded: INT8 is rejected on ROCm |
+| ROCm RDNA4 without AITER | torchao per-tensor dynamic-activation/FP8-weight, post-load | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
+| Other ROCm + AITER | torchao per-tensor dynamic-activation/FP8-weight, post-load; AITER FP8 block-scale is RDNA4-only | AITER MXFP4 | Excluded: INT8 is rejected on ROCm |
+| Other ROCm without AITER | torchao per-tensor dynamic-activation/FP8-weight, post-load | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
+| CUDA capability 10.0+ (Blackwell) | torchao per-tensor dynamic-activation/FP8-weight, post-load | torchao NVFP4 with dynamic per-tensor activation scaling | torchao dynamic-activation/dynamic-weight W8A8 INT8 |
+| CUDA capability 8.9 through 9.x | torchao per-tensor dynamic-activation/FP8-weight, post-load | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8 |
+| CUDA capability below 8.9 | Unsupported for torchao FP8 GEMMs; the runner does not currently reject this early, so the flag may fail during quantization or execution | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8 |
+
+INT8 uses per-row symmetric scaling and skips linear layers smaller than 512 in either dimension. During ordinary loading it is a post-load conversion after the bf16 component is on the GPU. Memory-efficient FSDP and replicated meta-load apply it one transformer block at a time after that block is read and before it is sharded or retained as a replica; INT8 has no quantize-on-load adapter. With sequence parallelism, Z-Image also leaves `context_refiner` unquantized because its local sequence can be too short for `torch._int_mm`. FP4 layers selected by a model's FP8 quality overrides remain FP8.
+
+FP4, INT8, and non-AITER FP8 are post-load conversions during ordinary loading. With memory-efficient FSDP or replicated meta-load they are applied one transformer block at a time after that block is read. AITER FP8 is the only format with a quantize-on-load integration for both diffusers transformers and Transformers text encoders.
+
+#### Model Support Matrix
+
+“Streaming” below means eligible for RDNA4+AITER transformer quantization during ordinary loading. On other hardware, the same FP8 targets use the torchao post-load path. “Memory-efficient FSDP” means `--memory_efficient_sharding` can avoid materializing the full transformer before FSDP wraps it; “replicated meta-load” means `--memory_efficient_replicated_load` can build the transformer on meta and fill it from rank 0.
+
+| Model family | Transformer loading | Text-encoder FP8 target | Memory-efficient FSDP | Replicated meta-load |
+|--------------|---------------------|-------------------------|-----------------------|----------------------|
+| FLUX.1-dev, FLUX.1-Kontext | Streaming; transformer targets declared | `text_encoder_2` | Transformer + targeted text encoder | Yes |
+| FLUX.2, FLUX.2-klein (4B/9B) | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
+| Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | Streaming; both Wan 2.2 transformers are covered | `text_encoder` | Transformer(s) + targeted text encoder | Yes |
+| Wan 2.2 Distilled I2V | Direct/post-load only | Declared, post-load only | No memory-efficient load path | No |
+| Wan 2.1 VACE | Streaming; main and VACE blocks covered | `text_encoder` | Not exposed by this runner | Yes |
+| Qwen-Image and Qwen-Image-Edit variants | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
+| Z-Image and Z-Image-Turbo | Streaming; transformer, noise refiner, and context refiner covered | `text_encoder` | Transformer + targeted text encoder | Yes |
+| Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | None | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
+| Stable Diffusion 3.5 | Direct/post-load only | `text_encoder_3`, post-load only | FSDP is supported, but loading is not memory-efficient | No |
+| HunyuanVideo and HunyuanVideo-1.5 variants | Direct/post-load only | None | Not exposed by these runners | No |
+| LTX-2 | Direct/post-load only | None | Not exposed by this runner | No |
+| LTX-2.3 | Direct load; no quantized GEMM capability declared | None | Not exposed by this runner | No |
+| Cosmos3-Super and Cosmos3-Nano | Streaming; transformer targets declared | None | Transformer only | Transformer only |
+| CausalWan | Direct load; no quantized GEMM capability declared | None | FSDP is supported, but loading is not memory-efficient | No |
+
+The FLUX PipeFusion loading branches construct their complete pipelines directly. They therefore do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. The distilled Wan runner similarly loads and replaces transformer checkpoints outside the shared meta-load seam.
+
+#### Per-model FP4 and INT8 Coverage
+
+An entry of “No” means the runner capability check rejects the flag, even if the hardware matrix would otherwise allow the format.
+
+| Model family | FP4 targets | INT8 targets |
+|--------------|-------------|--------------|
+| FLUX.2 | Transformer blocks and single-transformer blocks; model quality overrides remain FP8 | No |
+| Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | Declared transformer blocks; on dual-transformer Wan 2.2, the FP4 list covers `transformer` while `transformer_2` remains FP8 | No |
+| Wan 2.2 Distilled I2V | Same declared dual-transformer split as Wan 2.2, applied post-load | No |
+| Krea2-Raw and Krea2-Turbo | Transformer blocks | No |
+| Cosmos3-Super and Cosmos3-Nano | Transformer layers; Cosmos3-Super keeps its declared first/last layer ranges in FP8 | No |
+| Z-Image and Z-Image-Turbo | No | Transformer layers, noise refiner, and context refiner; `context_refiner` is excluded under sequence parallelism |
+| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, Wan VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan | No | No |
+
+#### Flag Combinations and Exclusions
+
+- `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 used to be implicit on supported RDNA4 runs; it is now opt-in everywhere. Add `--use_fp8_text_encoder` explicitly when wanted.
+- `--use_fp8_text_encoder` requires `--use_fp8_gemms`. On an FP8-capable runner that declares no text-encoder target, the text-encoder flag has no effect; a runner without FP8 capability rejects the FP8 request during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
+- RDNA4+AITER streaming FP8 for a text encoder requires Transformers 5 because the quantize-on-load adapter uses `transformers.core_model_loading`. The general package dependency remains older-compatible; upgrade Transformers when using this specific path.
+- `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`. This exclusion includes explicit hybrid FP8/FP4 mode. INT8 is also rejected on ROCm.
+- Setting `--use_fp8_gemms` and `--use_fp4_gemms` together requires `--use_hybrid_gemm_schedule`; the generic combination is rejected. The hybrid FP4 path owns its FP8 high-precision conversion, so the generic FP8 traversal does not run afterward. Model-selected quality overrides and FP8-only components remain FP8. Use the FP8 precision-override flags only with FP4.
+- `--memory_efficient_sharding` requires `--fully_shard_degree > 1`. It is a sharded load: rank 0 reads one block at a time and broadcasts it within the FSDP group before each rank receives its shard.
+- `--memory_efficient_replicated_load` is opt-in, requires multiple ranks, and applies only when weights are replicated. It is ignored with FSDP, PipeFusion, or tensor parallelism, and for runners marked “No” above. Pure Ulysses, ring, CFG, and data parallelism remain eligible.
+- The two memory-efficient load flags represent different layouts and are not used together: FSDP splits weights, while replicated meta-load gives every rank the same weights.
+- CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
+
+#### Practical Examples
+
+RDNA4 transformer-only streaming FP8:
+
+```bash
+xdit --model FLUX.2-dev \
+    --prompt "A lighthouse in a winter storm" \
+    --use_fp8_gemms
+```
+
+RDNA4 transformer and text-encoder streaming FP8 (Transformers 5 required):
+
+```bash
+xdit --model FLUX.2-dev \
+    --prompt "A lighthouse in a winter storm" \
+    --use_fp8_gemms \
+    --use_fp8_text_encoder
+```
+
+Memory-efficient FP8 FSDP load:
+
+```bash
+torchrun --nproc_per_node=4 -m xfuser.runner \
+    --model Wan2.1-T2V \
+    --prompt "Clouds moving over a mountain lake" \
+    --fully_shard_degree 4 \
+    --memory_efficient_sharding \
+    --use_fp8_gemms
+```
+
+Replicated load with sequence parallelism:
+
+```bash
+torchrun --nproc_per_node=4 -m xfuser.runner \
+    --model Qwen-Image \
+    --prompt "An isometric botanical library" \
+    --ulysses_degree 4 \
+    --memory_efficient_replicated_load \
+    --use_fp8_gemms
+```
+
+CUDA Blackwell NVFP4:
+
+```bash
+xdit --model FLUX.2-dev \
+    --prompt "A studio photograph of a glass sculpture" \
+    --use_fp4_gemms
+```
+
+These examples show the loading contract, not universal performance recommendations. Quantized output quality, peak memory, kernel availability, and the best override patterns depend on the checkpoint, GPU, torch/torchao/AITER versions, and parallel layout.
+
+#### Validation Status
+
+| Contract area | Implementation status | Static / unit-test evidence in the repository | GPU end-to-end status |
+|---------------|-----------------------|----------------------------------------------|-----------------------|
+| FP8 target selection and explicit `--use_fp8_text_encoder` opt-in | Implemented | Unit tests directly exercise target inclusion/exclusion and component-prefix routing. CLI validation and each runner's exact target declarations are verified by static inspection; the registry test only guards against text-encoder targets leaking into the always-on transformer list. | Unvalidated across the documented GPU/model combinations |
+| AITER diffusers/Transformers streaming adapters and FP8 layer layout | Implemented | Unit tests directly cover quantizer registration/packaging and sentinel FP8 parameter/buffer layouts without invoking kernels. Streaming adapter execution is verified only by static inspection. | Streaming checkpoint load and AITER kernels are GPU-unvalidated here |
+| Replicated meta-load policy | Implemented | Unit tests directly exercise the pure opt-in decision and exclusions for single rank, weight-splitting parallelism, and unwired runners. Collective fill behavior is verified only by static inspection. | Multi-rank GPU broadcasts and complete inference are GPU-unvalidated here |
+| Memory-efficient FSDP policy and meta construction | Implemented | Unit tests directly exercise the FSDP gate and bf16 meta-transformer construction. Per-block fill and quantize routing are verified only by static inspection. | Multi-rank FSDP fills, offload combinations, and complete inference are GPU-unvalidated here |
+| FP4/INT8 hardware gates and per-model capability/target declarations | Implemented | Statically enforced by runner capability checks, hardware checks, and model target lists; no unit coverage is claimed by this table | MXFP4, NVFP4, INT8, mixed FP4/FP8, and model-specific quality combinations are GPU-unvalidated here |
+
+These labels describe code and repository test coverage, not runtime validation performed for this documentation change. No GPU end-to-end result is claimed.
 
 ### Model-specific Arguments
 

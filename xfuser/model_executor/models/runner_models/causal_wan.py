@@ -70,6 +70,11 @@ class xFuserCausalWanModel(xFuserModel):
     _FLOW_SHIFT = 3
 
 
+    def _supports_replicated_meta_load(self) -> bool:
+        # _load_transformer has its own from_config + strict load_state_dict fallback for
+        # index-mismatched checkpoints, which a meta build plus broadcast fill cannot reproduce.
+        return False
+
     def _load_transformer(self, subfolder: str) -> xFuserCausalWanTransformer3DWrapper:
         """Load transformer, falling back to manual loading if weight index is mismatched."""
         try:

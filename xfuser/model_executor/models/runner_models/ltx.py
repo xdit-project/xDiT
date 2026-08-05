@@ -70,6 +70,12 @@ class xFuserLTX23VideoModel(xFuserModel):
     _AUDIO_MODALITY_SCALE = 3.0
     _AUDIO_GUIDANCE_RESCALE = 0.7
 
+    def _supports_replicated_meta_load(self) -> bool:
+        # Builds its transformer with a direct from_pretrained rather than through
+        # _build_transformer, so peers would never get the meta components the rank0 broadcast
+        # fills. Wiring LTX up is a follow-up; until then stay off the path.
+        return False
+
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
@@ -239,6 +245,10 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_slicing=True,
         use_fp8_gemms=True,
     )
+
+    def _supports_replicated_meta_load(self) -> bool:
+        # See xFuserLTX23VideoModel: direct from_pretrained, not wired for the meta broadcast fill.
+        return False
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(

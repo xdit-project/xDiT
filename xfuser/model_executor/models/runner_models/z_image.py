@@ -72,7 +72,8 @@ class xFuserZImageModel(xFuserModel):
                 "wrap_attrs": ["layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner", "text_encoder.layers"],
+        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        fp8_text_encoder_module_list=["text_encoder.layers"],
         int8_gemm_module_list=[
             "transformer.layers",
             "transformer.noise_refiner",
@@ -149,7 +150,8 @@ class xFuserZImageTurboModel(xFuserModel):
                 "wrap_attrs": ["layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner", "text_encoder.layers"],
+        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        fp8_text_encoder_module_list=["text_encoder.layers"],
         int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
     )
 

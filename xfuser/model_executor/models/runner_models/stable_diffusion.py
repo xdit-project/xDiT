@@ -43,7 +43,8 @@ class xFuserStableDiffusionModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder_3.encoder.block"],
+        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_text_encoder_module_list=["text_encoder_3.encoder.block"],
     )
 
     def _supports_replicated_meta_load(self) -> bool:

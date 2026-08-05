@@ -205,7 +205,8 @@ class xFuserWan21I2VModel(xFuserModel):
         model_output_type = "video",
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
-        fp8_gemm_module_list=["transformer.blocks", "text_encoder.encoder.block"],
+        fp8_gemm_module_list=["transformer.blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
                                  "5.", "6.", "7.", "8.", "9.",
@@ -290,7 +291,8 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks", "text_encoder.encoder.block"]
+        self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides = None
 
 
@@ -364,6 +366,12 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         super()._customize_settings(config)
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
+
+    def _supports_replicated_meta_load(self) -> bool:
+        # Unlike the base Wan2.2 runner this inherits from, the distilled variant loads the base
+        # architecture directly and then overwrites the transformer weights from separate distilled
+        # checkpoints, so there is no meta build for the rank0 broadcast to fill.
+        return False
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -471,7 +479,8 @@ class xFuserWan21T2VModel(xFuserModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
-        fp8_gemm_module_list=["transformer.blocks", "text_encoder.encoder.block"],
+        fp8_gemm_module_list=["transformer.blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
                                  "5.", "6.", "7.", "8.", "9.",
@@ -533,7 +542,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                 "wrap_attrs": ["blocks"],
                 "dtype": torch.bfloat16,
         }
-        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks", "text_encoder.encoder.block"]
+        self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_text_encoder_module_list=["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
@@ -596,7 +606,8 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         model_output_type="video",
         model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         output_name="wan2.2_ti2v",
-        fp8_gemm_module_list=["transformer.blocks", "text_encoder.encoder.block"],
+        fp8_gemm_module_list=["transformer.blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "28.", "29."),
         fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
@@ -698,7 +709,8 @@ class xFuserWan21VACEModel(xFuserModel):
     settings = ModelSettings(
         fps=16,
         model_output_type="video",
-        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks", "text_encoder.encoder.block"],
+        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["blocks", "vace_blocks"],

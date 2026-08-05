@@ -28,14 +28,9 @@ except ImportError:
 _FP8_BLOCK = 128
 _PRESHUFFLE_LAYOUT = (16, 16)
 
-# Preshuffle blockscale GEMM measured ~25% SLOWER than plain on gfx1201/RDNA4 (klein 2048^2:
-# 20.4s vs 16.4s/iter), so default off. Root cause: no tuned block-128 preshuffle kernel exists
-# for gfx1201 in AITER. The fast gluon/WMMA kernel is gfx1250-only; the core CK/asm dispatcher
-# (gemm_a8w8_blockscale_bpreshuffle) has no gfx1201 code object (SIGSEGVs, so AITER gates it off).
-# Both paths fall back to a generic triton kernel with a small-M (M_LEQ_8) config, mistuned for
-# our large-M (~16k image tokens) workload, while plain gemm_a8w8_blockscale IS tuned for gfx1201
-# large-M and wins. Set XFUSER_FP8_PRESHUFFLE=1 to re-enable on an arch with a real preshuffle
-# kernel (e.g. gfx1250, or newer AITER that adds gfx1201 support).
+# Default off: AITER has no tuned block-128 preshuffle kernel for gfx1201, so preshuffle falls back
+# to a small-M triton config and measured ~25% slower than plain there. Set XFUSER_FP8_PRESHUFFLE=1
+# on an arch that does have one.
 _PRESHUFFLE_ENABLED = os.environ.get("XFUSER_FP8_PRESHUFFLE", "0") != "0"
 
 
@@ -91,7 +86,7 @@ def quantize_weight_to_fp8_blockscale_plain(
     return w_q, w_scale
 
 
-@torch.library.custom_op("mylib::fp8_blockscale_gemm", mutates_args=())
+@torch.library.custom_op("xfuser::fp8_blockscale_gemm", mutates_args=())
 def _fp8_blockscale_gemm(
     x: torch.Tensor,
     w_fp8: torch.Tensor,
@@ -116,7 +111,7 @@ def _(
     return torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
 
 
-@torch.library.custom_op("mylib::fp8_blockscale_gemm_preshuffle", mutates_args=())
+@torch.library.custom_op("xfuser::fp8_blockscale_gemm_preshuffle", mutates_args=())
 def _fp8_blockscale_gemm_preshuffle(
     x: torch.Tensor,
     w_shuffle: torch.Tensor,
@@ -288,16 +283,42 @@ class xFuserFP8BlockScaleLinear(nn.Module):
             )
         if self.preshuffle:
             k_padded = ((self.in_features + _FP8_BLOCK - 1) // _FP8_BLOCK) * _FP8_BLOCK
-            output = torch.ops.mylib.fp8_blockscale_gemm_preshuffle(
+            output = torch.ops.xfuser.fp8_blockscale_gemm_preshuffle(
                 x, weight_fp8, self.weight_scale, self.out_features, k_padded,
             ).to(input.dtype)
         else:
-            output = torch.ops.mylib.fp8_blockscale_gemm(
+            output = torch.ops.xfuser.fp8_blockscale_gemm(
                 x, weight_fp8, self.weight_scale,
             ).to(input.dtype)
         if self.bias is not None:
             output = output + self.bias
         return output.view(*original_shape[:-1], self.out_features)
+
+    def move_fp8_weights_to(self, device) -> None:
+        """Move just the quantized weight tensors (and the `weight` sentinel that advertises their
+        device) to `device`, leaving everything else alone.
+
+        Load-time eviction needs this instead of a plain .to(): a freshly quantized layer can still
+        hold tensors that cannot move, such as a meta `bias` the loader has yet to stream.
+        """
+        self.weight_fp8 = nn.Parameter(self.weight_fp8.data.to(device), requires_grad=False)
+        self.weight_scale = self.weight_scale.to(device)
+        sentinel = self.__dict__.get("weight")
+        if sentinel is not None:
+            self.__dict__["weight"] = sentinel.to(device)
+
+    def _apply(self, fn, *args, **kwargs):
+        """Carry the `weight` sentinel along with .to()/.cuda()/.cpu().
+
+        nn.Module._apply only walks _parameters and _buffers, and the sentinel is deliberately
+        neither, so a module move would leave it advertising a stale device. Anything that probes
+        `weight` then reads the wrong one. T5 does exactly that, via `wo.weight.dtype`.
+        """
+        module = super()._apply(fn, *args, **kwargs)
+        sentinel = module.__dict__.get("weight")
+        if sentinel is not None:
+            module.__dict__["weight"] = fn(sentinel)
+        return module
 
     def extra_repr(self):
         return (

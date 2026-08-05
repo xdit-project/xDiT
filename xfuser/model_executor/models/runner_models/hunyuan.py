@@ -55,6 +55,12 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
 
+    def _supports_replicated_meta_load(self) -> bool:
+        # Pins a checkpoint revision on from_pretrained rather than going through
+        # _build_transformer, so peers would never get the meta components the rank0 broadcast
+        # fills. Wiring this up needs a revision passthrough on the meta build; follow-up.
+        return False
+
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
@@ -138,6 +144,12 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         else:
             self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
 
+
+    def _supports_replicated_meta_load(self) -> bool:
+        # Direct from_pretrained, not wired for the meta broadcast fill. Inherited by the distilled
+        # and sparse variants, which additionally rebuild their transformer from a remapped state
+        # dict and so could not use a meta build as-is.
+        return False
 
     def _load_model(self) -> DiffusionPipeline:
         task = self.config.task

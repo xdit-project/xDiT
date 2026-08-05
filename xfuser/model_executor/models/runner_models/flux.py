@@ -79,6 +79,8 @@ class xFuserFluxModel(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
             "text_encoder_2.encoder.block",
         ],
         fsdp_strategy={
@@ -170,6 +172,8 @@ class xFuserFluxKontextModel(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
             "text_encoder_2.encoder.block",
         ],
         fsdp_strategy={
@@ -278,6 +282,8 @@ class xFuserFlux2Model(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
             "text_encoder.model.language_model.layers",
         ],
         fp4_gemm_module_list=[
@@ -420,6 +426,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
             "text_encoder.model.layers",
         ],
         fsdp_strategy={
@@ -514,6 +522,8 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
             "text_encoder.model.layers",
         ],
         fsdp_strategy={

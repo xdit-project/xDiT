@@ -45,7 +45,8 @@ class xFuserQwenImageEditModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder.model.language_model.layers"],
+        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -114,7 +115,8 @@ class xFuserQwenImageModel(xFuserModel):
         model_name="Qwen/Qwen-Image",
         output_name="qwen_image",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks", "text_encoder.model.language_model.layers"],
+        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],

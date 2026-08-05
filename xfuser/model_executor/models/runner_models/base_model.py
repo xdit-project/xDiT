@@ -19,8 +19,6 @@ from xfuser.envs import (
     _is_hip,
     _is_cuda,
 )
-from xfuser.core.distributed.parallel_state import get_fs_group
-from xfuser.core.utils.checkpoint_io import host_mem_gb
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -34,7 +32,6 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 
-from xfuser.model_executor.quant import AiterFp8BlockScaleConfig  # noqa: F401  (import registers the quantizer)
 from xfuser.core.distributed import (
     get_world_group,
     get_data_parallel_rank,
@@ -45,11 +42,9 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
-    shard_component,
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
-
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -158,6 +153,7 @@ class ModelSettings:
     fps: Optional[int] = None
     int8_gemm_module_list: List[str] = None
     fp8_gemm_module_list: List[str] = None
+    fp8_text_encoder_module_list: List[str] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_suffixes: Tuple[str] = None
@@ -251,25 +247,17 @@ class xFuserModel(abc.ABC):
     def _update_model_settings(self, config: xFuserArgs) -> None:
         if config.use_fp4_gemms:
             self._apply_fp8_override_cli_from_config(config)
-        self._gate_te_fp8_to_rdna4()
-
-    def _gate_te_fp8_to_rdna4(self) -> None:
-        """Keep text-encoder entries in fp8_gemm_module_list only on RDNA4.
-
-        TE fp8 is worthwhile only via the AITER block-scale path (RDNA4). Off RDNA4 the
-        list is consumed by the torchao / fp4 walks, which would then quantize a text
-        encoder we don't want touched, so strip every non-transformer entry there. Runs
-        after _customize_settings (which may rebuild the list, e.g. Wan2.2 dual), so the
-        gate covers runtime-assigned lists too.
-        """
-        if _is_hip() and PACKAGES_CHECKER._on_rdna4():
-            return
-        lst = self.settings.fp8_gemm_module_list
-        if not lst:
-            return
-        self.settings.fp8_gemm_module_list = [
-            m for m in lst if m.split(".", 1)[0].startswith("transformer")
-        ]
+        te_targets = self.settings.fp8_text_encoder_module_list
+        if config.use_fp8_text_encoder and not te_targets:
+            log(f"--use_fp8_text_encoder has no effect for {type(self).__name__}: it declares no "
+                f"text-encoder FP8 targets.")
+        elif te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
+            # Says so out loud because text-encoder FP8 used to ride along with --use_fp8_gemms on
+            # RDNA4, and is now opt-in everywhere; a run that silently kept a bf16 text encoder
+            # would otherwise look like the flag had regressed.
+            log(f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
+                f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
+                f"to quantize them too, for less memory at some risk to text conditioning.")
 
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
@@ -296,105 +284,38 @@ class xFuserModel(abc.ABC):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)
 
-    def _aiter_fp8_active(self) -> bool:
-        """True when RDNA4 AITER FP8 quantization applies (fp8 gemms requested + supported)."""
-        return bool(self.config.use_fp8_gemms and _use_aiter_fp8_rdna4())
+    @property
+    def fp8(self):
+        """This run's FP8 coverage and the loader configs that apply it (see fp8_plan.Fp8Plan)."""
+        from xfuser.model_executor.models.runner_models.loading.fp8_plan import Fp8Plan
+        return Fp8Plan(self)
 
-    def _fp8_stream_quant_config(
-        self, attr_prefix: str = "transformer"
-    ) -> Optional[AiterFp8BlockScaleConfig]:
-        """Config for streaming FP8 quantize-on-load, or None when not applicable.
-
-        Passing this config to the transformer's from_pretrained quantizes each weight as it
-        streams off disk, so the full bf16 transformer never materializes (peak ~= one weight
-        + accumulating fp8) — cheaper than loading bf16 then quantizing in the _post_load walk.
-        Targets exactly the fp8_gemm_module_list sub-modules for this transformer (stripping
-        the pipe-level prefix, e.g. "transformer." / "transformer_2."), so the later
-        _post_load AITER walk is a safe no-op (leaves are already fp8, not nn.Linear).
-        Applies to both single-GPU and FSDP: the streamed fp8 module is what FSDP shards,
-        so the per-block quantize_fn is a no-op on those leaves.
+    def _supports_replicated_meta_load(self) -> bool:
+        """Whether this runner is wired for the rank0-broadcast load: it must build its transformer
+        via _build_transformer (and ideally its text encoders via _meta_te_kwargs) so peers get meta
+        components for the broadcast to fill.
         """
-        if not self._aiter_fp8_active():
-            return None
-        targets = self._fp8_targets_for_component(attr_prefix)
-        if not targets:
-            return None
-        return AiterFp8BlockScaleConfig(target_modules=targets)
-
-    def _te_pipeline_quant_config(self):
-        """PipelineQuantizationConfig routing the AITER FP8 streaming quantizer to the pipeline's
-        transformers sub-models (text encoders), or None when not applicable.
-
-        A text encoder is a transformers model loaded by the diffusers pipeline; streaming it to
-        fp8 (instead of loading full bf16 then quantizing post-load) is the load-time host-RAM win
-        on multi-GPU FSDP, where every node-local rank would otherwise hold a full bf16 copy.
-        Groups fp8_gemm_module_list entries by pipeline component, excluding the transformer(s)
-        (the DiT streams via _fp8_stream_quant_config), and keys the mapping by whatever the pipe
-        names each component. The later _post_load AITER walk is a safe no-op on those leaves.
-        """
-        if not self._aiter_fp8_active():
-            return None
-        component_targets: dict[str, list[str]] = {}
-        for entry in (self.settings.fp8_gemm_module_list or []):
-            component, _, rest = entry.partition(".")
-            if not rest or component.startswith("transformer"):
-                continue
-            component_targets.setdefault(component, []).append(rest)
-        if not component_targets:
-            return None
-        from diffusers.quantizers import PipelineQuantizationConfig
-        from xfuser.model_executor.quant import AiterFp8BlockScaleTEConfig
-        return PipelineQuantizationConfig(
-            quant_mapping={
-                component: AiterFp8BlockScaleTEConfig(target_modules=targets)
-                for component, targets in component_targets.items()
-            },
-        )
+        return True
 
     def _memory_efficient_fsdp_load(self) -> bool:
         """True when the memory-efficient sharded (meta-init + rank0-broadcast) load path is on."""
-        return bool(self.config.memory_efficient_sharding and self.config.fully_shard_degree > 1)
+        return self._loader.fsdp_meta_load()
 
     def _replicated_broadcast_load(self) -> bool:
-        """Auto-on replicated multi-GPU load: the model fits one GPU and is replicated across ranks
-        (pure sequence/CFG/data parallel), so every rank would otherwise from_pretrained a full CPU
-        copy -> host RAM = N x model -> cgroup OOM. Instead rank0 loads real weights to GPU, peers
-        build on meta and receive every param/buffer via a GPU->GPU broadcast (host peak = 1x).
-        RDNA4-only. Excludes weight-splitting parallelism (FSDP/pipefusion/TP), where per-rank
-        weights differ and a broadcast would be wrong (FSDP has its own meta-load path)."""
-        return bool(
-            self._supports_replicated_meta_load()
-            and PACKAGES_CHECKER._on_rdna4()
-            and get_world_group().world_size > 1
-            and self.config.fully_shard_degree == 1
-            and self.config.pipefusion_parallel_degree == 1
-            and self.config.tensor_parallel_degree == 1
-        )
-
-    def _supports_replicated_meta_load(self) -> bool:
-        """Whether peers can build this model's components on meta for the rank0-broadcast path.
-        Composition-wrapper pipelines (e.g. SD3) lack ConfigMixin.load_config, so they load real on
-        every rank and must stay off the meta/broadcast path — it no-ops for them (broadcast_fill
-        skips real components) and only emits misleading 'skipping broadcast fill' logs."""
-        return True
-
-    def _fp8_targets_for_component(self, component_name: str) -> list[str]:
-        """fp8_gemm_module_list entries under this component, with the pipe-level prefix stripped
-        (e.g. "text_encoder.model.language_model.layers" -> "model.language_model.layers")."""
-        prefix = f"{component_name}."
-        return [
-            m[len(prefix):] for m in (self.settings.fp8_gemm_module_list or [])
-            if m.startswith(prefix)
-        ]
-
-    def _component_wants_fp8(self, component_name: str) -> bool:
-        return bool(self._aiter_fp8_active() and self._fp8_targets_for_component(component_name))
+        """True when replicated components load once on rank0 and broadcast to peers
+        (see MemoryEfficientLoader.replicated_broadcast_load)."""
+        return self._loader.replicated_broadcast_load()
 
     @functools.cached_property
-    def _sharder(self):
-        """Lazy MemoryEfficientSharder bound to this model (meta-init + rank0-broadcast load)."""
-        from xfuser.model_executor.models.runner_models.meta_load import MemoryEfficientSharder
-        return MemoryEfficientSharder(self)
+    def _loader(self):
+        """Lazy MemoryEfficientLoader bound to this model (meta-init + rank0-broadcast load).
+
+        Must stay cached, unlike ``fp8``: the loader records which transformers it built on meta, so
+        a fresh instance per access would report none of them and silently route every component to
+        the wrong fill path.
+        """
+        from xfuser.model_executor.models.runner_models.loading.meta_load import MemoryEfficientLoader
+        return MemoryEfficientLoader(self)
 
     def _build_transformer(self, wrapper_cls, subfolder: str = "transformer", init_kwargs: dict | None = None, stream_quant: bool = True):
         """Load the transformer for a pipeline. On the memory-efficient FSDP path (multi-GPU
@@ -405,21 +326,21 @@ class xFuserModel(abc.ABC):
         init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) forwarded on both paths.
         stream_quant: on the non-meta path, stream-quantize to fp8 when True (models that already load
         fp8 today); False keeps the plain bf16 load (models that load bf16 today). The meta path always
-        quantizes per block from fp8_gemm_module_list, so stream_quant only gates the non-meta config.
+        quantizes per block from the active FP8 target list, so stream_quant only gates the non-meta config.
         """
         if self._memory_efficient_fsdp_load():
-            return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
+            return self._loader.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
         # Replicated broadcast load: build on meta on ALL ranks. Weights are streamed per block from
         # disk on rank0 and broadcast GPU->GPU, then fp8-quantized per block (broadcast_fill_replicated),
         # so the full bf16 transformer never materializes on host or any single GPU.
         if self._replicated_broadcast_load():
-            return self._sharder.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
+            return self._loader.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
         return wrapper_cls.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
             subfolder=subfolder,
             quantization_config=(
-                self._fp8_stream_quant_config(subfolder) if stream_quant else None
+                self.fp8.aiter_stream_config(subfolder) if stream_quant else None
             ),
             **(init_kwargs or {}),
         )
@@ -431,15 +352,19 @@ class xFuserModel(abc.ABC):
         modules to hand to the pipeline's from_pretrained (so it skips loading those components)
         and te_quant is None — the pipe does not stream the TE; instead the meta module (fp8 when
         targeted, else bf16) is filled by the rank0-broadcast sharded load, then FSDP-sharded
-        (CPU-offloaded). On the normal path returns ({}, self._te_pipeline_quant_config()). The
-        transformer is unaffected either way; it keeps its own streaming-fp8 from_pretrained path.
+        (CPU-offloaded). The transformer is unaffected either way; it keeps its own streaming-fp8
+        from_pretrained path.
+
+        The normal-path config is built last, and only if it is reached: constructing it registers
+        the transformers quantizer process-globally, which the meta paths have no use for.
         """
-        normal = ({}, self._te_pipeline_quant_config())
         if self._replicated_broadcast_load():
-            return self._sharder.meta_te_kwargs_replicated(normal)
-        if not self._memory_efficient_fsdp_load():
-            return normal
-        return self._sharder.meta_te_kwargs(normal)
+            return self._loader.meta_te_kwargs_replicated()
+        if self._memory_efficient_fsdp_load():
+            meta_kwargs = self._loader.meta_te_kwargs()
+            if meta_kwargs is not None:
+                return meta_kwargs
+        return {}, self.fp8.aiter_te_pipeline_config()
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
@@ -463,7 +388,6 @@ class xFuserModel(abc.ABC):
             from diffusers.hooks import apply_group_offloading
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
             local_rank = get_world_group().local_rank
-            low_cpu_mem_usage = PACKAGES_CHECKER._on_rdna4()
             onload_device = torch.device(f"cuda:{local_rank}")
             block_level_names = set(self._get_compiled_pipe_components())
             for name, component in self.pipe.components.items():
@@ -475,7 +399,10 @@ class xFuserModel(abc.ABC):
                     offload_type=offload_type,
                     use_stream=True,
                     record_stream=True,
-                    low_cpu_mem_usage=low_cpu_mem_usage,
+                    # Pin each tensor as it is offloaded instead of pre-pinning the whole component:
+                    # host RAM stays flat where it is the binding constraint, at some of the
+                    # streaming win. Opt-in because it costs latency where host RAM is plentiful.
+                    low_cpu_mem_usage=self.config.group_offload_low_cpu_mem,
                     non_blocking=True,
                 )
                 if offload_type == "block_level":
@@ -494,6 +421,7 @@ class xFuserModel(abc.ABC):
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
+        config._validate_gemm_quantization_flags()
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int):
@@ -564,11 +492,8 @@ class xFuserModel(abc.ABC):
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
-        if config.use_int8_gemms:
-            if config.use_fp8_gemms or config.use_fp4_gemms:
-                raise ValueError("Cannot use int8 gemms with fp8 or fp4 gemms.")
-            if _is_hip():
-                raise ValueError("Int8 GEMMs on ROCm are not supported.")
+        if config.use_int8_gemms and _is_hip():
+            raise ValueError("Int8 GEMMs on ROCm are not supported.")
             
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
@@ -882,7 +807,8 @@ class xFuserModel(abc.ABC):
             )
         # FSDP path handles device placement and quantization (per-block for FSDP2).
         if self.config.fully_shard_degree > 1:
-            self._shard_model_with_fsdp()
+            from .loading.shard import shard_pipeline_components
+            shard_pipeline_components(self)
         else:
             offload_requested = (
                 self.config.enable_model_cpu_offload
@@ -893,11 +819,11 @@ class xFuserModel(abc.ABC):
             # (GPU->GPU) and fp8-quantized per component in place. Bounds VRAM to one bf16 component.
             # The AITER walk below then no-ops (components are already fp8).
             if self._replicated_broadcast_load():
-                self._sharder.broadcast_fill_replicated(offload_requested)
+                self._loader.broadcast_fill_replicated(offload_requested)
             # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
             # All other quant paths (FP4, torchao FP8) need weights on GPU first.
-            if self._aiter_fp8_active():
-                for module_name in self.settings.fp8_gemm_module_list:
+            if self.fp8.aiter_active:
+                for module_name in self.fp8.module_list():
                     replaced = quantize_linear_layers_to_fp8_blockscale(
                         rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}",
                         offload_to_cpu=offload_requested,
@@ -913,8 +839,14 @@ class xFuserModel(abc.ABC):
                     self._setup_nvfp4_gemms(local_rank=local_rank)
                 else:
                     self._setup_mxfp4_gemms(local_rank=local_rank)
-            if self.config.use_fp8_gemms and not _use_aiter_fp8_rdna4():
-                for module_name in self.settings.fp8_gemm_module_list:
+            # FP4 setup also owns its explicit hybrid FP8 path and any declared FP8-only modules.
+            # Running the generic walk afterwards would re-quantize inside the hybrid wrappers.
+            if (
+                self.config.use_fp8_gemms
+                and not self.config.use_fp4_gemms
+                and not _use_aiter_fp8_rdna4()
+            ):
+                for module_name in self.fp8.module_list():
                     log(f"Quantizing {module_name} to FP8 (torchao)...")
                     quantize_linear_layers_to_fp8(rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}")
             if self.config.use_int8_gemms:
@@ -934,100 +866,6 @@ class xFuserModel(abc.ABC):
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
 
-
-    def _shard_model_with_fsdp(self) -> None:
-        """ Shard the model with FSDP based on settings """
-        if self.config.use_fp8_gemms and _is_cuda():
-            from xfuser.core.utils.runner_utils import _TORCHAO_FLOAT8_FSDP2_PATCHES
-            assert _TORCHAO_FLOAT8_FSDP2_PATCHES, (
-                "FSDP2 + FP8 requires torchao Float8Tensor patches but they failed to apply at "
-                "import time. Check for torchao import errors in runner_utils."
-            )
-        local_rank = get_world_group().local_rank
-        fs_local_rank = get_fs_group().local_rank
-        device_group = get_fs_group().device_group
-        for component_name, component in self.pipe.components.items():
-            if component_name in self.settings.fsdp_strategy:
-                log(f"Sharding {component_name} with FSDP... "
-                    f"(host cur/anon/file: {host_mem_gb()} GB, "
-                    f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
-                strategy = self.settings.fsdp_strategy[component_name]
-                wrap_attrs = strategy.get("wrap_attrs", [])
-                dtype = strategy.get("dtype", None)
-                offload_policy = strategy.get("offload_policy", None)
-                # A meta component was built on-config to avoid a full bf16 copy per rank. Two meta
-                # paths: the transformer self-fills each block from disk on every rank (never full
-                # anywhere, quantized per block), while text encoders are filled by a rank0
-                # broadcast (no per-block quantize; the filled TE stays bf16/streamed-fp8 on rank0).
-                is_meta = any(p.is_meta for p in component.parameters())
-                is_transformer_selffill = is_meta and component_name.startswith("transformer")
-                load_block_fn = load_epilogue_fn = None
-                if is_transformer_selffill:
-                    quantize_fn = self._build_fsdp_quantize_fn(
-                        component_name, wrap_attrs, fs_local_rank
-                    )
-                    load_block_fn, load_epilogue_fn = self._sharder.build_transformer_disk_loaders(
-                        component, wrap_attrs, component_name, f"cuda:{fs_local_rank}"
-                    )
-                else:
-                    quantize_fn = (
-                        None if is_meta
-                        else self._build_fsdp_quantize_fn(component_name, wrap_attrs, fs_local_rank)
-                    )
-                fsdp_object = shard_component(
-                    component, wrap_attrs, device_group, fs_local_rank, dtype,
-                    quantize_fn=quantize_fn,
-                    reshard_after_forward=self.config.reshard_after_forward,
-                    memory_efficient_init=self.config.memory_efficient_sharding,
-                    offload_policy=offload_policy,
-                    # All ranks load from the same checkpoint so states are already
-                    # identical. No broadcast needed regardless of offload policy.
-                    sync_module_states=False,
-                    meta_init=is_meta and not is_transformer_selffill,
-                    load_block_fn=load_block_fn,
-                    load_epilogue_fn=load_epilogue_fn,
-                )
-                if is_meta and not is_transformer_selffill:
-                    self._sharder.broadcast_load(
-                        fsdp_object, component_name, offload_policy == "cpu"
-                    )
-                setattr(self.pipe, component_name, fsdp_object)
-                torch.cuda.empty_cache()
-                log(f"Sharded {component_name}. "
-                    f"(host cur/anon/file: {host_mem_gb()} GB, "
-                    f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
-            else:
-                log(f"Skipping FSDP wrapping for {component_name}...")
-                if hasattr(component, "to"):
-                    component.to(f"cuda:{local_rank}")
-                else:
-                    log(f"Component {component_name} has no .to() method, skipping device move.")
-                    pass
-
-        # diffusers' _execution_device short-circuits on the first nn.Module component
-        # that lacks _hf_hook, returning self.device (= first module's .device).
-        # With CPUOffloadPolicy, text_encoder.device = cpu, breaking latent generation.
-        # Fix: give every nn.Module component a minimal _hf_hook so _execution_device
-        # continues past them, with cpu-offloaded components advertising cuda.
-        cpu_offloaded = {
-            name for name, s in self.settings.fsdp_strategy.items()
-            if s.get("offload_policy") == "cpu"
-        }
-        if cpu_offloaded:
-            cuda_device = f"cuda:{local_rank}"
-
-            class _ExecDeviceHook:
-                def __init__(self, execution_device):
-                    self.execution_device = execution_device
-
-            for name, component in self.pipe.components.items():
-                if not isinstance(component, torch.nn.Module):
-                    continue
-                if not hasattr(component, "_hf_hook"):
-                    component._hf_hook = _ExecDeviceHook(
-                        cuda_device if name in cpu_offloaded else None
-                    )
-
     def _log_fp8_overrides(self, prefixes, suffixes) -> None:
         """Log the FP8 precision-override patterns (prefix and suffix) consistently."""
         if prefixes:
@@ -1041,76 +879,6 @@ class xFuserModel(abc.ABC):
                 f"{suffixes} (suffix match)"
             )
 
-    def _build_fsdp_quantize_fn(
-        self, component_name: str, wrap_attrs: list, local_rank: int
-    ):
-        """
-        Return a per-block quantize callable (block, block_idx) -> None for this
-        component, or None if no quantization is configured for it.
-
-        fp8_precision_overrides entries like "5." apply to block index 5. We strip
-        the block-index prefix before passing to the quantize functions so they see
-        the same local FQN paths they would in the non-FSDP path.
-
-        Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed
-        through unchanged on every block; only prefix patterns are stripped.
-        """
-        if not (self.config.use_fp4_gemms or self.config.use_fp8_gemms or self.config.use_int8_gemms):
-            return None
-
-        device = f"cuda:{local_rank}"
-        fp4_list = set(self.settings.fp4_gemm_module_list or [])
-        fp8_list = set(self.settings.fp8_gemm_module_list or [])
-        fp8_overrides = self.settings.fp8_precision_overrides or ()
-        fp8_suffix_overrides = self.settings.fp8_precision_override_suffixes
-        int8_list = set(self.settings.int8_gemm_module_list or [])
-
-        paths = [f"{component_name}.{a}" for a in wrap_attrs]
-
-        use_fp4_here = self.config.use_fp4_gemms and any(p in fp4_list for p in paths)
-        # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
-        use_fp8_here = (
-            self.config.use_fp8_gemms and any(p in fp8_list for p in paths)
-        ) or (
-            self.config.use_fp4_gemms and any(p in fp8_list and p not in fp4_list for p in paths)
-        )
-        use_int8_here = self.config.use_int8_gemms and any(p in int8_list for p in paths)
-
-        if not use_fp4_here and not use_fp8_here and not use_int8_here:
-            return None
-
-        def quantize_fn(block, block_idx: int) -> None:
-            block_prefix = f"{block_idx}."
-            # Strip the block-index prefix so the quantize functions see local FQN paths.
-            local_fp8 = tuple(
-                o[len(block_prefix):] for o in fp8_overrides if o.startswith(block_prefix)
-            ) or None
-            if use_fp4_here:
-                if _is_cuda():
-                    quantize_linear_layers_to_nvfp4(
-                        block,
-                        fp8_layers=local_fp8,
-                        fp8_suffix_layers=fp8_suffix_overrides,
-                        device=device,
-                    )
-                else:
-                    quantize_linear_layers_to_fp4(
-                        block,
-                        fp8_layers=local_fp8,
-                        fp8_suffix_layers=fp8_suffix_overrides,
-                        use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
-                        device=device,
-                    )
-            elif use_fp8_here:
-                if _use_aiter_fp8_rdna4():
-                    quantize_linear_layers_to_fp8_blockscale(block, device=device)
-                else:
-                    quantize_linear_layers_to_fp8(block, device=device)
-            else:
-                # use_int8_here
-                quantize_linear_layers_to_int8(block, device=device, min_layer_size=512)
-
-        return quantize_fn
 
     def _setup_mxfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:
@@ -1130,7 +898,7 @@ class xFuserModel(abc.ABC):
         # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
         # where the low-noise transformer should use FP8 quantization.
         # This transformer generates fine details and requires higher precision to maintain quality.
-        for module_name in self.settings.fp8_gemm_module_list:
+        for module_name in self.fp8.module_list():
             if module_name in self.settings.fp4_gemm_module_list:
                 continue
             log(f"Quantizing linear layers in {module_name} to FP8...")
@@ -1147,7 +915,7 @@ class xFuserModel(abc.ABC):
                 fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
                 device=f"cuda:{local_rank}",
             )
-        for module_name in self.settings.fp8_gemm_module_list:
+        for module_name in self.fp8.module_list():
             if module_name in self.settings.fp4_gemm_module_list:
                 continue
             log(f"Quantizing linear layers in {module_name} to FP8...")

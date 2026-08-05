@@ -24,8 +24,16 @@ Layout difference between the two framework paths:
   * transformers (TE): the loader requires the target ``weight`` attr to pre-exist and the
     checkpoint ``weight`` key to be an expected param, so fp8 is stored under ``weight`` (+
     ``weight_scale``); forward falls back to ``weight`` when ``weight_fp8`` is absent.
+
+Importing this module must stay safe on any supported dependency set: it is reachable from the
+runner package, which every model imports. The transformers text-encoder half needs
+``transformers.core_model_loading`` (transformers>=5), well above the floor setup.py declares, so
+that import is deferred to first use. Registration likewise waits for construction: each config
+registers its own quantizer when built, so a run that never quantizes leaves both frameworks'
+global auto-mappings untouched.
 """
 
+import functools
 from enum import Enum
 from typing import Any, Optional
 
@@ -119,6 +127,7 @@ class AiterFp8BlockScaleConfig(DiffusersQuantizationConfigMixin):
     """
 
     def __init__(self, target_modules: Optional[list[str]] = None, **kwargs):
+        register_diffusers_fp8_quantizer()
         self.quant_method = AITER_FP8_BLOCKSCALE_QUANT_METHOD
         self.target_modules = list(target_modules or [])
 
@@ -185,10 +194,7 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
         # Offload: move only the produced fp8 tensors to host. The meta `bias` is streamed
         # to target_device separately by the normal loader (not a quantized param).
         if target_device is not None and torch.device(target_device).type != "cuda":
-            module.weight_fp8 = nn.Parameter(
-                module.weight_fp8.data.to(target_device), requires_grad=False
-            )
-            module.weight_scale = module.weight_scale.to(target_device)
+            module.move_fp8_weights_to(target_device)
 
     def _process_model_after_weight_loading(self, model, **kwargs):
         # Streaming quant leaves transient staging cached by the allocator (bf16 stage +
@@ -215,7 +221,6 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
 # transformers path (text encoders)
 # --------------------------------------------------------------------------------------
 
-from transformers.core_model_loading import ConversionOps
 from transformers.quantizers.base import HfQuantizer
 from transformers.quantizers.quantizers_utils import (
     get_module_from_name as _transformers_get_module_from_name,
@@ -235,34 +240,71 @@ class AiterFp8BlockScaleTEConfig(TransformersQuantizationConfigMixin):
     """
 
     def __init__(self, target_modules: Optional[list[str]] = None, **kwargs):
+        register_transformers_fp8_quantizer()
         self.quant_method = AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD
         self.target_modules = list(target_modules or [])
 
 
-class xFuserFp8BlockScaleQuantizeOp(ConversionOps):
-    """Block-quantizes a streamed bf16 weight to plain FP8 block-scale, emitting the fp8
-    weight and its scale so the loader assigns both and frees the bf16 tensor."""
+def _has_transformers_conversion_ops() -> bool:
+    """Whether the installed transformers exposes the streaming conversion-op API we build on.
 
-    def __init__(self, hf_quantizer):
-        self.hf_quantizer = hf_quantizer
+    ``transformers.core_model_loading`` arrived in transformers 5.0 as part of the parameter-at-a-
+    time loader; setup.py's floor is far below that. Feature detection rather than a version
+    comparison, so a backport or a rename in either direction is handled by the same check.
+    """
+    import importlib.util
+    return importlib.util.find_spec("transformers.core_model_loading") is not None
 
-    @torch.no_grad()
-    def convert(self, input_dict: dict, **kwargs) -> dict:
-        # AITER fp8 cast needs a GPU (gated on RDNA4 ROCm, so cuda is present); quantize there,
-        # then move the fp8 result back to the tensor's intended device to respect placement.
-        compute_device = f"cuda:{torch.cuda.current_device()}"
-        result: dict = {}
-        for key, value in input_dict.items():
-            tensor = value[0] if isinstance(value, list) else value
-            base = key[: -len(".weight")] if key.endswith(".weight") else key
-            orig_device = tensor.device
-            w_q, w_scale = quantize_weight_to_fp8_blockscale_plain(tensor, device=compute_device)
-            if orig_device.type != "cuda":
-                w_q = w_q.to(orig_device)
-                w_scale = w_scale.to(orig_device)
-            result[f"{base}.weight"] = nn.Parameter(w_q, requires_grad=False)
-            result[f"{base}.weight_scale"] = w_scale
-        return result
+
+_TE_QUANT_NEEDS_TRANSFORMERS_5 = (
+    "FP8 text-encoder quantize-on-load needs the transformers streaming loader "
+    "(transformers.core_model_loading, added in transformers 5.0), which the installed "
+    "transformers does not provide. Upgrade transformers, or run without text-encoder FP8."
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _quantize_op_cls() -> type:
+    """Build the streaming quantize op class on first use.
+
+    Its base, ``transformers.core_model_loading.ConversionOps``, only exists in transformers>=5,
+    above the floor setup.py declares. Deferring the import keeps this module importable on 4.x
+    (every runner reaches it through the runner package) and confines the requirement to the one
+    call path that needs it, which is already gated on the AITER FP8 text-encoder config.
+    """
+    if not _has_transformers_conversion_ops():
+        raise RuntimeError(_TE_QUANT_NEEDS_TRANSFORMERS_5)
+    from transformers.core_model_loading import ConversionOps
+
+    class xFuserFp8BlockScaleQuantizeOp(ConversionOps):
+        """Block-quantizes a streamed bf16 weight to plain FP8 block-scale, emitting the fp8
+        weight and its scale so the loader assigns both and frees the bf16 tensor."""
+
+        def __init__(self, hf_quantizer):
+            self.hf_quantizer = hf_quantizer
+
+        @torch.no_grad()
+        def convert(self, input_dict: dict, **kwargs) -> dict:
+            # AITER fp8 cast needs a GPU (gated on RDNA4 ROCm, so cuda is present); quantize
+            # there, then move the fp8 result back to the tensor's intended device to respect
+            # placement.
+            compute_device = f"cuda:{torch.cuda.current_device()}"
+            result: dict = {}
+            for key, value in input_dict.items():
+                tensor = value[0] if isinstance(value, list) else value
+                base = key[: -len(".weight")] if key.endswith(".weight") else key
+                orig_device = tensor.device
+                w_q, w_scale = quantize_weight_to_fp8_blockscale_plain(
+                    tensor, device=compute_device
+                )
+                if orig_device.type != "cuda":
+                    w_q = w_q.to(orig_device)
+                    w_scale = w_scale.to(orig_device)
+                result[f"{base}.weight"] = nn.Parameter(w_q, requires_grad=False)
+                result[f"{base}.weight_scale"] = w_scale
+            return result
+
+    return xFuserFp8BlockScaleQuantizeOp
 
 
 class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
@@ -282,6 +324,10 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
             raise RuntimeError(
                 "AiterFp8BlockScaleTEQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201)."
             )
+        # from_pretrained calls this before touching weights, so an unsupported transformers
+        # fails here with an actionable message instead of an ImportError mid-load.
+        if not _has_transformers_conversion_ops():
+            raise RuntimeError(_TE_QUANT_NEEDS_TRANSFORMERS_5)
 
     def _process_model_before_weight_loading(self, model, **kwargs):
         for target in self.target_modules:
@@ -296,7 +342,7 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
         return isinstance(module, xFuserFP8BlockScaleLinear)
 
     def get_quantize_ops(self):
-        return xFuserFp8BlockScaleQuantizeOp(self)
+        return _quantize_op_cls()(self)
 
     def _process_model_after_weight_loading(self, model, **kwargs):
         # The loader stores fp8 under `weight`; normalize each quantized linear to fp8 in
@@ -321,9 +367,22 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
         return True
 
 
-def register_aiter_fp8_quantizers() -> None:
-    """Register both quantizers into their respective auto-mappings so
-    ``from_pretrained(quantization_config=...)`` routes to us. Idempotent."""
+# Registration mutates the host framework's process-global auto-mappings, so it is not done at
+# import time: it runs from the call sites that build one of our quantization configs, which are
+# already gated on AITER FP8 being active. A run that never quantizes leaves both frameworks
+# untouched. lru_cache makes repeated calls free rather than merely idempotent.
+#
+# Registering when a config is constructed covers every route only because both quantizers are
+# is_serializable=False: we never write a checkpoint carrying our quant_method, so nothing asks the
+# framework to resolve that method from a config dict on disk (which happens before any config of
+# ours is built, and would find nothing registered). Making these serializable means registering
+# earlier, from whatever load path can encounter such a checkpoint.
+
+
+@functools.lru_cache(maxsize=1)
+def register_diffusers_fp8_quantizer() -> None:
+    """Route diffusers' ``from_pretrained(quantization_config=AiterFp8BlockScaleConfig(...))``
+    (the DiT) to our streaming quantizer."""
     from diffusers.quantizers.auto import (
         AUTO_QUANTIZER_MAPPING as DIFFUSERS_QUANTIZER_MAPPING,
         AUTO_QUANTIZATION_CONFIG_MAPPING as DIFFUSERS_CONFIG_MAPPING,
@@ -331,12 +390,14 @@ def register_aiter_fp8_quantizers() -> None:
     DIFFUSERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = AiterFp8BlockScaleQuantizer
     DIFFUSERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = AiterFp8BlockScaleConfig
 
+
+@functools.lru_cache(maxsize=1)
+def register_transformers_fp8_quantizer() -> None:
+    """Route transformers' ``from_pretrained(quantization_config=AiterFp8BlockScaleTEConfig(...))``
+    (text encoders) to our streaming quantizer."""
     from transformers.quantizers.auto import (
         AUTO_QUANTIZER_MAPPING as TRANSFORMERS_QUANTIZER_MAPPING,
         AUTO_QUANTIZATION_CONFIG_MAPPING as TRANSFORMERS_CONFIG_MAPPING,
     )
     TRANSFORMERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = AiterFp8BlockScaleTEQuantizer
     TRANSFORMERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = AiterFp8BlockScaleTEConfig
-
-
-register_aiter_fp8_quantizers()

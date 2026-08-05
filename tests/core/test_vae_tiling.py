@@ -407,17 +407,19 @@ class TestTileBatching(unittest.TestCase):
         area = 128 * 128
         self.assertEqual(vae_tiling.tile_batch_budget(area, area), area)
 
-    def test_a_narrower_window_lowers_the_area_a_call_carries_and_raises_the_tiles(self):
-        # Both of the things --vae_tile_size is asked for have to keep improving as it shrinks:
-        # less area per call than the VAE's own window, and more tiles sharing each round of
-        # collectives. Quartering the window's area does both by two.
-        default_area = 128 * 128
-        for latent, tiles, carried in ((64, 2, 8192), (32, 4, 4096), (16, 8, 2048), (8, 16, 1024)):
-            with self.subTest(latent_window=latent):
-                budget = vae_tiling.tile_batch_budget(default_area, latent * latent)
+    def test_halving_the_window_halves_the_area_a_call_carries(self):
+        # What --vae_tile_size promises, in the units it is set in: it is an edge, so halving the
+        # number halves the memory a decoder call needs. The tiles sharing each round of
+        # collectives double at the same time, which is the other half of the bargain.
+        default_edge = 128
+        default_area = default_edge**2
+        for edge, tiles, carried in ((64, 2, 8192), (32, 4, 4096), (16, 8, 2048), (8, 16, 1024)):
+            with self.subTest(latent_window=edge):
+                budget = vae_tiling.tile_batch_budget(default_area, edge * edge)
                 self.assertEqual(budget, carried)
-                self.assertEqual(budget // (latent * latent), tiles)
-                self.assertLess(budget, default_area)
+                self.assertEqual(budget // (edge * edge), tiles)
+                # Linear in the edge: an eighth of the window is an eighth of the area per call.
+                self.assertEqual(budget * default_edge, default_area * edge)
 
     def test_a_vae_with_no_square_window_is_not_batched(self):
         self.assertIsNone(vae_tiling.tile_batch_budget(None, 1024))

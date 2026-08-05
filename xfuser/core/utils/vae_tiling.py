@@ -208,17 +208,18 @@ def tile_latent_area(vae) -> Optional[int]:
 def tile_batch_budget(default_area: Optional[int], tile_area: Optional[int]) -> Optional[int]:
     """The latent area one decoder call should carry, given the VAE's window and the narrowed one
 
-    Two costs pull against each other. Activation memory follows the area a call carries, so a
-    narrow window only saves memory if the batch leaves that area below the VAE's own. A round of
-    collectives costs the same whatever the call carries, so a narrow window only stays fast if
-    the batch is large enough to spread that cost over many tiles. Holding the area at the VAE's
-    own window would be fastest and would hand back every byte --vae_tile_size was asked to save;
-    batching a fixed number of tiles would save the most and give a small window back its
-    per-tile collective tax.
+    Halve --vae_tile_size and this halves: the budget is the geometric mean of the two areas,
+    which is the product of their two edges, so it is linear in the edge the caller asked for.
+    Equivalently, a batched decode at window W costs what an unbatched decode at the geometric
+    mean of W and the VAE's own window costs. At the VAE's own window the two are equal, the
+    budget is one tile, and a run that asked for nothing decodes exactly as it always did.
 
-    The geometric mean of the two areas moves both ways at once: halving the window's area halves
-    the area a call carries and doubles the tiles it carries. At the VAE's own window the two
-    areas are equal and this is one tile, so a run that asked for nothing decodes as it always did.
+    Two costs pull against each other, which is why the budget is neither of the obvious ones.
+    Activation memory follows the area a call carries, so holding that area at the VAE's own
+    window - the fastest choice - would hand back every byte a narrower window was set to save.
+    A round of collectives costs the same whatever the call carries, so batching a fixed number
+    of tiles - the thriftiest choice - would give a narrow window back the per-tile collective
+    tax that makes it slow. Scaling with the edge moves both ways at once.
     """
     if not default_area or not tile_area:
         return None

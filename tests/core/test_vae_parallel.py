@@ -262,6 +262,80 @@ class TestBothHalvesShardTogether(unittest.TestCase):
                 self.assertIsNot(vae.encoder, encoder)
 
 
+class _ConvLosingAdapter(_StubAdapter):
+    """A stand-in that keeps none of the convolutions it replaced, as the real adapters do
+
+    The count a recounting VAE makes is over the convolutions still answering to its own class,
+    and after sharding there are none: that is the whole of what has to be reproduced here.
+    """
+
+    def __init__(self, half, vae_group=None, **kwargs):
+        super().__init__(half, vae_group=vae_group, **kwargs)
+        self.wrapped = nn.Identity()
+
+
+class TestCausalCacheLength(unittest.TestCase):
+    """A causal VAE's feature cache has to keep its length once its convolutions are replaced
+
+    Qwen-Image sizes that cache by counting its causal convolutions on every call, so sharding
+    them away leaves an empty list and the first convolution to want its entry indexes off the
+    end. The failure is an IndexError from inside diffusers on the first decode, well after the
+    point where anything says which VAE stopped being decodable.
+    """
+
+    def _parallelize(self, vae, half="decoder"):
+        with mock.patch.object(vae_parallel, "_adapter", return_value=_ConvLosingAdapter):
+            if half == "decoder":
+                vae_parallel.parallelize_decoder(vae, vae_group=None)
+            else:
+                vae_parallel.parallelize_encoder(vae, vae_group=None)
+
+    def test_a_recounting_vae_still_caches_one_entry_per_convolution(self):
+        vae = diffusers.AutoencoderKLQwenImage(**CONFIGS["AutoencoderKLQwenImage"])
+        vae.clear_cache()
+        expected = vae._conv_num
+        self.assertGreater(expected, 0)
+
+        self._parallelize(vae)
+        vae.clear_cache()
+
+        self.assertEqual(vae._conv_num, expected)
+        self.assertEqual(len(vae._feat_map), expected)
+
+    def test_the_second_half_is_counted_before_the_first_is_replaced(self):
+        # Both halves are counted on the first call, because by the time the encoder is sharded
+        # the decoder has been, and a count taken then would already be short.
+        vae = diffusers.AutoencoderKLQwenImage(**CONFIGS["AutoencoderKLQwenImage"])
+        vae.clear_cache()
+        expected = vae._enc_conv_num
+        self.assertGreater(expected, 0)
+
+        self._parallelize(vae, "decoder")
+        self._parallelize(vae, "encoder")
+        vae.clear_cache()
+
+        self.assertEqual(vae._enc_conv_num, expected)
+        self.assertEqual(len(vae._enc_feat_map), expected)
+
+    def test_a_vae_that_counts_once_when_built_is_left_as_it_is(self):
+        # Wan caches its counts at construction, so nothing here has to hold them; this is that
+        # the holding does not disturb the ones that never needed it.
+        vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
+        vae.clear_cache()
+        expected = (vae._conv_num, vae._enc_conv_num)
+
+        self._parallelize(vae)
+        vae.clear_cache()
+
+        self.assertEqual((vae._conv_num, vae._enc_conv_num), expected)
+
+    def test_a_vae_with_no_cache_at_all_is_wrapped_anyway(self):
+        vae = diffusers.AutoencoderKL(**CONFIGS["AutoencoderKL"])
+        self.assertFalse(hasattr(vae, "clear_cache"))
+        self._parallelize(vae)
+        self.assertIsInstance(vae.decoder, _ConvLosingAdapter)
+
+
 class AiterGroupNorm(nn.Module):
     """Stands in for AITER's replacement: a norm of its own, not a subclass of torch's"""
 

@@ -244,6 +244,38 @@ def _adapter(module: str, name: str, vae) -> type:
         ) from e
 
 
+def _keep_causal_cache_length(vae) -> None:
+    """Hold a recounting feature cache at the length the unsharded VAE would have given it
+
+    A causal VAE threads a list of cached frames through a call, one entry per causal
+    convolution, and Qwen-Image sizes that list by counting those convolutions afresh every
+    time, asking isinstance against its own class. Sharding replaces every one of them with an
+    adapter, so the count comes to zero, the list is empty, and the first convolution to reach
+    for its entry indexes off the end of it. Wan counts once when it is built and never notices.
+
+    Counting before the replacement and holding the answer is what the VAE would have done for
+    itself had it cached the count, and has to happen before either half is replaced, which is
+    why both entry points call it first and only the first call does anything.
+    """
+    if getattr(vae, "_distvae_cache_length_kept", False) or not hasattr(vae, "clear_cache"):
+        return
+    recount = vae.clear_cache
+    recount()
+    counts = {name: value for name, value in vars(vae).items() if name.endswith("conv_num")}
+    if not counts:
+        return
+
+    def clear_cache():
+        recount()
+        for name, count in counts.items():
+            setattr(vae, name, count)
+            # _conv_num goes with _feat_map, _enc_conv_num with _enc_feat_map.
+            setattr(vae, f"{name[: -len('conv_num')]}feat_map", [None] * count)
+
+    vae.clear_cache = clear_cache
+    vae._distvae_cache_length_kept = True
+
+
 def parallelize_decoder(vae, vae_group) -> str:
     """Replace this VAE's decoder with a sharded one, returning the adapter that did it"""
     name = decoder_adapter_name(vae)
@@ -253,6 +285,7 @@ def parallelize_decoder(vae, vae_group) -> str:
             f"adapter for its decoder blocks. Use --vae_tile_size to lower VAE decode memory "
             f"instead."
         )
+    _keep_causal_cache_length(vae)
     decoder = _adapter(DECODER_MODULE, name, vae)(vae.decoder, vae_group=vae_group)
     patch_size = _patch_size(vae)
     # The adapter crops its output by the ratio it upsamples, and its patchify assumes no patching
@@ -271,6 +304,7 @@ def parallelize_encoder(vae, vae_group) -> str:
             f"Parallel VAE encoding is not available for this VAE ({type(vae).__name__}): "
             f"DistVAE has no adapter for its encoder blocks."
         )
+    _keep_causal_cache_length(vae)
     adapter = _adapter(ENCODER_MODULE, name, vae)
     vae.encoder = adapter(
         vae.encoder, vae_group=vae_group, vae_scale_factor=encoder_scale_factor(vae)

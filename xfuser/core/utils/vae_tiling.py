@@ -5,6 +5,7 @@ they relate, and which releases have them. Nothing reads xDiT config or touches 
 the policy around these numbers lives with the runner instead.
 """
 
+import math
 from typing import Callable, Optional, Tuple
 
 import diffusers
@@ -194,14 +195,34 @@ def smallest_tile_window(
     return None
 
 
-def default_tile_area(vae) -> Optional[int]:
-    """The latent area of the VAE's own tile, None where the VAE has no square latent window"""
-    # Read before a narrower window is applied: this is the area the VAE was built to decode in
-    # one call, which is what makes it the right budget for a batch of tiles.
+def tile_latent_area(vae) -> Optional[int]:
+    """The latent area of the VAE's current tile, None where it has no square latent window"""
+    # Read either side of a narrowing to get both areas the batch budget is derived from: before,
+    # it is the area the VAE was built to decode in one call; after, the area the caller asked for.
     size = getattr(vae, "tile_latent_min_size", None)
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
         return None
     return size * size
+
+
+def tile_batch_budget(default_area: Optional[int], tile_area: Optional[int]) -> Optional[int]:
+    """The latent area one decoder call should carry, given the VAE's window and the narrowed one
+
+    Two costs pull against each other. Activation memory follows the area a call carries, so a
+    narrow window only saves memory if the batch leaves that area below the VAE's own. A round of
+    collectives costs the same whatever the call carries, so a narrow window only stays fast if
+    the batch is large enough to spread that cost over many tiles. Holding the area at the VAE's
+    own window would be fastest and would hand back every byte --vae_tile_size was asked to save;
+    batching a fixed number of tiles would save the most and give a small window back its
+    per-tile collective tax.
+
+    The geometric mean of the two areas moves both ways at once: halving the window's area halves
+    the area a call carries and doubles the tiles it carries. At the VAE's own window the two
+    areas are equal and this is one tile, so a run that asked for nothing decodes as it always did.
+    """
+    if not default_area or not tile_area:
+        return None
+    return max(tile_area, math.isqrt(default_area * tile_area))
 
 
 def tiles_by_overlap_factor(vae) -> bool:
@@ -230,8 +251,9 @@ def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
     much slower than the VAE's own. Tiles are independent and, away from the right and bottom
     edges, identically shaped, so they can be stacked on the batch dimension and share all of it.
 
-    `budget_elems` caps the latent area one call may carry. At 0, or wherever the budget only
-    fits one tile, this decodes a tile at a time and does exactly what upstream does.
+    `budget_elems` caps the latent area one call may carry; `tile_batch_budget` is what the runner
+    sizes it with. At 0, or wherever the budget only fits one tile, this decodes a tile at a time
+    and does exactly what upstream does.
     """
     if not tiles_by_overlap_factor(vae):
         return None
@@ -270,9 +292,8 @@ def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
         for shape, indices in by_shape.items():
             # Budget by area rather than by tile count. Activation memory follows the area being
             # decoded, so one count would batch the widest tiles into an allocation the VAE was
-            # never sized for while barely helping the narrow ones. Area instead holds peak memory
-            # near where the VAE's own window already put it, and lets the batch grow as the
-            # window shrinks, which is where the fixed cost hurts.
+            # never sized for while barely helping the narrow ones. Edge tiles are clipped by the
+            # latent bounds and so group larger than the full-shape ones for the same area.
             area = max(1, shape[0] * shape[-2] * shape[-1])
             per_call = max(1, budget_elems // area) if budget_elems > 0 else 1
             for start in range(0, len(indices), per_call):

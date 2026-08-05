@@ -397,9 +397,36 @@ class TestTileBatching(unittest.TestCase):
         self.assertIsNone(vae_tiling.batched_tiled_decode(stride_vae(), 4096))
         self.assertIsNotNone(vae_tiling.batched_tiled_decode(overlap_factor_vae(), 4096))
 
-    def test_the_budget_is_the_area_of_the_vaes_own_tile(self):
-        self.assertEqual(vae_tiling.default_tile_area(overlap_factor_vae()), 32 * 32)
-        self.assertIsNone(vae_tiling.default_tile_area(stride_vae()))
+    def test_the_tile_area_is_read_off_the_square_latent_window(self):
+        self.assertEqual(vae_tiling.tile_latent_area(overlap_factor_vae()), 32 * 32)
+        self.assertIsNone(vae_tiling.tile_latent_area(stride_vae()))
+
+    def test_an_unnarrowed_window_budgets_exactly_one_tile(self):
+        # The area a run gets when it asked for no window of its own, where batching has to be a
+        # no-op: the two areas are the same, so their geometric mean is that area, so one tile.
+        area = 128 * 128
+        self.assertEqual(vae_tiling.tile_batch_budget(area, area), area)
+
+    def test_a_narrower_window_lowers_the_area_a_call_carries_and_raises_the_tiles(self):
+        # Both of the things --vae_tile_size is asked for have to keep improving as it shrinks:
+        # less area per call than the VAE's own window, and more tiles sharing each round of
+        # collectives. Quartering the window's area does both by two.
+        default_area = 128 * 128
+        for latent, tiles, carried in ((64, 2, 8192), (32, 4, 4096), (16, 8, 2048), (8, 16, 1024)):
+            with self.subTest(latent_window=latent):
+                budget = vae_tiling.tile_batch_budget(default_area, latent * latent)
+                self.assertEqual(budget, carried)
+                self.assertEqual(budget // (latent * latent), tiles)
+                self.assertLess(budget, default_area)
+
+    def test_a_vae_with_no_square_window_is_not_batched(self):
+        self.assertIsNone(vae_tiling.tile_batch_budget(None, 1024))
+        self.assertIsNone(vae_tiling.tile_batch_budget(16384, None))
+
+    def test_the_budget_never_falls_below_a_single_tile(self):
+        # A tile larger than the VAE's own window cannot happen through --vae_tile_size, which
+        # refuses one, but a budget under a tile would decode nothing at all rather than one tile.
+        self.assertEqual(vae_tiling.tile_batch_budget(64, 4096), 4096)
 
     def _tiled_vae(self, name, batch=1):
         """A small VAE of class `name` at a narrowed window, and latents several tiles across"""
@@ -535,6 +562,35 @@ class TestTileBatching(unittest.TestCase):
                 # clipped by the latent bounds are smaller, and group larger for the same area.
                 self.assertEqual(max(counted.rows), tiles_per_call)
         vae.decoder = decoder
+
+    def test_the_narrowed_window_sets_the_batch_and_leaves_the_image_alone(self):
+        import torch
+        import diffusers
+
+        # The two ends of the rule joined up: the budget the runner computes from the VAE's own
+        # window and the narrowed one, spent by the decode that window produced.
+        kwargs, _, _ = TestEveryVAEARunnerLoads.VAES["AutoencoderKL"]
+        untouched = diffusers.AutoencoderKL(**kwargs).eval()
+        untouched.enable_tiling()
+        default_area = vae_tiling.tile_latent_area(untouched)
+
+        vae, latents = self._tiled_vae("AutoencoderKL")
+        narrowed_area = vae_tiling.tile_latent_area(vae)
+        budget = vae_tiling.tile_batch_budget(default_area, narrowed_area)
+        # Stated as the property rather than the numbers this particular stub lands on: the
+        # budget is the geometric mean, so it sits between the two areas it was taken from.
+        self.assertEqual(budget**2, default_area * narrowed_area)
+        self.assertLess(narrowed_area, budget)
+        self.assertLess(budget, default_area)
+
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            counted = self._counted(vae)
+            got = vae_tiling.batched_tiled_decode(vae, budget)(latents).sample
+        self.assertEqual(max(counted.rows), budget // narrowed_area)
+        for shape in counted.shapes:
+            self.assertLess(shape[0] * shape[-2] * shape[-1], default_area)
+        torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
 
     def test_a_tiled_decode_that_fits_in_one_tile_still_works(self):
         import torch

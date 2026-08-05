@@ -345,11 +345,13 @@ class xFuserModel(abc.ABC):
                 vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                 log(f"Enabling VAE tiling on {type(vae).__name__}...")
                 vae.enable_tiling()
-                # Read the VAE's own window before the next line can narrow it: that window is
-                # the batch budget, so tiling smaller costs the same per call as not tiling.
-                budget_elems = vae_tiling.default_tile_area(vae)
+                # Read the VAE's own window before the next line can narrow it: the budget is
+                # derived from both areas, so both have to be read either side of the narrowing.
+                default_area = vae_tiling.tile_latent_area(vae)
                 tile_window = self._apply_vae_tile_size(vae)
-                self._install_vae_tile_batching(vae, budget_elems)
+                self._install_vae_tile_batching(
+                    vae, default_area, vae_tiling.tile_latent_area(vae)
+                )
             # Installed either way, so a decode that OOMs with tiling off still says so.
             self._install_vae_decode_guard(vae, tile_window)
 
@@ -1149,13 +1151,15 @@ class xFuserModel(abc.ABC):
              f", and no size up to this VAE's own {window}px window gives them one each.")
         )
 
-    def _install_vae_tile_batching(self, vae, budget_elems: Optional[int]) -> None:
-        """Decode a tiled VAE's same-shaped tiles together, within one tile's worth of area"""
+    def _install_vae_tile_batching(
+        self, vae, default_area: Optional[int], tile_area: Optional[int]
+    ) -> None:
+        """Decode a tiled VAE's same-shaped tiles together, within a budget the window sets"""
         # Every decoder call costs the same whatever the tile, and under --use_parallel_vae that
         # cost is a round of collectives rather than arithmetic, so a narrow window pays it over
-        # and over. Batching spends the VAE's own tile area per call instead of one tile, which
-        # leaves the default window decoding exactly as it did and stops the smaller windows
-        # paying for their size twice.
+        # and over. Batching spreads one round over many tiles without taking back all of the
+        # memory the narrow window was asked for; tile_batch_budget is where that balance is set.
+        budget_elems = vae_tiling.tile_batch_budget(default_area, tile_area)
         if budget_elems is None:
             return
         batched = vae_tiling.batched_tiled_decode(vae, budget_elems)
@@ -1163,7 +1167,7 @@ class xFuserModel(abc.ABC):
             return
         vae.tiled_decode = batched
         log(f"VAE tiled decode will batch tiles up to {budget_elems} latent elements per call "
-            f"on {type(vae).__name__}.")
+            f"on {type(vae).__name__} (its own window carries {default_area}).")
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
         # Point a failed VAE decode at the knob that fixes it. Success path untouched.

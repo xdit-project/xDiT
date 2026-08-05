@@ -815,6 +815,148 @@ def _fp8_hadamard_rotate(x: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
     return torch.matmul(x.unflatten(-1, (d // block_r, block_r)), R).flatten(-2)
 
 
+def _quantize_aiter_fp8_inputs(query, key, value):
+    quant_dtype = aiter.dtypes.fp8
+    dtype_max = torch.finfo(quant_dtype).max
+    if AITER_FP8_HAS_DESCALE:
+        if AITER_FP8_STATIC_SCALE_WITH_DESCALE is None:
+            scale = None
+        else:
+            scale = torch.tensor(
+                AITER_FP8_STATIC_SCALE_WITH_DESCALE,
+                dtype=torch.float32,
+                device=query.device,
+            )
+    else:
+        scale = torch.tensor(
+            AITER_FP8_STATIC_SCALE_NO_DESCALE,
+            dtype=torch.float32,
+            device=query.device,
+        )
+
+    quant_q, q_descale = aiter.per_tensor_quant(
+        query,
+        scale=scale,
+        quant_dtype=quant_dtype,
+        dtypeMax=dtype_max,
+    )
+    quant_k, k_descale = aiter.per_tensor_quant(
+        key,
+        scale=scale,
+        quant_dtype=quant_dtype,
+        dtypeMax=dtype_max,
+    )
+    quant_v, v_descale = aiter.per_tensor_quant(
+        value,
+        scale=scale,
+        quant_dtype=quant_dtype,
+        dtypeMax=dtype_max,
+    )
+    return (
+        quant_q.to(quant_dtype),
+        quant_k.to(quant_dtype),
+        quant_v.to(quant_dtype),
+        q_descale,
+        k_descale,
+        v_descale,
+    )
+
+
+@torch.library.custom_op("xfuser::aiter_fp8_attention", mutates_args=())
+def _aiter_fp8_attention_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    softmax_scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    quant_q, quant_k, quant_v, q_descale, k_descale, v_descale = (
+        _quantize_aiter_fp8_inputs(query, key, value)
+    )
+    kwargs = {}
+    if AITER_FP8_HAS_DESCALE:
+        kwargs = {
+            "q_descale": q_descale,
+            "k_descale": k_descale,
+            "v_descale": v_descale,
+        }
+    return aiter.flash_attn_fp8_pertensor_func(
+        quant_q,
+        quant_k,
+        quant_v,
+        causal=is_causal,
+        softmax_scale=softmax_scale,
+        **kwargs,
+    )
+
+
+@_aiter_fp8_attention_kernel.register_fake
+def _aiter_fp8_attention_kernel_fake(
+    query,
+    key,
+    value,
+    softmax_scale,
+    is_causal,
+):
+    return torch.empty_like(query)
+
+
+@torch.library.custom_op("xfuser::aiter_fp8_varlen_attention", mutates_args=())
+def _aiter_fp8_varlen_attention_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    quant_q, quant_k, quant_v, q_descale, k_descale, v_descale = (
+        _quantize_aiter_fp8_inputs(query, key, value)
+    )
+    kwargs = {}
+    if AITER_FP8_HAS_DESCALE:
+        kwargs = {
+            "q_descale": q_descale,
+            "k_descale": k_descale,
+            "v_descale": v_descale,
+        }
+    varlen_func = getattr(aiter, "flash_attn_varlen_fp8_pertensor_func", None)
+    if varlen_func is None:
+        raise RuntimeError(
+            "AITER varlen FP8 flash attention is not available, please update AITER."
+        )
+    return varlen_func(
+        quant_q,
+        quant_k,
+        quant_v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=is_causal,
+        **kwargs,
+    )
+
+
+@_aiter_fp8_varlen_attention_kernel.register_fake
+def _aiter_fp8_varlen_attention_kernel_fake(
+    query,
+    key,
+    value,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    is_causal,
+):
+    return torch.empty_like(query)
+
+
 @register_attention_function(AttentionBackendType.AITER_FP8)
 def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
@@ -830,47 +972,42 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     query = _fp8_hadamard_rotate(query, R).contiguous()
     key = _fp8_hadamard_rotate(key, R).contiguous()
 
-    softmax_lse = None
-    quant_dtype = aiter.dtypes.fp8
-    dtypeMax = torch.finfo(quant_dtype).max
-    if AITER_FP8_HAS_DESCALE:
-        # If AITER_FP8_STATIC_SCALE_WITH_DESCALE is not set, use dynamic scaling.
-        # Set the environment variable XFUSER_AITER_FP8_STATIC_SCALE_WITH_DESCALE
-        # to a float value (i.e 2.5) to use static scaling.
-        if AITER_FP8_STATIC_SCALE_WITH_DESCALE is None:
-            scale = None
-        else:
-            scale=torch.tensor(AITER_FP8_STATIC_SCALE_WITH_DESCALE, dtype=torch.float32, device=query.device)
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+    if packed is not None:
+        (
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_k,
+            batch_size,
+            sequence_length,
+            num_heads,
+            head_dim,
+        ) = packed
+        output = _aiter_fp8_varlen_attention_kernel(
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            sequence_length,
+            max_seqlen_k,
+            head_dim**-0.5,
+            is_causal,
+        ).reshape(batch_size, sequence_length, num_heads, head_dim)
     else:
-        # Use static scale of 1.0, since descale is not available.
-        scale = torch.tensor(AITER_FP8_STATIC_SCALE_NO_DESCALE, dtype=torch.float32, device=query.device)
-    quant_q, q_descale = aiter.per_tensor_quant(query,
-                                                scale=scale,
-                                                quant_dtype=quant_dtype,
-                                                dtypeMax=dtypeMax)
-    quant_k, k_descale = aiter.per_tensor_quant(key,
-                                                scale=scale,
-                                                quant_dtype=quant_dtype,
-                                                dtypeMax=dtypeMax)
-    quant_v, v_descale = aiter.per_tensor_quant(value,
-                                                scale=scale,
-                                                quant_dtype=quant_dtype,
-                                                dtypeMax=dtypeMax)
+        output = _aiter_fp8_attention_kernel(
+            query,
+            key,
+            value,
+            query.shape[-1] ** -0.5,
+            is_causal,
+        )
 
-    kwargs = {}
-    if AITER_FP8_HAS_DESCALE:
-        kwargs = {
-                "q_descale": q_descale,
-                "k_descale": k_descale,
-                "v_descale": v_descale,
-            }
-    output = aiter.flash_attn_fp8_pertensor_func(
-        quant_q, quant_k, quant_v,
-        causal=is_causal,
-        **kwargs
-    )
     output = torch.permute(output, [0, 2, 1, 3])
-    return output, softmax_lse
+    return output, None
 
 @register_attention_function(AttentionBackendType.AITER)
 def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):

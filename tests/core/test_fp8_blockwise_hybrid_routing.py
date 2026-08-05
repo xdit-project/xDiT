@@ -23,11 +23,31 @@ class RecordingAdapter:
     def __init__(self):
         self.calls = []
 
-    def convert_block(self, block, *, device):
+    def convert_block(self, block, *, device, filter_fn=None):
         self.calls.append((block, device))
 
 
-def _hybrid_model(*, adapter, overrides=(), suffixes=None):
+class RecordingFormatAdapter:
+    def __init__(self):
+        self.calls = []
+
+    def convert_block(self, block, **kwargs):
+        self.calls.append((block, kwargs))
+
+
+class FilterRecordingFp8Adapter:
+    backend = QuantizationBackend.TORCHAO
+
+    def __init__(self):
+        self.calls = []
+
+    def convert_block(self, block, *, device, filter_fn):
+        self.calls.append((block, device, filter_fn))
+
+
+def _hybrid_model(
+    *, adapter, format_adapter=None, overrides=(), suffixes=None
+):
     return SimpleNamespace(
         config=SimpleNamespace(
             use_fp4_gemms=True,
@@ -48,23 +68,13 @@ def _hybrid_model(*, adapter, overrides=(), suffixes=None):
             ]
         ),
         blockwise_fp8_backend=adapter,
+        format_backend=format_adapter or RecordingFormatAdapter(),
     )
 
 
 def test_wan_fp8_only_second_transformer_uses_blockwise_backend(monkeypatch):
     adapter = RecordingAdapter()
     model = _hybrid_model(adapter=adapter)
-    fp4_calls = []
-    monkeypatch.setattr(
-        shard,
-        "quantize_linear_layers_to_fp4",
-        lambda *args, **kwargs: fp4_calls.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        shard,
-        "quantize_linear_layers_to_nvfp4",
-        lambda *args, **kwargs: fp4_calls.append((args, kwargs)),
-    )
 
     quantize = shard.build_block_quantize_fn(
         model, "transformer_2", ["blocks"], local_rank=3
@@ -73,22 +83,17 @@ def test_wan_fp8_only_second_transformer_uses_blockwise_backend(monkeypatch):
     quantize(block, 0)
 
     assert adapter.calls == [(block, "cuda:3")]
-    assert fp4_calls == []
+    assert model.format_backend.calls == []
 
 
 def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
     adapter = RecordingAdapter()
+    format_adapter = RecordingFormatAdapter()
     model = _hybrid_model(
         adapter=adapter,
+        format_adapter=format_adapter,
         overrides=("3.attn.proj", "8.mlp"),
         suffixes=(".net.0.proj",),
-    )
-    calls = []
-    monkeypatch.setattr(shard, "_is_cuda", lambda: True)
-    monkeypatch.setattr(
-        shard,
-        "quantize_linear_layers_to_nvfp4",
-        lambda block, **kwargs: calls.append((block, kwargs)),
     )
 
     quantize = shard.build_block_quantize_fn(
@@ -97,12 +102,16 @@ def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
     block = object()
     quantize(block, 3)
 
-    assert calls == [
+    call_block, call_kwargs = format_adapter.calls[0]
+    filter_fn = call_kwargs.pop("filter_fn")
+    assert filter_fn(object(), "anything")
+    assert [(call_block, call_kwargs)] == [
         (
             block,
             {
                 "fp8_layers": ("attn.proj",),
                 "fp8_suffix_layers": (".net.0.proj",),
+                "hybrid": False,
                 "device": "cuda:1",
             },
         )
@@ -110,10 +119,367 @@ def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
     assert adapter.calls == []
 
 
+@pytest.mark.parametrize(
+    ("format_name", "config_flags", "target_setting"),
+    [
+        (
+            "fp4",
+            {"use_fp4_gemms": True, "use_int8_gemms": False},
+            "fp4_gemm_module_list",
+        ),
+        (
+            "int8",
+            {"use_fp4_gemms": False, "use_int8_gemms": True},
+            "int8_gemm_module_list",
+        ),
+    ],
+)
+def test_blockwise_fp4_and_int8_route_through_format_adapter(
+    format_name,
+    config_flags,
+    target_setting,
+):
+    adapter = RecordingFormatAdapter()
+    settings = SimpleNamespace(
+        fp4_gemm_module_list=[],
+        int8_gemm_module_list=[],
+        fp8_precision_overrides=("2.attn",),
+        fp8_precision_override_suffixes=(".proj",),
+    )
+    setattr(settings, target_setting, ["transformer.blocks"])
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            use_fp8_gemms=False,
+            use_hybrid_gemm_schedule=False,
+            **config_flags,
+        ),
+        settings=settings,
+        fp8=SimpleNamespace(module_list=lambda: []),
+        blockwise_fp8_backend=None,
+        format_backend=adapter,
+    )
+
+    quantize = shard.build_block_quantize_fn(
+        model, "transformer", ["blocks"], local_rank=2
+    )
+    block = object()
+    quantize(block, 2)
+
+    expected = {"device": "cuda:2"}
+    if format_name == "fp4":
+        expected.update(
+            fp8_layers=("attn",),
+            fp8_suffix_layers=(".proj",),
+            hybrid=False,
+        )
+    call_block, call_kwargs = adapter.calls[0]
+    filter_fn = call_kwargs.pop("filter_fn")
+    assert filter_fn(object(), "anything")
+    assert [(call_block, call_kwargs)] == [(block, expected)]
+
+
+def test_blockwise_exact_component_target_routes_wrapped_blocks():
+    adapter = RecordingFormatAdapter()
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            use_fp4_gemms=False,
+            use_fp8_gemms=False,
+            use_int8_gemms=True,
+            use_hybrid_gemm_schedule=False,
+        ),
+        settings=SimpleNamespace(
+            fp4_gemm_module_list=[],
+            int8_gemm_module_list=["transformer"],
+            fp8_precision_overrides=None,
+            fp8_precision_override_suffixes=None,
+        ),
+        fp8=SimpleNamespace(module_list=lambda: []),
+        blockwise_fp8_backend=None,
+        format_backend=adapter,
+    )
+
+    quantize = shard.build_block_quantize_fn(
+        model, "transformer", ["blocks"], local_rank=1
+    )
+    block = object()
+    quantize(block, 0)
+
+    call_block, call_kwargs = adapter.calls[0]
+    filter_fn = call_kwargs.pop("filter_fn")
+    assert filter_fn(object(), "anything")
+    assert [(call_block, call_kwargs)] == [
+        (block, {"device": "cuda:1"})
+    ]
+
+
+def _targeted_block_model(*, format_adapter, fp4=(), int8=(), fp8=()):
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            use_fp4_gemms=bool(fp4),
+            use_fp8_gemms=bool(fp8),
+            use_int8_gemms=bool(int8),
+            use_hybrid_gemm_schedule=False,
+        ),
+        settings=SimpleNamespace(
+            fp4_gemm_module_list=list(fp4),
+            int8_gemm_module_list=list(int8),
+            fp8_precision_overrides=None,
+            fp8_precision_override_suffixes=None,
+        ),
+        fp8=SimpleNamespace(module_list=lambda: list(fp8)),
+        blockwise_fp8_backend=(
+            format_adapter if fp8 else None
+        ),
+        format_backend=(
+            None if fp8 else format_adapter
+        ),
+    )
+
+
+@pytest.mark.parametrize("format_name", ["fp4", "int8", "fp8"])
+def test_descendant_target_quantizes_only_block_zero_subpath(format_name):
+    adapter = (
+        FilterRecordingFp8Adapter()
+        if format_name == "fp8"
+        else RecordingFormatAdapter()
+    )
+    targets = {format_name: ("transformer.blocks.0.attn",)}
+    model = _targeted_block_model(
+        format_adapter=adapter,
+        fp4=targets.get("fp4", ()),
+        int8=targets.get("int8", ()),
+        fp8=targets.get("fp8", ()),
+    )
+    quantize = shard.build_block_quantize_fn(
+        model, "transformer", ["blocks"], local_rank=0
+    )
+    blocks = [object(), object()]
+
+    quantize(blocks[0], 0)
+    quantize(blocks[1], 1)
+
+    assert len(adapter.calls) == 1
+    call = adapter.calls[0]
+    filter_fn = call[2] if format_name == "fp8" else call[1]["filter_fn"]
+    assert filter_fn(object(), "attn.proj")
+    assert not filter_fn(object(), "mlp.proj")
+
+
+def test_descendant_target_filter_is_suffix_collision_safe():
+    adapter = RecordingFormatAdapter()
+    model = _targeted_block_model(
+        format_adapter=adapter,
+        int8=("transformer.blocks.0.attn",),
+    )
+    quantize = shard.build_block_quantize_fn(
+        model, "transformer", ["blocks"], local_rank=0
+    )
+
+    quantize(object(), 0)
+
+    filter_fn = adapter.calls[0][1]["filter_fn"]
+    assert filter_fn(object(), "attn.proj")
+    assert not filter_fn(object(), "attention.proj")
+
+
+def test_multiple_wrap_attrs_resolve_flattened_index_to_actual_fqn():
+    adapter = RecordingFormatAdapter()
+    model = _targeted_block_model(
+        format_adapter=adapter,
+        int8=("transformer.refiner.0.attn",),
+    )
+    component = SimpleNamespace(
+        blocks=[object(), object()],
+        refiner=[object(), object()],
+    )
+    quantize = shard.build_block_quantize_fn(
+        model,
+        "transformer",
+        ["blocks", "refiner"],
+        local_rank=0,
+        component=component,
+    )
+    flattened = component.blocks + component.refiner
+
+    for index, block in enumerate(flattened):
+        quantize(block, index)
+
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][0] is component.refiner[0]
+    filter_fn = adapter.calls[0][1]["filter_fn"]
+    assert filter_fn(object(), "attn.proj")
+    assert not filter_fn(object(), "attention.proj")
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["transformer", "transformer.blocks"],
+)
+def test_whole_component_or_list_target_quantizes_every_wrapped_block(target):
+    adapter = RecordingFormatAdapter()
+    model = _targeted_block_model(
+        format_adapter=adapter,
+        int8=(target,),
+    )
+    quantize = shard.build_block_quantize_fn(
+        model, "transformer", ["blocks"], local_rank=0
+    )
+    blocks = [object(), object()]
+
+    for index, block in enumerate(blocks):
+        quantize(block, index)
+
+    assert [call[0] for call in adapter.calls] == blocks
+    assert all(
+        call[1]["filter_fn"](object(), "any.linear")
+        for call in adapter.calls
+    )
+
+
+def test_exact_component_target_maps_to_transformer_root():
+    adapter = object()
+    model = SimpleNamespace(
+        load_contract=SimpleNamespace(
+            requested_format=QuantizationFormat.INT8
+        ),
+        settings=SimpleNamespace(
+            fp4_gemm_module_list=[],
+            int8_gemm_module_list=["transformer", "transformer_2.blocks"],
+        ),
+        format_backend=adapter,
+        fp8=SimpleNamespace(targets_for=lambda component: ()),
+    )
+    model._format_targets_for = lambda component: (
+        xFuserModel._format_targets_for(model, component)
+    )
+
+    assert xFuserModel._format_targets_for(model, "transformer") == ("",)
+    assert xFuserModel._format_targets_for(model, "transformer_2") == (
+        "blocks",
+    )
+    assert xFuserModel._transformer_quantization_adapter(
+        model, "transformer"
+    ) == (adapter, ("",))
+    assert xFuserModel._transformer_quantization_adapter(
+        model, "transformer_2"
+    ) == (adapter, ("blocks",))
+
+
+@pytest.mark.parametrize(
+    ("target", "wrapped", "expected"),
+    [
+        ("transformer", "blocks", True),
+        ("transformer.blocks.attn", "blocks", True),
+        ("transformer.blocks", "blocks", True),
+        ("transformer.block", "blocks", False),
+        ("transformer.blocks_extra", "blocks", False),
+    ],
+)
+def test_format_fsdp_preflight_uses_boundary_safe_path_containment(
+    target,
+    wrapped,
+    expected,
+):
+    model = SimpleNamespace(
+        config=SimpleNamespace(fully_shard_degree=2),
+        load_contract=SimpleNamespace(
+            requested_format=QuantizationFormat.INT8
+        ),
+        settings=SimpleNamespace(
+            fsdp_strategy={"transformer": {"wrap_attrs": [wrapped]}},
+            fp4_gemm_module_list=[],
+            int8_gemm_module_list=[target],
+        ),
+    )
+
+    assert (
+        xFuserModel._places_format_backend_under_fsdp2(model) is expected
+    )
+
+
 def test_pure_fp4_wan_targets_require_backend_preflight():
     model = _hybrid_model(adapter=RecordingAdapter())
 
     assert xFuserModel._requires_blockwise_fp8_backend(model)
+
+
+def test_narrow_fp4_target_preserves_broad_fp8_remainder():
+    fp8_adapter = FilterRecordingFp8Adapter()
+    fp4_adapter = RecordingFormatAdapter()
+    model = _hybrid_model(
+        adapter=fp8_adapter,
+        format_adapter=fp4_adapter,
+    )
+    model.settings.fp4_gemm_module_list = [
+        "transformer.blocks.0.attn"
+    ]
+    model.fp8 = SimpleNamespace(
+        module_list=lambda: ["transformer.blocks"]
+    )
+
+    quantize = shard.build_block_quantize_fn(
+        model, "transformer", ["blocks"], local_rank=2
+    )
+    block = object()
+    quantize(block, 0)
+
+    fp4_filter = fp4_adapter.calls[0][1]["filter_fn"]
+    fp8_filter = fp8_adapter.calls[0][2]
+    assert fp4_filter(object(), "attn.proj")
+    assert not fp4_filter(object(), "mlp.proj")
+    assert not fp4_filter(object(), "attention.proj")
+    assert not fp8_filter(object(), "attn.proj")
+    assert fp8_filter(object(), "mlp.proj")
+    assert fp8_filter(object(), "attention.proj")
+
+
+def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
+    model = _hybrid_model(adapter=RecordingAdapter())
+    model.settings.fp4_gemm_module_list = [
+        "transformer.blocks.0.attn"
+    ]
+    model.fp8 = SimpleNamespace(
+        module_list=lambda: ["transformer.blocks"]
+    )
+
+    assert xFuserModel._requires_blockwise_fp8_backend(model)
+
+
+def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
+    monkeypatch,
+):
+    fp8_calls = []
+    broad_module = object()
+    model = SimpleNamespace(
+        settings=SimpleNamespace(
+            fp4_gemm_module_list=[
+                "transformer.blocks.0.attn"
+            ]
+        ),
+        fp8=SimpleNamespace(
+            module_list=lambda: ["transformer.blocks"]
+        ),
+        pipe=SimpleNamespace(
+            transformer=SimpleNamespace(blocks=broad_module)
+        ),
+        blockwise_fp8_backend=SimpleNamespace(
+            convert_module=lambda module, **kwargs: fp8_calls.append(
+                (module, kwargs)
+            )
+        ),
+        _quantization_streaming_targets=set(),
+    )
+    monkeypatch.setattr(base_model, "log", lambda *_args: None)
+
+    xFuserModel._setup_fp8_only_gemm_modules(model, local_rank=1)
+
+    module, kwargs = fp8_calls[0]
+    filter_fn = kwargs.pop("filter_fn")
+    assert module is broad_module
+    assert kwargs == {"device": "cuda:1"}
+    assert not filter_fn(object(), "0.attn.proj")
+    assert filter_fn(object(), "0.mlp.proj")
+    assert filter_fn(object(), "1.attn.proj")
 
 
 def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
@@ -182,6 +548,35 @@ def test_fsdp_sharded_fp8_only_torchao_target_needs_patches():
 
     assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
         model, adapter
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("transformer", True),
+        ("transformer.blocks.attn", True),
+        ("transformer.blocks", True),
+        ("transformer.block", False),
+        ("transformer.blocks_extra", False),
+    ],
+)
+def test_fp8_fsdp_preflight_uses_boundary_safe_path_containment(
+    target,
+    expected,
+):
+    model = _fsdp_patch_model(
+        strategy={"transformer": {"wrap_attrs": ["blocks"]}},
+        fp4_targets=(),
+        fp8_targets=(target,),
+    )
+    adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
+
+    assert (
+        xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
+            model, adapter
+        )
+        is expected
     )
 
 
@@ -349,7 +744,6 @@ def test_component_outside_fsdp_strategy_does_not_block_startup(monkeypatch):
 def test_fsdp_boundary_has_no_global_fp8_patch_assertion(monkeypatch):
     from xfuser.core.utils import runner_utils
 
-    monkeypatch.setattr(shard, "_is_cuda", lambda: True)
     monkeypatch.setattr(runner_utils, "_TORCHAO_FLOAT8_FSDP2_PATCHES", [])
     monkeypatch.setattr(
         shard,
@@ -453,18 +847,13 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
     fp8_module = object()
     fp4_calls = []
     fp8_calls = []
+    format_adapter = SimpleNamespace(
+        convert_module=lambda module, **kwargs: fp4_calls.append(
+            (module, kwargs)
+        )
+    )
     adapter.convert_module = lambda module, **kwargs: fp8_calls.append(
         (module, kwargs)
-    )
-    monkeypatch.setattr(
-        base_model,
-        "quantize_linear_layers_to_fp4",
-        lambda module, **kwargs: fp4_calls.append((module, kwargs)),
-    )
-    monkeypatch.setattr(
-        base_model,
-        "quantize_linear_layers_to_nvfp4",
-        lambda module, **kwargs: fp4_calls.append((module, kwargs)),
     )
     monkeypatch.setattr(base_model, "log", lambda *args, **kwargs: None)
     model = SimpleNamespace(
@@ -485,6 +874,9 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
             transformer_2=SimpleNamespace(blocks=fp8_module),
         ),
         blockwise_fp8_backend=adapter,
+        format_backend=format_adapter,
+        _quantization_streaming_targets=set(),
+        _quantization_descriptor_components={"transformer"},
     )
     model._setup_fp8_only_gemm_modules = (
         lambda rank: xFuserModel._setup_fp8_only_gemm_modules(model, rank)
@@ -495,3 +887,63 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
     assert adapter.backend is expected_fp8_backend, platform
     assert [call[0] for call in fp4_calls] == [fp4_module]
     assert fp8_calls == [(fp8_module, {"device": "cuda:2"})]
+
+
+def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
+    monkeypatch,
+):
+    streamed_module = object()
+    post_load_module = object()
+    fp8_calls = []
+    adapter = SimpleNamespace(
+        converts_before_device_move=False,
+        backend=QuantizationBackend.TORCHAO,
+        storage_semantics="tensorwise_dynamic",
+        convert_module=lambda module, **kwargs: fp8_calls.append(
+            (module, kwargs)
+        ),
+    )
+    pipe = SimpleNamespace(
+        transformer=SimpleNamespace(
+            blocks=streamed_module,
+            encoder=post_load_module,
+        )
+    )
+    pipe.to = lambda _device: pipe
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            fully_shard_degree=1,
+            enable_model_cpu_offload=False,
+            enable_sequential_cpu_offload=False,
+            enable_group_cpu_offload=False,
+            use_fp4_gemms=False,
+            use_fp8_gemms=True,
+            use_int8_gemms=False,
+            use_hybrid_attn_schedule=False,
+            use_hybrid_gemm_schedule=False,
+            use_vae_channels_last_format=False,
+        ),
+        settings=SimpleNamespace(int8_gemm_module_list=None),
+        fp8=SimpleNamespace(
+            module_list=lambda: [
+                "transformer.blocks",
+                "transformer.encoder",
+            ]
+        ),
+        fp8_backend=adapter,
+        pipe=pipe,
+        _fp8_streaming_targets={"transformer.blocks"},
+        _fp8_descriptor_components={"transformer"},
+        _replicated_broadcast_load=lambda: False,
+    )
+    monkeypatch.setattr(
+        base_model,
+        "get_world_group",
+        lambda: SimpleNamespace(local_rank=0),
+    )
+
+    xFuserModel._post_load_and_state_initialization(model, {})
+
+    assert fp8_calls == [
+        (post_load_module, {"device": "cuda:0"})
+    ]

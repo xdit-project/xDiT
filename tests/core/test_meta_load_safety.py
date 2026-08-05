@@ -592,7 +592,11 @@ def test_replicated_transformer_restores_nonpersistent_buffers_before_fill(
         lambda block, index: seen.append(block.runtime_cache.detach().clone()),
         lambda component: None,
     )
-    monkeypatch.setattr(runtime.shard, "build_block_quantize_fn", lambda *args: None)
+    monkeypatch.setattr(
+        runtime.shard,
+        "build_block_quantize_fn",
+        lambda *args, **kwargs: None,
+    )
 
     loader._fill_transformer_replicated(
         component,
@@ -630,7 +634,9 @@ def test_replicated_quantize_failure_stops_all_ranks_before_next_block(
             raise ValueError("rank-local quantization failed")
 
     monkeypatch.setattr(
-        runtime.shard, "build_block_quantize_fn", lambda *args: quantize
+        runtime.shard,
+        "build_block_quantize_fn",
+        lambda *args, **kwargs: quantize,
     )
 
     class Group:

@@ -542,14 +542,19 @@ class MemoryEfficientLoader:
         # _from_config defaults to fp32; align meta params to bf16 (dtype-only .to is legal on
         # meta) so their DTensor dtype matches the broadcast source.
         component = component.to(torch.bfloat16)
-        if (
-            fp8
-            and component_name
-            in getattr(self.model, "_fp8_streaming_components", ())
-        ):
-            self._swap_meta_te_to_fp8(
-                component, self.model.fp8.targets_for(component_name)
-            )
+        streamed_targets = getattr(
+            self.model, "_fp8_streaming_targets", ()
+        )
+        prefix = f"{component_name}."
+        local_streamed_targets = tuple(
+            ""
+            if target == component_name
+            else target[len(prefix):]
+            for target in streamed_targets
+            if target == component_name or target.startswith(prefix)
+        )
+        if fp8 and local_streamed_targets:
+            self._swap_meta_te_to_fp8(component, local_streamed_targets)
         return component
 
     def meta_te_kwargs(self):
@@ -710,7 +715,13 @@ class MemoryEfficientLoader:
             _restore_nonpersistent_buffers,
             _save_nonpersistent_buffers,
         )
-        quantize_fn = build_block_quantize_fn(self.model, name, wrap_attrs, world.local_rank)
+        quantize_fn = build_block_quantize_fn(
+            self.model,
+            name,
+            wrap_attrs,
+            world.local_rank,
+            component=component,
+        )
         wrapped = []
         for attr in wrap_attrs:
             wrapped.extend(rgetattr(component, attr))

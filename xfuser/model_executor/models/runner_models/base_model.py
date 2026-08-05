@@ -22,10 +22,6 @@ from xfuser.envs import (
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
-    quantize_linear_layers_to_int8,
-    quantize_linear_layers_to_fp8,
-    quantize_linear_layers_to_fp4,
-    quantize_linear_layers_to_nvfp4,
     convert_model_convs_to_channels_last,
     _use_aiter_fp8_rdna4,
     rgetattr,
@@ -51,6 +47,71 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     select_load_contract,
     select_runtime_quantization,
 )
+from xfuser.model_executor.models.runner_models.loading.format_backends import (
+    module_path_is_covered,
+    module_paths_overlap,
+)
+
+
+def _component_target_paths(component_name, targets):
+    return {
+        component_name if not target else f"{component_name}.{target}"
+        for target in targets
+    }
+
+
+def _record_streaming_targets(model, attribute, component_name, targets):
+    tracked = getattr(model, attribute, None)
+    if tracked is not None:
+        tracked.update(_component_target_paths(component_name, targets))
+
+
+def _blockwise_owned_targets(targets, wrap_attrs):
+    owned = []
+    for target in targets:
+        for wrap_attr in wrap_attrs:
+            if module_path_is_covered(target, wrap_attr):
+                owned.append(target)
+            elif module_path_is_covered(wrap_attr, target):
+                owned.append(wrap_attr)
+    minimal = []
+    for target in sorted(set(owned), key=lambda path: (path.count("."), path)):
+        if not any(
+            module_path_is_covered(target, owner)
+            for owner in minimal
+        ):
+            minimal.append(target)
+    return tuple(minimal)
+
+
+def _conversion_filter(module_path, excluded_paths):
+    overlapping = tuple(
+        path
+        for path in excluded_paths
+        if module_paths_overlap(module_path, path)
+    )
+    if any(
+        module_path_is_covered(module_path, path)
+        for path in overlapping
+    ):
+        return False, None
+    descendants = tuple(
+        path
+        for path in overlapping
+        if module_path_is_covered(path, module_path)
+    )
+    if not descendants:
+        return True, None
+
+    def filter_fn(_module, fqn):
+        full_path = module_path if not fqn else f"{module_path}.{fqn}"
+        return not any(
+            module_path_is_covered(full_path, path)
+            for path in descendants
+        )
+
+    return True, filter_fn
+
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -248,7 +309,9 @@ class xFuserModel(abc.ABC):
         self.pipe = None
         self.load_contract = None
         self._fp8_descriptor_components = set()
-        self._fp8_streaming_components = set()
+        self._fp8_streaming_targets = set()
+        self._quantization_descriptor_components = set()
+        self._quantization_streaming_targets = set()
 
     def _refresh_load_capability(self) -> None:
         """Re-derive FSDP support from instance-customized settings."""
@@ -324,6 +387,7 @@ class xFuserModel(abc.ABC):
         # Capability/backend mismatches fail here, before _load_model allocates
         # transformer weights.
         _ = self.fp8_backend
+        _ = self.format_backend
         if self._uses_blockwise_fp8_backend():
             _ = self.blockwise_fp8_backend
         self.engine_config, _ = self.config.create_config()
@@ -367,6 +431,36 @@ class xFuserModel(abc.ABC):
             self.load_contract,
             capabilities=probe_fp8_backend_capabilities(),
         )
+
+    @functools.cached_property
+    def format_backend(self):
+        """Primary FP4/INT8 implementation, validated before allocation."""
+
+        if (
+            self.load_contract is None
+            or self.load_contract.requested_format.value
+            not in {"fp4", "fp8_fp4", "int8"}
+        ):
+            return None
+        from .loading.format_backends import (
+            probe_format_backend_capabilities,
+            select_format_backend,
+            validate_format_fsdp_placement,
+        )
+
+        capabilities = probe_format_backend_capabilities()
+        adapter = select_format_backend(
+            self.load_contract,
+            capabilities=capabilities,
+            hybrid=self.config.use_hybrid_gemm_schedule,
+        )
+        validate_format_fsdp_placement(
+            self.load_contract,
+            adapter,
+            capabilities=capabilities,
+            required=self._places_format_backend_under_fsdp2(),
+        )
+        return adapter
 
     @functools.cached_property
     def blockwise_fp8_backend(self):
@@ -415,7 +509,14 @@ class xFuserModel(abc.ABC):
             return False
 
         fp4_targets = set(self.settings.fp4_gemm_module_list or ())
-        fp8_only_targets = set(self.fp8.module_list()) - fp4_targets
+        fp8_only_targets = {
+            target
+            for target in self.fp8.module_list()
+            if not any(
+                module_path_is_covered(target, fp4_target)
+                for fp4_target in fp4_targets
+            )
+        }
         if (
             (
                 assume_torchao_fp8
@@ -424,7 +525,11 @@ class xFuserModel(abc.ABC):
                     and fp8_adapter.backend.value == "torchao"
                 )
             )
-            and fp8_only_targets & fsdp_target_paths
+            and any(
+                module_paths_overlap(target, fsdp_path)
+                for target in fp8_only_targets
+                for fsdp_path in fsdp_target_paths
+            )
         ):
             return True
 
@@ -436,7 +541,11 @@ class xFuserModel(abc.ABC):
         return bool(
             self.config.use_fp4_gemms
             and fp4_can_emit_fp8
-            and fp4_targets & fsdp_target_paths
+            and any(
+                module_paths_overlap(target, fsdp_path)
+                for target in fp4_targets
+                for fsdp_path in fsdp_target_paths
+            )
         )
 
     def _requires_blockwise_fp8_backend(self) -> bool:
@@ -445,7 +554,66 @@ class xFuserModel(abc.ABC):
         if not self.config.use_fp4_gemms:
             return False
         fp4_targets = set(self.settings.fp4_gemm_module_list or ())
-        return bool(set(self.fp8.module_list()) - fp4_targets)
+        return any(
+            not any(
+                module_path_is_covered(target, fp4_target)
+                for fp4_target in fp4_targets
+            )
+            for target in self.fp8.module_list()
+        )
+
+    def _places_format_backend_under_fsdp2(self) -> bool:
+        if self.config.fully_shard_degree <= 1:
+            return False
+        fsdp_target_paths = {
+            f"{component_name}.{wrap_attr}"
+            for component_name, strategy in (
+                self.settings.fsdp_strategy or {}
+            ).items()
+            for wrap_attr in strategy.get("wrap_attrs", ())
+        }
+        if self.load_contract.requested_format.value in {"fp4", "fp8_fp4"}:
+            targets = set(self.settings.fp4_gemm_module_list or ())
+        elif self.load_contract.requested_format.value == "int8":
+            targets = set(self.settings.int8_gemm_module_list or ())
+        else:
+            return False
+        return any(
+            module_paths_overlap(target, fsdp_path)
+            for target in targets
+            for fsdp_path in fsdp_target_paths
+        )
+
+    def _format_targets_for(self, component_name: str) -> tuple[str, ...]:
+        if self.load_contract.requested_format.value in {"fp4", "fp8_fp4"}:
+            entries = self.settings.fp4_gemm_module_list or ()
+        elif self.load_contract.requested_format.value == "int8":
+            entries = self.settings.int8_gemm_module_list or ()
+        else:
+            return ()
+        prefix = f"{component_name}."
+        return tuple(
+            ""
+            if entry == component_name
+            else entry[len(prefix):]
+            for entry in entries
+            if entry == component_name or entry.startswith(prefix)
+        )
+
+    def _transformer_quantization_adapter(self, component_name: str):
+        """Return the adapter and relative targets owning one transformer."""
+
+        format_targets = self._format_targets_for(component_name)
+        if format_targets:
+            return self.format_backend, format_targets
+        fp8_targets = tuple(self.fp8.targets_for(component_name))
+        if not fp8_targets:
+            return None, ()
+        if self.load_contract.requested_format.value == "fp8":
+            return self.fp8_backend, fp8_targets
+        if self.load_contract.requested_format.value in {"fp4", "fp8_fp4"}:
+            return self.blockwise_fp8_backend, fp8_targets
+        return None, ()
 
     def _uses_blockwise_fp8_backend(self) -> bool:
         if self._requires_blockwise_fp8_backend():
@@ -516,6 +684,11 @@ class xFuserModel(abc.ABC):
                 ) from exc
             return wrapper_cls.from_config(config, **(init_kwargs or {}))
 
+    def _native_quantization_device_map(self):
+        """Place TorchAO quantize-on-load weights on this rank's accelerator."""
+
+        return {"": get_world_group().local_rank}
+
     def _build_transformer(
         self,
         wrapper_cls,
@@ -527,8 +700,8 @@ class xFuserModel(abc.ABC):
         """Load a transformer through the selected materialization backend.
 
         FSDP/replicated paths retain the xDiT meta-build and blockwise filler.
-        Ordinary AITER and TorchAO FP8 paths pass a native Diffusers
-        quantization config to ``from_pretrained``.
+        Ordinary backends pass a native Diffusers quantization config to
+        ``from_pretrained`` only when the format's exact semantics permit it.
 
         init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) forwarded on both paths.
         stream_quant: gates native quantize-on-load for ordinary loading. Meta
@@ -542,8 +715,15 @@ class xFuserModel(abc.ABC):
         elif request.subfolder is None:
             request = request.with_subfolder("transformer")
         component_name = request.subfolder
-        adapter = self.fp8_backend
-        targets = tuple(self.fp8.targets_for(component_name))
+        adapter_selector = getattr(
+            self, "_transformer_quantization_adapter", None
+        )
+        if adapter_selector is None:
+            adapter = self.fp8_backend
+            targets = tuple(self.fp8.targets_for(component_name))
+        else:
+            adapter, targets = adapter_selector(component_name)
+            targets = tuple(targets)
         strategy = self.settings.fsdp_strategy.get(component_name, {})
         wrap_attrs = tuple(strategy.get("wrap_attrs", ()))
         fsdp_meta = self._memory_efficient_fsdp_load()
@@ -552,56 +732,158 @@ class xFuserModel(abc.ABC):
         )
         if fsdp_meta or replicated_meta:
             if adapter is not None:
-                from .loading.fp8_backends import (
-                    plan_blockwise_transformer_fp8_load,
-                )
+                if adapter.format.value == "fp8":
+                    from .loading.fp8_backends import (
+                        plan_blockwise_transformer_fp8_load,
+                    )
 
-                descriptor = plan_blockwise_transformer_fp8_load(
-                    adapter,
-                    component_name=component_name,
-                    targets=targets,
-                    wrap_attrs=wrap_attrs,
-                )
+                    descriptor = plan_blockwise_transformer_fp8_load(
+                        adapter,
+                        component_name=component_name,
+                        targets=targets,
+                        wrap_attrs=wrap_attrs,
+                    )
+                else:
+                    from .loading.format_backends import (
+                        describe_blockwise_format_load,
+                    )
+
+                    descriptor = describe_blockwise_format_load(
+                        adapter,
+                        component_name=component_name,
+                        targets=targets,
+                        wrap_attrs=wrap_attrs,
+                    )
                 log(descriptor.log_message())
-                if hasattr(self, "_fp8_descriptor_components"):
-                    self._fp8_descriptor_components.add(component_name)
                 if (
-                    descriptor.materialization_mode == "streaming"
-                    and hasattr(self, "_fp8_streaming_components")
+                    adapter.format.value == "fp8"
+                    and hasattr(self, "_fp8_descriptor_components")
                 ):
-                    self._fp8_streaming_components.add(component_name)
+                    self._fp8_descriptor_components.add(component_name)
+                if hasattr(self, "_quantization_descriptor_components"):
+                    self._quantization_descriptor_components.add(
+                        component_name
+                    )
+                if descriptor.materialization_mode in {"streaming", "blockwise"}:
+                    owned_targets = _blockwise_owned_targets(
+                        targets, wrap_attrs
+                    )
+                    _record_streaming_targets(
+                        self,
+                        "_quantization_streaming_targets",
+                        component_name,
+                        owned_targets,
+                    )
+                    if (
+                        descriptor.materialization_mode == "blockwise"
+                        and getattr(self.config, "use_fp4_gemms", False)
+                    ):
+                        fp8_targets = tuple(
+                            self.fp8.targets_for(component_name)
+                        )
+                        owned_fp8_targets = _blockwise_owned_targets(
+                            fp8_targets, wrap_attrs
+                        )
+                        _record_streaming_targets(
+                            self,
+                            "_quantization_streaming_targets",
+                            component_name,
+                            owned_fp8_targets,
+                        )
+                        _record_streaming_targets(
+                            self,
+                            "_fp8_streaming_targets",
+                            component_name,
+                            owned_fp8_targets,
+                        )
+                if adapter.format.value == "fp8" and (
+                    descriptor.materialization_mode in {
+                        "streaming",
+                        "blockwise",
+                    }
+                ):
+                    _record_streaming_targets(
+                        self,
+                        "_fp8_streaming_targets",
+                        component_name,
+                        owned_targets,
+                    )
             return self._loader.build_meta_transformer(
                 wrapper_cls, request, init_kwargs
             )
         quantization_config = None
         if adapter is not None:
-            from .loading.fp8_backends import (
-                prepare_native_transformer_fp8_load,
-            )
+            if adapter.format.value == "fp8":
+                from .loading.fp8_backends import (
+                    prepare_native_transformer_fp8_load,
+                )
 
-            prepared = prepare_native_transformer_fp8_load(
-                adapter,
-                component_name=component_name,
-                targets=targets,
-                stream_quant=stream_quant,
-                model_factory=lambda: self._build_transformer_structure(
-                    wrapper_cls, request, init_kwargs
-                ),
-            )
+                prepared = prepare_native_transformer_fp8_load(
+                    adapter,
+                    component_name=component_name,
+                    targets=targets,
+                    stream_quant=stream_quant,
+                    model_factory=lambda: self._build_transformer_structure(
+                        wrapper_cls, request, init_kwargs
+                    ),
+                )
+            else:
+                from .loading.format_backends import (
+                    prepare_native_transformer_format_load,
+                )
+
+                prepared = prepare_native_transformer_format_load(
+                    adapter,
+                    component_name=component_name,
+                    targets=targets,
+                    stream_quant=stream_quant,
+                    precision_prefixes=(
+                        self.settings.fp8_precision_overrides or ()
+                    ),
+                    precision_suffixes=(
+                        self.settings.fp8_precision_override_suffixes or ()
+                    ),
+                    hybrid=self.config.use_hybrid_gemm_schedule,
+                    model_factory=lambda: self._build_transformer_structure(
+                        wrapper_cls, request, init_kwargs
+                    ),
+                )
             log(prepared.descriptor.log_message())
             quantization_config = prepared.quantization_config
-            if hasattr(self, "_fp8_descriptor_components"):
+            if (
+                adapter.format.value == "fp8"
+                and hasattr(self, "_fp8_descriptor_components")
+            ):
                 self._fp8_descriptor_components.add(component_name)
+            if hasattr(self, "_quantization_descriptor_components"):
+                self._quantization_descriptor_components.add(component_name)
             if (
                 quantization_config is not None
-                and hasattr(self, "_fp8_streaming_components")
             ):
-                self._fp8_streaming_components.add(component_name)
+                _record_streaming_targets(
+                    self,
+                    "_quantization_streaming_targets",
+                    component_name,
+                    targets,
+                )
+                if adapter.format.value == "fp8":
+                    _record_streaming_targets(
+                        self,
+                        "_fp8_streaming_targets",
+                        component_name,
+                        targets,
+                    )
+        load_kwargs = request.from_pretrained_kwargs()
+        device_map_factory = getattr(
+            self, "_native_quantization_device_map", None
+        )
+        if quantization_config is not None and device_map_factory is not None:
+            load_kwargs.setdefault("device_map", device_map_factory())
         return wrapper_cls.from_pretrained(
             request.model_name_or_path,
             torch_dtype=torch.bfloat16,
             quantization_config=quantization_config,
-            **request.from_pretrained_kwargs(),
+            **load_kwargs,
             **(init_kwargs or {}),
         )
 
@@ -660,7 +942,12 @@ class xFuserModel(abc.ABC):
                 log(prepared.descriptor.log_message())
                 self._fp8_descriptor_components.add(component_name)
                 if prepared.descriptor.materialization_mode == "streaming":
-                    self._fp8_streaming_components.add(component_name)
+                    _record_streaming_targets(
+                        self,
+                        "_fp8_streaming_targets",
+                        component_name,
+                        targets,
+                    )
                 if prepared.quantization_config is not None:
                     component_configs[component_name] = (
                         prepared.quantization_config
@@ -1148,13 +1435,20 @@ class xFuserModel(abc.ABC):
             adapter = self.fp8_backend
             if adapter is not None and adapter.converts_before_device_move:
                 for module_name in self.fp8.module_list():
-                    component_name = module_name.partition(".")[0]
-                    if component_name in self._fp8_streaming_components:
+                    convert, filter_fn = _conversion_filter(
+                        module_name,
+                        getattr(self, "_fp8_streaming_targets", ()),
+                    )
+                    if not convert:
                         continue
+                    convert_kwargs = {}
+                    if filter_fn is not None:
+                        convert_kwargs["filter_fn"] = filter_fn
                     replaced = adapter.convert_module(
                         rgetattr(self.pipe, module_name),
                         device=f"cuda:{local_rank}",
                         offload_to_cpu=offload_requested,
+                        **convert_kwargs,
                     )
                     if replaced:
                         log(
@@ -1179,7 +1473,11 @@ class xFuserModel(abc.ABC):
             ):
                 for module_name in self.fp8.module_list():
                     component_name = module_name.partition(".")[0]
-                    if component_name in self._fp8_streaming_components:
+                    convert, filter_fn = _conversion_filter(
+                        module_name,
+                        getattr(self, "_fp8_streaming_targets", ()),
+                    )
+                    if not convert:
                         continue
                     if (
                         component_name.startswith("transformer")
@@ -1194,16 +1492,48 @@ class xFuserModel(abc.ABC):
                             "not use the transformer construction seam"
                         )
                         self._fp8_descriptor_components.add(component_name)
+                    convert_kwargs = {}
+                    if filter_fn is not None:
+                        convert_kwargs["filter_fn"] = filter_fn
                     adapter.convert_module(
                         rgetattr(self.pipe, module_name),
                         device=f"cuda:{local_rank}",
+                        **convert_kwargs,
                     )
             if self.config.use_int8_gemms:
+                adapter = self.format_backend
                 for module_name in self.settings.int8_gemm_module_list:
-                    log(f"Quantizing {module_name} to W8A8 INT8 (torchao)...")
-                    quantize_linear_layers_to_int8(
-                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}",
-                        min_layer_size=512,
+                    component_name = module_name.partition(".")[0]
+                    convert, filter_fn = _conversion_filter(
+                        module_name,
+                        getattr(
+                            self, "_quantization_streaming_targets", ()
+                        ),
+                    )
+                    if not convert:
+                        continue
+                    if component_name not in self._quantization_descriptor_components:
+                        from .loading.format_backends import (
+                            prepare_native_transformer_format_load,
+                        )
+
+                        descriptor = prepare_native_transformer_format_load(
+                            adapter,
+                            component_name=component_name,
+                            targets=self._format_targets_for(component_name),
+                            stream_quant=False,
+                        ).descriptor
+                        log(descriptor.log_message())
+                        self._quantization_descriptor_components.add(
+                            component_name
+                        )
+                    convert_kwargs = {}
+                    if filter_fn is not None:
+                        convert_kwargs["filter_fn"] = filter_fn
+                    adapter.convert_module(
+                        rgetattr(self.pipe, module_name),
+                        device=f"cuda:{local_rank}",
+                        **convert_kwargs,
                     )
 
         if self.config.use_hybrid_attn_schedule:
@@ -1230,18 +1560,49 @@ class xFuserModel(abc.ABC):
 
 
     def _setup_mxfp4_gemms(self, local_rank):
+        adapter = self.format_backend
         for module_name in self.settings.fp4_gemm_module_list:
+            component_name = module_name.partition(".")[0]
+            convert, filter_fn = _conversion_filter(
+                module_name,
+                getattr(self, "_quantization_streaming_targets", ()),
+            )
+            if not convert:
+                continue
             # Certain models benefit from a hybrid quantization strategy: applying FP8 to
             # a number of transformer blocks while using FP4 for others. This mixed-precision
             # approach balances performance and output quality better than uniform quantization.
-            log(f"Quantizing linear layers in {module_name} to FP4...")
+            if component_name not in self._quantization_descriptor_components:
+                from .loading.format_backends import (
+                    prepare_native_transformer_format_load,
+                )
+
+                descriptor = prepare_native_transformer_format_load(
+                    adapter,
+                    component_name=component_name,
+                    targets=self._format_targets_for(component_name),
+                    stream_quant=True,
+                    precision_prefixes=(
+                        self.settings.fp8_precision_overrides or ()
+                    ),
+                    precision_suffixes=(
+                        self.settings.fp8_precision_override_suffixes or ()
+                    ),
+                    hybrid=self.config.use_hybrid_gemm_schedule,
+                ).descriptor
+                log(descriptor.log_message())
+                self._quantization_descriptor_components.add(component_name)
             module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp4(
+            convert_kwargs = {}
+            if filter_fn is not None:
+                convert_kwargs["filter_fn"] = filter_fn
+            adapter.convert_module(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
                 fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
-                use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
+                hybrid=self.config.use_hybrid_gemm_schedule,
                 device=f"cuda:{local_rank}",
+                **convert_kwargs,
             )
         self._setup_fp8_only_gemm_modules(local_rank)
 
@@ -1252,25 +1613,79 @@ class xFuserModel(abc.ABC):
         # This transformer generates fine details and requires higher precision to maintain quality.
         fp4_modules = set(self.settings.fp4_gemm_module_list or ())
         fp8_only_modules = [
-            name for name in self.fp8.module_list() if name not in fp4_modules
+            name
+            for name in self.fp8.module_list()
+            if not any(
+                module_path_is_covered(name, fp4_module)
+                for fp4_module in fp4_modules
+            )
         ]
         if not fp8_only_modules:
             return
         adapter = self.blockwise_fp8_backend
         for module_name in fp8_only_modules:
+            excluded_paths = fp4_modules | set(
+                getattr(self, "_quantization_streaming_targets", ())
+            ) | set(
+                getattr(self, "_fp8_streaming_targets", ())
+            )
+            convert, filter_fn = _conversion_filter(
+                module_name, excluded_paths
+            )
+            if not convert:
+                continue
             log(f"Quantizing linear layers in {module_name} to FP8...")
             module = rgetattr(self.pipe, module_name)
-            adapter.convert_module(module, device=f"cuda:{local_rank}")
+            convert_kwargs = {}
+            if filter_fn is not None:
+                convert_kwargs["filter_fn"] = filter_fn
+            adapter.convert_module(
+                module,
+                device=f"cuda:{local_rank}",
+                **convert_kwargs,
+            )
 
     def _setup_nvfp4_gemms(self, local_rank):
+        adapter = self.format_backend
         for module_name in self.settings.fp4_gemm_module_list:
-            log(f"Quantizing linear layers in {module_name} to NVFP4 (torchao)...")
+            component_name = module_name.partition(".")[0]
+            convert, filter_fn = _conversion_filter(
+                module_name,
+                getattr(self, "_quantization_streaming_targets", ()),
+            )
+            if not convert:
+                continue
+            if component_name not in self._quantization_descriptor_components:
+                from .loading.format_backends import (
+                    prepare_native_transformer_format_load,
+                )
+
+                descriptor = prepare_native_transformer_format_load(
+                    adapter,
+                    component_name=component_name,
+                    targets=self._format_targets_for(component_name),
+                    stream_quant=False,
+                    precision_prefixes=(
+                        self.settings.fp8_precision_overrides or ()
+                    ),
+                    precision_suffixes=(
+                        self.settings.fp8_precision_override_suffixes or ()
+                    ),
+                    hybrid=self.config.use_hybrid_gemm_schedule,
+                ).descriptor
+                log(descriptor.log_message())
+                self._quantization_descriptor_components.add(component_name)
             module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_nvfp4(
+            convert_kwargs = {}
+            if filter_fn is not None:
+                convert_kwargs["filter_fn"] = filter_fn
+            adapter.convert_module(
                 module,
                 fp8_layers=self.settings.fp8_precision_overrides,
                 fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
+                hybrid=self.config.use_hybrid_gemm_schedule,
                 device=f"cuda:{local_rank}",
+                **convert_kwargs,
             )
         self._setup_fp8_only_gemm_modules(local_rank)
 

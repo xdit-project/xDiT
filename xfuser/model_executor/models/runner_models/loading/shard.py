@@ -11,16 +11,14 @@ package: the sharded path below, and ``meta_load``'s replicated per-block fill.
 
 import torch
 
-from xfuser.envs import _is_cuda
 from xfuser.core.distributed import get_world_group, shard_component
 from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.checkpoint_io import host_mem_gb
 from xfuser.core.utils.runner_utils import (
     log,
-    quantize_linear_layers_to_int8,
-    quantize_linear_layers_to_fp4,
-    quantize_linear_layers_to_nvfp4,
+    rgetattr,
 )
+from .format_backends import module_path_is_covered, module_paths_overlap
 
 
 def shard_pipeline_components(model) -> None:
@@ -52,7 +50,11 @@ def shard_pipeline_components(model) -> None:
             load_block_fn = load_epilogue_fn = None
             if is_selffill:
                 quantize_fn = build_block_quantize_fn(
-                    model, component_name, wrap_attrs, fs_local_rank
+                    model,
+                    component_name,
+                    wrap_attrs,
+                    fs_local_rank,
+                    component=component,
                 )
                 load_block_fn, load_epilogue_fn = loader.build_transformer_disk_loaders(
                     component, wrap_attrs, component_name, f"cuda:{fs_local_rank}"
@@ -61,7 +63,11 @@ def shard_pipeline_components(model) -> None:
                 quantize_fn = (
                     None if is_meta
                     else build_block_quantize_fn(
-                        model, component_name, wrap_attrs, fs_local_rank
+                        model,
+                        component_name,
+                        wrap_attrs,
+                        fs_local_rank,
+                        component=component,
                     )
                 )
             fsdp_object = shard_component(
@@ -125,13 +131,63 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
             )
 
 
-def build_block_quantize_fn(model, component_name: str, wrap_attrs: list, local_rank: int):
+def _wrapped_block_paths(component, component_name, wrap_attrs):
+    paths = []
+    for attr in wrap_attrs:
+        paths.extend(
+            f"{component_name}.{attr}.{index}"
+            for index, _ in enumerate(rgetattr(component, attr))
+        )
+    return tuple(paths)
+
+
+def _block_local_targets(targets, block_path):
+    local = []
+    for target in targets:
+        if target == block_path or block_path.startswith(f"{target}."):
+            return ("",)
+        if target.startswith(f"{block_path}."):
+            local.append(target[len(block_path) + 1 :])
+    return tuple(dict.fromkeys(local)) or None
+
+
+def _target_filter(targets, excluded_targets=()):
+    return lambda _module, fqn: any(
+        not target
+        or fqn == target
+        or fqn.startswith(f"{target}.")
+        for target in targets
+    ) and not any(
+        module_path_is_covered(fqn, target)
+        for target in excluded_targets
+    )
+
+
+def _has_unowned_target(targets, owners):
+    return any(
+        not any(
+            module_path_is_covered(target, owner)
+            for owner in owners
+        )
+        for target in targets
+    )
+
+
+def build_block_quantize_fn(
+    model,
+    component_name: str,
+    wrap_attrs: list,
+    local_rank: int,
+    *,
+    component=None,
+):
     """Return a per-block quantize callable (block, block_idx) -> None for this component, or None
     if no quantization is configured for it.
 
-    fp8_precision_overrides entries like "5." apply to block index 5. We strip the block-index
-    prefix before passing to the quantize functions so they see the same local FQN paths they would
-    in the non-FSDP path.
+    Quantization targets are resolved against each block's actual
+    ``component.wrap_attr.local_index`` path. The callback index remains flattened
+    across wrap attributes for checkpoint loading and existing FP8 precision
+    overrides; entries like "5." still apply to flattened block index 5.
 
     Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed through unchanged on
     every block; only prefix patterns are stripped.
@@ -149,49 +205,113 @@ def build_block_quantize_fn(model, component_name: str, wrap_attrs: list, local_
 
     paths = [f"{component_name}.{a}" for a in wrap_attrs]
 
-    use_fp4_here = config.use_fp4_gemms and any(p in fp4_list for p in paths)
+    def overlaps_any(targets):
+        return any(
+            module_paths_overlap(path, target)
+            for path in paths
+            for target in targets
+        )
+
+    use_fp4_here = config.use_fp4_gemms and overlaps_any(fp4_list)
     # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
     use_fp8_here = (
-        config.use_fp8_gemms and any(p in fp8_list for p in paths)
+        config.use_fp8_gemms and overlaps_any(fp8_list)
     ) or (
-        config.use_fp4_gemms and any(p in fp8_list and p not in fp4_list for p in paths)
+        config.use_fp4_gemms
+        and overlaps_any(fp8_list)
+        and not overlaps_any(fp4_list)
     )
-    use_int8_here = config.use_int8_gemms and any(p in int8_list for p in paths)
+    use_int8_here = config.use_int8_gemms and overlaps_any(int8_list)
 
     if not use_fp4_here and not use_fp8_here and not use_int8_here:
         return None
 
+    block_paths = (
+        _wrapped_block_paths(component, component_name, wrap_attrs)
+        if component is not None
+        else None
+    )
+    if block_paths is None and len(wrap_attrs) != 1:
+        raise ValueError(
+            "multiple wrap_attrs require the component to resolve flattened "
+            "block indices"
+        )
+
     def quantize_fn(block, block_idx: int) -> None:
+        block_path = (
+            block_paths[block_idx]
+            if block_paths is not None
+            else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
+        )
+        local_fp4_targets = _block_local_targets(fp4_list, block_path)
+        local_fp8_targets = _block_local_targets(fp8_list, block_path)
+        local_int8_targets = _block_local_targets(int8_list, block_path)
+        use_fp4_block = config.use_fp4_gemms and local_fp4_targets is not None
+        use_fp8_block = (
+            config.use_fp8_gemms and local_fp8_targets is not None
+        ) or (
+            config.use_fp4_gemms
+            and local_fp8_targets is not None
+            and (
+                local_fp4_targets is None
+                or _has_unowned_target(
+                    local_fp8_targets, local_fp4_targets
+                )
+            )
+        )
+        use_int8_block = (
+            config.use_int8_gemms and local_int8_targets is not None
+        )
+        if not use_fp4_block and not use_fp8_block and not use_int8_block:
+            return
+
         block_prefix = f"{block_idx}."
         # Strip the block-index prefix so the quantize functions see local FQN paths.
         local_fp8 = tuple(
             o[len(block_prefix):] for o in fp8_overrides if o.startswith(block_prefix)
         ) or None
-        if use_fp4_here:
-            if _is_cuda():
-                quantize_linear_layers_to_nvfp4(
-                    block,
-                    fp8_layers=local_fp8,
-                    fp8_suffix_layers=fp8_suffix_overrides,
-                    device=device,
+        if use_fp4_block:
+            adapter = model.format_backend
+            if adapter is None:
+                raise RuntimeError(
+                    "FP4 block conversion requested without a selected backend"
                 )
-            else:
-                quantize_linear_layers_to_fp4(
-                    block,
-                    fp8_layers=local_fp8,
-                    fp8_suffix_layers=fp8_suffix_overrides,
-                    use_hybrid_schedule=config.use_hybrid_gemm_schedule,
-                    device=device,
-                )
-        elif use_fp8_here:
+            adapter.convert_block(
+                block,
+                fp8_layers=local_fp8,
+                fp8_suffix_layers=fp8_suffix_overrides,
+                hybrid=config.use_hybrid_gemm_schedule,
+                device=device,
+                filter_fn=_target_filter(local_fp4_targets),
+            )
+        if use_fp8_block:
             adapter = model.blockwise_fp8_backend
             if adapter is None:
                 raise RuntimeError(
                     "FP8 block conversion requested without a selected backend"
                 )
-            adapter.convert_block(block, device=device)
-        else:
-            # use_int8_here
-            quantize_linear_layers_to_int8(block, device=device, min_layer_size=512)
+            adapter.convert_block(
+                block,
+                device=device,
+                filter_fn=_target_filter(
+                    local_fp8_targets,
+                    (
+                        local_fp4_targets
+                        if use_fp4_block
+                        else ()
+                    ),
+                ),
+            )
+        elif use_int8_block:
+            adapter = model.format_backend
+            if adapter is None:
+                raise RuntimeError(
+                    "INT8 block conversion requested without a selected backend"
+                )
+            adapter.convert_block(
+                block,
+                device=device,
+                filter_fn=_target_filter(local_int8_targets),
+            )
 
     return quantize_fn

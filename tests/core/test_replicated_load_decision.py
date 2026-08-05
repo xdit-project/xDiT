@@ -681,7 +681,8 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
         _replicated_broadcast_load=lambda: False,
         fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
         fp8_backend=adapter,
-        _fp8_streaming_components=set(),
+        _fp8_streaming_targets=set(),
+        _quantization_streaming_targets=set(),
         _build_transformer_structure=structure_factory,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest(
@@ -693,7 +694,122 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
 
     assert result == "streamed"
     assert calls[0]["quantization_config"] is sentinel
-    assert runner._fp8_streaming_components == {"transformer"}
+    assert runner._fp8_streaming_targets == {"transformer.blocks"}
+
+
+def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
+    monkeypatch,
+):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading import fp8_backends
+
+    adapter = SimpleNamespace(
+        format=SimpleNamespace(value="fp8")
+    )
+    descriptor = SimpleNamespace(
+        materialization_mode="blockwise",
+        log_message=lambda: "blockwise fp8",
+    )
+    monkeypatch.setattr(
+        fp8_backends,
+        "plan_blockwise_transformer_fp8_load",
+        lambda *args, **kwargs: descriptor,
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: True,
+        _replicated_broadcast_load=lambda: False,
+        fp8=SimpleNamespace(
+            targets_for=lambda name: ["blocks", "encoder"]
+        ),
+        fp8_backend=adapter,
+        settings=SimpleNamespace(
+            fsdp_strategy={
+                "transformer": {"wrap_attrs": ["blocks"]}
+            }
+        ),
+        config=SimpleNamespace(use_fp4_gemms=False),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_targets=set(),
+        _quantization_descriptor_components=set(),
+        _quantization_streaming_targets=set(),
+        _loader=SimpleNamespace(
+            build_meta_transformer=lambda *args, **kwargs: "meta"
+        ),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+
+    result = base_model.xFuserModel._build_transformer(
+        runner, SimpleNamespace()
+    )
+
+    assert result == "meta"
+    assert runner._fp8_streaming_targets == {
+        "transformer.blocks"
+    }
+    assert runner._quantization_streaming_targets == {
+        "transformer.blocks"
+    }
+
+
+def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
+    monkeypatch,
+):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading import format_backends
+
+    adapter = SimpleNamespace(
+        format=SimpleNamespace(value="fp4")
+    )
+    descriptor = SimpleNamespace(
+        materialization_mode="blockwise",
+        log_message=lambda: "blockwise fp4",
+    )
+    monkeypatch.setattr(
+        format_backends,
+        "describe_blockwise_format_load",
+        lambda *args, **kwargs: descriptor,
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: True,
+        _transformer_quantization_adapter=lambda name: (
+            adapter,
+            ("blocks",),
+        ),
+        fp8=SimpleNamespace(
+            targets_for=lambda name: ["blocks", "encoder"]
+        ),
+        settings=SimpleNamespace(
+            fsdp_strategy={
+                "transformer": {"wrap_attrs": ["blocks"]}
+            }
+        ),
+        config=SimpleNamespace(use_fp4_gemms=True),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_targets=set(),
+        _quantization_descriptor_components=set(),
+        _quantization_streaming_targets=set(),
+        _loader=SimpleNamespace(
+            build_meta_transformer=lambda *args, **kwargs: "meta"
+        ),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+
+    result = base_model.xFuserModel._build_transformer(
+        runner, SimpleNamespace()
+    )
+
+    assert result == "meta"
+    assert runner._fp8_streaming_targets == {
+        "transformer.blocks"
+    }
+    assert runner._quantization_streaming_targets == {
+        "transformer.blocks"
+    }
 
 
 def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch):
@@ -854,6 +970,83 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
     assert calls[0]["quantization_config"] is sentinel
 
 
+@pytest.mark.parametrize(
+    ("format_name", "adapter_name"),
+    [
+        ("FP4", "TorchaoNvfp4BackendAdapter"),
+        ("INT8", "TorchaoInt8BackendAdapter"),
+    ],
+)
+def test_build_transformer_streams_native_fp4_and_int8_configs(
+    monkeypatch,
+    format_name,
+    adapter_name,
+):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+    from xfuser.model_executor.models.runner_models.loading import (
+        format_backends,
+    )
+
+    adapter = getattr(format_backends, adapter_name)(
+        backend=QuantizationBackend.TORCHAO,
+        format_=getattr(QuantizationFormat, format_name),
+        native_transformer_streaming=True,
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        adapter, "_stream_config_factory", lambda exclusions: sentinel
+    )
+    calls = []
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls.append(kwargs)
+            return "streamed"
+
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        _transformer_quantization_adapter=lambda component: (
+            adapter,
+            ("blocks",),
+        ),
+        _native_quantization_device_map=lambda: {"": 0},
+        _fp8_streaming_targets=set(),
+        _quantization_streaming_targets=set(),
+        _build_transformer_structure=lambda *args, **kwargs: SimpleNamespace(
+            named_modules=lambda: [
+                ("", object()),
+                ("blocks", object()),
+                ("blocks.0.proj", torch.nn.Linear(1024, 1024)),
+            ],
+            get_submodule=lambda name: object(),
+        ),
+        settings=SimpleNamespace(
+            fsdp_strategy={},
+            fp8_precision_overrides=None,
+            fp8_precision_override_suffixes=None,
+        ),
+        config=SimpleNamespace(use_hybrid_gemm_schedule=False),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result == "streamed"
+    assert calls[0]["quantization_config"] is sentinel
+    assert calls[0]["device_map"] == {"": 0}
+    assert runner._quantization_streaming_targets == {
+        "transformer.blocks"
+    }
+
+
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
@@ -879,7 +1072,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
             build_meta_component=lambda name, fp8=False: (name, fp8)
         ),
         _fp8_descriptor_components=set(),
-        _fp8_streaming_components=set(),
+        _fp8_streaming_targets=set(),
     )
     prepared = {
         name: SimpleNamespace(
@@ -953,9 +1146,9 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         "text_encoder descriptor",
         "text_encoder_2 descriptor",
     ]
-    assert runner._fp8_streaming_components == {
-        "text_encoder",
-        "text_encoder_2",
+    assert runner._fp8_streaming_targets == {
+        "text_encoder.encoder.block",
+        "text_encoder_2.model.layers",
     }
 
 
@@ -977,7 +1170,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
             build_meta_component=lambda name, fp8=False: object(),
         ),
         _fp8_descriptor_components=set(),
-        _fp8_streaming_components=set(),
+        _fp8_streaming_targets=set(),
     )
     observed = []
 
@@ -1003,7 +1196,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     assert observed == [(False, False)]
-    assert runner._fp8_streaming_components == set()
+    assert runner._fp8_streaming_targets == set()
 
 
 def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
@@ -1021,7 +1214,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
             build_meta_component=lambda name, fp8=False: object(),
         ),
         _fp8_descriptor_components=set(),
-        _fp8_streaming_components=set(),
+        _fp8_streaming_targets=set(),
     )
 
     def prepare(adapter, **kwargs):

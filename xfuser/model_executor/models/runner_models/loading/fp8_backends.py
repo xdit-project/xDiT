@@ -387,8 +387,8 @@ class Fp8BackendAdapter:
     def convert_module(self, module, *, device, offload_to_cpu=False):
         raise NotImplementedError
 
-    def convert_block(self, block, *, device):
-        return self.convert_module(block, device=device)
+    def convert_block(self, block, *, device, **kwargs):
+        return self.convert_module(block, device=device, **kwargs)
 
 
 class AiterFp8BackendAdapter(Fp8BackendAdapter):
@@ -403,7 +403,14 @@ class AiterFp8BackendAdapter(Fp8BackendAdapter):
     def transformer_stream_config(self, targets, *, model_factory=None):
         return self._stream_config_factory(targets)
 
-    def convert_module(self, module, *, device, offload_to_cpu=False):
+    def convert_module(
+        self,
+        module,
+        *,
+        device,
+        offload_to_cpu=False,
+        filter_fn=None,
+    ):
         from xfuser.core.utils.runner_utils import (
             quantize_linear_layers_to_fp8_blockscale,
         )
@@ -412,6 +419,7 @@ class AiterFp8BackendAdapter(Fp8BackendAdapter):
             module,
             device=device,
             offload_to_cpu=offload_to_cpu,
+            filter_fn=filter_fn,
         )
 
 
@@ -463,14 +471,23 @@ class TorchaoFp8BackendAdapter(Fp8BackendAdapter):
                 f"{type(exc).__name__}: {exc}"
             ) from exc
 
-    def convert_module(self, module, *, device, offload_to_cpu=False):
+    def convert_module(
+        self,
+        module,
+        *,
+        device,
+        offload_to_cpu=False,
+        filter_fn=None,
+    ):
         if offload_to_cpu:
             raise ValueError(
                 "torchao FP8 conversion does not support immediate CPU offload"
             )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_fp8
 
-        return quantize_linear_layers_to_fp8(module, device=device)
+        return quantize_linear_layers_to_fp8(
+            module, device=device, filter_fn=filter_fn
+        )
 
 
 def _unsupported_error(contract):

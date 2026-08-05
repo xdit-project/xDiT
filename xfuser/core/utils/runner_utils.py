@@ -333,14 +333,17 @@ def quantize_linear_layers_to_int8(
         _is_linear,
     )
 
-    if filter_fn is None:
-        if min_layer_size > 0:
-            def filter_fn(mod, fqn):
-                if not _is_linear(mod, fqn):
-                    return False
-                return min(mod.out_features, mod.in_features) >= min_layer_size
-        else:
-            filter_fn = _is_linear
+    requested_filter = filter_fn
+
+    def filter_fn(mod, fqn):
+        if not _is_linear(mod, fqn):
+            return False
+        if requested_filter is not None and not requested_filter(mod, fqn):
+            return False
+        return (
+            min_layer_size <= 0
+            or min(mod.out_features, mod.in_features) >= min_layer_size
+        )
 
     config = Int8DynamicActivationInt8WeightConfig(
         granularity=PerRow(),
@@ -366,8 +369,12 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 
-    if filter_fn is None:
-        filter_fn = _is_linear
+    requested_filter = filter_fn
+
+    def filter_fn(mod, fqn):
+        return _is_linear(mod, fqn) and (
+            requested_filter is None or requested_filter(mod, fqn)
+        )
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
@@ -388,6 +395,8 @@ def quantize_linear_layers_to_fp8_blockscale(
     model: torch.nn.Module,
     device: Optional[torch.device] = None,
     offload_to_cpu: bool = False,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    parent_name: str = "",
 ) -> int:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
 
@@ -400,7 +409,10 @@ def quantize_linear_layers_to_fp8_blockscale(
 
     replaced = 0
     for name, module in list(model.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
         if isinstance(module, torch.nn.Linear):
+            if filter_fn is not None and not filter_fn(module, full_name):
+                continue
             weight = module.weight.data
             bias = module.bias.data if module.bias is not None else None
             fp8_layer = xFuserFP8BlockScaleLinear(
@@ -424,7 +436,13 @@ def quantize_linear_layers_to_fp8_blockscale(
             setattr(model, name, fp8_layer)
             replaced += 1
         elif next(module.children(), None) is not None:
-            replaced += quantize_linear_layers_to_fp8_blockscale(module, device=device, offload_to_cpu=offload_to_cpu)
+            replaced += quantize_linear_layers_to_fp8_blockscale(
+                module,
+                device=device,
+                offload_to_cpu=offload_to_cpu,
+                filter_fn=filter_fn,
+                parent_name=full_name,
+            )
     return replaced
 
 
@@ -466,6 +484,7 @@ def quantize_linear_layers_to_fp4(
     fp8_suffix_layers: tuple[str] | None = None,
     use_hybrid_schedule: bool = False,
     device: Optional[torch.device] = None,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
 ):
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
@@ -475,6 +494,8 @@ def quantize_linear_layers_to_fp4(
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
+            if filter_fn is not None and not filter_fn(module, full_name):
+                continue
             if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
                 quantize_(
                       module,
@@ -535,6 +556,7 @@ def quantize_linear_layers_to_fp4(
                 fp8_suffix_layers=fp8_suffix_layers,
                 use_hybrid_schedule=use_hybrid_schedule,
                 device=device,
+                filter_fn=filter_fn,
             )
 
 
@@ -545,6 +567,7 @@ def quantize_linear_layers_to_nvfp4(
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
     use_triton_kernel: bool = True,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
 ) -> None:
     """Quantize linear layers to NVFP4 using torchao on NVIDIA Blackwell GPUs.
 
@@ -578,6 +601,8 @@ def quantize_linear_layers_to_nvfp4(
         for fqn, submodule in module.named_modules():
             if not isinstance(submodule, torch.nn.Linear):
                 continue
+            if filter_fn is not None and not filter_fn(submodule, fqn):
+                continue
 
             if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 skipped_fp8_count += 1
@@ -592,6 +617,8 @@ def quantize_linear_layers_to_nvfp4(
 
         def nvfp4_filter_fn(mod, fqn):
             if not _is_linear(mod, fqn):
+                return False
+            if filter_fn is not None and not filter_fn(mod, fqn):
                 return False
             if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 return False
@@ -615,6 +642,8 @@ def quantize_linear_layers_to_nvfp4(
 
             def fp8_filter_fn(mod, fqn):
                 if not _is_linear(mod, fqn):
+                    return False
+                if filter_fn is not None and not filter_fn(mod, fqn):
                     return False
                 return _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers)
 

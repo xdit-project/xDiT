@@ -6,8 +6,11 @@ from xfuser.core.long_ctx_attention.ring.ring_flash_attn import (
     xdit_ring_flash_attn_func,
 )
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
-from flash_attn import flash_attn_func
+import pytest
 import os
+
+# A ROCm install has no flash-attn, and an import error here stops the whole directory collecting.
+flash_attn_func = pytest.importorskip("flash_attn").flash_attn_func
 
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttnProcessor2_0,

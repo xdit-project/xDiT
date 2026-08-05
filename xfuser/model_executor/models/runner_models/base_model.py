@@ -1214,8 +1214,13 @@ class xFuserModel(abc.ABC):
         if target is None:
             return (f"VAE tiled decode ran out of memory at a {window}px tile window, the smallest "
                     "this VAE can tile with.")
+        # One step, and say what to look at, rather than leaving halving to look like a free knob
+        # that can be turned again. It cannot: the VAE stops being what peaks after a step or two,
+        # and from there a narrower window costs image quality and buys no memory at all.
         return (f"VAE tiled decode ran out of memory at a {window}px tile window. Shrink it with "
-                f"--vae_tile_size {target}, then re-run.")
+                f"--vae_tile_size {target}, then re-run. Take one step at a time and compare peak "
+                f"VRAM: if it barely moves, the VAE is no longer what peaks and a narrower window "
+                f"will cost image quality without saving memory.")
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

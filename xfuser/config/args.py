@@ -406,7 +406,9 @@ class xFuserArgs:
             help="Edge, in output pixels, of each tile the VAE decodes. Smaller = less peak VRAM "
                  "at VAE decode, more tiles. Turns tiling on by itself. A size the VAE cannot tile "
                  "with exactly is rounded down to the next one that works, and a size above the "
-                 "VAE's own window is ignored.",
+                 "VAE's own window is ignored. Step down one size at a time and watch peak VRAM: "
+                 "the saving stops once the VAE is no longer what peaks, while small tiles visibly "
+                 "degrade the image, each one being normalized over less context than the last.",
         )
         runtime_group.add_argument(
             "--use_fp8_t5_encoder",
@@ -632,7 +634,9 @@ class xFuserArgs:
             help="Edge, in output pixels, of each tile the VAE decodes. Smaller = less peak VRAM "
                  "at VAE decode, more tiles. Turns tiling on by itself. A size the VAE cannot tile "
                  "with exactly is rounded down to the next one that works, and a size above the "
-                 "VAE's own window is ignored.",
+                 "VAE's own window is ignored. Step down one size at a time and watch peak VRAM: "
+                 "the saving stops once the VAE is no longer what peaks, while small tiles visibly "
+                 "degrade the image, each one being normalized over less context than the last.",
         )
         parser.add_argument(
             "--use_int8_gemms",

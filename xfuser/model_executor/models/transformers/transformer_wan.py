@@ -21,6 +21,7 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister
 )
 from xfuser.envs import PACKAGES_CHECKER
+from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
@@ -216,6 +217,31 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             )
 
 
+    def _update_vsa_attention_kwargs(
+        self, timestep: torch.LongTensor
+    ) -> None:
+        """Publish the current AITER VSA schedule values to its backend."""
+        if (
+            self.attention_kwargs is None
+            or not self.attention_kwargs.get("vsa_drop_rates")
+        ):
+            return
+
+        runtime_state = get_runtime_state()
+        step_index, num_steps = runtime_state.advance_vsa_schedule(
+            float(timestep.reshape(-1)[0].item())
+        )
+        self.attention_kwargs["vsa_step_index"] = step_index
+        self.attention_kwargs["vsa_num_steps"] = num_steps
+        effective_drop_rate = jenga_scheduled_drop_rate(
+            step_index,
+            num_steps,
+            self.attention_kwargs["vsa_drop_rates"],
+        )
+        self.attention_kwargs["vsa_effective_drop_rate"] = effective_drop_rate
+        self.attention_kwargs["vsa_use_dense"] = effective_drop_rate <= 0.25
+
+
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
         if pad_amount > 0:
             if dim < 0:
@@ -256,6 +282,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             lora_scale = 1.0
 
 
+        self._update_vsa_attention_kwargs(timestep)
         get_runtime_state().increment_step_counter()
 
         sp_world_rank = get_sequence_parallel_rank()

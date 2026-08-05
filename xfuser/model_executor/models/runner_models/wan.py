@@ -21,6 +21,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
     log,
@@ -44,16 +45,42 @@ COMMON_FSDP_STRATEGY = {
     }
 }
 
+WAN_VSA_ACCURACY_FIRST_DROP_RATES = (0.25, 0.40)
+
 
 def _build_attention_kwargs(config: "xFuserArgs") -> dict:
-    """Build the per-model attention_kwargs dict used by the AITER Sparge backends. """
+    """Build shared layout and sparse-attention options for Wan."""
+    drop_rates = config.vsa_drop_rates
+    backend = config.attention_backend
+    if isinstance(backend, str):
+        backend = AttentionBackendType[backend.upper()]
+    if backend == AttentionBackendType.AITER_VSA and not drop_rates:
+        drop_rates = list(WAN_VSA_ACCURACY_FIRST_DROP_RATES)
     return {
         "thw": None,
         "spargeattn_simthreshold": config.spargeattn_simthreshold,
         "spargeattn_cdfthreshold": config.spargeattn_cdfthreshold,
         "spargeattn_reorder_sequence": config.spargeattn_reorder_sequence,
         "use_spargeattn_static_block_mask": config.use_spargeattn_static_block_mask,
+        "vsa_block_size": config.vsa_block_size,
+        "vsa_top_k": config.vsa_top_k,
+        "vsa_top_k_ratio": config.vsa_top_k_ratio,
+        "vsa_drop_rates": drop_rates,
+        "vsa_prob_threshold": config.vsa_prob_threshold,
+        "vsa_reorder_sequence": config.vsa_reorder_sequence,
+        "use_vsa_static_block_mask": config.use_vsa_static_block_mask,
+        "use_vsa_first_frame_mask": config.use_vsa_first_frame_mask,
+        "vsa_collect_density": config.vsa_collect_density,
     }
+
+
+class xFuserWanModel(xFuserModel):
+    """Common lifecycle hooks for Wan runners."""
+
+    def _prepare_inference_run(self, input_args: dict) -> None:
+        get_runtime_state().reset_vsa_schedule_state(
+            int(input_args["num_inference_steps"])
+        )
 
 
 def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
@@ -162,7 +189,7 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
-class xFuserWan21I2VModel(xFuserModel):
+class xFuserWan21I2VModel(xFuserWanModel):
 
     min_diffusers_version = "0.35.2"
 
@@ -444,7 +471,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
-class xFuserWan21T2VModel(xFuserModel):
+class xFuserWan21T2VModel(xFuserWanModel):
 
     min_diffusers_version = "0.35.2"
 
@@ -701,7 +728,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
-class xFuserWan21VACEModel(xFuserModel):
+class xFuserWan21VACEModel(xFuserWanModel):
 
     min_diffusers_version = "0.35.2"
 

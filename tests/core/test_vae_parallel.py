@@ -54,7 +54,6 @@ EXPECTED_ENCODERS = {
     "AutoencoderKLLTX2Video": "LTX2VideoEncoderAdapter",
 }
 
-
 class TestDecoderAdapterChoice(unittest.TestCase):
 
     def test_every_vae_class_gets_the_adapter_it_needs(self):
@@ -346,19 +345,23 @@ class AiterGroupNorm(nn.Module):
 class TestGroupNormRevert(unittest.TestCase):
     """Undoing AITER's swap of torch.nn.GroupNorm, which the adapters cannot see past"""
 
+    def setUp(self):
+        # Whichever class is in place when a test starts, torch's own is what the revert should
+        # arrive at, and whatever a test puts there is its own business alone.
+        from xfuser.envs import _TORCH_GROUPNORM
+
+        self.torch_group_norm = _TORCH_GROUPNORM
+        self.addCleanup(setattr, nn, "GroupNorm", nn.GroupNorm)
+
     def test_a_swapped_group_norm_is_put_back(self):
-        original = nn.GroupNorm
-        try:
-            nn.GroupNorm = AiterGroupNorm
-            self.assertTrue(vae_parallel.restore_torch_group_norm())
-            self.assertIs(nn.GroupNorm, original)
-        finally:
-            nn.GroupNorm = original
+        nn.GroupNorm = AiterGroupNorm
+        self.assertTrue(vae_parallel.restore_torch_group_norm())
+        self.assertIs(nn.GroupNorm, self.torch_group_norm)
 
     def test_an_untouched_group_norm_is_left_alone(self):
-        original = nn.GroupNorm
+        nn.GroupNorm = self.torch_group_norm
         self.assertFalse(vae_parallel.restore_torch_group_norm())
-        self.assertIs(nn.GroupNorm, original)
+        self.assertIs(nn.GroupNorm, self.torch_group_norm)
 
     def test_the_swap_is_what_makes_a_2d_decoder_unrecognisable(self):
         # This is the failure the revert exists for. AITER's norm is not a subclass of torch's,

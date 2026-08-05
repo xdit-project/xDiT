@@ -53,6 +53,17 @@ def asymmetric_vae():
     )
 
 
+def overlap_factor_vae():
+    """AutoencoderKL and friends again, carrying the blending the batched decode reuses"""
+    return StubVAE(
+        tile_sample_min_size=256,
+        tile_latent_min_size=32,
+        tile_overlap_factor=0.25,
+        blend_v=lambda above, tile, extent: tile,
+        blend_h=lambda left, tile, extent: tile,
+    )
+
+
 def per_axis_overlap_vae():
     """A square window whose two axes carry their own overlap fractions"""
     return StubVAE(
@@ -366,6 +377,175 @@ class TestEveryVAEARunnerLoads(unittest.TestCase):
                 self.assertEqual(
                     got, expected, f"{name} decoded at a {pixels}px tile window"
                 )
+
+
+class TestTileBatching(unittest.TestCase):
+    """Decoding same-shaped tiles in one call, which has to leave the image exactly as it was"""
+
+    # The two VAE classes that tile by overlap fraction, reusing the stand-ins above.
+    FAMILY = ("AutoencoderKL", "AutoencoderKLFlux2")
+    # Three windows of latents across, so a run holds several tiles of the full shape alongside
+    # the clipped ones at the right and bottom edges.
+    WINDOWS_ACROSS = 3
+
+    def test_only_the_overlap_factor_family_is_batched(self):
+        # The others walk a stride they store outright, over a loop with its own blending and,
+        # for the video VAEs, a frame axis this knows nothing about.
+        self.assertTrue(vae_tiling.tiles_by_overlap_factor(overlap_factor_vae()))
+        self.assertFalse(vae_tiling.tiles_by_overlap_factor(stride_vae()))
+        self.assertFalse(vae_tiling.tiles_by_overlap_factor(overlap_hw_vae()))
+        self.assertIsNone(vae_tiling.batched_tiled_decode(stride_vae(), 4096))
+        self.assertIsNotNone(vae_tiling.batched_tiled_decode(overlap_factor_vae(), 4096))
+
+    def test_the_budget_is_the_area_of_the_vaes_own_tile(self):
+        self.assertEqual(vae_tiling.default_tile_area(overlap_factor_vae()), 32 * 32)
+        self.assertIsNone(vae_tiling.default_tile_area(stride_vae()))
+
+    def _tiled_vae(self, name, batch=1):
+        """A small VAE of class `name` at a narrowed window, and latents several tiles across"""
+        import torch
+        import diffusers
+
+        cls = getattr(diffusers, name, None)
+        if cls is None:
+            self.skipTest(f"{name} is not in diffusers {diffusers.__version__}")
+        kwargs, _, channels = TestEveryVAEARunnerLoads.VAES[name]
+        vae = cls(**kwargs).eval()
+        if not hasattr(vae, "use_tiling"):
+            self.skipTest(f"diffusers {diffusers.__version__} cannot tile {name}")
+        vae.enable_tiling()
+
+        window = vae_tiling.tile_window(vae)
+        pixels, plan = vae_tiling.snap_tile_window(vae, window // 4)
+        self.assertIsNotNone(plan, f"{name} refused every window at or below {window // 4}")
+        vae_tiling.apply_tile_plan(vae, plan)
+        self.assertTrue(
+            vae_tiling.tiles_by_overlap_factor(vae),
+            f"{name} was expected to tile by overlap fraction",
+        )
+
+        grid = vae.tile_latent_min_size * self.WINDOWS_ACROSS
+        torch.manual_seed(0)
+        return vae, torch.randn(batch, channels, grid, grid)
+
+    def _counted(self, vae):
+        """Replace the decoder with one that records the shape of every call"""
+        import torch.nn as nn
+
+        class CountingDecoder(nn.Module):
+            def __init__(self, decoder):
+                super().__init__()
+                self.decoder = decoder
+                self.shapes = []
+
+            def forward(self, x):
+                self.shapes.append(tuple(x.shape))
+                return self.decoder(x)
+
+            @property
+            def rows(self):
+                """The rows each call carried: one tile each, at a latent batch of one"""
+                return [shape[0] for shape in self.shapes]
+
+        counted = CountingDecoder(vae.decoder)
+        vae.decoder = counted
+        return counted
+
+    def test_a_batched_decode_gives_the_image_an_unbatched_one_gives(self):
+        import torch
+
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                with torch.no_grad():
+                    expected = vae.tiled_decode(latents).sample
+                    counted = self._counted(vae)
+                    batched = vae_tiling.batched_tiled_decode(
+                        vae, vae.tile_latent_min_size**2 * 8
+                    )
+                    got = batched(latents).sample
+                # Nothing here changes what is summed, only how many rows a kernel is handed at
+                # once, and a convolution picks its blocking off that. The residue is around
+                # 1e-5 on an image in [-1, 1]; a tile put back in the wrong place would be off by
+                # order one, which this still catches.
+                self.assertEqual(got.shape, expected.shape)
+                torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
+                self.assertTrue(
+                    any(rows > 1 for rows in counted.rows),
+                    f"{name} decoded every tile on its own, so this proved nothing",
+                )
+
+    def test_a_latent_batch_is_taken_apart_again(self):
+        import torch
+
+        # Each tile carries every sample in the batch, so a call decodes tiles x samples rows and
+        # the split back out has to step by the batch and not by one.
+        vae, latents = self._tiled_vae("AutoencoderKL", batch=2)
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            got = vae_tiling.batched_tiled_decode(
+                vae, vae.tile_latent_min_size**2 * 8
+            )(latents).sample
+        torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
+
+    def test_a_budget_of_one_tile_decodes_exactly_as_upstream_does(self):
+        import torch
+
+        # This is what the default window gets: the budget is that window's own area, so nothing
+        # about the decode changes for a run that did not ask for a smaller tile.
+        vae, latents = self._tiled_vae("AutoencoderKL")
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            counted = self._counted(vae)
+            got = vae_tiling.batched_tiled_decode(
+                vae, vae.tile_latent_min_size**2
+            )(latents).sample
+        self.assertEqual(set(counted.rows), {1})
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_a_budget_of_zero_decodes_exactly_as_upstream_does(self):
+        import torch
+
+        vae, latents = self._tiled_vae("AutoencoderKL")
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            counted = self._counted(vae)
+            got = vae_tiling.batched_tiled_decode(vae, 0)(latents).sample
+        self.assertEqual(set(counted.rows), {1})
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_the_budget_caps_the_area_one_call_carries(self):
+        import torch
+
+        vae, latents = self._tiled_vae("AutoencoderKL")
+        window = vae.tile_latent_min_size
+        decoder = vae.decoder
+        for tiles_per_call in (1, 2, 4):
+            with self.subTest(tiles_per_call=tiles_per_call):
+                budget = window**2 * tiles_per_call
+                vae.decoder = decoder
+                counted = self._counted(vae)
+                with torch.no_grad():
+                    vae_tiling.batched_tiled_decode(vae, budget)(latents)
+                # No call may carry more latent area than the budget, which is what holds peak
+                # memory where the VAE's own window put it.
+                for shape in counted.shapes:
+                    self.assertLessEqual(shape[0] * shape[-2] * shape[-1], budget)
+                # The full-shape tiles spend the budget exactly, so the batch tracks it. Tiles
+                # clipped by the latent bounds are smaller, and group larger for the same area.
+                self.assertEqual(max(counted.rows), tiles_per_call)
+        vae.decoder = decoder
+
+    def test_a_tiled_decode_that_fits_in_one_tile_still_works(self):
+        import torch
+
+        # A single tile means one shape, one group, and no blending pass at all.
+        vae, _ = self._tiled_vae("AutoencoderKL")
+        latents = torch.randn(1, vae.config.latent_channels, 4, 4)
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            got = vae_tiling.batched_tiled_decode(vae, 1 << 20)(latents).sample
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

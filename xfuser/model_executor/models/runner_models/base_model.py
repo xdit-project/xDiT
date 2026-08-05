@@ -346,7 +346,11 @@ class xFuserModel(abc.ABC):
                 vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                 log(f"Enabling VAE tiling on {type(vae).__name__}...")
                 vae.enable_tiling()
+                # Read the VAE's own window before the next line can narrow it: that window is
+                # the batch budget, so tiling smaller costs the same per call as not tiling.
+                budget_elems = vae_tiling.default_tile_area(vae)
                 tile_window = self._apply_vae_tile_size(vae)
+                self._install_vae_tile_batching(vae, budget_elems)
             # Installed either way, so a decode that OOMs with tiling off still says so.
             self._install_vae_decode_guard(vae, tile_window)
 
@@ -1145,6 +1149,22 @@ class xFuserModel(abc.ABC):
              if smallest else
              f", and no size up to this VAE's own {window}px window gives them one each.")
         )
+
+    def _install_vae_tile_batching(self, vae, budget_elems: Optional[int]) -> None:
+        """Decode a tiled VAE's same-shaped tiles together, within one tile's worth of area"""
+        # Every decoder call costs the same whatever the tile, and under --use_parallel_vae that
+        # cost is a round of collectives rather than arithmetic, so a narrow window pays it over
+        # and over. Batching spends the VAE's own tile area per call instead of one tile, which
+        # leaves the default window decoding exactly as it did and stops the smaller windows
+        # paying for their size twice.
+        if budget_elems is None:
+            return
+        batched = vae_tiling.batched_tiled_decode(vae, budget_elems)
+        if batched is None:
+            return
+        vae.tiled_decode = batched
+        log(f"VAE tiled decode will batch tiles up to {budget_elems} latent elements per call "
+            f"on {type(vae).__name__}.")
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
         # Point a failed VAE decode at the knob that fixes it. Success path untouched.

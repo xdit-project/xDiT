@@ -5,9 +5,10 @@ they relate, and which releases have them. Nothing reads xDiT config or touches 
 the policy around these numbers lives with the runner instead.
 """
 
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import diffusers
+import torch
 
 # The tiling window as diffusers spells it, across the shapes its VAEs use: a latent/pixel pair
 # (AutoencoderKL and friends), a pixel window plus a stride (Wan, Qwen-Image, the video VAEs), and
@@ -191,3 +192,123 @@ def smallest_tile_window(
         if rows is None or rows >= min_latent_rows:
             return pixels
     return None
+
+
+def default_tile_area(vae) -> Optional[int]:
+    """The latent area of the VAE's own tile, None where the VAE has no square latent window"""
+    # Read before a narrower window is applied: this is the area the VAE was built to decode in
+    # one call, which is what makes it the right budget for a batch of tiles.
+    size = getattr(vae, "tile_latent_min_size", None)
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        return None
+    return size * size
+
+
+def tiles_by_overlap_factor(vae) -> bool:
+    """Whether this VAE tiles with the loop `batched_tiled_decode` reimplements"""
+    # AutoencoderKL and AutoencoderKLFlux2 walk one square latent window at a stride derived from
+    # an overlap fraction. Wan, Qwen-Image and the video VAEs walk a stride they store outright,
+    # over a loop with different blending and a frame axis, and keep their own tiled_decode.
+    if any(getattr(vae, attr, None) for attr in STRIDE_ATTRS):
+        return False
+    return (
+        isinstance(getattr(vae, "tile_latent_min_size", None), int)
+        and isinstance(getattr(vae, "tile_sample_min_size", None), int)
+        and isinstance(getattr(vae, "tile_overlap_factor", None), float)
+        and callable(getattr(vae, "blend_v", None))
+        and callable(getattr(vae, "blend_h", None))
+    )
+
+
+def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
+    """A tiled_decode for `vae` that decodes same-shaped tiles in one call, None where it can't
+
+    Upstream decodes one tile per decoder call, and under --use_parallel_vae every one of those
+    calls pays a cost that does not shrink with the tile: a Patchify, a halo exchange per
+    convolution, a reduction per norm, and a DePatchify to gather the result. Narrowing the window
+    to save memory therefore multiplies a fixed cost, which is what makes a small tile size so
+    much slower than the VAE's own. Tiles are independent and, away from the right and bottom
+    edges, identically shaped, so they can be stacked on the batch dimension and share all of it.
+
+    `budget_elems` caps the latent area one call may carry. At 0, or wherever the budget only
+    fits one tile, this decodes a tile at a time and does exactly what upstream does.
+    """
+    if not tiles_by_overlap_factor(vae):
+        return None
+
+    from diffusers.models.autoencoders.vae import DecoderOutput
+
+    # Some classes hold the flag and a None conv, others only the conv; both spellings mean the
+    # same thing, and a class carrying neither has no post-quant step.
+    use_post_quant_conv = getattr(getattr(vae, "config", None), "use_post_quant_conv", None)
+    if use_post_quant_conv is None:
+        use_post_quant_conv = getattr(vae, "post_quant_conv", None) is not None
+
+    def tiled_decode(z, return_dict: bool = True):
+        overlap_size = int(vae.tile_latent_min_size * (1 - vae.tile_overlap_factor))
+        blend_extent = int(vae.tile_sample_min_size * vae.tile_overlap_factor)
+        row_limit = vae.tile_sample_min_size - blend_extent
+
+        tiles = []
+        for i in range(0, z.shape[2], overlap_size):
+            for j in range(0, z.shape[3], overlap_size):
+                tile = z[
+                    :,
+                    :,
+                    i : i + vae.tile_latent_min_size,
+                    j : j + vae.tile_latent_min_size,
+                ]
+                if use_post_quant_conv:
+                    tile = vae.post_quant_conv(tile)
+                tiles.append(tile)
+
+        by_shape = {}
+        for index, tile in enumerate(tiles):
+            by_shape.setdefault(tuple(tile.shape), []).append(index)
+
+        decoded = [None] * len(tiles)
+        for shape, indices in by_shape.items():
+            # Budget by area rather than by tile count. Activation memory follows the area being
+            # decoded, so one count would batch the widest tiles into an allocation the VAE was
+            # never sized for while barely helping the narrow ones. Area instead holds peak memory
+            # near where the VAE's own window already put it, and lets the batch grow as the
+            # window shrinks, which is where the fixed cost hurts.
+            area = max(1, shape[0] * shape[-2] * shape[-1])
+            per_call = max(1, budget_elems // area) if budget_elems > 0 else 1
+            for start in range(0, len(indices), per_call):
+                group = indices[start : start + per_call]
+                # One tile is handed over as it stands, so a budget that fits one tile leaves the
+                # decoder the same tensor upstream would have given it.
+                batched = (
+                    tiles[group[0]]
+                    if len(group) == 1
+                    else torch.cat([tiles[k] for k in group], dim=0)
+                )
+                out = vae.decoder(batched)
+                stride = out.shape[0] // len(group)
+                for n, k in enumerate(group):
+                    decoded[k] = out[n * stride : (n + 1) * stride]
+
+        columns = len(range(0, z.shape[3], overlap_size))
+        rows = [decoded[k : k + columns] for k in range(0, len(decoded), columns)]
+
+        # Upstream's assembly, unchanged. blend_v and blend_h write into the tile they are given,
+        # so each tile is blended against neighbours that were themselves already blended, and the
+        # scan order that produces is part of the result.
+        result_rows = []
+        for i, row in enumerate(rows):
+            result_row = []
+            for j, tile in enumerate(row):
+                if i > 0:
+                    tile = vae.blend_v(rows[i - 1][j], tile, blend_extent)
+                if j > 0:
+                    tile = vae.blend_h(row[j - 1], tile, blend_extent)
+                result_row.append(tile[:, :, :row_limit, :row_limit])
+            result_rows.append(torch.cat(result_row, dim=3))
+
+        dec = torch.cat(result_rows, dim=2)
+        if not return_dict:
+            return (dec,)
+        return DecoderOutput(sample=dec)
+
+    return tiled_decode

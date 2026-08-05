@@ -500,7 +500,9 @@ def test_build_transformer_preserves_request_subfolder_without_override():
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
-        fp8=SimpleNamespace(aiter_stream_config=lambda name: None),
+        fp8=SimpleNamespace(targets_for=lambda name: []),
+        fp8_backend=None,
+        settings=SimpleNamespace(fsdp_strategy={}),
     )
 
     result = base_model.xFuserModel._build_transformer(
@@ -520,3 +522,333 @@ def test_build_transformer_preserves_request_subfolder_without_override():
             },
         )
     ]
+
+
+def test_transformer_structure_inspection_keeps_parameters_and_buffers_meta(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+    import accelerate
+
+    from xfuser.model_executor.models.runner_models import base_model
+
+    calls = []
+
+    @contextmanager
+    def empty_weights(**kwargs):
+        calls.append(kwargs)
+        yield
+
+    class Wrapper:
+        @classmethod
+        def load_config(cls, model_name, **kwargs):
+            return "config"
+
+        @classmethod
+        def from_config(cls, config, **kwargs):
+            return "structure"
+
+    monkeypatch.setattr(accelerate, "init_empty_weights", empty_weights)
+
+    result = base_model.xFuserModel._build_transformer_structure(
+        SimpleNamespace(),
+        Wrapper,
+        CheckpointRequest("org/repo", subfolder="transformer"),
+        None,
+    )
+
+    assert result == "structure"
+    assert calls == [{"include_buffers": True}]
+
+
+def test_structure_inspection_reports_old_accelerate_explicitly(monkeypatch):
+    import accelerate
+
+    from xfuser.model_executor.models.runner_models import base_model
+
+    def legacy_empty_weights():
+        raise AssertionError("must fail before entering context")
+
+    class Wrapper:
+        @classmethod
+        def load_config(cls, model_name, **kwargs):
+            return "config"
+
+    monkeypatch.setattr(
+        accelerate, "init_empty_weights", legacy_empty_weights
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"accelerate\.init_empty_weights.*include_buffers",
+    ):
+        base_model.xFuserModel._build_transformer_structure(
+            SimpleNamespace(),
+            Wrapper,
+            CheckpointRequest("org/repo", subfolder="transformer"),
+            None,
+        )
+
+
+def test_structure_inspection_catches_include_buffers_error_on_context_enter(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+    import accelerate
+
+    from xfuser.model_executor.models.runner_models import base_model
+
+    @contextmanager
+    def broken_empty_weights(**kwargs):
+        raise TypeError("include_buffers is unsupported")
+        yield
+
+    class Wrapper:
+        @classmethod
+        def load_config(cls, model_name, **kwargs):
+            return "config"
+
+        @classmethod
+        def from_config(cls, config, **kwargs):
+            raise AssertionError("structure allocation must not start")
+
+    monkeypatch.setattr(
+        accelerate, "init_empty_weights", broken_empty_weights
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"accelerate\.init_empty_weights.*include_buffers",
+    ):
+        base_model.xFuserModel._build_transformer_structure(
+            SimpleNamespace(),
+            Wrapper,
+            CheckpointRequest("org/repo", subfolder="transformer"),
+            None,
+        )
+
+
+def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
+    monkeypatch,
+):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
+        Fp8BackendCapabilities,
+        select_fp8_backend,
+    )
+
+    contract = SimpleNamespace(
+        requested_format=QuantizationFormat.FP8,
+        selected_backend=QuantizationBackend.TORCHAO,
+    )
+    adapter = select_fp8_backend(
+        contract,
+        capabilities=Fp8BackendCapabilities(
+            torchao_fp8=True,
+            torchao_diffusers_streaming=True,
+        ),
+    )
+    calls = []
+    sentinel = object()
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls.append(kwargs)
+            return "streamed"
+
+    monkeypatch.setattr(
+        adapter,
+        "_stream_config_factory",
+        lambda exclusions: sentinel,
+    )
+    def structure_factory(*args, **kwargs):
+        return SimpleNamespace(
+            named_modules=lambda: [
+                ("", object()),
+                ("blocks", object()),
+                ("blocks.0.proj", torch.nn.Linear(2, 2)),
+            ],
+            get_submodule=lambda name: object(),
+        )
+
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8_backend=adapter,
+        _fp8_streaming_components=set(),
+        _build_transformer_structure=structure_factory,
+        settings=SimpleNamespace(fsdp_strategy={}),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result == "streamed"
+    assert calls[0]["quantization_config"] is sentinel
+    assert runner._fp8_streaming_components == {"transformer"}
+
+
+def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
+        Fp8BackendCapabilities,
+        select_fp8_backend,
+    )
+
+    calls = []
+    logs = []
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls.append(kwargs)
+            return "loaded"
+
+    adapter = select_fp8_backend(
+        SimpleNamespace(
+            requested_format=QuantizationFormat.FP8,
+            selected_backend=QuantizationBackend.TORCHAO,
+        ),
+        capabilities=Fp8BackendCapabilities(torchao_fp8=True),
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8_backend=adapter,
+        settings=SimpleNamespace(fsdp_strategy={}),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+    monkeypatch.setattr(base_model, "log", logs.append)
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result == "loaded"
+    assert calls[0]["quantization_config"] is None
+    assert any(
+        "backend=torchao" in message
+        and "materialization=post_load" in message
+        and "fallback=" in message
+        for message in logs
+    )
+
+
+def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
+    monkeypatch,
+):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
+        Fp8BackendCapabilities,
+        select_fp8_backend,
+    )
+
+    calls = []
+    logs = []
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls.append(kwargs)
+            return "loaded"
+
+    adapter = select_fp8_backend(
+        SimpleNamespace(
+            requested_format=QuantizationFormat.FP8,
+            selected_backend=QuantizationBackend.TORCHAO,
+        ),
+        capabilities=Fp8BackendCapabilities(
+            torchao_fp8=True,
+            torchao_diffusers_streaming=True,
+        ),
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8_backend=adapter,
+        settings=SimpleNamespace(fsdp_strategy={}),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+    def structure_factory(*args, **kwargs):
+        raise RuntimeError("config shape unavailable")
+
+    runner._build_transformer_structure = structure_factory
+    monkeypatch.setattr(base_model, "log", logs.append)
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result == "loaded"
+    assert calls[0]["quantization_config"] is None
+    assert any(
+        "backend=torchao" in message
+        and "materialization=post_load" in message
+        and "target mapping unavailable" in message
+        for message in logs
+    )
+
+
+def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+    from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
+        Fp8BackendCapabilities,
+        select_fp8_backend,
+    )
+
+    calls = []
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls.append(kwargs)
+            return "loaded"
+
+    adapter = select_fp8_backend(
+        SimpleNamespace(
+            requested_format=QuantizationFormat.FP8,
+            selected_backend=QuantizationBackend.AITER,
+        ),
+        capabilities=Fp8BackendCapabilities(aiter_block_scale=True),
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        adapter, "_stream_config_factory", lambda targets: sentinel
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
+        fp8_backend=adapter,
+        settings=SimpleNamespace(fsdp_strategy={}),
+        _checkpoint_request=lambda name: CheckpointRequest(
+            "org/repo", subfolder=name
+        ),
+    )
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result == "loaded"
+    assert calls[0]["quantization_config"] is sentinel

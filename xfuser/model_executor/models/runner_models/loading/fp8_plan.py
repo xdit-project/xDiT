@@ -9,11 +9,9 @@ imports; ``xFuserModel.fp8`` is the only entry point.
 block-scale path on RDNA4 and the torchao path everywhere else. (INT8 and FP4 are not routed through
 here; they read their own ``int8_gemm_module_list`` / ``fp4_gemm_module_list`` directly.)
 
-Everything named ``aiter_*`` decides whether the AITER block-scale path applies, which matters
-because it is the only FP8 backend with a quantize-on-load hook — the only one that can stop a full
-bf16 copy from materializing. Off RDNA4 these all report inactive and return None, and the callers
-fall back to loading normally and quantizing afterwards. How the decision is expressed to diffusers
-and transformers lives with the quantizer, in ``quant.aiter_load``.
+Everything named ``aiter_*`` is limited to AITER's block-scale format and its
+pipeline/text-encoder integration. Transformer backend selection and native
+Diffusers streaming for both AITER and TorchAO live in ``fp8_backends``.
 """
 
 from typing import TYPE_CHECKING, List, Optional

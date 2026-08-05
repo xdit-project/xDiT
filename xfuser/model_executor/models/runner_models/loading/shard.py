@@ -18,22 +18,13 @@ from xfuser.core.utils.checkpoint_io import host_mem_gb
 from xfuser.core.utils.runner_utils import (
     log,
     quantize_linear_layers_to_int8,
-    quantize_linear_layers_to_fp8,
-    quantize_linear_layers_to_fp8_blockscale,
     quantize_linear_layers_to_fp4,
     quantize_linear_layers_to_nvfp4,
-    _use_aiter_fp8_rdna4,
 )
 
 
 def shard_pipeline_components(model) -> None:
     """Shard every component the run's fsdp_strategy names, and move the rest to the local device."""
-    if model.config.use_fp8_gemms and _is_cuda():
-        from xfuser.core.utils.runner_utils import _TORCHAO_FLOAT8_FSDP2_PATCHES
-        assert _TORCHAO_FLOAT8_FSDP2_PATCHES, (
-            "FSDP2 + FP8 requires torchao Float8Tensor patches but they failed to apply at "
-            "import time. Check for torchao import errors in runner_utils."
-        )
     loader = model._loader
     local_rank = get_world_group().local_rank
     fs_local_rank = get_fs_group().local_rank
@@ -193,10 +184,12 @@ def build_block_quantize_fn(model, component_name: str, wrap_attrs: list, local_
                     device=device,
                 )
         elif use_fp8_here:
-            if _use_aiter_fp8_rdna4():
-                quantize_linear_layers_to_fp8_blockscale(block, device=device)
-            else:
-                quantize_linear_layers_to_fp8(block, device=device)
+            adapter = model.blockwise_fp8_backend
+            if adapter is None:
+                raise RuntimeError(
+                    "FP8 block conversion requested without a selected backend"
+                )
+            adapter.convert_block(block, device=device)
         else:
             # use_int8_here
             quantize_linear_layers_to_int8(block, device=device, min_layer_size=512)

@@ -284,12 +284,39 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
 
 
 _TORCHAO_FLOAT8_FSDP2_PATCHES: list[str] = []
+_REQUIRED_TORCHAO_FLOAT8_FSDP2_PATCHES = frozenset(
+    {
+        "aten.split.Tensor",
+        "aten.new_empty.default",
+        "aten.new_zeros.default",
+        "aten.copy_.default",
+        "aten.view.default",
+        "aten.as_strided.default",
+        "__torch_dispatch__ fallthrough",
+        "fsdp_pre_all_gather",
+        "fsdp_post_all_gather",
+    }
+)
 
 try:
     _TORCHAO_FLOAT8_FSDP2_PATCHES = _patch_torchao_float8_fsdp2()
     logger.debug("torchao Float8Tensor FSDP2 patches applied: %s", _TORCHAO_FLOAT8_FSDP2_PATCHES)
 except Exception as e:
     logger.debug("torchao Float8Tensor FSDP2 patches skipped (%s): %s", type(e).__name__, e)
+
+
+def torchao_float8_fsdp2_patches_available() -> tuple[bool, str | None]:
+    """Report whether every tensor-subclass patch required by FSDP2 applied."""
+
+    missing = _REQUIRED_TORCHAO_FLOAT8_FSDP2_PATCHES.difference(
+        _TORCHAO_FLOAT8_FSDP2_PATCHES
+    )
+    if missing:
+        return (
+            False,
+            "missing TorchAO FSDP patches: " + ", ".join(sorted(missing)),
+        )
+    return True, None
 
 
 def quantize_linear_layers_to_int8(

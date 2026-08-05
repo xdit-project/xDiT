@@ -66,6 +66,10 @@ def test_hardware_and_package_probes_are_injectable(modules):
         torchao_accelerator_probe=lambda: calls.append("accelerator") or True,
         torchao_probe=lambda: calls.append("torchao") or True,
         torchao_diffusers_probe=lambda: calls.append("diffusers") or False,
+        torchao_text_encoder_probe=lambda: calls.append("text_encoder") or (
+            False,
+            "Transformers TorchAO unavailable",
+        ),
         torchao_fsdp_probe=lambda: calls.append("fsdp") or True,
     )
 
@@ -74,14 +78,44 @@ def test_hardware_and_package_probes_are_injectable(modules):
         "accelerator",
         "torchao",
         "diffusers",
+        "text_encoder",
         "fsdp",
     ]
     assert capabilities == b.Fp8BackendCapabilities(
         aiter_block_scale=False,
         torchao_fp8=True,
         torchao_diffusers_streaming=False,
+        torchao_text_encoder_streaming=False,
         torchao_fsdp_patches=True,
+        aiter_transformers_reason="AITER FP8 backend is unavailable",
+        torchao_text_encoder_reason="Transformers TorchAO unavailable",
     )
+
+
+def test_text_encoder_probe_does_not_require_diffusers_transformer_quantizer(
+    modules, monkeypatch
+):
+    b = modules.backends
+    monkeypatch.setattr(
+        b,
+        "_probe_torchao_diffusers_streaming",
+        lambda: pytest.fail(
+            "text-encoder routing must probe PipelineQuantizationConfig directly"
+        ),
+    )
+    monkeypatch.setattr(
+        b, "_probe_torchao_fp8_conversion_api", lambda: (True, None)
+    )
+
+    def missing_transformers(name):
+        raise ImportError(f"isolated missing API: {name}")
+
+    monkeypatch.setattr(b, "import_module", missing_transformers)
+
+    available, reason = b._probe_torchao_text_encoder_streaming()
+
+    assert not available
+    assert "isolated missing API" in reason
 
 
 def test_supported_rocm_runs_torchao_api_preflight(modules):

@@ -50,6 +50,89 @@ def test_tensor_layout_preserves_order_kind_and_duplicate_names(runtime):
     )
 
 
+def test_tensor_layout_contract_captures_specs_ties_and_persistence(runtime):
+    torch = runtime.torch
+    module = torch.nn.Module()
+    shared = torch.nn.Parameter(torch.ones(2, dtype=torch.float16))
+    module.left = torch.nn.Module()
+    module.right = torch.nn.Module()
+    module.left.register_parameter("weight", shared)
+    module.right.register_parameter("weight", shared)
+    module.register_buffer(
+        "saved", torch.ones(3, dtype=torch.float32), persistent=True
+    )
+    module.register_buffer(
+        "cache", torch.ones(4, dtype=torch.float64), persistent=False
+    )
+
+    assert runtime.meta._tensor_layout_contract(module) == (
+        (
+            "parameter",
+            "left.weight",
+            (2,),
+            torch.float16,
+            "left.weight",
+            None,
+        ),
+        (
+            "parameter",
+            "right.weight",
+            (2,),
+            torch.float16,
+            "left.weight",
+            None,
+        ),
+        (
+            "buffer",
+            "saved",
+            (3,),
+            torch.float32,
+            "saved",
+            True,
+        ),
+        (
+            "buffer",
+            "cache",
+            (4,),
+            torch.float64,
+            "cache",
+            False,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "field,local",
+    [
+        ("shape", (("parameter", "weight", (3,), "bf16", "weight", None),)),
+        ("dtype", (("parameter", "weight", (2,), "fp32", "weight", None),)),
+        ("tie", (("parameter", "weight", (2,), "bf16", "other", None),)),
+        (
+            "persistence",
+            (("buffer", "cache", (2,), "bf16", "cache", False),),
+        ),
+    ],
+)
+def test_layout_contract_rejects_tensor_metadata_before_data_collective(
+    runtime, field, local
+):
+    reference = (
+        ("parameter", "weight", (2,), "bf16", "weight", None),
+    )
+    if field == "persistence":
+        reference = (
+            ("buffer", "cache", (2,), "bf16", "cache", True),
+        )
+    group = FakeGroup(reference)
+
+    with pytest.raises(RuntimeError, match="layout mismatch"):
+        runtime.meta._collective_assert_same_layout(
+            local, group, device="cpu"
+        )
+
+    assert group.calls == ["broadcast_object_list", "all_reduce"]
+
+
 def test_layout_validation_rejects_same_count_in_different_order_collectively(runtime):
     reference = (("parameter", "a"), ("buffer", "b"))
     local = (("buffer", "b"), ("parameter", "a"))
@@ -95,6 +178,160 @@ def test_disk_broadcast_reconciles_peer_shape_and_dtype_before_data(runtime):
 
     assert tuple(module.weight.shape) == (3,)
     assert module.weight.dtype == torch.float16
+
+
+def test_replicated_te_reconciles_specs_before_exact_layout_validation(runtime):
+    torch = runtime.torch
+    component = torch.nn.Module()
+    component.register_parameter(
+        "weight", torch.nn.Parameter(torch.empty(2, dtype=torch.float16))
+    )
+    source_contract = (
+        (
+            "parameter",
+            "weight",
+            (3,),
+            torch.float32,
+            "weight",
+            None,
+        ),
+    )
+
+    class Group:
+        rank_in_group = 1
+        world_size = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def broadcast_object_list(self, box, src=0):
+            if not self.calls:
+                self.calls.append("spec")
+                box[0] = source_contract
+            elif len(self.calls) < 3:
+                self.calls.append(f"reconcile-{src}")
+                box[0] = None
+            elif len(self.calls) < 5:
+                self.calls.append(f"materialize-{src}")
+                box[0] = None
+            else:
+                self.calls.append("layout")
+                box[0] = source_contract
+
+        def all_reduce(self, tensor):
+            self.calls.append("validate")
+            tensor.zero_()
+            return tensor
+
+        def broadcast(self, tensor, src=0):
+            self.calls.append("data")
+            tensor.fill_(7)
+
+    def set_tensor(module, name, device, *, value, dtype=None):
+        module._parameters[name] = torch.nn.Parameter(
+            value.to(dtype=dtype or value.dtype),
+            requires_grad=False,
+        )
+
+    group = Group()
+    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader._fill_te_replicated(
+        component,
+        "cpu",
+        group,
+        set_tensor,
+    )
+
+    assert tuple(component.weight.shape) == (3,)
+    assert component.weight.dtype == torch.float32
+    assert component.weight.tolist() == [7, 7, 7]
+    assert group.calls == [
+        "spec",
+        "reconcile-0",
+        "reconcile-1",
+        "materialize-0",
+        "materialize-1",
+        "layout",
+        "validate",
+        "validate",
+        "data",
+    ]
+
+
+def test_replicated_te_rebuilds_peer_aliases_from_tied_source_contract(runtime):
+    torch = runtime.torch
+    component = torch.nn.Module()
+    component.left = torch.nn.Module()
+    component.right = torch.nn.Module()
+    component.left.register_parameter(
+        "weight",
+        torch.nn.Parameter(torch.empty(2, dtype=torch.float16, device="meta")),
+    )
+    component.right.register_parameter(
+        "weight",
+        torch.nn.Parameter(torch.empty(2, dtype=torch.float16, device="meta")),
+    )
+    source_contract = (
+        (
+            "parameter",
+            "left.weight",
+            (3,),
+            torch.float32,
+            "left.weight",
+            None,
+        ),
+        (
+            "parameter",
+            "right.weight",
+            (3,),
+            torch.float32,
+            "left.weight",
+            None,
+        ),
+    )
+
+    class Group:
+        rank_in_group = 1
+        world_size = 2
+
+        def __init__(self):
+            self.object_calls = 0
+            self.data_broadcasts = 0
+
+        def broadcast_object_list(self, box, src=0):
+            self.object_calls += 1
+            if self.object_calls == 1:
+                box[0] = source_contract
+            elif self.object_calls in (2, 3, 4, 5):
+                box[0] = None
+            else:
+                box[0] = source_contract
+
+        @staticmethod
+        def all_reduce(tensor):
+            return tensor
+
+        def broadcast(self, tensor, src=0):
+            self.data_broadcasts += 1
+            tensor.fill_(11)
+
+    def set_tensor(module, name, device, *, value, dtype=None):
+        parent_name, _, local_name = name.rpartition(".")
+        owner = module.get_submodule(parent_name)
+        owner._parameters[local_name] = torch.nn.Parameter(
+            value.to(dtype=dtype or value.dtype),
+            requires_grad=False,
+        )
+
+    group = Group()
+    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader._fill_te_replicated(component, "cpu", group, set_tensor)
+
+    assert component.left.weight is component.right.weight
+    assert tuple(component.left.weight.shape) == (3,)
+    assert component.left.weight.dtype == torch.float32
+    assert component.left.weight.tolist() == [11, 11, 11]
+    assert group.data_broadcasts == 2
 
 
 @pytest.mark.parametrize("rank", [0, 1])
@@ -225,6 +462,7 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
     block.register_parameter("weight", torch.nn.Parameter(torch.ones(1)))
     object_broadcasts = 0
     tensor_broadcasts = []
+    layout_contract = runtime.meta._tensor_layout_contract(block)
 
     class Group:
         rank_in_group = rank
@@ -235,7 +473,7 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
             nonlocal object_broadcasts
             object_broadcasts += 1
             if object_broadcasts == 1:
-                box[0] = (("parameter", "weight"),)
+                box[0] = layout_contract
             elif object_broadcasts == 2:
                 box[0] = []
             else:

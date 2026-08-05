@@ -1,9 +1,8 @@
 """Loader configs for the AITER block-scale FP8 path, which quantizes weights as they load.
 
-AITER is the only FP8 backend here with a quantize-on-load hook, so it is the only one that can keep
-a full bf16 copy from ever materializing. Every other backend (torchao FP8, FP4) quantizes after the
-weights are already on the GPU, which is why these configs have no equivalent elsewhere and why the
-callers treat "no config" as "load normally, quantize later".
+TorchAO has a separate native loader adapter when its Diffusers/Transformers APIs are available.
+These configs only express AITER's transformer and text-encoder streaming formats; callers treat
+"no config" as "load normally, quantize later" only on placements that support that fallback.
 
 The runner side decides *whether* to quantize and *what* (see runner_models.loading.fp8_plan); this module
 only knows how to express that decision to diffusers and transformers. It is imported lazily from
@@ -14,7 +13,6 @@ from typing import List, Optional
 
 from xfuser.model_executor.quant.aiter_fp8_quantizer import (
     AiterFp8BlockScaleConfig,
-    AiterFp8BlockScaleTEConfig,
 )
 
 
@@ -57,10 +55,17 @@ def te_pipeline_config(entries: List[str]):
         component_targets.setdefault(component, []).append(rest)
     if not component_targets:
         return None
-    from diffusers.quantizers import PipelineQuantizationConfig
-    return PipelineQuantizationConfig(
-        quant_mapping={
-            component: AiterFp8BlockScaleTEConfig(target_modules=targets)
+    from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (
+        TextEncoderFrameworkAdapter,
+    )
+
+    framework = TextEncoderFrameworkAdapter()
+    return framework.pipeline_quantization_config(
+        {
+            component: framework.component_quantization_config(
+                backend="aiter",
+                targets=targets,
+            )
             for component, targets in component_targets.items()
-        },
+        }
     )

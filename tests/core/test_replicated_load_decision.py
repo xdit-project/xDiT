@@ -852,3 +852,189 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
 
     assert result == "loaded"
     assert calls[0]["quantization_config"] is sentinel
+
+
+def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    logs = []
+    sentinel = SimpleNamespace(quant_mapping={})
+    runner = SimpleNamespace(
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: False,
+        fp8_backend=SimpleNamespace(),
+        fp8=SimpleNamespace(
+            targets_for=lambda name: {
+                "text_encoder": ["encoder.block"],
+                "text_encoder_2": ["model.layers"],
+            }[name]
+        ),
+        settings=SimpleNamespace(
+            fp8_text_encoder_module_list=[
+                "text_encoder.encoder.block",
+                "text_encoder_2.model.layers",
+            ]
+        ),
+        _loader=SimpleNamespace(
+            build_meta_component=lambda name, fp8=False: (name, fp8)
+        ),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_components=set(),
+    )
+    prepared = {
+        name: SimpleNamespace(
+            descriptor=SimpleNamespace(
+                materialization_mode="streaming",
+                log_message=lambda name=name: f"{name} descriptor",
+            ),
+            quantization_config=f"{name}-config",
+        )
+        for name in ("text_encoder", "text_encoder_2")
+    }
+    calls = []
+
+    def prepare(
+        adapter,
+        *,
+        component_name,
+        targets,
+        model_factory,
+        stream_quant,
+        supports_post_load,
+    ):
+        calls.append(
+            (
+                component_name,
+                tuple(targets),
+                model_factory(),
+                stream_quant,
+                supports_post_load,
+            )
+        )
+        return prepared[component_name]
+
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        prepare,
+    )
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.text_encoder_adapter.TextEncoderFrameworkAdapter.pipeline_quantization_config",
+        lambda self, mapping, existing=None: (
+            setattr(sentinel, "quant_mapping", dict(mapping)) or sentinel
+        ),
+    )
+    monkeypatch.setattr(base_model, "log", logs.append)
+
+    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+
+    assert kwargs == {}
+    assert calls == [
+        (
+            "text_encoder",
+            ("encoder.block",),
+            ("text_encoder", False),
+            True,
+            True,
+        ),
+        (
+            "text_encoder_2",
+            ("model.layers",),
+            ("text_encoder_2", False),
+            True,
+            True,
+        ),
+    ]
+    assert config is sentinel
+    assert config.quant_mapping == {
+        "text_encoder": "text_encoder-config",
+        "text_encoder_2": "text_encoder_2-config",
+    }
+    assert logs == [
+        "text_encoder descriptor",
+        "text_encoder_2 descriptor",
+    ]
+    assert runner._fp8_streaming_components == {
+        "text_encoder",
+        "text_encoder_2",
+    }
+
+
+def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
+    monkeypatch,
+):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    runner = SimpleNamespace(
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: True,
+        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="torchao")),
+        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            fp8_text_encoder_module_list=["text_encoder.encoder.block"]
+        ),
+        _loader=SimpleNamespace(
+            meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
+            build_meta_component=lambda name, fp8=False: object(),
+        ),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_components=set(),
+    )
+    observed = []
+
+    def prepare(adapter, **kwargs):
+        observed.append(
+            (kwargs["stream_quant"], kwargs["supports_post_load"])
+        )
+        return SimpleNamespace(
+            descriptor=SimpleNamespace(
+                materialization_mode="post_load",
+                log_message=lambda: "post-load",
+            ),
+            quantization_config=None,
+        )
+
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        prepare,
+    )
+    monkeypatch.setattr(base_model, "log", lambda message: None)
+
+    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+
+    assert (kwargs, config) == ({"text_encoder": "meta"}, None)
+    assert observed == [(False, False)]
+    assert runner._fp8_streaming_components == set()
+
+
+def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    runner = SimpleNamespace(
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: True,
+        fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),
+        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            fp8_text_encoder_module_list=["text_encoder.encoder.block"]
+        ),
+        _loader=SimpleNamespace(
+            build_meta_component=lambda name, fp8=False: object(),
+        ),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_components=set(),
+    )
+
+    def prepare(adapter, **kwargs):
+        if not kwargs["supports_post_load"]:
+            raise RuntimeError(
+                "text_encoder FP8 cannot fall back before allocation"
+            )
+        pytest.fail("memory-efficient FSDP incorrectly allowed post-load")
+
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
+        prepare,
+    )
+
+    with pytest.raises(RuntimeError, match="before allocation"):
+        base_model.xFuserModel._meta_te_kwargs(runner)

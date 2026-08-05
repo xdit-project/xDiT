@@ -603,7 +603,7 @@ class xFuserModel(abc.ABC):
             **(init_kwargs or {}),
         )
 
-    def _meta_te_kwargs(self):
+    def _meta_te_kwargs(self, existing_quantization_config=None):
         """Build text-encoder(s) on meta for the memory-efficient FSDP load path.
 
         Returns (pipe_component_kwargs, te_quant_config). On the meta path the kwargs carry meta
@@ -616,13 +616,76 @@ class xFuserModel(abc.ABC):
         The normal-path config is built last, and only if it is reached: constructing it registers
         the transformers quantizer process-globally, which the meta paths have no use for.
         """
-        if self._replicated_broadcast_load():
-            return self._loader.meta_te_kwargs_replicated()
-        if self._memory_efficient_fsdp_load():
+        replicated_meta = self._replicated_broadcast_load()
+        fsdp_meta = (
+            False if replicated_meta else self._memory_efficient_fsdp_load()
+        )
+        adapter = self.fp8_backend
+        component_configs = {}
+        entries = self.settings.fp8_text_encoder_module_list or ()
+        component_names = tuple(
+            dict.fromkeys(
+                entry.partition(".")[0]
+                for entry in entries
+                if "." in entry
+            )
+        )
+        if adapter is not None:
+            from .loading.fp8_backends import (
+                prepare_text_encoder_fp8_load,
+            )
+
+            for component_name in component_names:
+                targets = tuple(self.fp8.targets_for(component_name))
+                if not targets:
+                    continue
+                # Existing meta layouts only mirror AITER's plain fp8+scale
+                # representation. Replicated TorchAO falls back after broadcast;
+                # memory-efficient FSDP rejects that layout-changing fallback.
+                stream_quant = not (replicated_meta or fsdp_meta) or (
+                    adapter.backend.value == "aiter"
+                )
+                prepared = prepare_text_encoder_fp8_load(
+                    adapter,
+                    component_name=component_name,
+                    targets=targets,
+                    stream_quant=stream_quant,
+                    supports_post_load=not fsdp_meta,
+                    model_factory=lambda name=component_name: (
+                        self._loader.build_meta_component(name, fp8=False)
+                    ),
+                )
+                log(prepared.descriptor.log_message())
+                self._fp8_descriptor_components.add(component_name)
+                if prepared.descriptor.materialization_mode == "streaming":
+                    self._fp8_streaming_components.add(component_name)
+                if prepared.quantization_config is not None:
+                    component_configs[component_name] = (
+                        prepared.quantization_config
+                    )
+        self._text_encoder_quantization_configs = dict(component_configs)
+
+        pipeline_config = existing_quantization_config
+        if component_configs:
+            from .loading.text_encoder_adapter import (
+                TextEncoderFrameworkAdapter,
+            )
+
+            pipeline_config = (
+                TextEncoderFrameworkAdapter()
+                .pipeline_quantization_config(
+                    component_configs,
+                    existing=existing_quantization_config,
+                )
+            )
+
+        if replicated_meta:
+            return self._loader.meta_te_kwargs_replicated(pipeline_config)
+        if fsdp_meta:
             meta_kwargs = self._loader.meta_te_kwargs()
             if meta_kwargs is not None:
                 return meta_kwargs
-        return {}, self.fp8.aiter_te_pipeline_config()
+        return {}, pipeline_config
 
     def _enable_options(self) -> None:
         """ Enable model options based on config"""

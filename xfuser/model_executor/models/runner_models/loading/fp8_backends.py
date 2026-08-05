@@ -17,11 +17,15 @@ class Fp8BackendCapabilities:
     """Runtime support discovered before transformer allocation."""
 
     aiter_block_scale: bool = False
+    aiter_transformers_streaming: bool = False
     torchao_fp8: bool = False
     torchao_diffusers_streaming: bool = False
+    torchao_text_encoder_streaming: bool = False
     torchao_fsdp_patches: bool = False
+    aiter_transformers_reason: str | None = None
     torchao_fp8_reason: str | None = None
     torchao_diffusers_reason: str | None = None
+    torchao_text_encoder_reason: str | None = None
     torchao_fsdp_reason: str | None = None
 
 
@@ -120,6 +124,68 @@ def _probe_torchao_diffusers_streaming() -> tuple[bool, str | None]:
         )
 
 
+def _probe_torchao_text_encoder_streaming() -> tuple[bool, str | None]:
+    """Probe granular Diffusers routing to Transformers TorchAO loading."""
+
+    conversion_available, conversion_reason = (
+        _probe_torchao_fp8_conversion_api()
+    )
+    if not conversion_available:
+        return False, conversion_reason
+    try:
+        diffusers_quantizers = import_module("diffusers.quantizers")
+        transformers = import_module("transformers")
+        quantizer_module = import_module(
+            "transformers.quantizers.quantizer_torchao"
+        )
+        from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (
+            TextEncoderFrameworkAdapter,
+        )
+
+        quantizer_cls = getattr(quantizer_module, "TorchAoHfQuantizer")
+        pipeline_cls = getattr(
+            diffusers_quantizers, "PipelineQuantizationConfig"
+        )
+        config = TextEncoderFrameworkAdapter().component_quantization_config(
+            backend="torchao",
+            targets=("probe",),
+            exclusions=("probe",),
+        )
+        pipeline_config = pipeline_cls(
+            quant_mapping={"text_encoder": config}
+        )
+        available = bool(
+            getattr(transformers, "TorchAoConfig", None)
+            and config is not None
+            and pipeline_config is not None
+            and callable(
+                getattr(quantizer_cls, "create_quantized_param", None)
+            )
+            and callable(
+                getattr(quantizer_cls, "check_if_quantized_param", None)
+            )
+        )
+        return (
+            available,
+            None
+            if available
+            else "Transformers TorchAO quantize-on-load methods are unavailable",
+        )
+    except Exception as exc:
+        return (
+            False,
+            "TorchAO text-encoder framework API probe failed: "
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _probe_aiter_transformers_streaming() -> tuple[bool, str | None]:
+    from .text_encoder_adapter import probe_transformers_streaming_loader
+
+    support = probe_transformers_streaming_loader()
+    return support.available, support.reason
+
+
 def _probe_torchao_fsdp_patches() -> tuple[bool, str | None]:
     """Validate xDiT's required TorchAO Float8Tensor FSDP2 patches."""
 
@@ -150,6 +216,8 @@ def probe_fp8_backend_capabilities(
     torchao_accelerator_probe: Callable[[], bool] | None = None,
     torchao_probe: Callable[[], _ProbeResult] | None = None,
     torchao_diffusers_probe: Callable[[], _ProbeResult] | None = None,
+    torchao_text_encoder_probe: Callable[[], _ProbeResult] | None = None,
+    aiter_transformers_probe: Callable[[], _ProbeResult] | None = None,
     torchao_fsdp_probe: Callable[[], _ProbeResult] | None = None,
 ) -> Fp8BackendCapabilities:
     """Keep hardware/package probing outside adapters and injectable in tests."""
@@ -166,9 +234,22 @@ def probe_fp8_backend_capabilities(
         torchao_probe = _probe_torchao_fp8_conversion_api
     if torchao_diffusers_probe is None:
         torchao_diffusers_probe = _probe_torchao_diffusers_streaming
+    if torchao_text_encoder_probe is None:
+        torchao_text_encoder_probe = _probe_torchao_text_encoder_streaming
+    if aiter_transformers_probe is None:
+        aiter_transformers_probe = _probe_aiter_transformers_streaming
     if torchao_fsdp_probe is None:
         torchao_fsdp_probe = _probe_torchao_fsdp_patches
     aiter_available = bool(aiter_probe())
+    if aiter_available:
+        aiter_te_available, aiter_te_reason = _probe_result(
+            aiter_transformers_probe()
+        )
+    else:
+        aiter_te_available, aiter_te_reason = (
+            False,
+            "AITER FP8 backend is unavailable",
+        )
     accelerator_available = bool(torchao_accelerator_probe())
     if accelerator_available:
         torchao_available, torchao_reason = _probe_result(torchao_probe())
@@ -179,17 +260,25 @@ def probe_fp8_backend_capabilities(
         native_available, native_reason = _probe_result(
             torchao_diffusers_probe()
         )
+        te_available, te_reason = _probe_result(
+            torchao_text_encoder_probe()
+        )
         fsdp_available, fsdp_reason = _probe_result(torchao_fsdp_probe())
     else:
         native_available, native_reason = False, torchao_reason
+        te_available, te_reason = False, torchao_reason
         fsdp_available, fsdp_reason = False, torchao_reason
     return Fp8BackendCapabilities(
         aiter_block_scale=aiter_available,
+        aiter_transformers_streaming=aiter_te_available,
         torchao_fp8=torchao_available,
         torchao_diffusers_streaming=native_available,
+        torchao_text_encoder_streaming=te_available,
         torchao_fsdp_patches=fsdp_available,
+        aiter_transformers_reason=aiter_te_reason,
         torchao_fp8_reason=torchao_reason,
         torchao_diffusers_reason=native_reason,
+        torchao_text_encoder_reason=te_reason,
         torchao_fsdp_reason=fsdp_reason,
     )
 
@@ -201,10 +290,11 @@ class TransformerFp8LoadDescriptor:
     storage_semantics: str
     materialization_mode: str
     fallback_reason: str | None = None
+    component_name: str = "transformer"
 
     def log_message(self) -> str:
         message = (
-            "Transformer quantization: "
+            f"{self.component_name} quantization: "
             f"requested={self.requested_format}, "
             f"backend={self.selected_backend}, "
             f"storage={self.storage_semantics}, "
@@ -266,6 +356,7 @@ class Fp8BackendAdapter:
 
     storage_semantics = ""
     converts_before_device_move = False
+    supports_text_encoder_post_load = True
 
     def __init__(
         self,
@@ -274,6 +365,8 @@ class Fp8BackendAdapter:
         format_,
         native_transformer_streaming: bool = False,
         native_unavailable_reason: str | None = None,
+        native_text_encoder_streaming: bool = False,
+        text_encoder_unavailable_reason: str | None = None,
     ) -> None:
         self.backend = backend
         self.format = format_
@@ -281,6 +374,12 @@ class Fp8BackendAdapter:
             native_transformer_streaming
         )
         self.native_unavailable_reason = native_unavailable_reason
+        self.uses_native_text_encoder_streaming = (
+            native_text_encoder_streaming
+        )
+        self.text_encoder_unavailable_reason = (
+            text_encoder_unavailable_reason
+        )
 
     def transformer_stream_config(self, targets, *, model_factory=None):
         return None
@@ -395,6 +494,12 @@ def select_fp8_backend(contract, *, capabilities: Fp8BackendCapabilities):
             backend=contract.selected_backend,
             format_=contract.requested_format,
             native_transformer_streaming=True,
+            native_text_encoder_streaming=(
+                capabilities.aiter_transformers_streaming
+            ),
+            text_encoder_unavailable_reason=(
+                capabilities.aiter_transformers_reason
+            ),
         )
     if backend_value == "torchao":
         if not capabilities.torchao_fp8:
@@ -412,6 +517,12 @@ def select_fp8_backend(contract, *, capabilities: Fp8BackendCapabilities):
             ),
             native_unavailable_reason=(
                 capabilities.torchao_diffusers_reason
+            ),
+            native_text_encoder_streaming=(
+                capabilities.torchao_text_encoder_streaming
+            ),
+            text_encoder_unavailable_reason=(
+                capabilities.torchao_text_encoder_reason
             ),
         )
     raise error(
@@ -476,6 +587,7 @@ def _descriptor(adapter, component_name, streaming, fallback=None):
         storage_semantics=adapter.storage_semantics,
         materialization_mode="streaming" if streaming else "post_load",
         fallback_reason=fallback,
+        component_name=component_name,
     )
 
 
@@ -512,6 +624,99 @@ def prepare_native_transformer_fp8_load(
     return PreparedTransformerFp8Load(
         descriptor=_descriptor(
             adapter, component_name, streaming=False, fallback=fallback
+        )
+    )
+
+
+def prepare_text_encoder_fp8_load(
+    adapter,
+    *,
+    component_name: str,
+    targets,
+    model_factory=None,
+    stream_quant: bool = True,
+    supports_post_load: bool | None = None,
+    framework_config_factory=None,
+) -> PreparedTransformerFp8Load:
+    """Plan one TE load, keeping framework construction behind its adapter."""
+
+    targets = tuple(targets)
+    if not targets:
+        fallback = f"{component_name} has no FP8 targets"
+    elif not stream_quant:
+        fallback = "streaming disabled by the runner"
+    elif not adapter.uses_native_text_encoder_streaming:
+        fallback = (
+            adapter.text_encoder_unavailable_reason
+            or "text-encoder framework quantize-on-load API is unavailable"
+        )
+    else:
+        try:
+            exclusions = ()
+            if adapter.backend.value == "torchao":
+                if model_factory is None:
+                    raise TargetMappingUnavailable(
+                        "target mapping unavailable: no text-encoder "
+                        "structure factory"
+                    )
+                try:
+                    model = model_factory()
+                except Exception as exc:
+                    raise TargetMappingUnavailable(
+                        "target mapping unavailable: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                exclusions = tuple(
+                    derive_untargeted_linear_exclusions(model, targets)
+                )
+            if framework_config_factory is None:
+                from .text_encoder_adapter import (
+                    TextEncoderFrameworkAdapter,
+                )
+
+                framework = TextEncoderFrameworkAdapter()
+                framework_config_factory = (
+                    lambda backend, targets, exclusions: (
+                        framework.component_quantization_config(
+                            backend=backend,
+                            targets=targets,
+                            exclusions=exclusions,
+                        )
+                    )
+                )
+            config = framework_config_factory(
+                adapter.backend.value,
+                targets,
+                exclusions,
+            )
+        except TargetMappingUnavailable as exc:
+            fallback = str(exc)
+        except Exception as exc:
+            fallback = (
+                "text-encoder framework config unavailable: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            return PreparedTransformerFp8Load(
+                descriptor=_descriptor(
+                    adapter, component_name, streaming=True
+                ),
+                quantization_config=config,
+            )
+
+    if supports_post_load is None:
+        supports_post_load = adapter.supports_text_encoder_post_load
+    if targets and not supports_post_load:
+        raise RuntimeError(
+            f"{component_name} FP8 cannot fall back before allocation: "
+            f"{fallback}"
+        )
+    return PreparedTransformerFp8Load(
+        descriptor=_descriptor(
+            adapter,
+            component_name,
+            streaming=False,
+            fallback=fallback,
         )
     )
 

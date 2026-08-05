@@ -229,6 +229,197 @@ def _te_source_error_worker(rank, world_size, init_method, result_queue):
             dist.destroy_process_group()
 
 
+def _run_replicated_te_validation_worker(
+    rank, world_size, init_method, result_queue, *, scenario
+):
+    dist = None
+    try:
+        import torch
+        import torch.distributed as dist
+
+        dist.init_process_group(
+            backend="gloo",
+            init_method=init_method,
+            rank=rank,
+            world_size=world_size,
+        )
+        from xfuser.model_executor.models.runner_models.loading import meta_load
+
+        class Group:
+            def __init__(self):
+                self.rank_in_group = rank
+                self.world_size = world_size
+
+            @staticmethod
+            def broadcast_object_list(box, src=0):
+                dist.broadcast_object_list(box, src=src)
+
+            @staticmethod
+            def all_reduce(tensor):
+                dist.all_reduce(tensor)
+                return tensor
+
+            @staticmethod
+            def broadcast(tensor, src=0):
+                dist.broadcast(tensor, src=src)
+
+        component = torch.nn.Module()
+        if scenario == "persistence_mismatch":
+            component.register_buffer(
+                "cache",
+                torch.ones(2),
+                persistent=rank == 0,
+            )
+        elif scenario == "spec_reconcile" and rank == 0:
+            component.register_parameter(
+                "weight",
+                torch.nn.Parameter(
+                    torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+                ),
+            )
+        elif scenario == "spec_reconcile":
+            component.register_parameter(
+                "weight",
+                torch.nn.Parameter(
+                    torch.empty(2, dtype=torch.float16, device="meta")
+                ),
+            )
+        else:
+            component.left = torch.nn.Module()
+            component.right = torch.nn.Module()
+            if rank == 0:
+                left = torch.nn.Parameter(
+                    torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+                )
+                right = (
+                    left
+                    if scenario == "source_tied"
+                    else torch.nn.Parameter(
+                        torch.tensor(
+                            [4.0, 5.0, 6.0], dtype=torch.float32
+                        )
+                    )
+                )
+            else:
+                left = torch.nn.Parameter(
+                    torch.empty(2, dtype=torch.float16, device="meta")
+                )
+                right = (
+                    left
+                    if scenario == "peer_tied"
+                    else torch.nn.Parameter(
+                        torch.empty(
+                            2, dtype=torch.float16, device="meta"
+                        )
+                    )
+                )
+            component.left.register_parameter("weight", left)
+            component.right.register_parameter("weight", right)
+
+        def set_tensor(module, name, device, *, value, dtype=None):
+            parent_name, _, local_name = name.rpartition(".")
+            owner = (
+                module.get_submodule(parent_name)
+                if parent_name
+                else module
+            )
+            value = value.to(device=device, dtype=dtype or value.dtype)
+            if local_name in owner._parameters:
+                owner._parameters[local_name] = torch.nn.Parameter(
+                    value,
+                    requires_grad=False,
+                )
+            else:
+                owner._buffers[local_name] = value
+
+        loader = object.__new__(meta_load.MemoryEfficientLoader)
+        try:
+            loader._fill_te_replicated(
+                component,
+                "cpu",
+                Group(),
+                set_tensor,
+            )
+        except RuntimeError as error:
+            result_queue.put(("raised", rank, str(error)))
+        else:
+            if scenario == "spec_reconcile":
+                result_queue.put(
+                    (
+                        "returned",
+                        rank,
+                        tuple(component.weight.shape),
+                        component.weight.dtype == torch.float32,
+                        component.weight.tolist(),
+                    )
+                )
+            elif scenario in {"source_tied", "peer_tied"}:
+                result_queue.put(
+                    (
+                        "returned",
+                        rank,
+                        component.left.weight is component.right.weight,
+                        component.left.weight.tolist(),
+                        component.right.weight.tolist(),
+                    )
+                )
+            else:
+                result_queue.put(
+                    ("returned", rank, "persistence mismatch was accepted")
+                )
+    except BaseException:
+        result_queue.put(("error", rank, traceback.format_exc()))
+    finally:
+        if dist is not None and dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _replicated_te_reconcile_worker(rank, world_size, init_method, result_queue):
+    _run_replicated_te_validation_worker(
+        rank,
+        world_size,
+        init_method,
+        result_queue,
+        scenario="spec_reconcile",
+    )
+
+
+def _replicated_te_persistence_worker(
+    rank, world_size, init_method, result_queue
+):
+    _run_replicated_te_validation_worker(
+        rank,
+        world_size,
+        init_method,
+        result_queue,
+        scenario="persistence_mismatch",
+    )
+
+
+def _replicated_te_source_tied_worker(
+    rank, world_size, init_method, result_queue
+):
+    _run_replicated_te_validation_worker(
+        rank,
+        world_size,
+        init_method,
+        result_queue,
+        scenario="source_tied",
+    )
+
+
+def _replicated_te_peer_tied_worker(
+    rank, world_size, init_method, result_queue
+):
+    _run_replicated_te_validation_worker(
+        rank,
+        world_size,
+        init_method,
+        result_queue,
+        scenario="peer_tied",
+    )
+
+
 def _mxfp4_fsdp2_worker(rank, world_size, init_method, result_queue):
     dist = None
     try:
@@ -445,6 +636,86 @@ def test_two_rank_text_encoder_source_error_exits_before_scatter(tmp_path):
         ("raised", 1),
     ], results
     assert all("OSError: text encoder state dict failed" in result[2] for result in results)
+
+
+def test_two_rank_replicated_te_reconciles_specs_without_hanging(tmp_path):
+    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
+    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+
+    processes, hung, results = _run_spawned(
+        torch,
+        _replicated_te_reconcile_worker,
+        f"file://{tmp_path / 'te-reconcile-init'}",
+        timeout=20,
+    )
+
+    assert not hung, f"text-encoder reconciliation hung worker pids: {hung}"
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert len(results) == 2
+    assert all(result[0] == "returned" for result in results), results
+    assert all(result[2:] == ((3,), True, [1.0, 2.0, 3.0]) for result in results)
+
+
+@pytest.mark.parametrize(
+    ("worker", "expected_tied", "expected_right", "init_name"),
+    [
+        (
+            _replicated_te_source_tied_worker,
+            True,
+            [1.0, 2.0, 3.0],
+            "te-source-tied-init",
+        ),
+        (
+            _replicated_te_peer_tied_worker,
+            False,
+            [4.0, 5.0, 6.0],
+            "te-peer-tied-init",
+        ),
+    ],
+)
+def test_two_rank_replicated_te_matches_source_aliases_without_hanging(
+    tmp_path, worker, expected_tied, expected_right, init_name
+):
+    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
+    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+
+    processes, hung, results = _run_spawned(
+        torch,
+        worker,
+        f"file://{tmp_path / init_name}",
+        timeout=20,
+    )
+
+    assert not hung, f"text-encoder alias reconciliation hung worker pids: {hung}"
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert len(results) == 2
+    assert all(result[0] == "returned" for result in results), results
+    assert all(result[2] is expected_tied for result in results)
+    assert all(result[3] == [1.0, 2.0, 3.0] for result in results)
+    assert all(result[4] == expected_right for result in results)
+
+
+def test_two_rank_replicated_te_layout_failure_is_collective(tmp_path):
+    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
+    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+        pytest.skip("torch.distributed gloo backend is unavailable")
+
+    processes, hung, results = _run_spawned(
+        torch,
+        _replicated_te_persistence_worker,
+        f"file://{tmp_path / 'te-persistence-init'}",
+        timeout=20,
+    )
+
+    assert not hung, f"text-encoder layout failure hung worker pids: {hung}"
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert sorted(result[:2] for result in results) == [
+        ("raised", 0),
+        ("raised", 1),
+    ], results
+    assert all("ordered parameter/buffer layout mismatch" in result[2] for result in results)
 
 
 def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):

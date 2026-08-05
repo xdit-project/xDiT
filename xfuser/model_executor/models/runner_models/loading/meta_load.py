@@ -73,9 +73,56 @@ def _tensor_layout(module) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _collective_assert_same_layout(local_layout, group, device) -> None:
+def _tensor_layout_contract(module) -> tuple[tuple, ...]:
+    """Ordered collective contract including tensor and alias metadata."""
+
+    canonical: dict[int, str] = {}
+    entries = []
+    for kind, named in (
+        (
+            "parameter",
+            module.named_parameters(recurse=True, remove_duplicate=False),
+        ),
+        (
+            "buffer",
+            module.named_buffers(recurse=True, remove_duplicate=False),
+        ),
+    ):
+        for name, tensor in named:
+            alias = canonical.setdefault(id(tensor), name)
+            persistent = None
+            if kind == "buffer":
+                parent_name, _, local_name = name.rpartition(".")
+                owner = (
+                    module.get_submodule(parent_name)
+                    if parent_name
+                    else module
+                )
+                persistent = (
+                    local_name not in owner._non_persistent_buffers_set
+                )
+            entries.append(
+                (
+                    kind,
+                    name,
+                    tuple(tensor.shape),
+                    tensor.dtype,
+                    alias,
+                    persistent,
+                )
+            )
+    return tuple(entries)
+
+
+def _collective_assert_same_layout(
+    local_layout, group, device, reference_layout=None
+) -> None:
     """Collectively reject any ordered layout mismatch before data broadcasts begin."""
-    box = [local_layout if group.rank_in_group == 0 else None]
+    box = [
+        (reference_layout if reference_layout is not None else local_layout)
+        if group.rank_in_group == 0
+        else None
+    ]
     group.broadcast_object_list(box, src=0)
     reference = box[0]
     local_mismatch = int(local_layout != reference)
@@ -160,8 +207,6 @@ def _collective_build_call(group, operation, context):
 
 def _collective_reconcile_tensor_specs(module, names, group, device):
     """Make peer tensor storage match rank0 shape/dtype before positional data broadcasts."""
-    from diffusers.models.model_loading_utils import set_module_tensor_to_device
-
     spec = (
         [
             (name, tuple(rgetattr(module, name).shape), rgetattr(module, name).dtype)
@@ -177,15 +222,97 @@ def _collective_reconcile_tensor_specs(module, names, group, device):
             for name, shape, dtype in box[0]:
                 tensor = rgetattr(module, name)
                 if tuple(tensor.shape) != shape or tensor.dtype != dtype:
-                    set_module_tensor_to_device(
-                        module,
-                        name,
-                        device,
-                        value=torch.empty(shape, dtype=dtype, device=device),
-                        dtype=dtype,
+                    parent_name, _, local_name = name.rpartition(".")
+                    owner = (
+                        module.get_submodule(parent_name)
+                        if parent_name
+                        else module
                     )
+                    replacement = torch.empty(
+                        shape, dtype=dtype, device=device
+                    )
+                    if local_name in owner._parameters:
+                        owner._parameters[local_name] = torch.nn.Parameter(
+                            replacement,
+                            requires_grad=tensor.requires_grad,
+                        )
+                    elif local_name in owner._buffers:
+                        owner._buffers[local_name] = replacement
+                    else:
+                        raise RuntimeError(
+                            f"{name} is not a registered parameter or buffer"
+                        )
 
     _collective_build_call(group, reconcile, context="transformer tensor-spec reconciliation")
+
+
+def _collective_reconcile_replicated_tensor_specs(
+    module, group, device
+) -> tuple[tuple, ...]:
+    """Rebuild peer storage and aliases from rank0's authoritative contract."""
+
+    source_contract = (
+        _tensor_layout_contract(module)
+        if group.rank_in_group == 0
+        else None
+    )
+    box = [source_contract]
+    group.broadcast_object_list(box, src=0)
+    source_contract = box[0]
+
+    def reconcile():
+        if group.rank_in_group == 0:
+            return
+        local_contract = _tensor_layout_contract(module)
+        local_by_name = {entry[1]: entry for entry in local_contract}
+        source_alias_groups: dict[str, list[tuple]] = {}
+        for entry in source_contract:
+            source_alias_groups.setdefault(entry[4], []).append(entry)
+
+        for sources in source_alias_groups.values():
+            entries = [local_by_name.get(source[1]) for source in sources]
+            if any(entry is None for entry in entries):
+                continue
+            if any(
+                entry[0] != source[0]
+                for entry, source in zip(entries, sources)
+            ):
+                continue
+            desired = {(source[2], source[3]) for source in sources}
+            if len(desired) != 1:
+                continue
+
+            shape, dtype = desired.pop()
+            tensor = rgetattr(module, entries[0][1])
+            replacement = torch.empty(shape, dtype=dtype, device=device)
+            registered = (
+                torch.nn.Parameter(
+                    replacement,
+                    requires_grad=tensor.requires_grad,
+                )
+                if entries[0][0] == "parameter"
+                else replacement
+            )
+            for kind, name, *_ in entries:
+                parent_name, _, local_name = name.rpartition(".")
+                owner = (
+                    module.get_submodule(parent_name)
+                    if parent_name
+                    else module
+                )
+                registry = (
+                    owner._parameters
+                    if kind == "parameter"
+                    else owner._buffers
+                )
+                registry[local_name] = registered
+
+    _collective_build_call(
+        group,
+        reconcile,
+        context="replicated text-encoder tensor-spec reconciliation",
+    )
+    return source_contract
 
 
 def _persistent_named_buffers(module):
@@ -373,8 +500,8 @@ class MemoryEfficientLoader:
         diverges; ``agreed_is_meta`` catches that downstream and fails every rank.
         """
         from diffusers import DiffusionPipeline
-        import importlib
         from accelerate import init_empty_weights
+        from .text_encoder_adapter import resolve_transformers_component
 
         # Only resolving the component's class and config is guarded: that is where "this component
         # is not rebuildable here" shows up. Construction and the fp8 swap run outside, so a bug in
@@ -383,20 +510,14 @@ class MemoryEfficientLoader:
         try:
             request = self._checkpoint_request()
             model_name = request.model_name_or_path
-            index = DiffusionPipeline.load_config(
-                model_name, **request.config_kwargs(include_subfolder=False)
+            resolved = resolve_transformers_component(
+                DiffusionPipeline,
+                component_name,
+                request,
             )
-            entry = index.get(component_name)
-            if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            if resolved is None:
                 return None
-            library, class_name = entry
-            if library != "transformers":
-                return None
-            cls = getattr(importlib.import_module(library), class_name)
-            component_request = request.with_subfolder(component_name)
-            config = cls.config_class.from_pretrained(
-                model_name, **component_request.config_kwargs()
-            )
+            cls, config = resolved
         except (OSError, ImportError, AttributeError) as e:
             log(f"Meta-init of component '{component_name}' failed "
                 f"({type(e).__name__}: {e}); using normal load.")
@@ -407,7 +528,11 @@ class MemoryEfficientLoader:
         # _from_config defaults to fp32; align meta params to bf16 (dtype-only .to is legal on
         # meta) so their DTensor dtype matches the broadcast source.
         component = component.to(torch.bfloat16)
-        if fp8 and self.model.fp8.aiter_covers(component_name):
+        if (
+            fp8
+            and component_name
+            in getattr(self.model, "_fp8_streaming_components", ())
+        ):
             self._swap_meta_te_to_fp8(
                 component, self.model.fp8.targets_for(component_name)
             )
@@ -440,13 +565,12 @@ class MemoryEfficientLoader:
             get_world_group(), build, context="FSDP text-encoder meta construction"
         )
 
-    def meta_te_kwargs_replicated(self):
+    def meta_te_kwargs_replicated(self, te_quant_config=None):
         """Text-encoder kwargs for the replicated broadcast-load path (fits-in-GPU, multi-GPU).
 
-        rank0 loads TEs real via the pipeline's from_pretrained, fp8-streamed when targeted
-        (te_quant from the run's fp8 plan), so its host peak is one fp8 copy. Peers build meta
-        components with the MATCHING layout (build_meta_component fp8-swaps targeted linears), so the
-        later broadcast fills fp8 shards param-for-param with no re-quantize.
+        Rank 0 loads TEs real via the pipeline's from_pretrained, using native FP8 streaming when
+        available. Otherwise it loads bf16 and peers build the matching bf16 meta layout; the normal
+        post-load walk converts each replica after broadcast.
 
         A peer that cannot meta-build a component raises: the per-tensor broadcast walks
         named_parameters/buffers in lockstep, so a real bf16 fallback (no fp8 weight_scale buffers)
@@ -456,7 +580,7 @@ class MemoryEfficientLoader:
 
         def build():
             if _is_bcast_src(world):
-                return {}, self.model.fp8.aiter_te_pipeline_config()
+                return {}, te_quant_config
             te_components = [
                 name for name in self.model.settings.fsdp_strategy
                 if name != "transformer" and not name.startswith("transformer_")
@@ -487,9 +611,10 @@ class MemoryEfficientLoader:
         ~12 GB). No fully_shard: replicated keeps the full quantized block on every rank. Reuses the
         FSDP disk filler (_TransformerDiskFiller) and per-block quantize_fn (``shard`` module).
 
-        Text encoders: rank0 loaded them real (fp8-streamed when targeted) via the pipeline; peers
-        built matching-layout meta. Materialize peer meta to real-empty on device, then broadcast
-        every param/buffer from rank0. No re-quantize, since both sides already carry the fp8 layout.
+        Text encoders: rank0 loaded them real via the pipeline and peers built a matching-layout
+        meta component. Materialize peer meta to real-empty on device, then broadcast every
+        param/buffer from rank0. Native-streamed FP8 layouts need no later conversion; bf16 fallback
+        layouts are converted by the normal post-load walk.
         """
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
         world = get_world_group()
@@ -603,9 +728,10 @@ class MemoryEfficientLoader:
            at ulysses=4 where the SP chunk amplifies the corrupt rotary positions). Broadcast rank0's
            (shape, dtype) per name and reallocate any mismatched peer tensor before the data broadcast.
 
-        2. layout divergence. Compare the exact ordered parameter/buffer names collectively before
-           materializing or broadcasting anything. This catches same-count reorderings and aliases,
-           and makes every rank raise together instead of letting rank0 enter a later broadcast.
+        2. layout divergence. First reconcile peer placeholders to rank0's tensor specs, then compare
+           exact ordered names, kinds, aliases, persistence, and final shape/dtype collectively.
+           This permits legitimate real-vs-meta storage differences while making every rank reject
+           structural divergence before rank0 enters a data broadcast.
 
         Capture the name lists ONCE and drive the materialize pass off them (via rgetattr), mirroring
         _TransformerDiskFiller.finalize. Re-enumerating named_parameters() for the broadcast is unsafe:
@@ -613,47 +739,62 @@ class MemoryEfficientLoader:
         different (still-CPU) object than the one the materialize pass moved, and world.broadcast on a
         CPU tensor aborts the NCCL group.
 
-        remove_duplicate=False: T5-family TEs tie shared.weight to encoder.embed_tokens.weight. rank0
-        (from_pretrained) keeps the tie -> dedup yields one name; peers (_from_config on meta) build
-        them untied -> two names. Enumerating with duplicates makes both sides expose the SAME name
-        SET; each tied name then broadcasts rank0's shared tensor into the matching peer name, leaving
-        every peer alias holding rank0's value (effectively tied) instead of desyncing the collective.
+        remove_duplicate=False exposes every tied name. Materialization preserves each rank's alias
+        groups, and the final contract rejects any rank whose tie structure differs from rank0.
         """
+        source_contract = _collective_reconcile_replicated_tensor_specs(
+            component, world, device
+        )
         layout = _tensor_layout(component)
-        _collective_assert_same_layout(layout, world, device)
         param_names = [name for kind, name in layout if kind == "parameter"]
         buffer_names = [name for kind, name in layout if kind == "buffer"]
-        for name in param_names + buffer_names:
-            t = rgetattr(component, name)
-            if t.is_meta:
-                set_module_tensor_to_device(
-                    component, name, device,
-                    value=torch.empty(t.shape, dtype=t.dtype, device=device),
-                )
-            elif t.device.type != "cuda":
-                set_module_tensor_to_device(component, name, device, value=t.to(device))
-        ordered = param_names + buffer_names
-        # dtype/shape realign: broadcast rank0's (shape, dtype) per name and reallocate any peer
-        # tensor that differs so every broadcast lands into a matching-layout slot (hazard 1 above).
-        spec = (
-            {n: (tuple(rgetattr(component, n).shape), rgetattr(component, n).dtype) for n in ordered}
-            if world.rank_in_group == 0 else None
-        )
-        box = [spec]
-        world.broadcast_object_list(box, src=0)
-        spec = box[0]
-        if world.rank_in_group != 0:
-            for name in ordered:
+        local_contract = _tensor_layout_contract(component)
+        alias_groups: dict[str, list[tuple]] = {}
+        for entry in local_contract:
+            alias_groups.setdefault(entry[4], []).append(entry)
+
+        def materialize():
+            for entries in alias_groups.values():
+                name = entries[0][1]
                 t = rgetattr(component, name)
-                shape, dtype = spec[name]
-                if tuple(t.shape) != shape or t.dtype != dtype:
-                    # dtype= is required: set_module_tensor_to_device otherwise casts `value` back to
-                    # the EXISTING buffer dtype (bf16), silently no-oping the fp32 realloc.
+                if t.is_meta:
                     set_module_tensor_to_device(
                         component, name, device,
-                        value=torch.empty(shape, dtype=dtype, device=device),
-                        dtype=dtype,
+                        value=torch.empty(
+                            t.shape, dtype=t.dtype, device=device
+                        ),
                     )
+                elif t.device.type != "cuda":
+                    set_module_tensor_to_device(
+                        component, name, device, value=t.to(device)
+                    )
+                materialized = rgetattr(component, name)
+                for kind, alias_name, *_ in entries[1:]:
+                    parent_name, _, local_name = alias_name.rpartition(".")
+                    owner = (
+                        component.get_submodule(parent_name)
+                        if parent_name
+                        else component
+                    )
+                    registry = (
+                        owner._parameters
+                        if kind == "parameter"
+                        else owner._buffers
+                    )
+                    registry[local_name] = materialized
+
+        _collective_build_call(
+            world,
+            materialize,
+            context="replicated text-encoder materialization",
+        )
+        _collective_assert_same_layout(
+            _tensor_layout_contract(component),
+            world,
+            device,
+            reference_layout=source_contract,
+        )
+        ordered = param_names + buffer_names
         # Peers must receive in place: .contiguous() on a peer would return a copy and the broadcast
         # would fill that temporary, leaving the real tensor unwritten. Check every destination
         # before the loop and agree the result, because raising from inside the loop would abort the
@@ -739,18 +880,17 @@ class MemoryEfficientLoader:
         from_pretrained resolves tied weights; the fp8 HfQuantizer streams straight to fp8 so the
         source is fp8-sized, not bf16-sized, on rank0.
         """
-        kwargs = {}
-        if self.model.fp8.aiter_covers(component_name):
-            from xfuser.model_executor.quant import AiterFp8BlockScaleTEConfig
-            kwargs["quantization_config"] = AiterFp8BlockScaleTEConfig(
-                target_modules=self.model.fp8.targets_for(component_name)
-            )
         request = self._checkpoint_request(component_name)
-        return type(component).from_pretrained(
-            request.model_name_or_path,
+        quantization_config = getattr(
+            self.model, "_text_encoder_quantization_configs", {}
+        ).get(component_name)
+        from .text_encoder_adapter import load_transformers_component
+
+        return load_transformers_component(
+            type(component),
+            request,
             torch_dtype=torch.bfloat16,
-            **request.from_pretrained_kwargs(),
-            **kwargs,
+            quantization_config=quantization_config,
         )
 
     def _broadcast_load_component(
@@ -934,11 +1074,16 @@ class _TransformerDiskFiller:
 
     def fill_block(self, block, i):
         """Fill + broadcast one wrapped block, excluding only non-persistent buffers."""
+        device = getattr(self, "device", "cpu")
         fqn = self._id2fqn.get(id(block))
         if fqn is None:
             raise RuntimeError(f"block {i} not found in wrap_attrs index (id mismatch)")
         layout = _tensor_layout(block)
-        _collective_assert_same_layout(layout, self.group, self.device)
+        _collective_assert_same_layout(
+            _tensor_layout_contract(block),
+            self.group,
+            device,
+        )
         prefix = fqn + "."
         required = [
             (local_name, prefix + self._ckpt_key(block, local_name))
@@ -961,7 +1106,7 @@ class _TransformerDiskFiller:
             name for kind, name in layout if kind == "parameter"
         ] + [name for name, _ in _persistent_named_buffers(block)]
         _collective_reconcile_tensor_specs(
-            block, broadcast_names, self.group, self.device
+            block, broadcast_names, self.group, device
         )
         self._broadcast(block)
         if i % 8 == 0:
@@ -998,7 +1143,11 @@ class _TransformerDiskFiller:
             [("parameter", name) for name in tail]
             + [("buffer", name) for name in all_tail_bufs]
         )
-        _collective_assert_same_layout(tail_layout, self.group, self.device)
+        _collective_assert_same_layout(
+            _tensor_layout_contract(comp),
+            self.group,
+            self.device,
+        )
         self._require_checkpoint_keys(
             [self._ckpt_key(comp, name) for name in tail + tail_bufs]
         )

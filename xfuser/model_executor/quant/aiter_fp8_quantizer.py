@@ -252,15 +252,19 @@ def _has_transformers_conversion_ops() -> bool:
     time loader; setup.py's floor is far below that. Feature detection rather than a version
     comparison, so a backport or a rename in either direction is handled by the same check.
     """
-    import importlib.util
-    return importlib.util.find_spec("transformers.core_model_loading") is not None
+    from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (
+        probe_transformers_streaming_loader,
+    )
+
+    return probe_transformers_streaming_loader().available
 
 
-_TE_QUANT_NEEDS_TRANSFORMERS_5 = (
-    "FP8 text-encoder quantize-on-load needs the transformers streaming loader "
-    "(transformers.core_model_loading, added in transformers 5.0), which the installed "
-    "transformers does not provide. Upgrade transformers, or run without text-encoder FP8."
+from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (
+    transformers_streaming_requirement,
 )
+
+
+_TE_QUANT_NEEDS_TRANSFORMERS_5 = transformers_streaming_requirement()
 
 
 @functools.lru_cache(maxsize=1)

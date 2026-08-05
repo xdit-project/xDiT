@@ -9,10 +9,12 @@ import datetime as dt
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import platform
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -67,6 +69,43 @@ PACKAGE_NAMES = (
     "huggingface-hub",
     "xfuser",
 )
+PROCESS_TERMINATE_GRACE_SECONDS = 5.0
+
+
+def _positive_seconds(value: Any, *, field: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{field} must be a finite positive number")
+    return value
+
+
+def resolve_timeout_seconds(
+    case: dict[str, Any],
+    defaults: dict[str, Any],
+    cli_override: float | None,
+) -> float:
+    value = (
+        cli_override
+        if cli_override is not None
+        else case.get("timeout_seconds", defaults.get("timeout_seconds"))
+    )
+    if value is None:
+        raise ValueError(
+            f"{case.get('id', 'case')}: timeout_seconds is required "
+            "in the case, matrix defaults, or CLI"
+        )
+    return _positive_seconds(value, field="timeout_seconds")
+
+
+def _timeout_argument(value: str) -> float:
+    try:
+        return _positive_seconds(float(value), field="timeout_seconds")
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def load_matrix(path: Path | str) -> dict[str, Any]:
@@ -83,6 +122,11 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
         raise ValueError("checked-in matrix validation_status must remain 'NOT RUN'")
     if not isinstance(matrix.get("defaults"), dict):
         raise ValueError("matrix defaults must be an object")
+    default_timeout = matrix["defaults"].get("timeout_seconds")
+    if default_timeout is not None:
+        _positive_seconds(
+            default_timeout, field="matrix defaults timeout_seconds"
+        )
     cases = matrix.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ValueError("matrix cases must be a non-empty list")
@@ -98,6 +142,12 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
         if case_id in seen:
             raise ValueError(f"duplicate case id: {case_id}")
         seen.add(case_id)
+        timeout = case.get("timeout_seconds", default_timeout)
+        if timeout is None:
+            raise ValueError(
+                f"{case_id}: timeout_seconds is required in the case or defaults"
+            )
+        _positive_seconds(timeout, field=f"{case_id}: timeout_seconds")
         if not isinstance(case["tags"], list) or not all(
             isinstance(tag, str) and tag for tag in case["tags"]
         ):
@@ -966,6 +1016,52 @@ def aggregate_exit_code(statuses: list[str]) -> int:
     return 0
 
 
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[str],
+    reader: threading.Thread,
+    grace_seconds: float = PROCESS_TERMINATE_GRACE_SECONDS,
+) -> int:
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    term_deadline = time.monotonic() + grace_seconds
+    while _process_group_exists(process_group):
+        process.poll()
+        remaining = term_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.01, remaining))
+
+    if _process_group_exists(process_group):
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    reap_deadline = time.monotonic() + grace_seconds
+    try:
+        exit_status = process.wait(
+            timeout=max(0.0, reap_deadline - time.monotonic())
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"could not reap timed-out root process {process.pid}"
+        ) from error
+    reader.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+    return exit_status
+
+
 def execute_case(
     case: dict[str, Any],
     command: list[str],
@@ -974,6 +1070,7 @@ def execute_case(
     quality_notes: str,
     reference: str | None,
     environment: dict[str, Any],
+    timeout_seconds: float,
 ) -> dict[str, Any]:
     expanded = expand_command(command)
     redactions = _redactions(command)
@@ -981,9 +1078,11 @@ def execute_case(
     reserve_output_directory(output_dir)
     log_path = output_dir / "validation.log"
     markers: dict[str, float] = {}
-    log_lines: list[str] = []
+    captured_lines: list[tuple[str, str]] = []
+    capture_lock = threading.Lock()
 
     started = time.monotonic()
+    deadline = started + timeout_seconds
     process = subprocess.Popen(
         expanded,
         cwd=ROOT,
@@ -991,27 +1090,52 @@ def execute_case(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
     monitor = ResourceMonitor(process.pid)
     monitor.start()
     assert process.stdout is not None
-    with log_path.open("w", encoding="utf-8") as log_handle:
+
+    def consume_output() -> None:
         for line in process.stdout:
             now = time.monotonic()
             line = _redact(line, redactions)
-            stamped = (
-                f"{dt.datetime.now(dt.timezone.utc).isoformat()} {line}"
-            )
+            stamped = f"{dt.datetime.now(dt.timezone.utc).isoformat()} {line}"
             print(stamped, end="")
-            log_handle.write(stamped)
-            log_lines.append(line)
-            if "Initializing model:" in line:
-                markers.setdefault("load_start", now)
-            if "Model initialization complete." in line:
-                markers.setdefault("load_end", now)
-            if "Running model..." in line:
-                markers.setdefault("forward_start", now)
-    exit_status = process.wait()
+            with capture_lock:
+                captured_lines.append((line, stamped))
+                if "Initializing model:" in line:
+                    markers.setdefault("load_start", now)
+                if "Model initialization complete." in line:
+                    markers.setdefault("load_end", now)
+                if "Running model..." in line:
+                    markers.setdefault("forward_start", now)
+
+    timed_out = False
+    reader = threading.Thread(target=consume_output, daemon=True)
+    reader.start()
+    try:
+        exit_status = process.wait(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        exit_status = _terminate_process_group(
+            process, reader, PROCESS_TERMINATE_GRACE_SECONDS
+        )
+    else:
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
+        if reader.is_alive():
+            timed_out = True
+            exit_status = _terminate_process_group(
+                process, reader, PROCESS_TERMINATE_GRACE_SECONDS
+            )
+    with capture_lock:
+        log_lines = [line for line, _ in captured_lines]
+        stamped_lines = [stamped for _, stamped in captured_lines]
+        markers = dict(markers)
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        log_handle.writelines(stamped_lines)
     monitor.stop()
     elapsed = time.monotonic() - started
 
@@ -1046,6 +1170,10 @@ def execute_case(
         quality_notes=quality_notes,
         reference=reference,
     )
+    record["timed_out"] = timed_out
+    record["timeout_seconds"] = timeout_seconds
+    if timed_out:
+        record["status"] = "timed_out"
     record["log_path"] = str(log_path)
     append_result(results_path, record)
     return record
@@ -1074,6 +1202,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--quality-note", default="")
     parser.add_argument("--reference")
+    parser.add_argument(
+        "--timeout-seconds",
+        type=_timeout_argument,
+        help="override the matrix timeout for every selected case",
+    )
     parser.add_argument("--continue-on-error", action="store_true")
     return parser
 
@@ -1138,6 +1271,9 @@ def main(argv: list[str] | None = None) -> int:
                 quality_notes=args.quality_note,
                 reference=args.reference,
                 environment=environment,
+                timeout_seconds=resolve_timeout_seconds(
+                    case, defaults, args.timeout_seconds
+                ),
             )
             statuses.append(record["status"])
             print(f"  result: {record['status']}")

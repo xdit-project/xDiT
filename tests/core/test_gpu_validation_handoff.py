@@ -2,8 +2,12 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -39,6 +43,51 @@ def test_matrix_schema_and_case_ids_are_valid(runner, matrix):
     assert len(ids) == len(set(ids))
     assert all(case_id == case_id.lower() for case_id in ids)
     assert all(" " not in case_id for case_id in ids)
+
+
+def test_case_timeout_uses_case_then_default_then_cli_override(runner):
+    defaults = {"timeout_seconds": 120}
+
+    parsed = runner._parser().parse_args(["--timeout-seconds", "5"])
+    assert parsed.timeout_seconds == 5
+    assert runner.resolve_timeout_seconds({}, defaults, None) == 120
+    assert (
+        runner.resolve_timeout_seconds({"timeout_seconds": 30}, defaults, None)
+        == 30
+    )
+    assert (
+        runner.resolve_timeout_seconds({"timeout_seconds": 30}, defaults, 5)
+        == 5
+    )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_timeout_rejects_non_finite_values(runner, matrix, value):
+    with pytest.raises(ValueError, match="finite positive number"):
+        runner.resolve_timeout_seconds(
+            {"id": "bad-timeout", "timeout_seconds": value}, {}, None
+        )
+
+    invalid_matrix = {
+        **matrix,
+        "defaults": {**matrix["defaults"], "timeout_seconds": value},
+    }
+    with pytest.raises(ValueError, match="finite positive number"):
+        runner.validate_matrix(invalid_matrix)
+
+    invalid_case_matrix = {
+        **matrix,
+        "cases": [
+            {**matrix["cases"][0], "timeout_seconds": value},
+            *matrix["cases"][1:],
+        ],
+    }
+    with pytest.raises(ValueError, match="finite positive number"):
+        runner.validate_matrix(invalid_case_matrix)
+
+    with pytest.raises(SystemExit) as exc:
+        runner._parser().parse_args(["--timeout-seconds", str(value)])
+    assert exc.value.code == 2
 
 
 def test_operator_guide_is_linked_and_marks_results_not_run():
@@ -478,7 +527,7 @@ def test_continue_on_error_runs_remaining_cases_but_returns_failure(
         "aiter_available": True,
         "torchao_available": True,
     }
-    statuses = iter(["failed_inference", "passed"])
+    statuses = iter(["timed_out", "passed"])
     executed = []
 
     monkeypatch.setattr(runner, "load_matrix", lambda path: fake_matrix)
@@ -499,6 +548,377 @@ def test_continue_on_error_runs_remaining_cases_but_returns_failure(
 
     assert executed == ["first-case", "second-case"]
     assert exit_code == 1
+
+
+def test_execute_case_times_out_and_kills_isolated_process_group(
+    runner, monkeypatch, tmp_path
+):
+    child_state = tmp_path / "child.json"
+    child_ready = tmp_path / "child.ready"
+    output_dir = tmp_path / "output"
+    results = tmp_path / "results.jsonl"
+    child_code = (
+        "import pathlib,signal,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "pathlib.Path(sys.argv[1]).write_text('ready');"
+        "time.sleep(60)"
+    )
+    parent_code = (
+        "import json,os,pathlib,signal,subprocess,sys,time;"
+        f"child=subprocess.Popen([sys.executable,'-c',{child_code!r},sys.argv[2]]);"
+        "ready=pathlib.Path(sys.argv[2]);"
+        "\nwhile not ready.exists(): time.sleep(0.01)\n"
+        "open(sys.argv[1],'w').write(json.dumps("
+        "{'pid':child.pid,'pgrp':os.getpgrp()}));"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "time.sleep(60)"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        parent_code,
+        str(child_state),
+        str(child_ready),
+        "--output_directory",
+        str(output_dir),
+    ]
+    case = {
+        "id": "timeout-case",
+        "expected": {"outcome": "inference_success"},
+        "quality_notes": "",
+    }
+
+    class NullMonitor:
+        peak_host_rss = 0
+        peak_cgroup = 0
+        peak_gpu = None
+        gpu_scope = None
+
+        def __init__(self, root_pid):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(runner, "ResourceMonitor", NullMonitor)
+    monkeypatch.setattr(runner, "PROCESS_TERMINATE_GRACE_SECONDS", 0.1)
+    real_popen = runner.subprocess.Popen
+    real_killpg = runner.os.killpg
+    killed = False
+    wrapped_processes = []
+
+    class DelayedReapProcess:
+        def __init__(self, process):
+            self.process = process
+            self.pid = process.pid
+            self.stdout = process.stdout
+            self._returncode = None
+
+        @property
+        def returncode(self):
+            return self._returncode
+
+        def poll(self):
+            if killed and self._returncode is None:
+                return None
+            self._returncode = self.process.poll()
+            return self._returncode
+
+        def wait(self, timeout=None):
+            if killed and self._returncode is None:
+                scheduling_interval = 0.03
+                if timeout is not None and timeout < scheduling_interval:
+                    raise runner.subprocess.TimeoutExpired(
+                        self.process.args, timeout
+                    )
+                time.sleep(scheduling_interval)
+                if timeout is not None:
+                    timeout -= scheduling_interval
+            self._returncode = self.process.wait(timeout=timeout)
+            return self._returncode
+
+    def popen_after_process_tree_is_ready(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not child_state.exists():
+            time.sleep(0.01)
+        if not child_state.exists():
+            os.killpg(process.pid, 9)
+            pytest.fail("child process tree did not become ready")
+        wrapped = DelayedReapProcess(process)
+        wrapped_processes.append(wrapped)
+        return wrapped
+
+    def track_killpg(process_group, sig):
+        nonlocal killed
+        if sig == runner.signal.SIGKILL:
+            killed = True
+        return real_killpg(process_group, sig)
+
+    monkeypatch.setattr(
+        runner.subprocess, "Popen", popen_after_process_tree_is_ready
+    )
+    monkeypatch.setattr(runner.os, "killpg", track_killpg)
+
+    record = runner.execute_case(
+        case,
+        command,
+        results_path=results,
+        quality_notes="",
+        reference=None,
+        environment={},
+        timeout_seconds=0.05,
+    )
+    for wrapped in wrapped_processes:
+        if wrapped.process.poll() is None:
+            real_killpg(wrapped.pid, runner.signal.SIGKILL)
+        wrapped.process.wait(timeout=2)
+
+    child = json.loads(child_state.read_text())
+    assert child["pgrp"] != os.getpgrp()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        stat_path = Path(f"/proc/{child['pid']}/stat")
+        if not stat_path.exists() or stat_path.read_text().split()[2] == "Z":
+            break
+        time.sleep(0.02)
+    else:
+        subprocess.run(
+            ["kill", "-KILL", str(child["pid"])],
+            check=False,
+            capture_output=True,
+        )
+        pytest.fail("timed-out grandchild process remained alive")
+
+    assert record["status"] == "timed_out"
+    assert record["timed_out"] is True
+    assert record["timeout_seconds"] == 0.05
+    assert record["execution"] == "RAN"
+    assert isinstance(record["exit_status"], int)
+    assert json.loads(results.read_text())["status"] == "timed_out"
+
+
+def test_term_grace_is_not_shortened_when_root_closes_stdout(
+    runner, monkeypatch, tmp_path
+):
+    ready = tmp_path / "ready"
+    term_complete = tmp_path / "term-complete"
+    output_dir = tmp_path / "output"
+    results = tmp_path / "results.jsonl"
+    program = (
+        "import os,pathlib,signal,sys,time;"
+        "ready=pathlib.Path(sys.argv[1]);"
+        "complete=pathlib.Path(sys.argv[2]);"
+        "\ndef handle_term(signum,frame):\n"
+        " time.sleep(0.12)\n"
+        " complete.write_text('complete')\n"
+        " raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM,handle_term);"
+        "ready.write_text('ready');"
+        "os.close(1);os.close(2);"
+        "time.sleep(60)"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        program,
+        str(ready),
+        str(term_complete),
+        "--output_directory",
+        str(output_dir),
+    ]
+    case = {
+        "id": "term-grace",
+        "expected": {"outcome": "inference_success"},
+        "quality_notes": "",
+    }
+
+    class NullMonitor:
+        peak_host_rss = 0
+        peak_cgroup = 0
+        peak_gpu = None
+        gpu_scope = None
+
+        def __init__(self, root_pid):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(runner, "ResourceMonitor", NullMonitor)
+    monkeypatch.setattr(runner, "PROCESS_TERMINATE_GRACE_SECONDS", 0.3)
+    real_popen = runner.subprocess.Popen
+
+    def popen_after_root_is_ready(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.01)
+        if not ready.exists():
+            os.killpg(process.pid, 9)
+            pytest.fail("root process did not become ready")
+        return process
+
+    monkeypatch.setattr(
+        runner.subprocess, "Popen", popen_after_root_is_ready
+    )
+
+    record = runner.execute_case(
+        case,
+        command,
+        results_path=results,
+        quality_notes="",
+        reference=None,
+        environment={},
+        timeout_seconds=0.05,
+    )
+
+    assert term_complete.read_text() == "complete"
+    assert record["status"] == "timed_out"
+    assert record["exit_status"] == 0
+
+
+@pytest.mark.parametrize("race_signal", [signal.SIGTERM, signal.SIGKILL])
+def test_process_lookup_race_still_reaps_root(
+    runner, monkeypatch, race_signal
+):
+    class Process:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            assert timeout is not None
+            return -signal.SIGKILL
+
+    class Reader:
+        def join(self, timeout=None):
+            assert timeout is not None
+
+    def killpg(process_group, sent_signal):
+        assert process_group == Process.pid
+        if sent_signal == race_signal:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(runner.os, "killpg", killpg)
+    monkeypatch.setattr(
+        runner,
+        "_process_group_exists",
+        lambda process_group: race_signal == signal.SIGKILL,
+    )
+
+    assert (
+        runner._terminate_process_group(Process(), Reader(), 0.01)
+        == -signal.SIGKILL
+    )
+
+
+def test_execute_case_bounds_drain_when_ready_descendant_retains_stdout(
+    runner, monkeypatch, tmp_path
+):
+    ready = tmp_path / "ready"
+    output_dir = tmp_path / "output"
+    results = tmp_path / "results.jsonl"
+    child_code = (
+        "import os,pathlib,signal,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "print('grandchild-ready',flush=True);"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
+        "time.sleep(1)"
+    )
+    parent_code = (
+        "import pathlib,subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child_code!r},sys.argv[1]]);"
+        "ready=pathlib.Path(sys.argv[1]);"
+        "\nwhile not ready.exists(): time.sleep(0.01)\n"
+        "print('parent-ready',flush=True)"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        parent_code,
+        str(ready),
+        "--output_directory",
+        str(output_dir),
+    ]
+    case = {
+        "id": "retained-stdout",
+        "expected": {"outcome": "inference_success"},
+        "quality_notes": "",
+    }
+
+    class NullMonitor:
+        peak_host_rss = 0
+        peak_cgroup = 0
+        peak_gpu = None
+        gpu_scope = None
+
+        def __init__(self, root_pid):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(runner, "ResourceMonitor", NullMonitor)
+    monkeypatch.setattr(runner, "PROCESS_TERMINATE_GRACE_SECONDS", 0.1)
+    real_popen = runner.subprocess.Popen
+
+    def popen_after_grandchild_is_ready(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.01)
+        if not ready.exists():
+            os.killpg(process.pid, 9)
+            pytest.fail("grandchild did not become ready")
+        return process
+
+    monkeypatch.setattr(
+        runner.subprocess, "Popen", popen_after_grandchild_is_ready
+    )
+
+    started = time.monotonic()
+    record = runner.execute_case(
+        case,
+        command,
+        results_path=results,
+        quality_notes="",
+        reference=None,
+        environment={},
+        timeout_seconds=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    log = (output_dir / "validation.log").read_text()
+    child_pid = int(ready.read_text())
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        stat_path = Path(f"/proc/{child_pid}/stat")
+        if not stat_path.exists() or stat_path.read_text().split()[2] == "Z":
+            break
+        time.sleep(0.02)
+    else:
+        subprocess.run(
+            ["kill", "-KILL", str(child_pid)],
+            check=False,
+            capture_output=True,
+        )
+        pytest.fail("stdout-retaining grandchild remained alive")
+
+    assert elapsed < 0.7
+    assert record["status"] == "timed_out"
+    assert "parent-ready" in log
+    assert "grandchild-ready" in log
 
 
 def test_environment_mismatch_does_not_execute_case(

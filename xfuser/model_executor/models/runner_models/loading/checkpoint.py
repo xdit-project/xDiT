@@ -63,6 +63,13 @@ class CheckpointManifest:
         return frozenset(self.weight_map.values())
 
 
+def _is_within(directory: str, path: str) -> bool:
+    try:
+        return os.path.commonpath([directory, path]) == directory
+    except ValueError:
+        return False
+
+
 def resolve_checkpoint_file(
     request: CheckpointRequest, filename: str
 ) -> str | None:
@@ -70,11 +77,21 @@ def resolve_checkpoint_file(
 
     root = os.fspath(request.model_name_or_path)
     if os.path.isdir(root):
-        parts = [root]
-        if request.subfolder:
-            parts.append(request.subfolder)
-        parts.append(filename)
-        local = os.path.join(*parts)
+        model_root = os.path.realpath(root)
+        checkpoint_dir = os.path.realpath(
+            os.path.join(model_root, request.subfolder or "")
+        )
+        if not _is_within(model_root, checkpoint_dir):
+            raise ValueError(
+                f"local checkpoint subfolder {request.subfolder!r} resolves "
+                f"outside model root {model_root!r}"
+            )
+        local = os.path.realpath(os.path.join(checkpoint_dir, filename))
+        if not _is_within(checkpoint_dir, local):
+            raise ValueError(
+                f"local checkpoint file {filename!r} resolves outside "
+                f"checkpoint directory {checkpoint_dir!r}"
+            )
         return local if os.path.isfile(local) else None
 
     from huggingface_hub import hf_hub_download
@@ -110,6 +127,10 @@ def _require_checkpoint_file(
 def _variant_filename(request: CheckpointRequest, filename: str) -> str:
     if not request.variant:
         return filename
+    marker = ".safetensors"
+    stem, separator, suffix = filename.partition(marker)
+    if separator:
+        return f"{stem}.{request.variant}{separator}{suffix}"
     stem, extension = filename.rsplit(".", 1)
     return f"{stem}.{request.variant}.{extension}"
 

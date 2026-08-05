@@ -70,6 +70,60 @@ def test_local_request_resolves_subfolder_without_hub(checkpoint, tmp_path):
     assert checkpoint.resolve_checkpoint_file(request, "missing") is None
 
 
+@pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
+def test_local_request_rejects_subfolder_outside_model_root(
+    checkpoint, tmp_path, escape_kind
+):
+    model_root = tmp_path / "model"
+    model_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "weights.safetensors").write_bytes(b"outside")
+    subfolder = "../outside" if escape_kind == "parent" else str(outside)
+    request = checkpoint.CheckpointRequest(
+        str(model_root), subfolder=subfolder
+    )
+
+    with pytest.raises(ValueError, match="subfolder.*outside.*model root"):
+        checkpoint.resolve_checkpoint_file(request, "weights.safetensors")
+
+
+def test_local_request_rejects_symlinked_subfolder_outside_model_root(
+    checkpoint, tmp_path
+):
+    model_root = tmp_path / "model"
+    model_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "weights.safetensors").write_bytes(b"outside")
+    (model_root / "component").symlink_to(outside, target_is_directory=True)
+    request = checkpoint.CheckpointRequest(
+        str(model_root), subfolder="component"
+    )
+
+    with pytest.raises(ValueError, match="subfolder.*outside.*model root"):
+        checkpoint.resolve_checkpoint_file(request, "weights.safetensors")
+
+
+def test_local_request_allows_empty_and_nested_subfolders(checkpoint, tmp_path):
+    root_weight = tmp_path / "root.safetensors"
+    root_weight.write_bytes(b"root")
+    nested = tmp_path / "nested" / "component"
+    nested.mkdir(parents=True)
+    nested_weight = nested / "weights.safetensors"
+    nested_weight.write_bytes(b"nested")
+
+    assert checkpoint.resolve_checkpoint_file(
+        checkpoint.CheckpointRequest(str(tmp_path)), root_weight.name
+    ) == str(root_weight)
+    assert checkpoint.resolve_checkpoint_file(
+        checkpoint.CheckpointRequest(
+            str(tmp_path), subfolder="nested/component"
+        ),
+        nested_weight.name,
+    ) == str(nested_weight)
+
+
 def test_hub_resolution_propagates_request_kwargs(checkpoint, monkeypatch):
     calls = []
     hub = types.ModuleType("huggingface_hub")
@@ -131,6 +185,47 @@ def test_sharded_discovery_maps_keys_without_reading_tensors(checkpoint, tmp_pat
     assert manifest.shard_paths == frozenset({str(shard)})
 
 
+@pytest.mark.parametrize(
+    "shard_name", ["../outside.safetensors", "/tmp/outside.safetensors"]
+)
+def test_local_index_rejects_shard_paths_outside_component(
+    checkpoint, tmp_path, shard_name
+):
+    component = tmp_path / "transformer"
+    component.mkdir()
+    (tmp_path / "outside.safetensors").write_bytes(b"outside")
+    (component / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight": shard_name}})
+    )
+
+    with pytest.raises(ValueError, match="outside.*checkpoint directory"):
+        checkpoint.discover_checkpoint(
+            checkpoint.CheckpointRequest(
+                str(tmp_path), subfolder="transformer"
+            )
+        )
+
+
+def test_local_index_rejects_symlink_to_shard_outside_component(
+    checkpoint, tmp_path
+):
+    component = tmp_path / "transformer"
+    component.mkdir()
+    outside = tmp_path / "outside.safetensors"
+    outside.write_bytes(b"outside")
+    (component / "linked.safetensors").symlink_to(outside)
+    (component / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight": "linked.safetensors"}})
+    )
+
+    with pytest.raises(ValueError, match="outside.*checkpoint directory"):
+        checkpoint.discover_checkpoint(
+            checkpoint.CheckpointRequest(
+                str(tmp_path), subfolder="transformer"
+            )
+        )
+
+
 def test_variant_uses_diffusers_checkpoint_filenames(checkpoint, tmp_path):
     component = tmp_path / "transformer"
     component.mkdir()
@@ -154,7 +249,7 @@ def test_variant_index_places_variant_before_json_extension(checkpoint, tmp_path
     shard.write_bytes(b"header only")
     (
         component
-        / "diffusion_pytorch_model.safetensors.index.fp16.json"
+        / "diffusion_pytorch_model.fp16.safetensors.index.json"
     ).write_text(json.dumps({"weight_map": {"weight": shard.name}}))
 
     manifest = checkpoint.discover_checkpoint(

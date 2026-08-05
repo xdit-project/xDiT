@@ -79,6 +79,13 @@ rejection is missing, late, or wrong. Exit code 2 means cases were not run due
 to selection or environment mismatch; exit code 1 takes precedence when a
 batch also contains an execution failure.
 
+Each case uses its `timeout_seconds` value or the matrix default. Pass
+`--timeout-seconds N` to override that limit for every selected case. A timeout
+terminates the case's isolated process group, kills any processes that remain
+after the grace period, and writes a `timed_out` failed record. With
+`--continue-on-error`, later cases still run and the batch exits nonzero.
+Timeout values must be finite positive numbers.
+
 `--list`, `--dry-run`, and `--execute` are mutually exclusive action modes.
 Omitting all three retains the safe dry-run behavior.
 

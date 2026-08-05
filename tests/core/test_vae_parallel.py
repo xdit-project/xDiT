@@ -262,5 +262,39 @@ class TestBothHalvesShardTogether(unittest.TestCase):
                 self.assertIsNot(vae.encoder, encoder)
 
 
+class AiterGroupNorm(nn.Module):
+    """Stands in for AITER's replacement: a norm of its own, not a subclass of torch's"""
+
+    # The revert recognises it by where it comes from, which is all this has to reproduce.
+    __module__ = "aiter.ops.groupnorm"
+
+
+class TestGroupNormRevert(unittest.TestCase):
+    """Undoing AITER's swap of torch.nn.GroupNorm, which the adapters cannot see past"""
+
+    def test_a_swapped_group_norm_is_put_back(self):
+        original = nn.GroupNorm
+        try:
+            nn.GroupNorm = AiterGroupNorm
+            self.assertTrue(vae_parallel.restore_torch_group_norm())
+            self.assertIs(nn.GroupNorm, original)
+        finally:
+            nn.GroupNorm = original
+
+    def test_an_untouched_group_norm_is_left_alone(self):
+        original = nn.GroupNorm
+        self.assertFalse(vae_parallel.restore_torch_group_norm())
+        self.assertIs(nn.GroupNorm, original)
+
+    def test_the_swap_is_what_makes_a_2d_decoder_unrecognisable(self):
+        # This is the failure the revert exists for. AITER's norm is not a subclass of torch's,
+        # so a VAE assembled while the swap was in place carries norms that the check for a 2D
+        # decoder does not accept, and the VAE reads as one DistVAE cannot shard.
+        vae = diffusers.AutoencoderKL(**CONFIGS["AutoencoderKL"]).eval()
+        self.assertEqual(vae_parallel.decoder_adapter_name(vae), "DecoderAdapter")
+        vae.decoder.conv_norm_out = AiterGroupNorm()
+        self.assertIsNone(vae_parallel.decoder_adapter_name(vae))
+
+
 if __name__ == "__main__":
     unittest.main()

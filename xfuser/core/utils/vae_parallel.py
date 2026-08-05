@@ -101,6 +101,28 @@ def _blocks(module: str, names: Tuple[str, ...]) -> Tuple[type, ...]:
     )
 
 
+def restore_torch_group_norm() -> bool:
+    """Put torch.nn.GroupNorm back where AITER replaced it, reporting whether it had to
+
+    On ROCm, importing xfuser swaps torch.nn.GroupNorm for AITER's, a faster drop-in everywhere
+    but here. DistVAE finds the norms it has to shard by asking isinstance against torch's class,
+    and so does the check below for a 2D decoder; AITER's is not a subclass, so a VAE assembled
+    after the swap either reads as unsupported or keeps norms that reduce over one rank's band of
+    rows rather than over the whole image. Neither says so at the time.
+
+    The revert has to land before the VAE is built, so a caller that means to shard one calls
+    this while it is still deciding to.
+    """
+    # Imported here rather than at module scope: envs owns the swap, and it must not need
+    # anything under xfuser.core to be importable itself.
+    from xfuser.envs import _TORCH_GROUPNORM
+
+    if nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
+        return False
+    nn.GroupNorm = _TORCH_GROUPNORM
+    return True
+
+
 def _family_of(half, attr: str) -> Optional[_Family]:
     """The family this half of a VAE belongs to, by the blocks it is assembled from
 

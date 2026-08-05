@@ -16,7 +16,6 @@ from xfuser.compat import is_diffusers_import_error
 from xfuser.config import args, xFuserArgs
 from xfuser.envs import (
     PACKAGES_CHECKER,
-    _TORCH_GROUPNORM,
     get_platform,
     _is_hip,
     _is_cuda,
@@ -481,9 +480,9 @@ class xFuserModel(abc.ABC):
         if config.use_parallel_vae:
             if not packages_info.get("has_distvae", False):
                 raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
-            if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
-                log("AITER GroupNorm is not supported with parallel VAE. Reverting to torch GroupNorm.")
-                torch.nn.GroupNorm = _TORCH_GROUPNORM
+            if vae_parallel.restore_torch_group_norm():
+                log("AITER GroupNorm cannot be sharded. Reverting to torch GroupNorm so that "
+                    "--use_parallel_vae can recognise the norms it has to replace.")
         
         if config.distilled_transformer_path or config.distilled_transformer_2_path:
             if not self.capabilities.supports_distilled_weights:

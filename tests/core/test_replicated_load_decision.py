@@ -18,6 +18,13 @@ torch = pytest.importorskip("torch")
 
 from xfuser.model_executor.models.runner_models.loading import meta_load
 from xfuser.model_executor.models.runner_models.loading.meta_load import MemoryEfficientLoader
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadCapability,
+    UnsupportedLoadContract,
+)
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    CheckpointRequest,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -48,8 +55,15 @@ def make_loader(
             pipefusion_parallel_degree=pipefusion_parallel_degree,
             tensor_parallel_degree=tensor_parallel_degree,
         ),
-        _supports_replicated_meta_load=lambda: supported,
+        load_capability=(
+            LoadCapability.meta("transformer", replicated=True)
+            if supported
+            else LoadCapability.unsupported("test runner bypasses the seam")
+        ),
     )
+    model.settings.fsdp_strategy = {
+        "transformer": {"wrap_attrs": ["blocks"]}
+    }
     return MemoryEfficientLoader(model)
 
 
@@ -92,10 +106,17 @@ def test_never_broadcasts_on_a_single_rank(monkeypatch):
     assert not loader.replicated_broadcast_load()
 
 
+def test_single_rank_unsupported_runner_resolves_to_eager(monkeypatch):
+    loader = make_loader(monkeypatch, world_size=1, supported=False)
+
+    assert not loader.replicated_broadcast_load()
+
+
 def test_never_broadcasts_for_a_runner_that_is_not_wired_for_it(monkeypatch):
     """A runner loading its components directly leaves peers with no meta tensors to fill."""
     loader = make_loader(monkeypatch, supported=False)
-    assert not loader.replicated_broadcast_load()
+    with pytest.raises(UnsupportedLoadContract, match="bypasses the seam"):
+        loader.replicated_broadcast_load()
 
 
 # ============================================================================
@@ -140,7 +161,7 @@ class FakeWrapper(torch.nn.Module):
     """Stands in for a diffusers transformer wrapper: enough of the from_config API to be built."""
 
     @classmethod
-    def load_config(cls, model_name, subfolder=None):
+    def load_config(cls, model_name, subfolder=None, **kwargs):
         return {"hidden": 4}
 
     @classmethod
@@ -183,16 +204,79 @@ def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
     assert len(loader._meta_transformers) == 0
 
 
+def test_disk_filler_receives_the_exact_request_used_for_meta_build(monkeypatch):
+    loader = make_loader(monkeypatch)
+    request = CheckpointRequest(
+        "org/repo",
+        subfolder="transformer",
+        revision="refs/pr/7",
+        variant="fp16",
+        token="secret",
+        cache_dir="/cache",
+        local_files_only=True,
+    )
+    built = loader.build_meta_transformer(FakeWrapper, request)
+    captured = []
+
+    class Filler:
+        def __init__(self, model, component, wrap_attrs, request, device, group):
+            captured.append(request)
+
+        fill_block = None
+        finalize = None
+
+    monkeypatch.setattr(meta_load, "_TransformerDiskFiller", Filler)
+    loader.build_transformer_disk_loaders(
+        built, ["blocks"], "transformer", "cpu"
+    )
+
+    assert captured == [request]
+    assert captured[0] is request
+
+
+def test_dual_meta_transformers_keep_distinct_checkpoint_requests(monkeypatch):
+    loader = make_loader(monkeypatch)
+    loader.model.load_capability = LoadCapability.meta(
+        "transformer", "transformer_2", replicated=True
+    )
+    loader.model.settings.fsdp_strategy["transformer_2"] = {
+        "wrap_attrs": ["blocks"]
+    }
+    first_request = CheckpointRequest(
+        "org/repo", subfolder="transformer", revision="main"
+    )
+    second_request = CheckpointRequest(
+        "org/repo", subfolder="transformer_2", revision="refs/pr/9"
+    )
+    first = loader.build_meta_transformer(FakeWrapper, first_request)
+    second = loader.build_meta_transformer(FakeWrapper, second_request)
+    captured = []
+
+    class Filler:
+        def __init__(self, model, component, wrap_attrs, request, device, group):
+            captured.append((component, request))
+
+        fill_block = None
+        finalize = None
+
+    monkeypatch.setattr(meta_load, "_TransformerDiskFiller", Filler)
+    loader.build_transformer_disk_loaders(
+        first, ["blocks"], "transformer", "cpu"
+    )
+    loader.build_transformer_disk_loaders(
+        second, ["blocks"], "transformer_2", "cpu"
+    )
+
+    assert captured == [(first, first_request), (second, second_request)]
+
+
 # ============================================================================
 # Every runner's declared capability matches how it actually loads
 # ============================================================================
 
 
 def test_runners_that_bypass_the_meta_seam_declare_it():
-    """_supports_replicated_meta_load is hand-maintained, so it can drift from the load path it
-    describes. A runner whose _load_model does its own from_pretrained gets no meta components for
-    the rank0 broadcast to fill; it must opt out, or it claims a win it cannot take (and logs that
-    it is taking it). Checked over the whole registry so a new runner cannot quietly skip it."""
+    """A runner claiming meta support must construct through _build_transformer."""
     import inspect
 
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
@@ -201,11 +285,238 @@ def test_runners_that_bypass_the_meta_seam_declare_it():
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
         # _load_model may be inherited; read the source of whichever class actually defines it.
         goes_through_seam = "_build_transformer" in inspect.getsource(cls._load_model)
-        declares_support = cls._supports_replicated_meta_load(object.__new__(cls))
+        declares_support = bool(cls.load_capability.meta_transformers)
         if declares_support and not goes_through_seam:
             mismatched.append(f"{cls.__name__} (from {cls._load_model.__qualname__})")
 
     assert not mismatched, (
         "these runners load their transformer outside _build_transformer but still declare "
-        "_supports_replicated_meta_load: " + ", ".join(sorted(mismatched))
+        "meta-load support: " + ", ".join(sorted(mismatched))
     )
+
+
+def test_runner_load_capabilities_match_model_quantization_capabilities():
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    mismatched = []
+    for cls in dict.fromkeys(MODEL_REGISTRY.values()):
+        expected = LoadCapability.for_runner(cls.capabilities).quantization_contracts
+        if cls.load_capability.quantization_contracts != expected:
+            mismatched.append(cls.__name__)
+
+    assert not mismatched, (
+        "load_capability quantization contracts disagree with ModelCapabilities: "
+        + ", ".join(sorted(mismatched))
+    )
+
+
+def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    mismatched = []
+    for cls in dict.fromkeys(MODEL_REGISTRY.values()):
+        declaration = cls.load_capability
+        candidates = declaration.replicated_meta_transformers
+        expected = (
+            tuple(
+                name
+                for name in candidates
+                if cls.settings.fsdp_strategy.get(name, {}).get("wrap_attrs")
+            )
+            if cls.capabilities.fully_shard_degree
+            else ()
+        )
+        if declaration.fsdp_meta_transformers != expected:
+            mismatched.append(
+                f"{cls.__name__}: expected {expected}, "
+                f"declared {declaration.fsdp_meta_transformers}"
+            )
+
+    assert not mismatched, "\n".join(mismatched)
+
+
+def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: True)
+    monkeypatch.setattr(base_model, "_is_cuda", lambda: False)
+    model_capabilities = base_model.ModelCapabilities(
+        fully_shard_degree=True,
+        use_fp8_gemms=True,
+    )
+    runner = SimpleNamespace(
+        config=SimpleNamespace(
+            fully_shard_degree=2,
+            pipefusion_parallel_degree=1,
+            tensor_parallel_degree=1,
+            memory_efficient_sharding=True,
+            memory_efficient_replicated_load=False,
+            use_fp8_gemms=True,
+            use_fp4_gemms=False,
+            use_int8_gemms=False,
+        ),
+        settings=SimpleNamespace(
+            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
+        ),
+        load_capability=LoadCapability.for_runner(
+            model_capabilities,
+            meta_transformers=("transformer",),
+            replicated=True,
+            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
+        ),
+    )
+
+    selected = base_model.xFuserModel._select_preload_contract(
+        runner, world_size=2
+    )
+
+    assert selected.requested_format.name == "FP8"
+    assert selected.selected_backend.name == "AITER"
+    assert selected.materialization_mode.name == "FSDP_META"
+
+
+def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: False)
+    monkeypatch.setattr(base_model, "_is_cuda", lambda: True)
+    runner = SimpleNamespace(
+        config=SimpleNamespace(
+            fully_shard_degree=1,
+            pipefusion_parallel_degree=1,
+            tensor_parallel_degree=1,
+            memory_efficient_sharding=False,
+            memory_efficient_replicated_load=True,
+            use_fp8_gemms=False,
+            use_fp4_gemms=False,
+            use_int8_gemms=False,
+        ),
+        settings=SimpleNamespace(fsdp_strategy={}),
+        load_capability=LoadCapability.for_runner(
+            base_model.ModelCapabilities(),
+            unsupported_reason="custom loader bypasses the seam",
+        ),
+    )
+
+    with pytest.raises(
+        UnsupportedLoadContract, match="custom loader bypasses the seam"
+    ):
+        base_model.xFuserModel._select_preload_contract(
+            runner, world_size=2
+        )
+
+
+def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: False)
+    monkeypatch.setattr(base_model, "_is_cuda", lambda: True)
+    runner = SimpleNamespace(
+        config=SimpleNamespace(
+            fully_shard_degree=1,
+            pipefusion_parallel_degree=1,
+            tensor_parallel_degree=1,
+            memory_efficient_sharding=False,
+            memory_efficient_replicated_load=True,
+            use_fp8_gemms=False,
+            use_fp4_gemms=False,
+            use_int8_gemms=False,
+        ),
+        settings=SimpleNamespace(fsdp_strategy={}),
+        load_capability=LoadCapability.for_runner(
+            base_model.ModelCapabilities(),
+            unsupported_reason="custom loader bypasses the seam",
+        ),
+    )
+
+    selected = base_model.xFuserModel._select_preload_contract(
+        runner, world_size=1
+    )
+
+    assert selected.materialization_mode.name == "EAGER"
+
+
+def test_wan22_instance_settings_refresh_both_transformers(monkeypatch):
+    import copy
+
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.wan import (
+        xFuserWan22I2VModel,
+    )
+
+    runner = object.__new__(xFuserWan22I2VModel)
+    runner.settings = copy.deepcopy(xFuserWan22I2VModel.settings)
+    runner.config = SimpleNamespace(
+        fully_shard_degree=2,
+        pipefusion_parallel_degree=1,
+        tensor_parallel_degree=1,
+        memory_efficient_sharding=True,
+        memory_efficient_replicated_load=False,
+        use_fp8_gemms=True,
+        use_fp4_gemms=False,
+        use_int8_gemms=False,
+    )
+    runner._customize_settings(SimpleNamespace())
+    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: True)
+    monkeypatch.setattr(base_model, "_is_cuda", lambda: False)
+
+    runner._refresh_load_capability()
+    fsdp_selected = runner._select_preload_contract(world_size=2)
+
+    assert runner.load_capability.fsdp_meta_transformers == (
+        "transformer",
+        "transformer_2",
+    )
+    assert runner.load_capability.replicated_meta_transformers == (
+        "transformer",
+        "transformer_2",
+    )
+    assert fsdp_selected.materialization_mode.name == "FSDP_META"
+
+    runner.config.fully_shard_degree = 1
+    runner.config.memory_efficient_sharding = False
+    runner.config.memory_efficient_replicated_load = True
+    replicated_selected = runner._select_preload_contract(world_size=2)
+
+    assert replicated_selected.materialization_mode.name == "REPLICATED_META"
+
+
+def test_build_transformer_preserves_request_subfolder_without_override():
+    from xfuser.model_executor.models.runner_models import base_model
+
+    calls = []
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            calls.append((model_name, kwargs))
+            return "loaded"
+
+    request = CheckpointRequest(
+        "org/repo",
+        subfolder="transformer_2",
+        revision="refs/pr/9",
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        fp8=SimpleNamespace(aiter_stream_config=lambda name: None),
+    )
+
+    result = base_model.xFuserModel._build_transformer(
+        runner, Wrapper, checkpoint_request=request
+    )
+
+    assert result == "loaded"
+    assert calls == [
+        (
+            "org/repo",
+            {
+                "torch_dtype": torch.bfloat16,
+                "quantization_config": None,
+                "subfolder": "transformer_2",
+                "revision": "refs/pr/9",
+                "local_files_only": False,
+            },
+        )
+    ]

@@ -16,6 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
     ModelCapabilities,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 from xfuser.core.utils.runner_utils import (
     log,
@@ -70,11 +71,12 @@ class xFuserLTX23VideoModel(xFuserModel):
     _AUDIO_MODALITY_SCALE = 3.0
     _AUDIO_GUIDANCE_RESCALE = 0.7
 
-    def _supports_replicated_meta_load(self) -> bool:
-        # Builds its transformer with a direct from_pretrained rather than through
-        # _build_transformer, so peers would never get the meta components the rank0 broadcast
-        # fills. Wiring LTX up is a follow-up; until then stay off the path.
-        return False
+    load_capability = LoadCapability.for_runner(
+        capabilities,
+        unsupported_reason=(
+            "transformer is loaded directly instead of through _build_transformer"
+        ),
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
@@ -246,9 +248,12 @@ class xFuserLTX2VideoModel(xFuserModel):
         use_fp8_gemms=True,
     )
 
-    def _supports_replicated_meta_load(self) -> bool:
-        # See xFuserLTX23VideoModel: direct from_pretrained, not wired for the meta broadcast fill.
-        return False
+    load_capability = LoadCapability.for_runner(
+        capabilities,
+        unsupported_reason=(
+            "transformer is loaded directly instead of through _build_transformer"
+        ),
+    )
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(

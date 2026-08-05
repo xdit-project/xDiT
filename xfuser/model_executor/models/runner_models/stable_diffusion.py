@@ -9,10 +9,16 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "composition wrapper has no config-only transformer construction seam"
+    )
+)
 class xFuserStableDiffusionModel(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -46,12 +52,6 @@ class xFuserStableDiffusionModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fp8_text_encoder_module_list=["text_encoder_3.encoder.block"],
     )
-
-    def _supports_replicated_meta_load(self) -> bool:
-        # Composition wrapper (no ConfigMixin.load_config): loads real on every rank, so the
-        # rank0-broadcast meta path never applies. Keep it off the gate rather than entering and
-        # no-op'ing (which only logs a misleading "skipping broadcast fill").
-        return False
 
     def _load_model(self) -> DiffusionPipeline:
         # SD3's wrapper is composition-style (wraps a transformer instance) and lacks

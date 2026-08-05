@@ -10,6 +10,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelSettings,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 
 def _normalize_prompt(prompt_input):
@@ -44,6 +45,7 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserZImageModel(xFuserModel):
 
     default_input_values = DefaultInputValues(
@@ -125,6 +127,7 @@ class xFuserZImageModel(xFuserModel):
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserZImageTurboModel(xFuserModel):
 
     capabilities = ModelCapabilities(

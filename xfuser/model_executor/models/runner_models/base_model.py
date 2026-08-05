@@ -45,6 +45,13 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+from xfuser.model_executor.models.runner_models.loading.checkpoint import CheckpointRequest
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadCapability,
+    select_effective_materialization_mode,
+    select_load_contract,
+    select_runtime_quantization,
+)
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -221,6 +228,12 @@ class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    load_capability: LoadCapability = LoadCapability.for_runner(
+        capabilities,
+        unsupported_reason=(
+            "runner has not declared a compatible meta construction seam"
+        ),
+    )
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
     model_output_type: str = ""
@@ -229,10 +242,46 @@ class xFuserModel(abc.ABC):
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.settings)
         self._customize_settings(config)
+        self._refresh_load_capability()
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
         self.pipe = None
+        self.load_contract = None
+
+    def _refresh_load_capability(self) -> None:
+        """Re-derive FSDP support from instance-customized settings."""
+        declaration = type(self).load_capability
+        self.load_capability = LoadCapability.for_runner(
+            self.capabilities,
+            meta_transformers=declaration.meta_transformers,
+            replicated=bool(
+                declaration.replicated_meta_transformers
+            ),
+            fsdp_strategy=self.settings.fsdp_strategy,
+            unsupported_reason=declaration.unsupported_reason,
+        )
+
+    def _select_preload_contract(self, *, world_size: int):
+        """Resolve and validate loading before model allocation or load collectives."""
+        mode = select_effective_materialization_mode(
+            self.config, world_size=world_size
+        )
+        requested_format, backend = select_runtime_quantization(
+            self.config,
+            aiter_fp8_active=bool(
+                self.config.use_fp8_gemms and _use_aiter_fp8_rdna4()
+            ),
+            cuda_active=_is_cuda(),
+        )
+        return select_load_contract(
+            requested_format=requested_format,
+            selected_backend=backend,
+            materialization_mode=mode,
+            capability=self.load_capability,
+            fsdp_strategy=self.settings.fsdp_strategy,
+            runner_name=type(self).__name__,
+        )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         """Hook for subclasses to mutate self.settings before validation and CLI overrides.
@@ -266,6 +315,9 @@ class xFuserModel(abc.ABC):
             log("Initializing distributed environment...")
             init_distributed_environment()
 
+        self.load_contract = self._select_preload_contract(
+            world_size=get_world_group().world_size
+        )
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
         self.pipe = self._load_model()
@@ -290,13 +342,6 @@ class xFuserModel(abc.ABC):
         from xfuser.model_executor.models.runner_models.loading.fp8_plan import Fp8Plan
         return Fp8Plan(self)
 
-    def _supports_replicated_meta_load(self) -> bool:
-        """Whether this runner is wired for the rank0-broadcast load: it must build its transformer
-        via _build_transformer (and ideally its text encoders via _meta_te_kwargs) so peers get meta
-        components for the broadcast to fill.
-        """
-        return True
-
     def _memory_efficient_fsdp_load(self) -> bool:
         """True when the memory-efficient sharded (meta-init + rank0-broadcast) load path is on."""
         return self._loader.fsdp_meta_load()
@@ -317,7 +362,20 @@ class xFuserModel(abc.ABC):
         from xfuser.model_executor.models.runner_models.loading.meta_load import MemoryEfficientLoader
         return MemoryEfficientLoader(self)
 
-    def _build_transformer(self, wrapper_cls, subfolder: str = "transformer", init_kwargs: dict | None = None, stream_quant: bool = True):
+    def _checkpoint_request(self, subfolder: str | None = None, **kwargs) -> CheckpointRequest:
+        """Checkpoint identity shared by discovery and from_pretrained calls."""
+        return CheckpointRequest(
+            self.settings.model_name, subfolder=subfolder, **kwargs
+        )
+
+    def _build_transformer(
+        self,
+        wrapper_cls,
+        subfolder: str | None = None,
+        init_kwargs: dict | None = None,
+        stream_quant: bool = True,
+        checkpoint_request: CheckpointRequest | None = None,
+    ):
         """Load the transformer for a pipeline. On the memory-efficient FSDP path (multi-GPU
         fully-shard) build it on meta — weights are then streamed per block from disk on every rank
         during sharding, so the full model never materializes on host or any single GPU. Otherwise
@@ -328,20 +386,28 @@ class xFuserModel(abc.ABC):
         fp8 today); False keeps the plain bf16 load (models that load bf16 today). The meta path always
         quantizes per block from the active FP8 target list, so stream_quant only gates the non-meta config.
         """
+        request = checkpoint_request or self._checkpoint_request(
+            subfolder or "transformer"
+        )
+        if subfolder is not None and request.subfolder != subfolder:
+            request = request.with_subfolder(subfolder)
+        elif request.subfolder is None:
+            request = request.with_subfolder("transformer")
+        component_name = request.subfolder
         if self._memory_efficient_fsdp_load():
-            return self._loader.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
+            return self._loader.build_meta_transformer(wrapper_cls, request, init_kwargs)
         # Replicated broadcast load: build on meta on ALL ranks. Weights are streamed per block from
         # disk on rank0 and broadcast GPU->GPU, then fp8-quantized per block (broadcast_fill_replicated),
         # so the full bf16 transformer never materializes on host or any single GPU.
         if self._replicated_broadcast_load():
-            return self._loader.build_meta_transformer(wrapper_cls, subfolder, init_kwargs)
+            return self._loader.build_meta_transformer(wrapper_cls, request, init_kwargs)
         return wrapper_cls.from_pretrained(
-            self.settings.model_name,
+            request.model_name_or_path,
             torch_dtype=torch.bfloat16,
-            subfolder=subfolder,
             quantization_config=(
-                self.fp8.aiter_stream_config(subfolder) if stream_quant else None
+                self.fp8.aiter_stream_config(component_name) if stream_quant else None
             ),
+            **request.from_pretrained_kwargs(),
             **(init_kwargs or {}),
         )
 

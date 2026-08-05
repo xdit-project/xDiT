@@ -5,13 +5,18 @@ no tensor read), enumerate a component's shard files, report the container's mem
 evict clean page-cache after a checkpoint is consumed. Used by ``meta_load`` to stream weights
 per block/rank without materializing a full copy on host.
 
-Every file lookup goes through ``resolve_repo_file``, so a checkpoint may be given either as a Hub
-repo id or as a path to a local directory.
+Checkpoint discovery delegates to the request-driven loading.checkpoint module; the public helpers
+here retain the legacy string-based API for existing callers.
 """
 
-import json
 import os
 
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    CheckpointRequest,
+    component_shard_paths as _component_shard_paths,
+    discover_checkpoint,
+    resolve_checkpoint_file,
+)
 
 def host_mem_gb() -> str:
     """Container memory footprint (the number the OOM killer watches) as 'cur/anon/file GB'.
@@ -69,7 +74,9 @@ def drop_file_page_cache(paths) -> None:
             pass
 
 
-def resolve_repo_file(model_name: str, relpath: str) -> str | None:
+def resolve_repo_file(
+    model_name: str | CheckpointRequest, relpath: str
+) -> str | None:
     """Local path of ``relpath`` within a checkpoint, or None when it is not there.
 
     ``model_name`` is either a Hub repo id or a path to a local checkpoint directory; a local
@@ -86,20 +93,17 @@ def resolve_repo_file(model_name: str, relpath: str) -> str | None:
     sharded checkpoint reads as unsharded, then the run fails against the single-file name, blaming
     a file that was never the problem.
     """
-    if os.path.isdir(model_name):
-        local = os.path.join(model_name, relpath)
-        return local if os.path.isfile(local) else None
-    from huggingface_hub import hf_hub_download
-    from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
-    try:
-        return hf_hub_download(model_name, relpath)
-    except LocalEntryNotFoundError:
-        raise
-    except EntryNotFoundError:
-        return None
+    request = (
+        model_name
+        if isinstance(model_name, CheckpointRequest)
+        else CheckpointRequest(model_name)
+    )
+    return resolve_checkpoint_file(request, relpath)
 
 
-def resolve_checkpoint_weight_map(model_name: str, subfolder: str) -> dict:
+def resolve_checkpoint_weight_map(
+    model_name: str | CheckpointRequest, subfolder: str | None = None
+) -> dict:
     """Map every checkpoint tensor key -> local safetensors file path for a component.
 
     Downloads only the index + shard files (cached if already present), never loads tensors.
@@ -107,31 +111,19 @@ def resolve_checkpoint_weight_map(model_name: str, subfolder: str) -> dict:
     a local checkpoint directory. Used by the transformer self-fill path to read individual tensors
     lazily per block/rank.
     """
-    weight_map: dict[str, str] = {}
-    idx_path = resolve_repo_file(
-        model_name, f"{subfolder}/diffusion_pytorch_model.safetensors.index.json"
+    request = (
+        model_name
+        if isinstance(model_name, CheckpointRequest)
+        else CheckpointRequest(model_name, subfolder=subfolder)
     )
-    if idx_path is not None:
-        with open(idx_path) as f:
-            key_to_file = json.load(f)["weight_map"]
-        file_local: dict[str, str] = {}
-        for key, fname in key_to_file.items():
-            if fname not in file_local:
-                file_local[fname] = _require_repo_file(model_name, f"{subfolder}/{fname}")
-            weight_map[key] = file_local[fname]
-        return weight_map
-    # Unsharded: there is no index to enumerate keys from, so read them off the file header.
-    single = _require_repo_file(
-        model_name, f"{subfolder}/diffusion_pytorch_model.safetensors"
-    )
-    from safetensors import safe_open
-    with safe_open(single, framework="pt", device="cpu") as f:
-        for key in f.keys():
-            weight_map[key] = single
-    return weight_map
+    if subfolder is not None and request.subfolder != subfolder:
+        request = request.with_subfolder(subfolder)
+    return discover_checkpoint(request).weight_map
 
 
-def _require_repo_file(model_name: str, relpath: str) -> str:
+def _require_repo_file(
+    model_name: str | CheckpointRequest, relpath: str
+) -> str:
     """resolve_repo_file for a file the checkpoint layout says must exist."""
     path = resolve_repo_file(model_name, relpath)
     if path is None:
@@ -139,7 +131,11 @@ def _require_repo_file(model_name: str, relpath: str) -> str:
     return path
 
 
-def component_shard_paths(model_name: str, subfolder: str, basename: str) -> set:
+def component_shard_paths(
+    model_name: str | CheckpointRequest,
+    subfolder: str | None = None,
+    basename: str | None = None,
+) -> set:
     """Local safetensors file paths for a component, no tensor read (index-only).
 
     basename distinguishes diffusers ("diffusion_pytorch_model") from transformers ("model")
@@ -149,12 +145,15 @@ def component_shard_paths(model_name: str, subfolder: str, basename: str) -> set
     Returns an empty set when the component has no safetensors of that name (e.g. a .bin-only
     checkpoint), which only costs the page-cache drop for it.
     """
-    idx_path = resolve_repo_file(
-        model_name, f"{subfolder}/{basename}.safetensors.index.json"
+    if isinstance(model_name, CheckpointRequest) and basename is None:
+        basename, subfolder = subfolder, None
+    if basename is None:
+        raise TypeError("basename is required")
+    request = (
+        model_name
+        if isinstance(model_name, CheckpointRequest)
+        else CheckpointRequest(model_name, subfolder=subfolder)
     )
-    if idx_path is not None:
-        with open(idx_path) as f:
-            fnames = set(json.load(f)["weight_map"].values())
-        return {_require_repo_file(model_name, f"{subfolder}/{fn}") for fn in fnames}
-    single = resolve_repo_file(model_name, f"{subfolder}/{basename}.safetensors")
-    return {single} if single is not None else set()
+    if subfolder is not None and request.subfolder != subfolder:
+        request = request.with_subfolder(subfolder)
+    return _component_shard_paths(request, basename)

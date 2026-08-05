@@ -26,9 +26,15 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "runner pins a custom revision and loads outside _build_transformer"
+    )
+)
 class xFuserHunyuanvideoModel(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -54,12 +60,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
     )
-
-    def _supports_replicated_meta_load(self) -> bool:
-        # Pins a checkpoint revision on from_pretrained rather than going through
-        # _build_transformer, so peers would never get the meta components the rank0 broadcast
-        # fills. Wiring this up needs a revision passthrough on the meta build; follow-up.
-        return False
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
@@ -112,6 +112,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "runner and derived variants load or remap weights outside _build_transformer"
+    )
+)
 class xFuserHunyuanvideo15Model(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -144,12 +149,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         else:
             self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v"
 
-
-    def _supports_replicated_meta_load(self) -> bool:
-        # Direct from_pretrained, not wired for the meta broadcast fill. Inherited by the distilled
-        # and sparse variants, which additionally rebuild their transformer from a remapped state
-        # dict and so could not use a meta build as-is.
-        return False
 
     def _load_model(self) -> DiffusionPipeline:
         task = self.config.task
@@ -268,6 +267,9 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("tencent/HunyuanVideo-1.5-Sparse")
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
+@LoadCapability.declare(
+    unsupported_reason="sparse runner remaps weights outside _build_transformer"
+)
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
     capabilities = ModelCapabilities(

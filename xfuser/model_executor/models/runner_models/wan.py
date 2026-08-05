@@ -31,6 +31,7 @@ from xfuser.core.utils.runner_utils import (
     resize_image_to_max_area,
 )
 from xfuser.envs import PACKAGES_CHECKER
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 
 COMMON_FSDP_STRATEGY = {
@@ -165,6 +166,7 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserWan21I2VModel(xFuserModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -281,6 +283,7 @@ class xFuserWan21I2VModel(xFuserModel):
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan2.2-I2V")
+@LoadCapability.declare("transformer", "transformer_2", replicated=True)
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -321,6 +324,11 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 
 @register_model("Wan2.2-Distilled-I2V")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "distilled checkpoints replace weights outside _build_transformer"
+    )
+)
 class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
     """Wan2.2 I2V with LightX2V 4-step distilled weights.
 
@@ -367,11 +375,6 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
 
-    def _supports_replicated_meta_load(self) -> bool:
-        # Unlike the base Wan2.2 runner this inherits from, the distilled variant loads the base
-        # architecture directly and then overwrites the transformer weights from separate distilled
-        # checkpoints, so there is no meta build for the rank0 broadcast to fill.
-        return False
 
     def _load_model(self) -> DiffusionPipeline:
         transformer = xFuserWanTransformer3DWrapper.from_pretrained(
@@ -441,6 +444,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserWan21T2VModel(xFuserModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -532,6 +536,7 @@ class xFuserWan21T2VModel(xFuserModel):
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
+@LoadCapability.declare("transformer", "transformer_2", replicated=True)
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -572,6 +577,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 @register_model("Wan2.2-TI2V")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 
     capabilities = ModelCapabilities(
@@ -685,6 +691,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserWan21VACEModel(xFuserModel):
 
     capabilities = ModelCapabilities(

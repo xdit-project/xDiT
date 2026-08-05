@@ -21,6 +21,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 
@@ -70,6 +71,7 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
     )
 
 
+@LoadCapability.declare("transformer", replicated=True)
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
 
@@ -184,6 +186,7 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("krea/krea-2-raw")
 @register_model("krea/Krea-2-Raw")
 @register_model("Krea-2-Raw")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserKrea2RawModel(_Krea2BaseModel):
     """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
 
@@ -218,6 +221,7 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("krea/krea-2-turbo")
 @register_model("krea/Krea-2-Turbo")
 @register_model("Krea-2-Turbo")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserKrea2TurboModel(_Krea2BaseModel):
     """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
 

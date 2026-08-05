@@ -14,10 +14,16 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 
 
 @register_model("CausalWan")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "custom transformer loader may remap checkpoint keys outside _build_transformer"
+    )
+)
 class xFuserCausalWanModel(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -69,11 +75,6 @@ class xFuserCausalWanModel(xFuserModel):
     _DMD_DENOISING_STEPS = [1000, 850, 700, 550, 350, 275, 200, 125]
     _FLOW_SHIFT = 3
 
-
-    def _supports_replicated_meta_load(self) -> bool:
-        # _load_transformer has its own from_config + strict load_state_dict fallback for
-        # index-mismatched checkpoints, which a meta build plus broadcast fill cannot reproduce.
-        return False
 
     def _load_transformer(self, subfolder: str) -> xFuserCausalWanTransformer3DWrapper:
         """Load transformer, falling back to manual loading if weight index is mismatched."""

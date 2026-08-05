@@ -11,6 +11,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.model_executor.models.transformers.transformer_qwen import xFuserQwenImageTransformerWrapper
 from xfuser import xFuserArgs
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
 @register_model("Qwen/Qwen-Image-Edit-2511")
 @register_model("Qwen/Qwen-Image-Edit-2509")
@@ -18,6 +19,7 @@ from xfuser import xFuserArgs
 @register_model("Qwen-Image-Edit-2511")
 @register_model("Qwen-Image-Edit-2509")
 @register_model("Qwen-Image-Edit")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserQwenImageEditModel(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -97,6 +99,7 @@ class xFuserQwenImageEditModel(xFuserModel):
 @register_model("Qwen/Qwen-Image")
 @register_model("Qwen-Image-2512")
 @register_model("Qwen-Image")
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserQwenImageModel(xFuserModel):
 
     capabilities = ModelCapabilities(

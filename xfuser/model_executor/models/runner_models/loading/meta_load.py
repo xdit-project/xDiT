@@ -40,6 +40,13 @@ from xfuser.core.utils.checkpoint_io import (
     component_shard_paths,
 )
 from xfuser.core.utils.runner_utils import log, rgetattr
+from .checkpoint import CheckpointRequest
+from .contracts import (
+    MaterializationMode,
+    UnsupportedLoadContract,
+    select_effective_materialization_mode,
+    validate_materialization_contract,
+)
 
 
 def _is_bcast_src(group) -> bool:
@@ -205,16 +212,40 @@ class MemoryEfficientLoader:
         # The meta transformers this loader built, so the shard step can recognize them by identity
         # rather than by guessing from the component's name. Weak so a component the pipeline
         # replaces or drops is not kept alive by the bookkeeping.
-        self._meta_transformers = weakref.WeakSet()
+        self._meta_transformers = weakref.WeakKeyDictionary()
         # Resolved on first use and cached: several load-time seams consult it, so this keeps the
         # decision identical everywhere and logs the reason once.
         self._replicated_decision = None
+
+    def _checkpoint_request(self, subfolder: str | None = None) -> CheckpointRequest:
+        factory = getattr(self.model, "_checkpoint_request", None)
+        if factory is not None:
+            return factory(subfolder)
+        return CheckpointRequest(
+            self.model.settings.model_name, subfolder=subfolder
+        )
+
+    def _validate_mode(self, mode: MaterializationMode) -> None:
+        validate_materialization_contract(
+            self.model.load_capability,
+            mode,
+            self.model.settings.fsdp_strategy,
+            runner_name=type(self.model).__name__,
+        )
 
     def fsdp_meta_load(self) -> bool:
         """True when the memory-efficient sharded (meta-init + per-block rank0-read/broadcast fill)
         load path is on."""
         config = self.model.config
-        return bool(config.memory_efficient_sharding and config.fully_shard_degree > 1)
+        enabled = (
+            select_effective_materialization_mode(
+                config, world_size=get_world_group().world_size
+            )
+            is MaterializationMode.FSDP_META
+        )
+        if enabled:
+            self._validate_mode(MaterializationMode.FSDP_META)
+        return enabled
 
     def replicated_broadcast_load(self) -> bool:
         """Whether to load replicated components once on rank0 and broadcast them to peers.
@@ -232,7 +263,7 @@ class MemoryEfficientLoader:
         it cannot apply: weight-splitting parallelism (FSDP, PipeFusion, tensor parallel), where
         ranks legitimately hold different weights and a broadcast would overwrite them; a single
         rank, where there is no peer to broadcast to; and runners not wired for the path (the
-        model's _supports_replicated_meta_load).
+        model's explicit load_capability declaration).
         """
         if self._replicated_decision is None:
             self._replicated_decision = self._resolve_replicated_broadcast_load()
@@ -242,25 +273,25 @@ class MemoryEfficientLoader:
         config = self.model.config
         if not config.memory_efficient_replicated_load:
             return False
-        splits_weights_per_rank = (
-            config.fully_shard_degree > 1
-            or config.pipefusion_parallel_degree > 1
-            or config.tensor_parallel_degree > 1
+        world_size = get_world_group().world_size
+        effective_mode = select_effective_materialization_mode(
+            config, world_size=world_size
         )
-        if splits_weights_per_rank:
-            log("--memory_efficient_replicated_load ignored: this run splits weights per rank "
-                "(FSDP/PipeFusion/tensor parallel), so peers hold different weights than rank0 and "
-                "a broadcast would overwrite them. Loading per rank.")
+        if effective_mode is not MaterializationMode.REPLICATED_META:
+            splits_weights_per_rank = (
+                config.fully_shard_degree > 1
+                or config.pipefusion_parallel_degree > 1
+                or config.tensor_parallel_degree > 1
+            )
+            if splits_weights_per_rank:
+                log("--memory_efficient_replicated_load ignored: this run splits weights per rank "
+                    "(FSDP/PipeFusion/tensor parallel), so peers hold different weights than rank0 and "
+                    "a broadcast would overwrite them. Loading per rank.")
+            elif world_size == 1:
+                log("--memory_efficient_replicated_load ignored: single-rank run has no peer to "
+                    "broadcast to. Loading normally.")
             return False
-        if get_world_group().world_size == 1:
-            log("--memory_efficient_replicated_load ignored: single-rank run has no peer to "
-                "broadcast to. Loading normally.")
-            return False
-        if not self.model._supports_replicated_meta_load():
-            log(f"--memory_efficient_replicated_load ignored: "
-                f"{type(self.model).__name__} loads its components directly rather than through "
-                f"the meta-build seams this path needs. Loading per rank.")
-            return False
+        self._validate_mode(effective_mode)
         log("Replicated rank0-broadcast load enabled by --memory_efficient_replicated_load "
             "(host peak 1x the model, not Nx).")
         return True
@@ -272,7 +303,14 @@ class MemoryEfficientLoader:
         different collectives, so this must not guess from the component's name."""
         return component in self._meta_transformers
 
-    def build_meta_transformer(self, wrapper_cls, subfolder: str = "transformer", init_kwargs: dict | None = None):
+    def build_meta_transformer(
+        self,
+        wrapper_cls,
+        request: CheckpointRequest | str = "transformer",
+        init_kwargs: dict | None = None,
+        *,
+        subfolder: str | None = None,
+    ):
         """Build the (diffusers) transformer wrapper on meta from its config only (no weights).
 
         Real weights are streamed per block from disk during sharding (see _TransformerDiskFiller),
@@ -282,10 +320,27 @@ class MemoryEfficientLoader:
         init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) not in the on-disk
         config; forwarded to from_config so the meta model matches the from_pretrained path.
         """
+        if isinstance(request, str):
+            request = self._checkpoint_request(subfolder or request)
+        elif subfolder is not None and request.subfolder != subfolder:
+            request = request.with_subfolder(subfolder)
+        component_name = request.subfolder or "transformer"
+        if component_name not in self.model.load_capability.meta_transformers:
+            raise UnsupportedLoadContract(
+                f"{type(self.model).__name__} attempted meta construction of "
+                f"'{component_name}' without declaring it in load_capability"
+            )
+        strategy = self.model.settings.fsdp_strategy.get(component_name)
+        if strategy is None or not strategy.get("wrap_attrs"):
+            raise UnsupportedLoadContract(
+                f"{type(self.model).__name__} cannot meta-build '{component_name}': "
+                "fsdp_strategy must declare non-empty wrap_attrs before construction"
+            )
+
         def build():
             from accelerate import init_empty_weights
             config = wrapper_cls.load_config(
-                self.model.settings.model_name, subfolder=subfolder
+                request.model_name_or_path, **request.config_kwargs()
             )
             with init_empty_weights():
                 model = wrapper_cls.from_config(config, **(init_kwargs or {}))
@@ -293,9 +348,9 @@ class MemoryEfficientLoader:
             return model.to(torch.bfloat16)
 
         model = _collective_build_call(
-            get_world_group(), build, context=f"meta transformer '{subfolder}'"
+            get_world_group(), build, context=f"meta transformer '{component_name}'"
         )
-        self._meta_transformers.add(model)
+        self._meta_transformers[model] = request
         return model
 
     def build_meta_component(self, component_name: str, fp8: bool = True):
@@ -326,8 +381,11 @@ class MemoryEfficientLoader:
         # either surfaces instead of degrading every rank to a normal load behind one log line
         # (symmetrically, so agreed_is_meta would not catch it either).
         try:
-            model_name = self.model.settings.model_name
-            index = DiffusionPipeline.load_config(model_name)
+            request = self._checkpoint_request()
+            model_name = request.model_name_or_path
+            index = DiffusionPipeline.load_config(
+                model_name, **request.config_kwargs(include_subfolder=False)
+            )
             entry = index.get(component_name)
             if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
                 return None
@@ -335,7 +393,10 @@ class MemoryEfficientLoader:
             if library != "transformers":
                 return None
             cls = getattr(importlib.import_module(library), class_name)
-            config = cls.config_class.from_pretrained(model_name, subfolder=component_name)
+            component_request = request.with_subfolder(component_name)
+            config = cls.config_class.from_pretrained(
+                model_name, **component_request.config_kwargs()
+            )
         except (OSError, ImportError, AttributeError) as e:
             log(f"Meta-init of component '{component_name}' failed "
                 f"({type(e).__name__}: {e}); using normal load.")
@@ -622,7 +683,15 @@ class MemoryEfficientLoader:
         group: broadcast group (default get_fs_group() for the FSDP path). The replicated path passes
         get_world_group() — get_fs_group() has world_size 1 when fully_shard_degree==1, so its
         broadcast would be a no-op and peers would receive garbage."""
-        filler = _TransformerDiskFiller(self.model, component, wrap_attrs, subfolder, device, group)
+        request = self._meta_transformers.get(component)
+        if request is None:
+            raise UnsupportedLoadContract(
+                f"no CheckpointRequest recorded for meta transformer '{subfolder}'; "
+                "refusing to reconstruct checkpoint identity before disk fill"
+            )
+        filler = _TransformerDiskFiller(
+            self.model, component, wrap_attrs, request, device, group
+        )
         return filler.fill_block, filler.finalize
 
     def broadcast_load(self, component, component_name: str, offload: bool) -> None:
@@ -676,10 +745,11 @@ class MemoryEfficientLoader:
             kwargs["quantization_config"] = AiterFp8BlockScaleTEConfig(
                 target_modules=self.model.fp8.targets_for(component_name)
             )
+        request = self._checkpoint_request(component_name)
         return type(component).from_pretrained(
-            self.model.settings.model_name,
-            subfolder=component_name,
+            request.model_name_or_path,
             torch_dtype=torch.bfloat16,
+            **request.from_pretrained_kwargs(),
             **kwargs,
         )
 
@@ -754,7 +824,8 @@ class MemoryEfficientLoader:
             paths = set()
             for basename in ("model", "diffusion_pytorch_model"):
                 paths |= component_shard_paths(
-                    self.model.settings.model_name, component_name, basename
+                    self._checkpoint_request(component_name),
+                    basename=basename,
                 )
             drop_file_page_cache(paths)
         if torch.cuda.is_available():
@@ -767,11 +838,20 @@ class _TransformerDiskFiller:
     handle ExitStack across the per-block fill and the epilogue. See module docstring for why the
     read is rank0-only (block-128 fp8 tile constraint + host-anon N-scaling)."""
 
-    def __init__(self, model, component, wrap_attrs, subfolder, device, group=None) -> None:
+    def __init__(
+        self,
+        model,
+        component,
+        wrap_attrs,
+        request: CheckpointRequest,
+        device,
+        group=None,
+    ) -> None:
         from contextlib import ExitStack
 
         self.model = model
-        self.subfolder = subfolder
+        self.request = request
+        self.subfolder = request.subfolder or "transformer"
         self.device = device
         self.group = group or get_fs_group()
         self.is_src = _is_bcast_src(self.group)
@@ -781,9 +861,9 @@ class _TransformerDiskFiller:
             self.group,
             self.is_src,
             lambda: resolve_checkpoint_weight_map(
-                model.settings.model_name, subfolder
+                self.request
             ),
-            context=f"resolving checkpoint map for {subfolder}",
+            context=f"resolving checkpoint map for {self.subfolder}",
         ) or {}
         self.shard_paths = set(self.weight_map.values())
         self._handle_cache: dict[str, object] = {}

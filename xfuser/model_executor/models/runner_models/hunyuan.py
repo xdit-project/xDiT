@@ -26,15 +26,14 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadCapability,
+    LoaderAdapter,
+)
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
-@LoadCapability.declare(
-    unsupported_reason=(
-        "runner pins a custom revision and loads outside _build_transformer"
-    )
-)
+@LoadCapability.declare("transformer", replicated=True)
 class xFuserHunyuanvideoModel(xFuserModel):
 
     capabilities = ModelCapabilities(
@@ -44,6 +43,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -59,22 +59,32 @@ class xFuserHunyuanvideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": [
+                    "transformer_blocks", "single_transformer_blocks"
+                ],
+                "dtype": torch.bfloat16,
+            },
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            revision="refs/pr/18",
+        request = self._checkpoint_request(revision="refs/pr/18")
+        transformer_request = request.with_subfolder("transformer")
+        transformer = self._build_transformer(
+            xFuserHunyuanVideoTransformer3DWrapper,
+            checkpoint_request=transformer_request,
         )
         pipe = HunyuanVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
-            revision="refs/pr/18",
+            **request.from_pretrained_kwargs(include_subfolder=False),
         )
-        fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision="refs/pr/18")
+        fix_llama_tokenizer_pretokenizer(
+            pipe, self.settings.model_name, revision=request.revision
+        )
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -113,8 +123,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @LoadCapability.declare(
+    loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
     unsupported_reason=(
-        "runner and derived variants load or remap weights outside _build_transformer"
+        "HunyuanVideo 1.5 uses a separate wrapper whose config-only "
+        "construction and checkpoint layout have not been verified for the "
+        "standard collective loader"
     )
 )
 class xFuserHunyuanvideo15Model(xFuserModel):
@@ -219,6 +232,13 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("Hunyuanvideo-1.5-Distilled")
+@LoadCapability.declare(
+    loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
+    unsupported_reason=(
+        "the HunyuanVideo 1.5 distilled checkpoint uses the separate 1.5 "
+        "wrapper and has not been verified for config-only collective loading"
+    )
+)
 class xFuserHunyuanvideo15DistilledModel(xFuserHunyuanvideo15Model):
     
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -268,7 +288,11 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
 @LoadCapability.declare(
-    unsupported_reason="sparse runner remaps weights outside _build_transformer"
+    loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
+    unsupported_reason=(
+        "the sparse HunyuanVideo 1.5 loader composes base non-block weights "
+        "with remapped Tencent sparse blocks outside _build_transformer"
+    ),
 )
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 

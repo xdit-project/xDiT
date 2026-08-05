@@ -260,6 +260,8 @@ class xFuserModel(abc.ABC):
                 declaration.replicated_meta_transformers
             ),
             fsdp_strategy=self.settings.fsdp_strategy,
+            loader_adapter=declaration.loader_adapter,
+            component_exclusions=declaration.component_exclusions,
             unsupported_reason=declaration.unsupported_reason,
         )
 

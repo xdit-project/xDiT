@@ -200,19 +200,20 @@ FP4 and INT8 are post-load conversions during ordinary loading. FP8 uses native 
 | FLUX.1-dev, FLUX.1-Kontext | Streaming; transformer targets declared | `text_encoder_2` | Transformer + targeted text encoder | Yes |
 | FLUX.2, FLUX.2-klein (4B/9B) | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | Streaming; both Wan 2.2 transformers are covered | `text_encoder` | Transformer(s) + targeted text encoder | Yes |
-| Wan 2.2 Distilled I2V | Direct/post-load only | Declared, post-load only | No memory-efficient load path | No |
+| Wan 2.2 Distilled I2V | Explicit `distilled_wan_remap` adapter exclusion; external LightX2V state dicts replace both transformers | Declared, post-load only | Rejected before allocation: strict remapping is not collective-safe | No |
 | Wan 2.1 VACE | Streaming; main and VACE blocks covered | `text_encoder` | Not exposed by this runner | Yes |
 | Qwen-Image and Qwen-Image-Edit variants | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Z-Image and Z-Image-Turbo | Streaming; transformer, noise refiner, and context refiner covered | `text_encoder` | Transformer + targeted text encoder | Yes |
-| Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | None | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
-| Stable Diffusion 3.5 | Direct/post-load only | `text_encoder_3`, post-load only | FSDP is supported, but loading is not memory-efficient | No |
-| HunyuanVideo and HunyuanVideo-1.5 variants | Direct/post-load only | None | Not exposed by these runners | No |
-| LTX-2 | Direct/post-load only | None | Not exposed by this runner | No |
-| LTX-2.3 | Direct load; no quantized GEMM capability declared | None | Not exposed by this runner | No |
+| Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | Explicitly excluded: the Qwen3VL ROCm float32-Linear workaround has no exact quantization target/API contract | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
+| Stable Diffusion 3.5 | Explicit `sd35_composition` adapter exclusion; direct/post-load only | `text_encoder_3`, post-load only | Rejected before allocation: the composition wrapper has no config-only transformer seam | No |
+| HunyuanVideo | Streaming from pinned revision `refs/pr/18`; both transformer block lists declared | None | Transformer | Transformer |
+| HunyuanVideo-1.5, distilled, and sparse/remapped variants | Explicit `hunyuan_video_15_variants` adapter exclusion; direct/remapped loading only | None | Rejected before allocation: separate wrapper/config and remapped sparse composition are not verified against the standard seam | No |
+| LTX-2 | Eager/native streaming through the shared transformer seam; transformer targets declared | None | Rejected before allocation: stage-2 distilled LoRA currently precedes base checkpoint fill on a meta transformer | No |
+| LTX-2.3 | Eager load through the shared transformer seam; no quantized GEMM capability declared | None | Rejected before allocation: stage-2 distilled LoRA currently precedes base checkpoint fill on a meta transformer | No |
 | Cosmos3-Super and Cosmos3-Nano | Streaming; transformer targets declared | None | Transformer only | Transformer only |
-| CausalWan | Direct load; no quantized GEMM capability declared | None | FSDP is supported, but loading is not memory-efficient | No |
+| CausalWan | Explicit `causal_wan_custom` adapter exclusion; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
 
-The FLUX PipeFusion loading branches construct their complete pipelines directly. They therefore do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. The distilled Wan runner similarly loads and replaces transformer checkpoints outside the shared meta-load seam.
+The FLUX PipeFusion loading branches construct their complete pipelines directly. They therefore do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. Named custom adapters are declarative exclusions: they preserve eager behavior, but a requested meta mode fails before model allocation and cannot enter the standard transformer collective path.
 
 #### Per-model FP4 and INT8 Coverage
 
@@ -301,6 +302,7 @@ These examples show the loading contract, not universal performance recommendati
 | Replicated meta-load policy | Implemented | Unit tests directly exercise the pure opt-in decision and exclusions for single rank, weight-splitting parallelism, and unwired runners. Collective fill behavior is verified only by static inspection. | Multi-rank GPU broadcasts and complete inference are GPU-unvalidated here |
 | Memory-efficient FSDP policy and meta construction | Implemented | Unit tests directly exercise the FSDP gate and bf16 meta-transformer construction. Per-block fill and quantize routing are verified only by static inspection. | Multi-rank FSDP fills, offload combinations, and complete inference are GPU-unvalidated here |
 | FP4/INT8 hardware gates and per-model capability/target declarations | Implemented | Statically enforced by runner capability checks, hardware checks, and model target lists; no unit coverage is claimed by this table | MXFP4, NVFP4, INT8, mixed FP4/FP8, and model-specific quality combinations are GPU-unvalidated here |
+| Registry/model construction declarations | Implemented | Dependency-light AST tests require every registered runner to declare its load contract, extract actual `ModelSettings.fsdp_strategy` and instance strategy assignments for meta declarations, and keep named custom adapters out of standard collective modes. Guarded model tests check the Hunyuan/LTX wrapper config APIs when Diffusers is installed. | HunyuanVideo meta loading and LTX-2/2.3 eager/native loading remain GPU-unvalidated here |
 
 These labels describe code and repository test coverage, not runtime validation performed for this documentation change. No GPU end-to-end result is claimed.
 

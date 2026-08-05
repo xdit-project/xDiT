@@ -14,14 +14,20 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadCapability,
+    LoaderAdapter,
+)
 
 
 
 @register_model("CausalWan")
 @LoadCapability.declare(
+    loader_adapter=LoaderAdapter.CAUSAL_WAN,
     unsupported_reason=(
-        "custom transformer loader may remap checkpoint keys outside _build_transformer"
+        "the checkpoint may require a manual single-file fallback after its "
+        "Diffusers index load fails; exact collective-safe key discovery is "
+        "not declared"
     )
 )
 class xFuserCausalWanModel(xFuserModel):

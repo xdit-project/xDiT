@@ -37,6 +37,13 @@ DEFAULT_NEGATIVE_PROMPT = "" \
 
 @register_model("dg845/LTX-2.3-Diffusers")
 @register_model("LTX-2.3")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "stage 2 distilled LoRA is applied before a meta transformer would "
+        "receive its base checkpoint; collective meta loading is withheld "
+        "until that load order is reordered and verified"
+    )
+)
 class xFuserLTX23VideoModel(xFuserModel):
     default_input_values = DefaultInputValues(
         height=1024,
@@ -53,6 +60,12 @@ class xFuserLTX23VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+                "dtype": torch.bfloat16,
+            },
+        },
     )
 
     capabilities = ModelCapabilities(
@@ -60,6 +73,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        fully_shard_degree=True,
     )
 
     _STG_SCALE = 1.0
@@ -71,18 +85,9 @@ class xFuserLTX23VideoModel(xFuserModel):
     _AUDIO_MODALITY_SCALE = 3.0
     _AUDIO_GUIDANCE_RESCALE = 0.7
 
-    load_capability = LoadCapability.for_runner(
-        capabilities,
-        unsupported_reason=(
-            "transformer is loaded directly instead of through _build_transformer"
-        ),
-    )
-
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
+        transformer = self._build_transformer(
+            xFuserLTX2VideoTransformer3DWrapper
         )
 
         pipe = LTX2Pipeline.from_pretrained(
@@ -222,6 +227,13 @@ class xFuserLTX23VideoModel(xFuserModel):
 
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "stage 2 distilled LoRA is applied before a meta transformer would "
+        "receive its base checkpoint; collective meta loading is withheld "
+        "until that load order is reordered and verified"
+    )
+)
 class xFuserLTX2VideoModel(xFuserModel):
 
     default_input_values = DefaultInputValues(
@@ -239,6 +251,12 @@ class xFuserLTX2VideoModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fps=24,
         resolution_divisor=64,
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": ["transformer_blocks"],
+                "dtype": torch.bfloat16,
+            },
+        },
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -246,20 +264,12 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
-    )
-
-    load_capability = LoadCapability.for_runner(
-        capabilities,
-        unsupported_reason=(
-            "transformer is loaded directly instead of through _build_transformer"
-        ),
+        fully_shard_degree=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
+        transformer = self._build_transformer(
+            xFuserLTX2VideoTransformer3DWrapper
         )
         pipe = LTX2Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,

@@ -31,7 +31,10 @@ from xfuser.core.utils.runner_utils import (
     resize_image_to_max_area,
 )
 from xfuser.envs import PACKAGES_CHECKER
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadCapability,
+    LoaderAdapter,
+)
 
 
 COMMON_FSDP_STRATEGY = {
@@ -325,8 +328,10 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 @register_model("Wan2.2-Distilled-I2V")
 @LoadCapability.declare(
+    loader_adapter=LoaderAdapter.DISTILLED_WAN,
     unsupported_reason=(
-        "distilled checkpoints replace weights outside _build_transformer"
+        "external LightX2V checkpoints require strict key remapping and replace "
+        "both transformer state dicts after standard construction"
     )
 )
 class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):

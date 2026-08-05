@@ -9,14 +9,20 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadCapability,
+    LoaderAdapter,
+)
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
 @LoadCapability.declare(
+    loader_adapter=LoaderAdapter.SD35_COMPOSITION,
     unsupported_reason=(
-        "composition wrapper has no config-only transformer construction seam"
+        "xFuserStableDiffusion3Pipeline is a composition wrapper around a "
+        "fully loaded Diffusers pipeline and has no config-only transformer "
+        "construction seam"
     )
 )
 class xFuserStableDiffusionModel(xFuserModel):

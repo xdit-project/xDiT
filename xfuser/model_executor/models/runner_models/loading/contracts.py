@@ -29,6 +29,38 @@ class ConstructionSeam(str, Enum):
     BUILD_TRANSFORMER = "_build_transformer"
 
 
+class LoaderAdapter(str, Enum):
+    """Checkpoint construction strategy owned by a runner."""
+
+    STANDARD_TRANSFORMER = "standard_transformer"
+    DISTILLED_WAN = "distilled_wan_remap"
+    SD35_COMPOSITION = "sd35_composition"
+    CAUSAL_WAN = "causal_wan_custom"
+    HUNYUAN15_VARIANTS = "hunyuan_video_15_variants"
+
+    @property
+    def supports_standard_collectives(self) -> bool:
+        return self is LoaderAdapter.STANDARD_TRANSFORMER
+
+
+@dataclass(frozen=True)
+class ComponentLoadExclusion:
+    """A component intentionally kept outside the shared loader adapters."""
+
+    component: str
+    reason: str
+
+
+KREA2_TEXT_ENCODER_EXCLUSION = ComponentLoadExclusion(
+    component="text_encoder",
+    reason=(
+        "Krea2's Qwen3VL text encoder uses a ROCm-specific float32 Linear "
+        "runtime patch; exact quantization targets and a compatible "
+        "quantize-on-load API are not declared"
+    ),
+)
+
+
 class UnsupportedLoadContract(ValueError):
     """The runner cannot honor a requested load contract safely."""
 
@@ -51,6 +83,8 @@ class LoadCapability:
         {MaterializationMode.EAGER}
     )
     construction_seam: ConstructionSeam | None = None
+    loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER
+    component_exclusions: tuple[ComponentLoadExclusion, ...] = ()
     quantization_formats: FrozenSet[QuantizationFormat] = frozenset(
         {QuantizationFormat.NONE}
     )
@@ -69,6 +103,18 @@ class LoadCapability:
                 self.fsdp_meta_transformers
                 + self.replicated_meta_transformers
             )
+        )
+
+    def exclusion_for(
+        self, component: str
+    ) -> ComponentLoadExclusion | None:
+        return next(
+            (
+                exclusion
+                for exclusion in self.component_exclusions
+                if exclusion.component == component
+            ),
+            None,
         )
 
     @classmethod
@@ -124,6 +170,8 @@ class LoadCapability:
         meta_transformers: tuple[str, ...] = (),
         replicated: bool = False,
         fsdp_strategy: Mapping[str, Mapping] | None = None,
+        loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER,
+        component_exclusions: tuple[ComponentLoadExclusion, ...] = (),
         unsupported_reason: str | None = None,
     ) -> "LoadCapability":
         """Derive quantization support while keeping meta loading opt-in."""
@@ -169,19 +217,22 @@ class LoadCapability:
         modes = {MaterializationMode.EAGER}
         seam = None
         strategy = fsdp_strategy or {}
+        standard_collectives = loader_adapter.supports_standard_collectives
         fsdp_transformers = (
             tuple(
                 name
                 for name in meta_transformers
                 if strategy.get(name, {}).get("wrap_attrs")
             )
-            if getattr(
+            if standard_collectives and getattr(
                 model_capabilities, "fully_shard_degree", False
             )
             else ()
         )
         replicated_transformers = (
-            tuple(meta_transformers) if replicated else ()
+            tuple(meta_transformers)
+            if standard_collectives and replicated
+            else ()
         )
         if fsdp_transformers:
             modes.add(MaterializationMode.FSDP_META)
@@ -196,6 +247,8 @@ class LoadCapability:
             replicated_meta_transformers=replicated_transformers,
             materialization_modes=frozenset(modes),
             construction_seam=seam,
+            loader_adapter=loader_adapter,
+            component_exclusions=tuple(component_exclusions),
             quantization_formats=formats,
             quantization_backends=backends,
             quantization_contracts=frozenset(contracts),
@@ -207,6 +260,8 @@ class LoadCapability:
         cls,
         *meta_transformers: str,
         replicated: bool = False,
+        loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER,
+        component_exclusions: tuple[ComponentLoadExclusion, ...] = (),
         unsupported_reason: str | None = None,
     ):
         """Class decorator deriving quantization support after class creation."""
@@ -217,6 +272,8 @@ class LoadCapability:
                 meta_transformers=tuple(meta_transformers),
                 replicated=replicated,
                 fsdp_strategy=runner_cls.settings.fsdp_strategy,
+                loader_adapter=loader_adapter,
+                component_exclusions=component_exclusions,
                 unsupported_reason=unsupported_reason,
             )
             return runner_cls
@@ -275,6 +332,15 @@ def validate_materialization_contract(
         )
     if mode is MaterializationMode.EAGER:
         return
+    if not capability.loader_adapter.supports_standard_collectives:
+        reason = (
+            capability.unsupported_reason
+            or f"{capability.loader_adapter.value} is not collective-safe"
+        )
+        raise UnsupportedLoadContract(
+            f"{runner_name} does not support {mode.value} materialization: "
+            f"{reason}"
+        )
     if capability.construction_seam is None:
         raise UnsupportedLoadContract(
             f"{runner_name} declares {mode.value} but no meta construction seam"

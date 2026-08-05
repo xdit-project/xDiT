@@ -451,6 +451,13 @@ class MemoryEfficientLoader:
             request = self._checkpoint_request(subfolder or request)
         elif subfolder is not None and request.subfolder != subfolder:
             request = request.with_subfolder(subfolder)
+        if not self.model.load_capability.loader_adapter.supports_standard_collectives:
+            raise UnsupportedLoadContract(
+                f"{type(self.model).__name__} uses "
+                f"{self.model.load_capability.loader_adapter.value}; custom "
+                "loader adapters cannot enter the standard transformer "
+                "collective path"
+            )
         component_name = request.subfolder or "transformer"
         if component_name not in self.model.load_capability.meta_transformers:
             raise UnsupportedLoadContract(
@@ -499,6 +506,13 @@ class MemoryEfficientLoader:
         Note the fallback is rank-local, so a rank that takes it while its peers build meta
         diverges; ``agreed_is_meta`` catches that downstream and fails every rank.
         """
+        exclusion = self.model.load_capability.exclusion_for(component_name)
+        if exclusion is not None:
+            raise UnsupportedLoadContract(
+                f"{type(self.model).__name__} excludes meta construction of "
+                f"'{component_name}': {exclusion.reason}"
+            )
+
         from diffusers import DiffusionPipeline
         from accelerate import init_empty_weights
         from .text_encoder_adapter import resolve_transformers_component
@@ -549,6 +563,7 @@ class MemoryEfficientLoader:
         te_components = [
             name for name in self.model.settings.fsdp_strategy
             if name != "transformer" and not name.startswith("transformer_")
+            and self.model.load_capability.exclusion_for(name) is None
         ]
         if not te_components:
             return None
@@ -584,6 +599,7 @@ class MemoryEfficientLoader:
             te_components = [
                 name for name in self.model.settings.fsdp_strategy
                 if name != "transformer" and not name.startswith("transformer_")
+                and self.model.load_capability.exclusion_for(name) is None
             ]
             kwargs = {}
             for name in te_components:

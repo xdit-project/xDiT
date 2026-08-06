@@ -145,7 +145,14 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
 
     requires_calibration = False
     required_packages = ["aiter"]
-    use_keep_in_fp32_modules = False
+    # Diffusers drops the model's `_keep_in_fp32_modules` for any load with a quantizer unless the
+    # quantizer opts back in here, as its bitsandbytes, quanto, gguf and modelopt ones all do. Opt
+    # in: only targeted nn.Linear weights are converted, and the modules a model pins to fp32 are
+    # norms, scale-shift tables and embedders that are never a target, so honouring the policy
+    # leaves nothing for this quantizer to disagree with. Without it a streamed Wan-family
+    # transformer would hold those modules in the compute dtype while the post-load walk over the
+    # same checkpoint keeps them fp32.
+    use_keep_in_fp32_modules = True
 
     def __init__(self, quantization_config, **kwargs):
         super().__init__(quantization_config, **kwargs)

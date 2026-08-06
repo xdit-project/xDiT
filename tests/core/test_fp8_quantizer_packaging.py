@@ -126,6 +126,14 @@ def test_the_torchao_policy_leaves_an_opted_in_quantizer_alone(monkeypatch):
         torchao_quantizer.register_torchao_fp32_policy.cache_clear()
 
 
+def test_every_diffusers_side_streaming_quantizer_keeps_the_fp32_modules():
+    """Diffusers gates `_keep_in_fp32_modules` on the active quantizer opting in, so a quantizer
+    that does not silently loads the pinned modules in the compute dtype. Both routes into a
+    diffusers model have to opt in, or streaming and the post-load walk load the same checkpoint
+    differently."""
+    assert quant.AiterFp8BlockScaleQuantizer.use_keep_in_fp32_modules is True
+
+
 def test_missing_streaming_loader_gives_an_actionable_error(monkeypatch):
     """On a transformers below the streaming loader, the failure has to name the requirement rather
     than surface as an ImportError from inside the load."""

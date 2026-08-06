@@ -346,10 +346,10 @@ def batched_tiled_decode(
     other way to spend the independence between tiles and the one that removes the per-tile cost
     above rather than dividing it.
 
-    `assemble` goes further and divides the blending too, by giving each rank a band of tile rows
-    to decode and stitch by itself. Where it declines - too few rows to give every rank one - the
-    decode falls back to `dispatch`, which divides the decoder calls and leaves the blending
-    everywhere.
+    `assemble` goes further and divides the blending too, by giving each rank a run of
+    neighbouring tiles to decode and stitch by itself. Where it declines - too few tiles to give
+    every rank one, or tiles too small to blend against a neighbour's edge alone - the decode
+    falls back to `dispatch`, which divides the decoder calls and leaves the blending everywhere.
     """
     if not tiles_by_overlap_factor(vae):
         return None

@@ -1197,8 +1197,9 @@ class xFuserModel(abc.ABC):
             else "a tile per call"
         )
         log(f"VAE tiled decode on {type(vae).__name__}: {carried}"
-            + (f", dealt out across {torch.distributed.get_world_size(group)} ranks, "
-               f"a band of tile rows each where the grid has a row to spare them."
+            + (f", divided across {torch.distributed.get_world_size(group)} ranks, "
+               f"a run of neighbouring tiles each to decode and blend where the grid "
+               f"has the tiles to spare them."
                if group is not None else "."))
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:

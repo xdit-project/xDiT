@@ -97,7 +97,7 @@ class TestDispatchOverAGroup(unittest.TestCase):
         self._spawn(4, 3)
 
 
-BAND_VAES = {
+RUN_VAES = {
     "AutoencoderKL": (
         dict(
             block_out_channels=[8, 8, 16, 16],
@@ -133,7 +133,7 @@ def _tiled_vae(name: str):
 
     from xfuser.core.utils import vae_parallel, vae_tiling
 
-    kwargs, video = BAND_VAES[name]
+    kwargs, video = RUN_VAES[name]
     # Importing xfuser on ROCm swaps torch's GroupNorm for AITER's, which faults on the CPU
     # tensors these tiles are made of. The revert has to land before the VAE is assembled.
     vae_parallel.restore_torch_group_norm()
@@ -151,8 +151,8 @@ def _tiled_vae(name: str):
     return vae, torch.randn(*shape)
 
 
-def _bands_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
-    """One rank blending its own band, checked against the whole grid blended by one rank"""
+def _runs_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
+    """One rank blending its own run, checked against the whole grid blended by one rank"""
     from xfuser.core.utils import vae_tile_parallel, vae_tiling
 
     dist.init_process_group(
@@ -175,14 +175,14 @@ def _bands_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
             got = decode(latents).sample
 
         assert got.shape == expected.shape, f"{got.shape} != {expected.shape}"
-        # Bit-exact, not close: a band replays the blending its neighbour would have done on the
+        # Bit-exact, not close: a run replays the blending its neighbour would have done on the
         # same values, so there is no reordering to excuse a difference.
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
     finally:
         dist.destroy_process_group()
 
 
-class TestBands(unittest.TestCase):
+class TestRuns(unittest.TestCase):
     """Tiles split into a contiguous run per rank, blended locally, gathered back whole"""
 
     def test_tiles_of_equal_weight_are_split_as_evenly_as_they_divide(self):
@@ -227,12 +227,12 @@ class TestBands(unittest.TestCase):
                 covered = [n for start, stop in split for n in range(start, stop)]
                 self.assertEqual(covered, list(range(tiles)), f"{tiles}/{world_size}")
 
-    def test_a_band_decode_is_what_one_rank_blending_everything_gives(self):
-        for name in BAND_VAES:
+    def test_a_run_decode_is_what_one_rank_blending_everything_gives(self):
+        for name in RUN_VAES:
             for world_size in (2, 4):
                 with self.subTest(vae=name, world_size=world_size):
                     mp.spawn(
-                        _bands_in_a_group,
+                        _runs_in_a_group,
                         args=(world_size, _free_port(), name),
                         nprocs=world_size,
                         join=True,

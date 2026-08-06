@@ -1,11 +1,12 @@
 """Dealing a tiled decode's calls out to a group, over gloo, without a GPU or a VAE in sight"""
 
 import itertools
+import os
 import random
 import socket
 import unittest
 from datetime import timedelta
-from typing import List
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -18,9 +19,9 @@ from xfuser.core.utils import vae_tile_parallel
 SHAPES = ((2, 3), (2, 3), (2, 3), (2, 3), (1, 3), (2, 1))
 
 
-def _result(index: int) -> torch.Tensor:
+def _result(index: int, device=None) -> torch.Tensor:
     """What call `index` returns: its own number, in a shape only it has"""
-    return torch.full(SHAPES[index], float(index), dtype=torch.float32)
+    return torch.full(SHAPES[index], float(index), dtype=torch.float32, device=device)
 
 
 def _load(weights, owner, world_size: int) -> List[int]:
@@ -53,10 +54,55 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _cores_allowed() -> int:
+    """The cores this process may actually use, which is not the number it can see
+
+    Under a container CPU limit the kernel enforces a quota rather than an affinity mask, so
+    `os.cpu_count()` reports the whole host - 128 where the quota was 8 - and anything sizing a
+    thread pool from it asks for sixteen times the machine it has been given.
+    """
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        if quota != "max":
+            return max(1, int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    return os.cpu_count() or 1
+
+
+def _share_the_cores(world_size: int) -> None:
+    """Take a share of what this process may use, since the other ranks are here too
+
+    Every rank is a process of its own, and four of them each sizing a thread pool from the whole
+    host put 512 threads on an 8-core quota. The four-rank decodes then ran an order of magnitude
+    longer than the two-rank ones and looked for all the world like a deadlock. These tests check
+    what the assembly computes, not how fast it computes it.
+    """
+    torch.set_num_threads(max(1, _cores_allowed() // world_size))
+
+
+def _backend_for(world_size: int) -> Tuple[str, Optional[str]]:
+    """The collective backend to use and the device to put this rank's tensors on
+
+    Gloo on the CPU runs anywhere, which is why these tests were written for it, but it is neither
+    the fast path nor the one shipped: a real decode gathers over RCCL between devices. Where the
+    group can have a device each, use that - it exercises the collective that will actually carry
+    the tiles, and a decode that takes minutes on CPU takes seconds. Where it cannot, gloo still
+    checks the arithmetic, which is what these tests are for.
+    """
+    if torch.cuda.is_available() and torch.cuda.device_count() >= world_size:
+        return dist.Backend.NCCL, "cuda"
+    return dist.Backend.GLOO, None
+
+
 def _dispatch_in_a_group(rank: int, world_size: int, port: int, calls_made: int) -> None:
     """One rank of the group, asserting for itself; mp.spawn re-raises what it fails on"""
+    _share_the_cores(world_size)
+    backend, device = _backend_for(world_size)
+    if device is not None:
+        torch.cuda.set_device(rank)
     dist.init_process_group(
-        "gloo",
+        backend,
         rank=rank,
         world_size=world_size,
         init_method=f"tcp://127.0.0.1:{port}",
@@ -67,7 +113,7 @@ def _dispatch_in_a_group(rank: int, world_size: int, port: int, calls_made: int)
 
         def call(index):
             made.append(index)
-            return _result(index)
+            return _result(index, device)
 
         indices = list(range(calls_made))
         results = vae_tile_parallel.dispatch_over(dist.group.WORLD)(
@@ -78,7 +124,7 @@ def _dispatch_in_a_group(rank: int, world_size: int, port: int, calls_made: int)
         for index, result in zip(indices, results):
             # Every rank ends holding every result, whoever computed it, in the order the calls
             # were given rather than the order they were made.
-            torch.testing.assert_close(result, _result(index), rtol=0, atol=0)
+            torch.testing.assert_close(result, _result(index, device), rtol=0, atol=0)
 
         if len(indices) < world_size:
             # Too few to divide, so each rank makes them all rather than leaving a rank with
@@ -145,7 +191,7 @@ RUN_VAES = {
 WINDOWS_DOWN, WINDOWS_ACROSS = 2, 3
 
 
-def _tiled_vae(name: str):
+def _tiled_vae(name: str, device=None):
     """The same small VAE and latents on every rank, at a window several tiles across"""
     import diffusers
 
@@ -153,7 +199,8 @@ def _tiled_vae(name: str):
 
     kwargs, video = RUN_VAES[name]
     # Importing xfuser on ROCm swaps torch's GroupNorm for AITER's, which faults on the CPU
-    # tensors these tiles are made of. The revert has to land before the VAE is assembled.
+    # tensors these tiles are made of. The revert has to land before the VAE is assembled, and it
+    # stays reverted on a device too so that both paths compute the same arithmetic.
     vae_parallel.restore_torch_group_norm()
     # Seeded because every rank builds its own and they have to agree to the bit.
     torch.manual_seed(0)
@@ -166,22 +213,30 @@ def _tiled_vae(name: str):
     down, across = window * WINDOWS_DOWN, window * WINDOWS_ACROSS
     shape = (1, 4, 2, down, across) if video else (1, 4, down, across)
     torch.manual_seed(1)
-    return vae, torch.randn(*shape)
+    latents = torch.randn(*shape)
+    if device is not None:
+        vae, latents = vae.to(device), latents.to(device)
+    return vae, latents
 
 
 def _runs_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
     """One rank blending its own run, checked against the whole grid blended by one rank"""
     from xfuser.core.utils import vae_tile_parallel, vae_tiling
 
+    _share_the_cores(world_size)
+    backend, device = _backend_for(world_size)
+    if device is not None:
+        torch.cuda.set_device(rank)
+        device = f"cuda:{rank}"
     dist.init_process_group(
-        "gloo",
+        backend,
         rank=rank,
         world_size=world_size,
         init_method=f"tcp://127.0.0.1:{port}",
         timeout=timedelta(seconds=300),
     )
     try:
-        vae, latents = _tiled_vae(name)
+        vae, latents = _tiled_vae(name, device)
         with torch.no_grad():
             expected = vae.tiled_decode(latents).sample
 

@@ -606,12 +606,14 @@ def test_native_diffusers_load_quantizes_only_targeted_linears(modules, tmp_path
     from diffusers.configuration_utils import register_to_config
     from torchao.utils import TorchAOBaseTensor
 
+    # TorchAO silently leaves a linear in bf16 unless both dimensions are a
+    # multiple of 16, which _scaled_mm requires.
     class TinyTransformer(ModelMixin, ConfigMixin):
         @register_to_config
         def __init__(self):
             super().__init__()
-            self.blocks = torch.nn.ModuleList([torch.nn.Linear(4, 4)])
-            self.input_proj = torch.nn.Linear(4, 4)
+            self.blocks = torch.nn.ModuleList([torch.nn.Linear(32, 32)])
+            self.input_proj = torch.nn.Linear(32, 32)
 
     c, b = modules.contracts, modules.backends
     adapter = b.select_fp8_backend(

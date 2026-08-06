@@ -11,7 +11,6 @@ import time
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/gpu_validation/matrix.json"
 RUNNER_PATH = ROOT / "tools/gpu_validation.py"
@@ -20,9 +19,7 @@ GUIDE_PATH = ROOT / "docs/runner/gpu_validation_handoff.md"
 
 @pytest.fixture(scope="module")
 def runner():
-    spec = importlib.util.spec_from_file_location(
-        "gpu_validation_runner", RUNNER_PATH
-    )
+    spec = importlib.util.spec_from_file_location("gpu_validation_runner", RUNNER_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -51,14 +48,8 @@ def test_case_timeout_uses_case_then_default_then_cli_override(runner):
     parsed = runner._parser().parse_args(["--timeout-seconds", "5"])
     assert parsed.timeout_seconds == 5
     assert runner.resolve_timeout_seconds({}, defaults, None) == 120
-    assert (
-        runner.resolve_timeout_seconds({"timeout_seconds": 30}, defaults, None)
-        == 30
-    )
-    assert (
-        runner.resolve_timeout_seconds({"timeout_seconds": 30}, defaults, 5)
-        == 5
-    )
+    assert runner.resolve_timeout_seconds({"timeout_seconds": 30}, defaults, None) == 30
+    assert runner.resolve_timeout_seconds({"timeout_seconds": 30}, defaults, 5) == 5
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -102,9 +93,7 @@ def test_operator_guide_is_linked_and_marks_results_not_run():
 def test_matrix_covers_required_validation_dimensions(matrix):
     cases = matrix["cases"]
 
-    assert {
-        case["hardware"]["backend"] for case in cases
-    } >= {
+    assert {case["hardware"]["backend"] for case in cases} >= {
         "rdna4_aiter",
         "rocm_torchao",
         "cuda_ada_torchao",
@@ -125,29 +114,22 @@ def test_matrix_covers_required_validation_dimensions(matrix):
         "group_low_cpu_mem",
     }
     assert {case["transformers"] for case in cases} >= {"4.x", "5.x"}
-    assert {
-        case["checkpoint"]["source"] for case in cases
-    } == {"hub", "local"}
+    assert {case["checkpoint"]["source"] for case in cases} == {"hub", "local"}
     assert any("dual-transformer" in case["tags"] for case in cases)
     assert any("custom-exclusion" in case["tags"] for case in cases)
-    assert {
-        case["expected"]["outcome"] for case in cases
-    } == {"inference_success", "preflight_failure"}
+    assert {case["expected"]["outcome"] for case in cases} == {
+        "inference_success",
+        "preflight_failure",
+    }
 
 
 def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
-    eager = next(
-        case for case in matrix["cases"] if case["placement"] == "eager"
-    )
+    eager = next(case for case in matrix["cases"] if case["placement"] == "eager")
     distributed = next(
-        case
-        for case in matrix["cases"]
-        if case["placement"] == "fsdp_blockwise"
+        case for case in matrix["cases"] if case["placement"] == "fsdp_blockwise"
     )
 
-    eager_command = runner.build_command(
-        eager, matrix["defaults"], run_id="test-run"
-    )
+    eager_command = runner.build_command(eager, matrix["defaults"], run_id="test-run")
     distributed_command = runner.build_command(
         distributed, matrix["defaults"], run_id="test-run"
     )
@@ -163,21 +145,15 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
     assert "--memory_efficient_sharding" in distributed_command
     assert "--fully_shard_degree" in distributed_command
     output_index = eager_command.index("--output_directory")
-    assert eager_command[output_index + 1].endswith(
-        f"{eager['id']}/test-run"
-    )
+    assert eager_command[output_index + 1].endswith(f"{eager['id']}/test-run")
 
 
 def test_local_checkpoint_command_keeps_env_placeholder(runner, matrix):
     case = next(
-        case
-        for case in matrix["cases"]
-        if case["checkpoint"]["source"] == "local"
+        case for case in matrix["cases"] if case["checkpoint"]["source"] == "local"
     )
 
-    command = runner.build_command(
-        case, matrix["defaults"], run_id="test-run"
-    )
+    command = runner.build_command(case, matrix["defaults"], run_id="test-run")
 
     placeholder = f"${{{case['checkpoint']['env']}}}"
     assert any(placeholder in argument for argument in command)
@@ -197,13 +173,8 @@ def test_filters_compose(runner, matrix):
 
     assert selected
     assert all("expected-failure" in case["tags"] for case in selected)
-    assert all(
-        case["model"] == "Wan2.2-Distilled-I2V" for case in selected
-    )
-    assert all(
-        case["hardware"]["backend"] == "rdna4_aiter"
-        for case in selected
-    )
+    assert all(case["model"] == "Wan2.2-Distilled-I2V" for case in selected)
+    assert all(case["hardware"]["backend"] == "rdna4_aiter" for case in selected)
 
 
 @pytest.mark.parametrize(
@@ -288,16 +259,12 @@ def test_expected_failure_classification(
     classification,
 ):
     assert (
-        runner.classify_outcome(
-            exit_status, log, first_forward, expected, output
-        )
+        runner.classify_outcome(exit_status, log, first_forward, expected, output)
         == classification
     )
 
 
-def test_output_discovery_requires_new_nonempty_hashed_artifact(
-    runner, tmp_path
-):
+def test_output_discovery_requires_new_nonempty_hashed_artifact(runner, tmp_path):
     (tmp_path / "empty.png").touch()
     (tmp_path / "metadata.txt").write_text("not generated media")
     (tmp_path / "weights.safetensors").write_bytes(b"not output media")
@@ -359,9 +326,7 @@ def test_output_directory_is_absolute_from_non_repo_cwd(
     output_dir = Path(command[command.index("--output_directory") + 1])
 
     assert output_dir.is_absolute()
-    assert output_dir == (
-        tmp_path / "relative-output" / case["id"] / "outside-cwd"
-    )
+    assert output_dir == (tmp_path / "relative-output" / case["id"] / "outside-cwd")
     runner.reserve_output_directory(output_dir)
     artifact = output_dir / "result.png"
     artifact.write_bytes(b"generated")
@@ -393,11 +358,7 @@ def test_environment_probe_is_injectable(runner):
 
 def test_environment_probe_applies_cuda_visible_devices_mask(runner):
     responses = {
-        "nvidia-smi": (
-            "0, GPU-aaaa, 8.9\n"
-            "1, GPU-bbbb, 8.9\n"
-            "2, GPU-cccc, 9.0"
-        )
+        "nvidia-smi": ("0, GPU-aaaa, 8.9\n" "1, GPU-bbbb, 8.9\n" "2, GPU-cccc, 9.0")
     }
 
     observed = runner.probe_environment(
@@ -448,9 +409,7 @@ def test_environment_validation_rejects_backend_accelerator_and_major_mismatch(
     assert any("Transformers 5.x" in mismatch for mismatch in mismatches)
 
 
-def test_environment_validation_rejects_insufficient_matching_devices(
-    runner, matrix
-):
+def test_environment_validation_rejects_insufficient_matching_devices(runner, matrix):
     case = next(
         case
         for case in matrix["cases"]
@@ -499,9 +458,7 @@ def test_environment_mismatch_record_is_not_run(runner, matrix):
         (["environment_mismatch", "failed_missing_rejection"], 1),
     ],
 )
-def test_aggregate_exit_code_preserves_batch_failures(
-    runner, statuses, expected
-):
+def test_aggregate_exit_code_preserves_batch_failures(runner, statuses, expected):
     assert runner.aggregate_exit_code(statuses) == expected
 
 
@@ -631,9 +588,7 @@ def test_execute_case_times_out_and_kills_isolated_process_group(
             if killed and self._returncode is None:
                 scheduling_interval = 0.03
                 if timeout is not None and timeout < scheduling_interval:
-                    raise runner.subprocess.TimeoutExpired(
-                        self.process.args, timeout
-                    )
+                    raise runner.subprocess.TimeoutExpired(self.process.args, timeout)
                 time.sleep(scheduling_interval)
                 if timeout is not None:
                     timeout -= scheduling_interval
@@ -658,9 +613,7 @@ def test_execute_case_times_out_and_kills_isolated_process_group(
             killed = True
         return real_killpg(process_group, sig)
 
-    monkeypatch.setattr(
-        runner.subprocess, "Popen", popen_after_process_tree_is_ready
-    )
+    monkeypatch.setattr(runner.subprocess, "Popen", popen_after_process_tree_is_ready)
     monkeypatch.setattr(runner.os, "killpg", track_killpg)
 
     record = runner.execute_case(
@@ -765,9 +718,7 @@ def test_term_grace_is_not_shortened_when_root_closes_stdout(
             pytest.fail("root process did not become ready")
         return process
 
-    monkeypatch.setattr(
-        runner.subprocess, "Popen", popen_after_root_is_ready
-    )
+    monkeypatch.setattr(runner.subprocess, "Popen", popen_after_root_is_ready)
 
     record = runner.execute_case(
         case,
@@ -785,9 +736,7 @@ def test_term_grace_is_not_shortened_when_root_closes_stdout(
 
 
 @pytest.mark.parametrize("race_signal", [signal.SIGTERM, signal.SIGKILL])
-def test_process_lookup_race_still_reaps_root(
-    runner, monkeypatch, race_signal
-):
+def test_process_lookup_race_still_reaps_root(runner, monkeypatch, race_signal):
     class Process:
         pid = 12345
 
@@ -814,16 +763,14 @@ def test_process_lookup_race_still_reaps_root(
         lambda process_group: race_signal == signal.SIGKILL,
     )
 
-    assert (
-        runner._terminate_process_group(Process(), Reader(), 0.01)
-        == -signal.SIGKILL
-    )
+    assert runner._terminate_process_group(Process(), Reader(), 0.01) == -signal.SIGKILL
 
 
 def test_execute_case_bounds_drain_when_ready_descendant_retains_stdout(
     runner, monkeypatch, tmp_path
 ):
     ready = tmp_path / "ready"
+    parent_ready = tmp_path / "parent-ready"
     output_dir = tmp_path / "output"
     results = tmp_path / "results.jsonl"
     child_code = (
@@ -838,13 +785,15 @@ def test_execute_case_bounds_drain_when_ready_descendant_retains_stdout(
         f"subprocess.Popen([sys.executable,'-c',{child_code!r},sys.argv[1]]);"
         "ready=pathlib.Path(sys.argv[1]);"
         "\nwhile not ready.exists(): time.sleep(0.01)\n"
-        "print('parent-ready',flush=True)"
+        "print('parent-ready',flush=True);"
+        "pathlib.Path(sys.argv[2]).write_text('ready')"
     )
     command = [
         sys.executable,
         "-c",
         parent_code,
         str(ready),
+        str(parent_ready),
         "--output_directory",
         str(output_dir),
     ]
@@ -876,16 +825,14 @@ def test_execute_case_bounds_drain_when_ready_descendant_retains_stdout(
     def popen_after_grandchild_is_ready(*args, **kwargs):
         process = real_popen(*args, **kwargs)
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not ready.exists():
+        while time.monotonic() < deadline and not parent_ready.exists():
             time.sleep(0.01)
-        if not ready.exists():
+        if not parent_ready.exists():
             os.killpg(process.pid, 9)
-            pytest.fail("grandchild did not become ready")
+            pytest.fail("parent did not emit readiness output")
         return process
 
-    monkeypatch.setattr(
-        runner.subprocess, "Popen", popen_after_grandchild_is_ready
-    )
+    monkeypatch.setattr(runner.subprocess, "Popen", popen_after_grandchild_is_ready)
 
     started = time.monotonic()
     record = runner.execute_case(
@@ -953,9 +900,7 @@ def test_environment_mismatch_does_not_execute_case(
         lambda *args, **kwargs: pytest.fail("case must not execute"),
     )
 
-    exit_code = runner.main(
-        ["--execute", "--results", str(results)]
-    )
+    exit_code = runner.main(["--execute", "--results", str(results)])
     record = json.loads(results.read_text())
 
     assert exit_code == 2
@@ -1014,9 +959,7 @@ def test_missing_placeholder_continues_batch_without_logging_value(
             str(results),
         ]
     )
-    records = [
-        json.loads(line) for line in results.read_text().splitlines()
-    ]
+    records = [json.loads(line) for line in results.read_text().splitlines()]
 
     assert exit_code == 2
     assert executed == ["runnable-case"]
@@ -1029,9 +972,7 @@ def test_missing_placeholder_continues_batch_without_logging_value(
     ]
 
 
-def test_placeholder_expansion_is_separate_from_recorded_command(
-    runner, monkeypatch
-):
+def test_placeholder_expansion_is_separate_from_recorded_command(runner, monkeypatch):
     template = ["xdit", "--input_images", "${XDIT_SECRET_PATH}"]
     monkeypatch.setenv("XDIT_SECRET_PATH", "/secret/value")
 
@@ -1091,9 +1032,7 @@ def test_result_record_serializes_required_fields(runner, tmp_path, matrix):
             "path": "out.png",
             "sha256": "deadbeef",
             "bytes": 10,
-            "files": [
-                {"path": "out.png", "sha256": "deadbeef", "bytes": 10}
-            ],
+            "files": [{"path": "out.png", "sha256": "deadbeef", "bytes": 10}],
         },
         log="ok",
         quality_notes="matches reference",

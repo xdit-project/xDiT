@@ -52,11 +52,14 @@ cannot supply its execution semantics.
 
 ## Single-Rank Blockwise Meta Loading
 
-Add a distinct materialization mode for a single process that builds supported
-transformers on `meta`, reads one declared block at a time, applies the selected
-format adapter, and places the converted block on its execution device. This
-mode reuses checkpoint requests, exact layout reconciliation, persistent-buffer
-handling, and block target ownership from the distributed loaders.
+Add a component-level blockwise plan under eager materialization. A global
+materialization mode would be incorrect for dual-transformer pipelines where
+one component can stream natively and another requires blockwise fallback. The
+plan builds one supported transformer on `meta`, reads one declared block at a
+time, applies the selected format adapter, and places the converted block on
+its execution device. It reuses checkpoint requests, exact layout
+reconciliation, persistent-buffer handling, and block target ownership from
+the distributed loaders.
 
 The single-rank path performs no collectives. Failure propagation is local, and
 the loader must release each source block before reading the next. The expected

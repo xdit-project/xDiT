@@ -188,27 +188,51 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
             if isinstance(node, ast.FunctionDef) and node.name == "fill_block"
         ),
     )
-    assert "_collective_source_call" in init_source
-    assert "_collective_source_call" in fill_source
-    assert "_collective_assert_same_layout" in fill_source
-    assert "_collective_reconcile_tensor_specs" in fill_source
+    # Source reads may call _collective_source_call directly or go through the
+    # _source_call wrapper; both names end in _source_call. The wrapper is only
+    # equivalent if it still delegates, which is asserted below.
+    assert "_source_call" in init_source
+    assert "_source_call" in fill_source
+    assert "_assert_same_layout" in fill_source
+    assert "_reconcile_tensor_specs" in fill_source
 
-    loader = _class(meta_tree, "MemoryEfficientLoader")
-    replicated_fill = ast.get_source_segment(
+    source_call = ast.get_source_segment(
         meta_source,
         next(
             node
-            for node in loader.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "_fill_transformer_replicated"
+            for node in filler.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_source_call"
         ),
     )
-    assert replicated_fill.index(
-        "_save_nonpersistent_buffers(block, device)"
-    ) < replicated_fill.index("block.to_empty")
-    assert replicated_fill.index("block.to_empty") < replicated_fill.index(
+    assert "_collective_source_call" in source_call
+
+    loader = _class(meta_tree, "MemoryEfficientLoader")
+
+    def _loader_method(method_name):
+        return ast.get_source_segment(
+            meta_source,
+            next(
+                node
+                for node in loader.body
+                if isinstance(node, ast.FunctionDef) and node.name == method_name
+            ),
+        )
+
+    # The replicated and local paths share one block loop, so the buffer
+    # save/restore ordering is asserted there rather than once per caller.
+    for entry_point in ("_fill_transformer_replicated", "fill_transformer_local"):
+        assert "self._fill_transformer_blocks(" in _loader_method(entry_point)
+
+    block_fill = _loader_method("_fill_transformer_blocks")
+    assert block_fill.index("_save_nonpersistent_buffers(block, device)") < block_fill.index(
+        "block.to_empty"
+    )
+    assert block_fill.index("block.to_empty") < block_fill.index(
         "_restore_nonpersistent_buffers(nonpersistent_buffers)"
     )
+    assert block_fill.index(
+        "_restore_nonpersistent_buffers(nonpersistent_buffers)"
+    ) < block_fill.index("fill_block(block, i)")
 
     te_load = ast.get_source_segment(
         meta_source,
@@ -231,18 +255,10 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
         "meta_te_kwargs",
         "meta_te_kwargs_replicated",
     ):
-        method_source = ast.get_source_segment(
-            meta_source,
-            next(
-                node
-                for node in loader.body
-                if isinstance(node, ast.FunctionDef) and node.name == method_name
-            ),
-        )
-        assert "_collective_build_call" in method_source
+        assert "_collective_build_call" in _loader_method(method_name)
 
-    assert "_collective_build_call" in replicated_fill
-    assert "quantizing replicated transformer block" in replicated_fill
+    assert "_collective_build_call" in block_fill
+    assert "quantizing replicated transformer block" in block_fill
 
     quant_helper = next(
         node

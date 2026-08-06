@@ -199,6 +199,38 @@ def test_the_meta_transformer_is_built_on_meta_in_bf16(monkeypatch):
     assert all(p.dtype is torch.bfloat16 for p in built.parameters())
 
 
+class FakeFp32Wrapper(FakeWrapper):
+    """A wrapper that pins some modules to fp32, the way diffusers models do."""
+
+    _keep_in_fp32_modules = ["norm2", "scale_shift_table"]
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        module = cls()
+        hidden = config["hidden"]
+        block = torch.nn.Module()
+        block.attn = torch.nn.Linear(hidden, hidden)
+        block.norm2 = torch.nn.LayerNorm(hidden)
+        block.scale_shift_table = torch.nn.Parameter(torch.zeros(1, 6, hidden))
+        module.blocks = torch.nn.ModuleList([block])
+        return module
+
+
+def test_the_meta_transformer_keeps_the_wrappers_fp32_modules(monkeypatch):
+    """The disk fill adopts each meta parameter's dtype, so demoting the modules
+    diffusers pins to fp32 would silently round their checkpoint weights."""
+    loader = make_loader(monkeypatch)
+
+    built = loader.build_meta_transformer(FakeFp32Wrapper, subfolder="transformer")
+
+    dtypes = dict(
+        (name, param.dtype) for name, param in built.named_parameters()
+    )
+    assert dtypes["blocks.0.norm2.weight"] is torch.float32
+    assert dtypes["blocks.0.scale_shift_table"] is torch.float32
+    assert dtypes["blocks.0.attn.weight"] is torch.bfloat16
+
+
 def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
     """The bookkeeping must not pin a component the pipeline has replaced or dropped."""
     import gc

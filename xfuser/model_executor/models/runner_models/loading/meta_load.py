@@ -293,6 +293,43 @@ def _collective_reconcile_replicated_tensor_specs(
     return source_contract
 
 
+def _keeps_fp32(name: str, keep_in_fp32_modules) -> bool:
+    """Diffusers matches _keep_in_fp32_modules against whole path segments."""
+
+    segments = name.split(".")
+    return any(module in segments for module in keep_in_fp32_modules)
+
+
+def _cast_meta_to_checkpoint_dtype(model, dtype):
+    """Apply the checkpoint dtype the way the ordinary diffusers load does.
+
+    from_pretrained casts each loaded tensor individually, so the modules a model
+    pins through ``_keep_in_fp32_modules`` stay fp32, and non-persistent buffers
+    are absent from the state dict and keep whatever dtype ``__init__`` chose. A
+    blanket ``model.to(dtype)`` demotes both, and because the disk fill hands each
+    checkpoint tensor to ``set_module_tensor_to_device``, which adopts the meta
+    parameter's dtype, the demotion silently rounds every fp32 checkpoint weight
+    through ``dtype``. That leaves the memory-efficient load holding a
+    lower-precision model than the ordinary load of the same checkpoint.
+    """
+
+    keep_in_fp32_modules = tuple(getattr(model, "_keep_in_fp32_modules", None) or ())
+    persistent = {name for name, _ in _persistent_named_buffers(model)}
+    tensors = list(model.named_parameters(recurse=True, remove_duplicate=False))
+    tensors += [
+        (name, buffer)
+        for name, buffer in model.named_buffers(recurse=True, remove_duplicate=False)
+        if name in persistent
+    ]
+    for name, tensor in tensors:
+        if not torch.is_floating_point(tensor):
+            continue
+        if _keeps_fp32(name, keep_in_fp32_modules):
+            continue
+        tensor.data = tensor.data.to(dtype)
+    return model
+
+
 def _persistent_named_buffers(module):
     """Named buffers saved by state_dict, using each buffer owner's persistence set."""
     persistent = []
@@ -526,7 +563,7 @@ class MemoryEfficientLoader:
             with init_empty_weights():
                 model = wrapper_cls.from_config(config, **(init_kwargs or {}))
             # Match the checkpoint dtype before disk fill and quantization.
-            return model.to(torch.bfloat16)
+            return _cast_meta_to_checkpoint_dtype(model, torch.bfloat16)
 
         model = _collective_build_call(
             get_world_group(), build, context=f"meta transformer '{component_name}'"
@@ -590,7 +627,7 @@ class MemoryEfficientLoader:
             component = cls._from_config(config)
         # _from_config defaults to fp32; align meta params to bf16 (dtype-only .to is legal on
         # meta) so their DTensor dtype matches the broadcast source.
-        component = component.to(torch.bfloat16)
+        component = _cast_meta_to_checkpoint_dtype(component, torch.bfloat16)
         streamed_targets = getattr(self.model, "_fp8_streaming_targets", ())
         prefix = f"{component_name}."
         local_streamed_targets = tuple(

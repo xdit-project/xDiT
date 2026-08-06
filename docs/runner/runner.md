@@ -290,6 +290,7 @@ An entry of “No” means the runner capability check rejects the flag, even if
 - `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`. This exclusion includes explicit hybrid FP8/FP4 mode. INT8 is also rejected on ROCm.
 - Setting `--use_fp8_gemms` and `--use_fp4_gemms` together requires `--use_hybrid_gemm_schedule`; the generic combination is rejected. The hybrid FP4 path owns its FP8 high-precision conversion, so the generic FP8 traversal does not run afterward. Model-selected quality overrides and FP8-only components remain FP8. Use the FP8 precision-override flags only with FP4.
 - `--memory_efficient_sharding` requires `--fully_shard_degree > 1`. It is a sharded load: rank 0 reads one block at a time and broadcasts it within the FSDP group before each rank receives its shard.
+- `--fully_shard_degree` is orthogonal to the parallel degree and does not contribute to it. A multi-rank run must still declare a parallel degree whose product (`data × cfg × sequence × tensor × pipefusion`) equals the DiT parallel size, so pair `--fully_shard_degree N` with, for example, `--ulysses_degree N`. Setting only `--fully_shard_degree` fails config validation before the model is built.
 - `--memory_efficient_replicated_load` is opt-in, requires multiple ranks, and applies only when weights are replicated. It is ignored with FSDP, PipeFusion, or tensor parallelism, and for runners marked “No” above. Pure Ulysses, ring, CFG, and data parallelism remain eligible.
 - The two memory-efficient load flags represent different layouts and are not used together: FSDP splits weights, while replicated meta-load gives every rank the same weights.
 - CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
@@ -319,6 +320,7 @@ Memory-efficient FP8 FSDP load:
 torchrun --nproc_per_node=4 -m xfuser.runner \
     --model Wan2.1-T2V \
     --prompt "Clouds moving over a mountain lake" \
+    --ulysses_degree 4 \
     --fully_shard_degree 4 \
     --memory_efficient_sharding \
     --use_fp8_gemms

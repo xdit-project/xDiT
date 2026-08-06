@@ -195,20 +195,25 @@ def smallest_tile_window(
     return None
 
 
-NARROWEST_USEFUL_FRACTION = 4
-"""How far below its own window a VAE's tile window is still worth narrowing: to a quarter
+NARROWEST_USEFUL_FRACTION = 2
+"""How far below its own window a VAE's tile window is worth narrowing: to a half
 
-Narrowing the window trades output fidelity for memory, and the trade stops paying well before
-the window runs out. Peak memory falls until the tile's activations no longer dominate the
-weights and the full-resolution sample, and then it flattens; past that point a narrower window
-costs seams and time and buys nothing. Measured on flux2 at 1024x1024 (whose VAE ships a 1024px
-window), sweeping only the window - peak memory 1017 MB at 512px, 469 MB at 256px, then 544 MB at
-128px and 417 MB at 64px, so it has already flattened by a quarter of the window. Time turns at
-the same place, 382.7 ms at 512px against 497.2 ms at 256px and 679.2 ms at 64px, and divergence
-from an untiled decode climbs the whole way: 19.6% max at 512px, 42.0% at 256px, 103.5% at 64px.
+A guard rather than a recommendation. Narrowing the window trades output fidelity for memory, and
+the trade stops paying well before the window runs out: peak memory falls until the tile's
+activations no longer dominate the weights and the full-resolution sample, and then it flattens,
+while the seams and the time keep growing. Measured on flux2 at 1024x1024 (whose VAE ships a
+1024px window), sweeping only the window - peak memory 1017 MB at 512px, 469 MB at 256px, then
+544 MB at 128px and 417 MB at 64px, so it has flattened by a quarter of the window; time turns at
+the same place, 382.7 ms at 512px against 497.2 ms at 256px and 679.2 ms at 64px; and divergence
+from an untiled decode climbs the whole way, 19.6% max at 512px, 42.0% at 256px, 103.5% at 64px.
+
+Half rather than the quarter where the curves actually turn, because this only has to catch
+someone reaching well past the point of return. A half is already a 19.6% divergence on the one
+VAE swept, which is the most a window should be asked to give up, and the windows anyone picks
+deliberately sit above it.
 
 Expressed as a fraction of the VAE's own window rather than a pixel count, because that window is
-the tile size the VAE was built around and a quarter of it means the same thing across VAEs; the
+the tile size the VAE was built around and a half of it means the same thing across VAEs; the
 pixel count where flux2 flattens says nothing about a VAE that ships a 512px window. Only flux2
 has been swept, so the fraction is the generalisation and it is the part to re-check.
 """

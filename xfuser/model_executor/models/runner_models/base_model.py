@@ -1123,7 +1123,7 @@ class xFuserModel(abc.ABC):
         # window this narrow is someone reaching for memory that is no longer there to save.
         narrowest = vae_tiling.narrowest_useful_window(vae)
         if narrowest is not None and requested < narrowest:
-            log(f"--vae_tile_size {requested} is below a quarter of this VAE's {window}px tile "
+            log(f"--vae_tile_size {requested} is below half of this VAE's {window}px tile "
                 f"window, where peak memory has stopped falling and only the seams and the time "
                 f"keep growing; using {narrowest}px instead.")
             requested = narrowest

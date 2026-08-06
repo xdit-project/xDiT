@@ -382,24 +382,27 @@ class TestEveryVAEARunnerLoads(unittest.TestCase):
 class TestTheNarrowestUsefulWindow(unittest.TestCase):
     """How far a window may be narrowed before it stops buying the memory it costs output for"""
 
-    def test_it_is_a_quarter_of_the_vae_s_own_window(self):
+    def test_it_is_half_of_the_vae_s_own_window(self):
         # A fraction rather than a pixel count, because the window a VAE ships is the tile size it
-        # was built around: 256px is two halvings down from flux2's 1024 and no narrowing at all
-        # for a VAE that ships 256.
+        # was built around: 512px is one halving down from flux2's 1024 and no narrowing at all
+        # for a VAE that ships 512.
         for window in (1024, 512, 256, 64):
             with self.subTest(window=window):
                 vae = overlap_factor_vae(sample=window)
                 self.assertEqual(vae_tiling.tile_window(vae), window)
-                self.assertEqual(vae_tiling.narrowest_useful_window(vae), window // 4)
+                self.assertEqual(vae_tiling.narrowest_useful_window(vae), window // 2)
 
     def test_a_vae_with_no_single_window_has_no_floor_to_give(self):
-        # Nothing to take a quarter of, and the runner refuses --vae_tile_size on these anyway.
-        self.assertIsNone(vae_tiling.narrowest_useful_window(overlap_hw_vae()))
+        # A window taller than it is wide has no one edge to halve, and the runner refuses
+        # --vae_tile_size on these anyway. A VAE keyed by height and width that happens to hold
+        # the same number in both still has a window, and so still has a floor.
+        self.assertIsNone(vae_tiling.narrowest_useful_window(asymmetric_vae()))
+        self.assertEqual(vae_tiling.narrowest_useful_window(overlap_hw_vae()), 128)
 
     def test_the_floor_is_never_zero(self):
         # A VAE whose window is smaller than the fraction would floor at nothing, and a window of
         # zero pixels is not a window.
-        self.assertEqual(vae_tiling.narrowest_useful_window(overlap_factor_vae(sample=2)), 1)
+        self.assertEqual(vae_tiling.narrowest_useful_window(overlap_factor_vae(sample=1)), 1)
 
 
 class TestTiledDecode(unittest.TestCase):

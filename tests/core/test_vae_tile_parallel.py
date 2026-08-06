@@ -110,18 +110,22 @@ BAND_VAES = {
         True,
     ),
 }
-# Enough tile rows that four ranks each get one, and an odd number so the bands do not divide
-# evenly and the shapes coming back differ by rank.
-WINDOWS_ACROSS = 5
+# Three windows across comes out as four tile rows at a quarter overlap, which is the smallest
+# grid that still gives four ranks a band each. The tiles are decoded on a CPU here, so a wider
+# grid costs minutes rather than the coverage it looks like it buys.
+WINDOWS_ACROSS = 3
 
 
 def _tiled_vae(name: str):
     """The same small VAE and latents on every rank, at a window several tiles across"""
     import diffusers
 
-    from xfuser.core.utils import vae_tiling
+    from xfuser.core.utils import vae_parallel, vae_tiling
 
     kwargs, video = BAND_VAES[name]
+    # Importing xfuser on ROCm swaps torch's GroupNorm for AITER's, which faults on the CPU
+    # tensors these tiles are made of. The revert has to land before the VAE is assembled.
+    vae_parallel.restore_torch_group_norm()
     # Seeded because every rank builds its own and they have to agree to the bit.
     torch.manual_seed(0)
     vae = getattr(diffusers, name)(**kwargs).eval()

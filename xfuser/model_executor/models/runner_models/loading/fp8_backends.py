@@ -192,10 +192,49 @@ def _probe_result(result) -> tuple[bool, str | None]:
     return bool(result), None
 
 
+def _probe_torchao_fp8_accelerator(
+    *,
+    cuda_probe: Callable[[], bool] | None = None,
+    hip_probe: Callable[[], bool] | None = None,
+    cuda_capability_probe: Callable[[], tuple[int, int] | None] | None = None,
+) -> tuple[bool, str | None]:
+    """Validate the accelerator required by TorchAO's FP8 kernels."""
+
+    if cuda_probe is None or hip_probe is None:
+        from xfuser.envs import _is_cuda, _is_hip
+
+        cuda_probe = cuda_probe or _is_cuda
+        hip_probe = hip_probe or _is_hip
+    if hip_probe():
+        return True, None
+    if not cuda_probe():
+        return False, "TorchAO FP8 requires CUDA or HIP/ROCm"
+    if cuda_capability_probe is None:
+        torch = import_module("torch")
+        cuda_capability_probe = torch.cuda.get_device_capability
+    try:
+        capability = cuda_capability_probe()
+    except Exception as exc:
+        return (
+            False,
+            f"cannot query CUDA capability for TorchAO FP8: "
+            f"{type(exc).__name__}: {exc}",
+        )
+    if capability is None or capability < (8, 9):
+        observed = (
+            "unknown" if capability is None else f"{capability[0]}.{capability[1]}"
+        )
+        return (
+            False,
+            f"TorchAO FP8 requires CUDA capability >= 8.9; observed {observed}",
+        )
+    return True, None
+
+
 def probe_fp8_backend_capabilities(
     *,
     aiter_probe: Callable[[], bool] | None = None,
-    torchao_accelerator_probe: Callable[[], bool] | None = None,
+    torchao_accelerator_probe: Callable[[], _ProbeResult] | None = None,
     torchao_probe: Callable[[], _ProbeResult] | None = None,
     torchao_diffusers_probe: Callable[[], _ProbeResult] | None = None,
     torchao_text_encoder_probe: Callable[[], _ProbeResult] | None = None,
@@ -209,9 +248,7 @@ def probe_fp8_backend_capabilities(
 
         aiter_probe = _use_aiter_fp8_rdna4
     if torchao_accelerator_probe is None:
-        from xfuser.envs import _is_cuda, _is_hip
-
-        torchao_accelerator_probe = lambda: bool(_is_cuda() or _is_hip())
+        torchao_accelerator_probe = _probe_torchao_fp8_accelerator
     if torchao_probe is None:
         torchao_probe = _probe_torchao_fp8_conversion_api
     if torchao_diffusers_probe is None:
@@ -230,12 +267,14 @@ def probe_fp8_backend_capabilities(
             False,
             "AITER FP8 backend is unavailable",
         )
-    accelerator_available = bool(torchao_accelerator_probe())
+    accelerator_available, accelerator_reason = _probe_result(
+        torchao_accelerator_probe()
+    )
     if accelerator_available:
         torchao_available, torchao_reason = _probe_result(torchao_probe())
     else:
         torchao_available = False
-        torchao_reason = "TorchAO FP8 requires CUDA or HIP/ROCm"
+        torchao_reason = accelerator_reason or "TorchAO FP8 requires CUDA or HIP/ROCm"
     if torchao_available:
         native_available, native_reason = _probe_result(torchao_diffusers_probe())
         te_available, te_reason = _probe_result(torchao_text_encoder_probe())

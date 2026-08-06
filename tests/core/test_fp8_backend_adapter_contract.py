@@ -131,6 +131,33 @@ def test_supported_rocm_runs_torchao_api_preflight(modules):
     assert capabilities.torchao_fp8 is True
 
 
+def test_cuda_fp8_requires_capability_89(modules):
+    available, reason = modules.backends._probe_torchao_fp8_accelerator(
+        cuda_probe=lambda: True,
+        hip_probe=lambda: False,
+        cuda_capability_probe=lambda: (8, 6),
+    )
+
+    assert available is False
+    assert "8.9" in reason
+
+
+def test_cuda_fp8_accepts_capability_89(modules):
+    assert modules.backends._probe_torchao_fp8_accelerator(
+        cuda_probe=lambda: True,
+        hip_probe=lambda: False,
+        cuda_capability_probe=lambda: (8, 9),
+    ) == (True, None)
+
+
+def test_rocm_fp8_eligibility_does_not_query_cuda_capability(modules):
+    assert modules.backends._probe_torchao_fp8_accelerator(
+        cuda_probe=lambda: False,
+        hip_probe=lambda: True,
+        cuda_capability_probe=lambda: pytest.fail("CUDA capability probed on ROCm"),
+    ) == (True, None)
+
+
 def test_unsupported_accelerator_skips_torchao_import_probe(modules):
     b = modules.backends
 

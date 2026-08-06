@@ -591,9 +591,11 @@ def test_shard_component_restores_nonpersistent_block_buffers_before_disk_callba
         ),
     )
 
+    # shard_component places blocks on device_id, so the restored buffers are on
+    # the accelerator wherever one exists; compare on the host.
     assert len(seen) == 1
-    assert torch.equal(seen[0], torch.tensor([3.0]))
-    assert torch.equal(component.blocks[0].runtime_cache, torch.tensor([3.0]))
+    assert torch.equal(seen[0].cpu(), torch.tensor([3.0]))
+    assert torch.equal(component.blocks[0].runtime_cache.cpu(), torch.tensor([3.0]))
 
 
 def test_replicated_transformer_restores_nonpersistent_buffers_before_fill(

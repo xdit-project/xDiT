@@ -17,7 +17,7 @@ have made, and gets back what all of those calls returned, on every rank, in ord
 
 import functools
 import math
-from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.distributed as dist
@@ -196,12 +196,15 @@ def assemble_in_runs(
         return None
 
     rank = dist.get_rank(group)
-    start, stop = runs(weights, world_size)[rank]
+    split = runs(weights, world_size)
+    start, stop = split[rank]
     mine = decode(order[start:stop])
 
     # Exchanged before anything is blended, both because the edges are raw at that point and
     # because a rank waiting on a neighbour's blending would serialise what this is dividing.
-    edges = _share_edges(order, mine, start, stop, group, world_size, blend)
+    edges = _share_edges(
+        order, mine, start, stop, _wanted(split, columns), group, world_size, blend
+    )
 
     blended: Dict[Where, torch.Tensor] = {}
     kept: List[Optional[torch.Tensor]] = [None] * len(order)
@@ -259,28 +262,53 @@ def assemble_here(rows: int, columns: int, decode: Decode, blend: Blend) -> torc
     return torch.cat(made, dim=DOWN)
 
 
+def _wanted(split: Sequence[Tuple[int, int]], columns: int) -> Set[int]:
+    """The tiles whose raw edges a rank other than their own will read
+
+    A run covers the tail of the row it starts in, then whole rows, so the only neighbours it
+    cannot supply for itself are in the two rows around where it begins: the row above, from the
+    column before its first tile onward, and the part of its own first row that the rank before
+    it holds. Everything deeper into the run has its neighbours to hand.
+
+    So the edges that travel go as the ranks do, not as the tiles do, and a grid of any size
+    exchanges about a row of them per rank.
+    """
+    wanted: Set[int] = set()
+    for start, _ in split:
+        if start == 0:
+            continue
+        row, column = divmod(start, columns)
+        if row > 0:
+            wanted.update(range((row - 1) * columns + max(0, column - 1), row * columns))
+        wanted.update(range(row * columns, start))
+    return wanted
+
+
 def _share_edges(
     order: Sequence[Where],
     mine: Dict[Where, torch.Tensor],
     start: int,
     stop: int,
+    wanted: Set[int],
     group,
     world_size: int,
     blend: Blend,
-) -> Dict[Where, Tuple[torch.Tensor, torch.Tensor]]:
-    """Every tile's last rows and last columns, raw, on every rank
+) -> Dict[Where, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
+    """The last rows and last columns of the tiles another rank will read, raw, on every rank
 
     The edges rather than the tiles: what a neighbour reads is one blend deep, so this carries a
     fraction of what dealing the tiles themselves round would have to.
     """
     sending: List[Optional[torch.Tensor]] = [None] * (2 * len(order))
     for n in range(start, stop):
+        if n not in wanted:
+            continue
         tile = mine[order[n]]
         # Cloned because the blending below writes into the tiles these came from, and an edge is
         # only the edge a neighbour needs while it is still raw.
         sending[2 * n] = tile[..., -blend.deep_down :, :].clone()
         sending[2 * n + 1] = tile[..., -blend.deep_across :].clone()
-    shared = _share(sending, group, world_size)
+    shared = _share(sending, group, world_size, mine[order[start]])
     return {at: (shared[2 * n], shared[2 * n + 1]) for n, at in enumerate(order)}
 
 
@@ -311,9 +339,16 @@ def _edge_left(edges, i: int, j: int, blend: Blend) -> torch.Tensor:
 
 
 def _share(
-    made: List[Optional[torch.Tensor]], group, world_size: int
+    made: List[Optional[torch.Tensor]],
+    group,
+    world_size: int,
+    like: Optional[torch.Tensor] = None,
 ) -> List[torch.Tensor]:
-    """Fill in the calls this rank did not make from the ranks that did"""
+    """Fill in the calls this rank did not make from the ranks that did
+
+    `like` says what to send from where this rank has nothing of its own to send, which happens
+    only where what is being shared is edges: the last run has no run after it to read its own.
+    """
     mine = [(n, tensor) for n, tensor in enumerate(made) if tensor is not None]
 
     # A rank cannot work out the shape of a call it did not make: tiles at the right and bottom
@@ -322,15 +357,21 @@ def _share(
     manifest: List = [None] * world_size
     dist.all_gather_object(manifest, [(n, tuple(t.shape)) for n, t in mine], group=group)
 
+    # Nothing to send is a real answer here, not an empty group: the last run has no run after it
+    # to read its edges. Its rank still joins the exchange above, so nobody is left waiting.
+    width = max(sum(math.prod(shape) for _, shape in entries) for entries in manifest)
+    if width == 0:
+        return list(made)
+
     # Then one tensor exchange for the results themselves, flattened together and padded to the
     # largest share, since all_gather wants every rank sending the same count. Ranks differ by at
     # most one call, so the padding is at most one call's worth of the traffic.
-    width = max(sum(math.prod(shape) for _, shape in entries) for entries in manifest)
+    #
     # Filled a call at a time rather than concatenated into the buffer, which would hold a second
     # copy of everything this rank decoded while the first was still alive. Left uninitialised
     # past what this rank sends: the manifest bounds what each share is read back out of, so the
     # padding is never looked at.
-    sample = mine[0][1]
+    sample = mine[0][1] if mine else like
     sending = torch.empty(width, dtype=sample.dtype, device=sample.device)
     at = 0
     for _, tensor in mine:

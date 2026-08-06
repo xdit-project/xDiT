@@ -360,6 +360,62 @@ def format_command(command: list[str]) -> str:
     return " ".join(rendered)
 
 
+# Saved logs carry the recorder's ISO timestamp prefix; in-process
+# classification does not. Tolerate both so the same filter can be reapplied to
+# an attached validation.log.
+LINE_PREFIX = re.compile(r"^(?:\d{4}-\d\d-\d\dT[\d:.+\-]+Z? )?(?:\[rank\d+\]:\s?)?")
+TRACEBACK_HEADER = re.compile(r"^Traceback \(most recent call last\):")
+# Python renders a terminating exception as a dotted class name followed
+# immediately by ": ". Requiring no space before the colon keeps prose log
+# lines such as "transformer quantization: requested=fp4" out.
+EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:: \S|$)")
+RAISE_LINE = re.compile(r"^\s*raise\b")
+ERROR_LEVEL_LINE = re.compile(r"\b(?:ERROR|CRITICAL|FATAL)\b|^E\d{4} ")
+
+
+def failure_text(log: str) -> str:
+    """Return only the lines that report why the process failed.
+
+    An expected rejection must be matched against the reason the process died,
+    not against the whole transcript. Routine INFO output can otherwise satisfy
+    a rejection pattern: the descriptor line
+    "transformer quantization: requested=fp4, backend=aiter,
+    storage=aiter_mxfp4_per_1x32" matches "AITER.*FP4" while reporting that FP4
+    was accepted, so a case that actually died on a gated-repo 401 was recorded
+    as a pass.
+
+    Selecting failure lines rather than excluding known-noisy ones fails closed:
+    a rejection that leaves no error trace does not match, instead of matching
+    whatever happens to sit nearby in the log.
+    """
+    selected: list[str] = []
+    in_traceback = False
+    for raw in log.splitlines():
+        line = LINE_PREFIX.sub("", raw).rstrip()
+        if not line:
+            continue
+        if TRACEBACK_HEADER.match(line):
+            in_traceback = True
+            continue
+        if in_traceback:
+            # Frames are indented; the first unindented line terminates the
+            # traceback and carries the exception type and message.
+            if line[:1].isspace():
+                if RAISE_LINE.match(line):
+                    selected.append(line.strip())
+                continue
+            in_traceback = False
+            selected.append(line)
+            continue
+        if (
+            EXCEPTION_LINE.match(line)
+            or RAISE_LINE.match(line)
+            or ERROR_LEVEL_LINE.search(line)
+        ):
+            selected.append(line.strip())
+    return "\n".join(selected)
+
+
 def classify_outcome(
     exit_status: int,
     log: str,
@@ -378,7 +434,9 @@ def classify_outcome(
         return "failed_missing_rejection"
     if first_forward != "not_reached":
         return "failed_late_rejection"
-    if not re.search(expected["error_pattern"], log, flags=re.IGNORECASE):
+    if not re.search(
+        expected["error_pattern"], failure_text(log), flags=re.IGNORECASE
+    ):
         return "failed_wrong_rejection"
     return "passed_expected_rejection"
 

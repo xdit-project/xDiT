@@ -245,7 +245,8 @@ def test_filters_compose(runner, matrix):
         ),
         (
             2,
-            "custom checkpoint semantics are not collective-safe",
+            "UnsupportedLoadContract: custom checkpoint semantics are not "
+            "collective-safe",
             "not_reached",
             {
                 "outcome": "preflight_failure",
@@ -256,7 +257,7 @@ def test_filters_compose(runner, matrix):
         ),
         (
             2,
-            "different error",
+            "UnsupportedLoadContract: different error",
             "not_reached",
             {
                 "outcome": "preflight_failure",
@@ -291,6 +292,67 @@ def test_expected_failure_classification(
         runner.classify_outcome(exit_status, log, first_forward, expected, output)
         == classification
     )
+
+
+def test_expected_rejection_ignores_informational_output(runner):
+    """A rejection pattern must not be satisfied by routine INFO logging.
+
+    Observed on gfx942: rocm-flux2-fp4-rejected died on a gated-repo 401, but
+    the descriptor line below matches "AITER.*FP4" while reporting that FP4 was
+    accepted, so the case was recorded as passed_expected_rejection.
+    """
+    log = (
+        "INFO 08-06 10:12:04 [runner_utils.py:30] transformer quantization: "
+        "requested=fp4, backend=aiter, storage=aiter_mxfp4_per_1x32, "
+        "materialization=blockwise\n"
+        "[rank0]: huggingface_hub.errors.GatedRepoError: 401 Client Error.\n"
+    )
+    expected = {
+        "outcome": "preflight_failure",
+        "error_pattern": "FP4.*AITER|AITER.*FP4",
+    }
+    output = {"path": None, "sha256": None, "files": []}
+
+    assert (
+        runner.classify_outcome(1, log, "not_reached", expected, output)
+        == "failed_wrong_rejection"
+    )
+
+
+def test_expected_rejection_matches_the_raised_error(runner):
+    """The real rejection still passes: captured from rocm-zimage-int8-rejected."""
+    log = (
+        "INFO 08-06 09:48:11 [runner_utils.py:30] Initializing model: Z-Image-Turbo\n"
+        '[rank0]:     raise ValueError("Int8 GEMMs on ROCm are not supported.")\n'
+        "[rank0]: ValueError: Int8 GEMMs on ROCm are not supported.\n"
+    )
+    expected = {
+        "outcome": "preflight_failure",
+        "error_pattern": "INT8.*ROCm|ROCm.*INT8",
+    }
+    output = {"path": None, "sha256": None, "files": []}
+
+    assert (
+        runner.classify_outcome(1, log, "not_reached", expected, output)
+        == "passed_expected_rejection"
+    )
+
+
+def test_failure_text_selects_only_failure_lines(runner):
+    log = (
+        "INFO 08-06 10:00:26 [runner_utils.py:30] Running model...\n"
+        "WARNING 08-06 10:00:06 [runtime_state.py:129] Using AITER attention.\n"
+        "[rank0]: Traceback (most recent call last):\n"
+        "[rank0]: RuntimeError: kernel unavailable\n"
+        "E0806 10:12:33.874000 28461 api.py:882] failed (exitcode: -6)\n"
+    )
+
+    selected = runner.failure_text(log)
+
+    assert "RuntimeError: kernel unavailable" in selected
+    assert "failed (exitcode: -6)" in selected
+    assert "Running model" not in selected
+    assert "Using AITER attention" not in selected
 
 
 def test_output_discovery_requires_new_nonempty_hashed_artifact(runner, tmp_path):

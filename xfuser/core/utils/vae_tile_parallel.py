@@ -125,6 +125,60 @@ def runs(weights: Sequence[int], world_size: int) -> List[Tuple[int, int]]:
     return _widen(_greedy(weights, low), world_size)
 
 
+def shares(weights: Sequence[int], world_size: int) -> List[int]:
+    """Which rank decodes each tile: contiguous runs, levelled by moving a few tiles across
+
+    A run is the cheap shape to blend, since its tiles' neighbours are mostly its own, but it is
+    a coarse shape to balance. Nine tiles over four ranks split by weight as evenly as contiguity
+    allows still leaves the heaviest rank a quarter above the average, because the tiles are large
+    against the share and a run cannot skip one. No weighing fixes that; only a finer assignment.
+
+    So the runs are a starting point rather than the answer. A tile at a time moves from the
+    heaviest rank to the lightest wherever that lowers the heaviest, which is what the decode
+    waits for. Each move costs an exchange - the tile's neighbours are now somewhere else - and
+    that is why the runs are worth starting from, and why the moves prefer a tile already beside
+    the rank taking it.
+
+    A rank down to its last tile never gives it up, because handing over everything it has cannot
+    lower the higher of the two loads.
+    """
+    owner: List[int] = []
+    for rank, (start, stop) in enumerate(runs(weights, world_size)):
+        owner.extend([rank] * (stop - start))
+    if world_size < 2:
+        return owner
+
+    load = [0] * world_size
+    for n, weight in enumerate(weights):
+        load[owner[n]] += weight
+
+    # Bounded by the tiles: every move strictly lowers the heaviest load, so the sorted loads
+    # fall each time and cannot return to where they were.
+    for _ in range(len(weights)):
+        heavy = max(range(world_size), key=lambda r: (load[r], -r))
+        light = min(range(world_size), key=lambda r: (load[r], r))
+        best = None
+        for n, weight in enumerate(weights):
+            if owner[n] != heavy:
+                continue
+            after = max(load[heavy] - weight, load[light] + weight)
+            if after >= load[heavy]:
+                continue
+            beside = any(
+                0 <= m < len(weights) and owner[m] == light for m in (n - 1, n + 1)
+            )
+            key = (after, 0 if beside else 1, n)
+            if best is None or key < best[0]:
+                best = (key, n)
+        if best is None:
+            break
+        moved = best[1]
+        owner[moved] = light
+        load[heavy] -= weights[moved]
+        load[light] += weights[moved]
+    return owner
+
+
 def _greedy(weights: Sequence[int], ceiling: int) -> List[Tuple[int, int]]:
     """The fewest contiguous runs none of which weighs more than `ceiling`"""
     out, start, carried = [], 0, 0
@@ -165,10 +219,10 @@ def assemble_in_runs(
     """Assemble a tile grid with each rank decoding and blending its own run, None if it can't
 
     Dealing tiles out divides the decoding and leaves the blending on every rank, a cost that
-    does not shrink however many ranks join the group. Giving a rank a contiguous run of tiles
-    lets it blend its own and send only the finished pieces, so the blending divides too.
+    does not shrink however many ranks join the group. Giving a rank a share of neighbouring
+    tiles lets it blend its own and send only the finished pieces, so the blending divides too.
 
-    The reason a run can be blended alone is a property of the two blends. `blend_v` writes a
+    The reason a share can be blended alone is a property of the two blends. `blend_v` writes a
     tile's *first* rows and `blend_h` its *first* columns, so neither ever writes the last rows or
     the last columns - and those are the only parts of a tile that the tiles after it read. A
     tile's edges are therefore final while it is still raw, and one exchange of raw edges lets
@@ -196,20 +250,20 @@ def assemble_in_runs(
         return None
 
     rank = dist.get_rank(group)
-    split = runs(weights, world_size)
-    start, stop = split[rank]
-    mine = decode(order[start:stop])
+    owner = shares(weights, world_size)
+    mine = decode([at for n, at in enumerate(order) if owner[n] == rank])
 
     # Exchanged before anything is blended, both because the edges are raw at that point and
     # because a rank waiting on a neighbour's blending would serialise what this is dividing.
     edges = _share_edges(
-        order, mine, start, stop, _wanted(split, columns), group, world_size, blend
+        order, mine, owner, rank, _wanted(owner, columns), group, world_size, blend
     )
 
     blended: Dict[Where, torch.Tensor] = {}
     kept: List[Optional[torch.Tensor]] = [None] * len(order)
-    for n in range(start, stop):
-        i, j = order[n]
+    for n, (i, j) in enumerate(order):
+        if owner[n] != rank:
+            continue
         tile = mine[(i, j)]
         if i > 0:
             # The neighbour itself where this rank blended it, and its edge rebuilt from the raw
@@ -262,33 +316,34 @@ def assemble_here(rows: int, columns: int, decode: Decode, blend: Blend) -> torc
     return torch.cat(made, dim=DOWN)
 
 
-def _wanted(split: Sequence[Tuple[int, int]], columns: int) -> Set[int]:
+def _wanted(owner: Sequence[int], columns: int) -> Set[int]:
     """The tiles whose raw edges a rank other than their own will read
 
-    A run covers the tail of the row it starts in, then whole rows, so the only neighbours it
-    cannot supply for itself are in the two rows around where it begins: the row above, from the
-    column before its first tile onward, and the part of its own first row that the rank before
-    it holds. Everything deeper into the run has its neighbours to hand.
-
-    So the edges that travel go as the ranks do, not as the tiles do, and a grid of any size
-    exchanges about a row of them per rank.
+    Read off what the blending below asks for, tile by tile, rather than reasoned about from the
+    shape of a rank's share: a rank blending a tile reaches for the one above and the one to its
+    left, and only where one of those is somewhere else does anything have to travel. Where the
+    shares are runs that is about a row of tiles per rank however large the grid, and where a
+    tile has been moved across to level the load it is that tile's neighbours as well.
     """
     wanted: Set[int] = set()
-    for start, _ in split:
-        if start == 0:
-            continue
-        row, column = divmod(start, columns)
-        if row > 0:
-            wanted.update(range((row - 1) * columns + max(0, column - 1), row * columns))
-        wanted.update(range(row * columns, start))
+    for n, rank in enumerate(owner):
+        row, column = divmod(n, columns)
+        if row > 0 and owner[n - columns] != rank:
+            wanted.add(n - columns)
+            if column > 0:
+                wanted.add(n - columns - 1)
+        if column > 0 and owner[n - 1] != rank:
+            wanted.add(n - 1)
+            if row > 0:
+                wanted.add(n - columns - 1)
     return wanted
 
 
 def _share_edges(
     order: Sequence[Where],
     mine: Dict[Where, torch.Tensor],
-    start: int,
-    stop: int,
+    owner: Sequence[int],
+    rank: int,
     wanted: Set[int],
     group,
     world_size: int,
@@ -300,15 +355,15 @@ def _share_edges(
     fraction of what dealing the tiles themselves round would have to.
     """
     sending: List[Optional[torch.Tensor]] = [None] * (2 * len(order))
-    for n in range(start, stop):
-        if n not in wanted:
+    for n in wanted:
+        if owner[n] != rank:
             continue
         tile = mine[order[n]]
         # Cloned because the blending below writes into the tiles these came from, and an edge is
         # only the edge a neighbour needs while it is still raw.
         sending[2 * n] = tile[..., -blend.deep_down :, :].clone()
         sending[2 * n + 1] = tile[..., -blend.deep_across :].clone()
-    shared = _share(sending, group, world_size, mine[order[start]])
+    shared = _share(sending, group, world_size, next(iter(mine.values())))
     return {at: (shared[2 * n], shared[2 * n + 1]) for n, at in enumerate(order)}
 
 

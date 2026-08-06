@@ -5,6 +5,7 @@ import random
 import socket
 import unittest
 from datetime import timedelta
+from typing import List
 
 import torch
 import torch.distributed as dist
@@ -20,6 +21,23 @@ SHAPES = ((2, 3), (2, 3), (2, 3), (2, 3), (1, 3), (2, 1))
 def _result(index: int) -> torch.Tensor:
     """What call `index` returns: its own number, in a shape only it has"""
     return torch.full(SHAPES[index], float(index), dtype=torch.float32)
+
+
+def _load(weights, owner, world_size: int) -> List[int]:
+    """What each rank carries under an assignment"""
+    load = [0] * world_size
+    for n, weight in enumerate(weights):
+        load[owner[n]] += weight
+    return load
+
+
+def _by_runs(weights, world_size: int) -> List[int]:
+    """The assignment before any tile is moved to level it"""
+    return [
+        rank
+        for rank, (start, stop) in enumerate(vae_tile_parallel.runs(weights, world_size))
+        for _ in range(start, stop)
+    ]
 
 
 def _every_split(tiles: int, world_size: int):
@@ -215,6 +233,49 @@ class TestRuns(unittest.TestCase):
         weights = [9, 9, 4, 9, 9, 4, 4, 4, 2]
         held = [sum(weights[start:stop]) for start, stop in vae_tile_parallel.runs(weights, 2)]
         self.assertLessEqual(max(held) / min(held), 1.1, held)
+
+    def test_levelling_never_leaves_a_rank_worse_off_than_the_runs_it_started_from(self):
+        random.seed(13)
+        for tiles in range(2, 20):
+            for world_size in range(2, min(tiles, 6) + 1):
+                for _ in range(10):
+                    weights = [random.randint(1, 9) for _ in range(tiles)]
+                    owner = vae_tile_parallel.shares(weights, world_size)
+                    self.assertEqual(set(owner), set(range(world_size)), weights)
+                    self.assertEqual(len(owner), tiles)
+                    self.assertLessEqual(
+                        max(_load(weights, owner, world_size)),
+                        max(_load(weights, _by_runs(weights, world_size), world_size)),
+                        f"{weights} over {world_size}",
+                    )
+
+    def test_a_tile_moves_across_where_a_run_cannot_be_levelled(self):
+        # The grid measured on four ranks: nine tiles, the last row and column clipped. Contiguity
+        # alone leaves the heaviest rank a quarter above the lightest possible; a tile moving
+        # across takes that back.
+        weights = [16384, 16384, 8192, 16384, 16384, 8192, 8192, 8192, 4096]
+        by_runs = max(_load(weights, _by_runs(weights, 4), 4))
+        levelled = max(_load(weights, vae_tile_parallel.shares(weights, 4), 4))
+        self.assertEqual(by_runs, 32768)
+        self.assertEqual(levelled, 28672)
+
+    def test_the_edges_asked_for_are_the_edges_the_blending_reaches_for(self):
+        random.seed(17)
+        for rows in range(1, 6):
+            for columns in range(1, 6):
+                for world_size in range(2, min(rows * columns, 5) + 1):
+                    weights = [random.randint(1, 9) for _ in range(rows * columns)]
+                    owner = vae_tile_parallel.shares(weights, world_size)
+                    wanted = vae_tile_parallel._wanted(owner, columns)
+                    for n in range(rows * columns):
+                        row, column = divmod(n, columns)
+                        reaches = []
+                        if row > 0 and owner[n - columns] != owner[n]:
+                            reaches += [n - columns] + ([n - columns - 1] if column else [])
+                        if column > 0 and owner[n - 1] != owner[n]:
+                            reaches += [n - 1] + ([n - columns - 1] if row else [])
+                        for at in reaches:
+                            self.assertIn(at, wanted, f"{rows}x{columns}/{world_size} at {n}")
 
     def test_every_rank_holds_a_tile_and_every_tile_is_held_once(self):
         random.seed(11)

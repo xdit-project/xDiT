@@ -45,6 +45,10 @@ class Blend(NamedTuple):
     deep_down: int
     deep_across: int
     crop: Callable[[torch.Tensor], torch.Tensor]  # the corner of a blended tile that is kept
+    # How deep a whole tile is, which decides whether bands are possible at all. Taken from the
+    # window rather than from a decoded tile, because every rank has to reach the same answer:
+    # one rank falling back while the others gather would hang the decode rather than fail it.
+    tile_down: int
 
 
 def mark(vae, group) -> None:
@@ -122,6 +126,10 @@ def assemble_in_bands(
     Where the tiles are shallower than twice the blend, that argument fails: the rows `blend_v`
     writes would reach into the rows the band below reads. None comes back and the caller falls
     back to a scheme that does not divide the blending.
+
+    Every reason to decline is one every rank reaches the same way, from the grid and the window
+    rather than from the tiles a rank happens to hold. A rank that fell back alone would leave
+    the others waiting in a gather it never joins, which hangs a decode rather than failing it.
     """
     world_size = dist.get_world_size(group)
     if world_size < 2:
@@ -129,6 +137,8 @@ def assemble_in_bands(
     # Fewer rows than ranks and some rank would hold no band at all. Round-robin over the calls
     # still divides that decode; bands cannot.
     if rows < world_size:
+        return None
+    if blend.tile_down < 2 * blend.deep_down:
         return None
 
     rank = dist.get_rank(group)
@@ -138,9 +148,7 @@ def assemble_in_bands(
     # Sent before anything is blended, both because the edge is raw at that point and because a
     # rank that had to wait for its neighbour's blending would serialise the very thing this is
     # dividing.
-    sending = _bottom_edge(mine, stop - 1, columns, blend.deep_down, read=stop < rows)
-    if sending is None:
-        return None
+    sending = _bottom_edge(mine, stop - 1, columns, blend.deep_down)
     received = [torch.empty_like(sending) for _ in range(world_size)]
     dist.all_gather(received, sending, group=group)
 
@@ -194,19 +202,15 @@ def _blend_rows(
 
 
 def _bottom_edge(
-    mine: Dict[Where, torch.Tensor], row: int, columns: int, deep: int, read: bool
-) -> Optional[torch.Tensor]:
+    mine: Dict[Where, torch.Tensor], row: int, columns: int, deep: int
+) -> torch.Tensor:
     """The last `deep` rows of a band's bottom row of tiles, as one tensor across the columns
 
-    `read` is whether any band sits below this one. The last band's edge is still sent, because
-    all_gather asks every rank for the same shape, but nothing is read out of it, so a bottom row
-    the latent bounds clipped short is padded rather than refused.
+    The last band's edge is sent along with everyone else's, because all_gather asks every rank
+    for the same shape, and nothing is read out of it. That row is the one the latent bounds clip,
+    so it is also the one that can come back shallower than the rest and need padding out.
     """
     tiles = [mine[(row, j)] for j in range(columns)]
-    # A tile no deeper than two blends would have the rows blend_v writes reaching into the rows
-    # the band below reads, and then the edge sent here would not be the edge that band needs.
-    if read and any(tile.shape[DOWN] < 2 * deep for tile in tiles):
-        return None
     edge = torch.cat([tile[..., -deep:, :] for tile in tiles], dim=ACROSS).clone()
     short = deep - edge.shape[DOWN]
     if short > 0:

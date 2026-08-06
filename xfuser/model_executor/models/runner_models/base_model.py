@@ -1178,11 +1178,15 @@ class xFuserModel(abc.ABC):
         # balance is set. Where the group is dividing the tiles instead there are no rounds to
         # spread, and the budget is only holding peak memory to what the window asked for.
         group = vae_tile_parallel.group_of(vae)
-        dispatch = vae_tile_parallel.dispatch_over(group) if group is not None else None
+        dispatch, assemble = (
+            vae_tile_parallel.sharing(group) if group is not None else (None, None)
+        )
         budget_elems = vae_tiling.tile_batch_budget(default_area, tile_area)
         if budget_elems is None and dispatch is None:
             return
-        installed = vae_tiling.tiled_decode_for(vae, budget_elems or 0, dispatch)
+        installed = vae_tiling.tiled_decode_for(
+            vae, budget_elems or 0, dispatch, assemble
+        )
         if installed is None:
             return
         vae.tiled_decode = installed
@@ -1193,7 +1197,8 @@ class xFuserModel(abc.ABC):
             else "a tile per call"
         )
         log(f"VAE tiled decode on {type(vae).__name__}: {carried}"
-            + (f", dealt out across {torch.distributed.get_world_size(group)} ranks."
+            + (f", dealt out across {torch.distributed.get_world_size(group)} ranks, "
+               f"a band of tile rows each where the grid has a row to spare them."
                if group is not None else "."))
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:

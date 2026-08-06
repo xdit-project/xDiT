@@ -414,6 +414,7 @@ def batched_tiled_decode(
             deep_down=blend_extent,
             deep_across=blend_extent,
             crop=lambda tile: tile[:, :, :row_limit, :row_limit],
+            tile_down=vae.tile_sample_min_size,
         )
         dec = None
         if assemble is not None:
@@ -523,6 +524,11 @@ def strided_tiled_decode(
             deep_down=blend_height,
             deep_across=blend_width,
             crop=lambda tile: tile[:, :, :, :sample_stride_height, :sample_stride_width],
+            tile_down=(
+                vae.tile_sample_min_height // patch_size
+                if patch_size is not None
+                else vae.tile_sample_min_height
+            ),
         )
         dec = None
         if assemble is not None:

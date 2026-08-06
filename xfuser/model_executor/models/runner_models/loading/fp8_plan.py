@@ -50,27 +50,31 @@ class Fp8Plan:
         (e.g. "text_encoder.model.language_model.layers" -> "model.language_model.layers"), which is
         the form loaders and module walks take."""
         prefix = f"{component_name}."
-        return [m[len(prefix):] for m in self.module_list() if m.startswith(prefix)]
+        return [m[len(prefix) :] for m in self.module_list() if m.startswith(prefix)]
 
     @property
     def aiter_active(self) -> bool:
         """True when the AITER block-scale FP8 path applies: fp8 gemms requested, and hardware and
-        library support for the only kernels that implement it (ROCm RDNA4 with AITER)."""
+        library support for the only kernels that implement it (ROCm RDNA4 with AITER).
+        """
         return bool(self.model.config.use_fp8_gemms and _use_aiter_fp8_rdna4())
 
     def aiter_covers(self, component_name: str) -> bool:
         """True when the AITER path is on for this run and covers part of this component, i.e. the
-        component should be built, filled and sharded as FP8 rather than quantized afterwards."""
+        component should be built, filled and sharded as FP8 rather than quantized afterwards.
+        """
         return bool(self.aiter_active and self.targets_for(component_name))
 
     def aiter_stream_config(
         self, attr_prefix: str = "transformer"
     ) -> Optional["AiterFp8BlockScaleConfig"]:
         """Quantize-on-load config for this run's targets under ``attr_prefix`` (e.g. "transformer" /
-        "transformer_2"), or None when the AITER path does not apply. See quant.aiter_load."""
+        "transformer_2"), or None when the AITER path does not apply. See quant.aiter_load.
+        """
         if not self.aiter_active:
             return None
         from xfuser.model_executor.quant.aiter_load import stream_config
+
         return stream_config(self.targets_for(attr_prefix))
 
     def aiter_te_pipeline_config(self):
@@ -80,4 +84,5 @@ class Fp8Plan:
         if not (self.aiter_active and self.model.config.use_fp8_text_encoder):
             return None
         from xfuser.model_executor.quant.aiter_load import te_pipeline_config
+
         return te_pipeline_config(self.model.settings.fp8_text_encoder_module_list)

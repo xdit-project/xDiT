@@ -69,8 +69,7 @@ class UnsupportedLoadContract(ValueError):
 class CheckpointTensorReader(Protocol):
     """Small tensor-reading seam; discovery is intentionally independent of it."""
 
-    def get_tensor(self, key: str):
-        ...
+    def get_tensor(self, key: str): ...
 
 
 @dataclass(frozen=True)
@@ -100,14 +99,11 @@ class LoadCapability:
     def meta_transformers(self) -> tuple[str, ...]:
         return tuple(
             dict.fromkeys(
-                self.fsdp_meta_transformers
-                + self.replicated_meta_transformers
+                self.fsdp_meta_transformers + self.replicated_meta_transformers
             )
         )
 
-    def exclusion_for(
-        self, component: str
-    ) -> ComponentLoadExclusion | None:
+    def exclusion_for(self, component: str) -> ComponentLoadExclusion | None:
         return next(
             (
                 exclusion
@@ -128,17 +124,10 @@ class LoadCapability:
         modes = {MaterializationMode.EAGER, MaterializationMode.FSDP_META}
         if replicated:
             modes.add(MaterializationMode.REPLICATED_META)
-        formats = frozenset(
-            quantization_formats or {QuantizationFormat.NONE}
-        )
-        if (
-            QuantizationFormat.FP8 in formats
-            and QuantizationFormat.FP4 in formats
-        ):
+        formats = frozenset(quantization_formats or {QuantizationFormat.NONE})
+        if QuantizationFormat.FP8 in formats and QuantizationFormat.FP4 in formats:
             formats = formats | {QuantizationFormat.FP8_FP4}
-        backends = frozenset(
-            quantization_backends or {QuantizationBackend.NONE}
-        )
+        backends = frozenset(quantization_backends or {QuantizationBackend.NONE})
         contracts = {
             (format_, backend)
             for format_ in formats
@@ -148,9 +137,7 @@ class LoadCapability:
         }
         return cls(
             fsdp_meta_transformers=tuple(transformers),
-            replicated_meta_transformers=(
-                tuple(transformers) if replicated else ()
-            ),
+            replicated_meta_transformers=(tuple(transformers) if replicated else ()),
             materialization_modes=frozenset(modes),
             construction_seam=ConstructionSeam.BUILD_TRANSFORMER,
             quantization_formats=formats,
@@ -176,9 +163,7 @@ class LoadCapability:
     ) -> "LoadCapability":
         """Derive quantization support while keeping meta loading opt-in."""
 
-        contracts = {
-            (QuantizationFormat.NONE, QuantizationBackend.NONE)
-        }
+        contracts = {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
         if getattr(model_capabilities, "use_fp8_gemms", False):
             contracts.update(
                 {
@@ -193,9 +178,8 @@ class LoadCapability:
                     (QuantizationFormat.FP4, QuantizationBackend.TORCHAO),
                 }
             )
-        if (
-            getattr(model_capabilities, "use_fp8_gemms", False)
-            and getattr(model_capabilities, "use_fp4_gemms", False)
+        if getattr(model_capabilities, "use_fp8_gemms", False) and getattr(
+            model_capabilities, "use_fp4_gemms", False
         ):
             contracts.update(
                 {
@@ -210,9 +194,7 @@ class LoadCapability:
                 }
             )
         if getattr(model_capabilities, "use_int8_gemms", False):
-            contracts.add(
-                (QuantizationFormat.INT8, QuantizationBackend.TORCHAO)
-            )
+            contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
 
         modes = {MaterializationMode.EAGER}
         seam = None
@@ -224,15 +206,12 @@ class LoadCapability:
                 for name in meta_transformers
                 if strategy.get(name, {}).get("wrap_attrs")
             )
-            if standard_collectives and getattr(
-                model_capabilities, "fully_shard_degree", False
-            )
+            if standard_collectives
+            and getattr(model_capabilities, "fully_shard_degree", False)
             else ()
         )
         replicated_transformers = (
-            tuple(meta_transformers)
-            if standard_collectives and replicated
-            else ()
+            tuple(meta_transformers) if standard_collectives and replicated else ()
         )
         if fsdp_transformers:
             modes.add(MaterializationMode.FSDP_META)
@@ -295,10 +274,7 @@ def select_effective_materialization_mode(
 ) -> MaterializationMode:
     """Apply the same runtime exclusions used by memory-efficient loading."""
 
-    if (
-        config.memory_efficient_sharding
-        and config.fully_shard_degree > 1
-    ):
+    if config.memory_efficient_sharding and config.fully_shard_degree > 1:
         return MaterializationMode.FSDP_META
     splits_weights = (
         config.fully_shard_degree > 1
@@ -338,8 +314,7 @@ def validate_materialization_contract(
             or f"{capability.loader_adapter.value} is not collective-safe"
         )
         raise UnsupportedLoadContract(
-            f"{runner_name} does not support {mode.value} materialization: "
-            f"{reason}"
+            f"{runner_name} does not support {mode.value} materialization: " f"{reason}"
         )
     if capability.construction_seam is None:
         raise UnsupportedLoadContract(
@@ -415,15 +390,13 @@ def select_runtime_quantization(
 ) -> tuple[QuantizationFormat, QuantizationBackend]:
     """Translate current flags/platform selection into the explicit contract."""
 
-    if config.use_int8_gemms and (
-        config.use_fp8_gemms or config.use_fp4_gemms
-    ):
-        others = "FP8 + FP4" if (
-            config.use_fp8_gemms and config.use_fp4_gemms
-        ) else ("FP8" if config.use_fp8_gemms else "FP4")
-        raise UnsupportedLoadContract(
-            f"INT8 cannot be combined with {others}"
+    if config.use_int8_gemms and (config.use_fp8_gemms or config.use_fp4_gemms):
+        others = (
+            "FP8 + FP4"
+            if (config.use_fp8_gemms and config.use_fp4_gemms)
+            else ("FP8" if config.use_fp8_gemms else "FP4")
         )
+        raise UnsupportedLoadContract(f"INT8 cannot be combined with {others}")
     if config.use_fp8_gemms and config.use_fp4_gemms:
         format_ = QuantizationFormat.FP8_FP4
     elif config.use_fp8_gemms:
@@ -446,9 +419,7 @@ def select_runtime_quantization(
         QuantizationFormat.FP8_FP4,
     ):
         backend = (
-            QuantizationBackend.TORCHAO
-            if cuda_active
-            else QuantizationBackend.AITER
+            QuantizationBackend.TORCHAO if cuda_active else QuantizationBackend.AITER
         )
     else:
         backend = QuantizationBackend.TORCHAO

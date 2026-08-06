@@ -45,9 +45,7 @@ class CheckpointRequest:
 
     def config_kwargs(self, *, include_subfolder: bool = True) -> dict:
         """from_pretrained kwargs accepted by config-only loading APIs."""
-        values = self.from_pretrained_kwargs(
-            include_subfolder=include_subfolder
-        )
+        values = self.from_pretrained_kwargs(include_subfolder=include_subfolder)
         values.pop("variant", None)
         return values
 
@@ -70,9 +68,7 @@ def _is_within(directory: str, path: str) -> bool:
         return False
 
 
-def resolve_checkpoint_file(
-    request: CheckpointRequest, filename: str
-) -> str | None:
+def resolve_checkpoint_file(request: CheckpointRequest, filename: str) -> str | None:
     """Resolve one request-relative file; only genuine absence maps to None."""
 
     root = os.fspath(request.model_name_or_path)
@@ -110,17 +106,13 @@ def resolve_checkpoint_file(
         return None
 
 
-def _require_checkpoint_file(
-    request: CheckpointRequest, filename: str
-) -> str:
+def _require_checkpoint_file(request: CheckpointRequest, filename: str) -> str:
     path = resolve_checkpoint_file(request, filename)
     if path is None:
         location = request.model_name_or_path
         if request.subfolder:
             location = f"{location}/{request.subfolder}"
-        raise FileNotFoundError(
-            f"checkpoint file '{filename}' not found in {location}"
-        )
+        raise FileNotFoundError(f"checkpoint file '{filename}' not found in {location}")
     return path
 
 
@@ -152,9 +144,7 @@ def discover_checkpoint(
 
     index = resolve_checkpoint_file(
         request,
-        _variant_filename(
-            request, f"{basename}.safetensors.index.json"
-        ),
+        _variant_filename(request, f"{basename}.safetensors.index.json"),
     )
     if index is not None:
         with open(index) as handle:
@@ -163,9 +153,7 @@ def discover_checkpoint(
         weight_map = {}
         for key, filename in key_to_file.items():
             if filename not in local_files:
-                local_files[filename] = _require_checkpoint_file(
-                    request, filename
-                )
+                local_files[filename] = _require_checkpoint_file(request, filename)
             weight_map[key] = local_files[filename]
         return CheckpointManifest(weight_map)
 
@@ -175,24 +163,17 @@ def discover_checkpoint(
     return CheckpointManifest({key: single for key in key_reader(single)})
 
 
-def component_shard_paths(
-    request: CheckpointRequest, basename: str
-) -> set[str]:
+def component_shard_paths(request: CheckpointRequest, basename: str) -> set[str]:
     """Resolve component shard paths from an index, without reading tensors."""
 
     index = resolve_checkpoint_file(
         request,
-        _variant_filename(
-            request, f"{basename}.safetensors.index.json"
-        ),
+        _variant_filename(request, f"{basename}.safetensors.index.json"),
     )
     if index is not None:
         with open(index) as handle:
             filenames = set(json.load(handle)["weight_map"].values())
-        return {
-            _require_checkpoint_file(request, filename)
-            for filename in filenames
-        }
+        return {_require_checkpoint_file(request, filename) for filename in filenames}
     single = resolve_checkpoint_file(
         request, _variant_filename(request, f"{basename}.safetensors")
     )

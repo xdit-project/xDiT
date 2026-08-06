@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import importlib.util
 from typing import Callable, Mapping
 
-
 _TRANSFORMERS_STREAMING_REQUIREMENT = (
     "transformers 5 (transformers>=5.0) with "
     "transformers.core_model_loading is required "
@@ -38,8 +37,7 @@ def probe_transformers_streaming_loader(
     except (ImportError, ModuleNotFoundError, ValueError) as exc:
         return TransformersStreamingSupport(
             False,
-            f"{_TRANSFORMERS_STREAMING_REQUIREMENT}: "
-            f"{type(exc).__name__}: {exc}",
+            f"{_TRANSFORMERS_STREAMING_REQUIREMENT}: " f"{type(exc).__name__}: {exc}",
         )
     return TransformersStreamingSupport(
         available,
@@ -95,15 +93,11 @@ class TextEncoderFrameworkAdapter:
         torchao_config_factory=None,
         aiter_config_factory=None,
     ) -> None:
-        self._pipeline_config_factory = (
-            pipeline_config_factory or _pipeline_config
-        )
+        self._pipeline_config_factory = pipeline_config_factory or _pipeline_config
         self._torchao_config_factory = (
             torchao_config_factory or _torchao_text_encoder_config
         )
-        self._aiter_config_factory = (
-            aiter_config_factory or _aiter_text_encoder_config
-        )
+        self._aiter_config_factory = aiter_config_factory or _aiter_text_encoder_config
 
     def component_quantization_config(
         self,

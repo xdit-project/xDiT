@@ -6,7 +6,6 @@ from importlib.metadata import PackageNotFoundError, version
 from packaging.version import InvalidVersion, Version
 from typing import Callable
 
-
 _ProbeResult = bool | tuple[bool, str | None]
 _MIN_TORCHAO_VERSION = Version("0.15.0")
 MXFP4_STREAMING_FALLBACK = (
@@ -49,14 +48,11 @@ def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
     if installed < _MIN_TORCHAO_VERSION:
         return (
             False,
-            f"torchao {installed} is older than required "
-            f"{_MIN_TORCHAO_VERSION}",
+            f"torchao {installed} is older than required " f"{_MIN_TORCHAO_VERSION}",
         )
     try:
         if kind == "nvfp4":
-            module = import_module(
-                "torchao.prototype.mx_formats.inference_workflow"
-            )
+            module = import_module("torchao.prototype.mx_formats.inference_workflow")
             config = module.NVFP4DynamicActivationNVFP4WeightConfig(
                 use_dynamic_per_tensor_scale=True,
                 use_triton_kernel=True,
@@ -64,9 +60,7 @@ def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
         else:
             quant = import_module("torchao.quantization.quant_api")
             granularity = import_module("torchao.quantization.granularity")
-            primitives = import_module(
-                "torchao.quantization.quant_primitives"
-            )
+            primitives = import_module("torchao.quantization.quant_primitives")
             config = quant.Int8DynamicActivationInt8WeightConfig(
                 granularity=granularity.PerRow(),
                 act_mapping_type=primitives.MappingType.SYMMETRIC,
@@ -75,7 +69,10 @@ def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
         if config is None:
             return False, f"TorchAO {kind.upper()} config is unavailable"
     except Exception as exc:
-        return False, f"TorchAO {kind.upper()} API probe failed: {type(exc).__name__}: {exc}"
+        return (
+            False,
+            f"TorchAO {kind.upper()} API probe failed: {type(exc).__name__}: {exc}",
+        )
     return True, None
 
 
@@ -85,25 +82,22 @@ def _probe_diffusers_config(kind: str) -> tuple[bool, str | None]:
         return False, reason
     try:
         diffusers = import_module("diffusers")
-        quantizer = import_module(
-            "diffusers.quantizers.torchao.torchao_quantizer"
-        )
+        quantizer = import_module("diffusers.quantizers.torchao.torchao_quantizer")
         config = _torchao_stream_config(kind, [])
         quantizer_cls = quantizer.TorchAoHfQuantizer
         valid = bool(
             config is not None
-            and callable(
-                getattr(quantizer_cls, "check_if_quantized_param", None)
-            )
-            and callable(
-                getattr(quantizer_cls, "create_quantized_param", None)
-            )
+            and callable(getattr(quantizer_cls, "check_if_quantized_param", None))
+            and callable(getattr(quantizer_cls, "create_quantized_param", None))
             and getattr(diffusers, "TorchAoConfig", None)
         )
         if not valid:
             return False, "Diffusers TorchAoConfig per-weight API is unavailable"
     except Exception as exc:
-        return False, f"Diffusers TorchAoConfig probe failed: {type(exc).__name__}: {exc}"
+        return (
+            False,
+            f"Diffusers TorchAoConfig probe failed: {type(exc).__name__}: {exc}",
+        )
     return True, None
 
 
@@ -163,7 +157,9 @@ def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:
         )
         weight = module.weight
         methods = ("fsdp_pre_all_gather", "fsdp_post_all_gather")
-        missing = [name for name in methods if not callable(getattr(weight, name, None))]
+        missing = [
+            name for name in methods if not callable(getattr(weight, name, None))
+        ]
         if missing:
             return False, "INT8 tensor subclass is missing " + ", ".join(missing)
     except Exception as exc:
@@ -197,22 +193,24 @@ def probe_format_backend_capabilities(
             torch = import_module("torch")
             cuda_capability_probe = torch.cuda.get_device_capability
         else:
+
             def cuda_capability_probe():
                 return None
+
     capability = cuda_capability_probe()
     blackwell = bool(cuda and capability is not None and capability >= (10, 0))
     if mxfp4_probe is None:
         if aiter_probe is None:
             mxfp4_probe = _probe_aiter_mxfp4_apis
         else:
+
             def mxfp4_probe():
                 available = bool(aiter_probe())
                 return (
                     available,
-                    None
-                    if available
-                    else "AITER MXFP4 APIs are unavailable",
+                    None if available else "AITER MXFP4 APIs are unavailable",
                 )
+
     nvfp4_probe = nvfp4_probe or (lambda: _probe_torchao_config("nvfp4"))
     int8_probe = int8_probe or (lambda: _probe_torchao_config("int8"))
     diffusers_probe = diffusers_probe or _probe_diffusers_config
@@ -235,24 +233,16 @@ def probe_format_backend_capabilities(
         int8_reason = "TorchAO INT8 is supported only on CUDA"
 
     nv_stream, nv_stream_reason = (
-        _result(diffusers_probe("nvfp4"))
-        if nvfp4
-        else (False, nvfp4_reason)
+        _result(diffusers_probe("nvfp4")) if nvfp4 else (False, nvfp4_reason)
     )
     int8_stream, int8_stream_reason = (
-        _result(diffusers_probe("int8"))
-        if int8
-        else (False, int8_reason)
+        _result(diffusers_probe("int8")) if int8 else (False, int8_reason)
     )
     nv_fsdp, nv_fsdp_reason = (
-        _result(fsdp_probe("nvfp4"))
-        if nvfp4
-        else (False, nvfp4_reason)
+        _result(fsdp_probe("nvfp4")) if nvfp4 else (False, nvfp4_reason)
     )
     int8_fsdp, int8_fsdp_reason = (
-        _result(fsdp_probe("int8"))
-        if int8
-        else (False, int8_reason)
+        _result(fsdp_probe("int8")) if int8 else (False, int8_reason)
     )
     return FormatBackendCapabilities(
         torchao_nvfp4=nvfp4,
@@ -380,8 +370,7 @@ class TorchaoNvfp4BackendAdapter(FormatBackendAdapter):
     ):
         if hybrid:
             raise RuntimeError(
-                "CUDA NVFP4 does not implement the runtime hybrid FP8/FP4 "
-                "schedule"
+                "CUDA NVFP4 does not implement the runtime hybrid FP8/FP4 " "schedule"
             )
         from xfuser.core.utils.runner_utils import quantize_linear_layers_to_nvfp4
 
@@ -447,11 +436,7 @@ def module_paths_overlap(left: str, right: str) -> bool:
 
     if not left or not right:
         return True
-    return (
-        left == right
-        or left.startswith(f"{right}.")
-        or right.startswith(f"{left}.")
-    )
+    return left == right or left.startswith(f"{right}.") or right.startswith(f"{left}.")
 
 
 def module_path_is_covered(path: str, owner: str) -> bool:
@@ -501,6 +486,7 @@ def derive_linear_exclusions(
 
         def is_linear(module):
             return isinstance(module, nn.Linear)
+
     targets = tuple(dict.fromkeys(targets))
     for target in targets:
         try:
@@ -512,9 +498,7 @@ def derive_linear_exclusions(
 
     def targeted(name):
         return any(
-            not target
-            or name == target
-            or name.startswith(f"{target}.")
+            not target or name == target or name.startswith(f"{target}.")
             for target in targets
         )
 
@@ -522,9 +506,10 @@ def derive_linear_exclusions(
     for name, module in model.named_modules():
         if not name or not is_linear(module):
             continue
-        too_small = min_layer_size > 0 and min(
-            module.in_features, module.out_features
-        ) < min_layer_size
+        too_small = (
+            min_layer_size > 0
+            and min(module.in_features, module.out_features) < min_layer_size
+        )
         if not targeted(name) or too_small:
             exclusions.append(name)
     return exclusions
@@ -622,9 +607,7 @@ def prepare_native_transformer_format_load(
     elif isinstance(adapter, TorchaoNvfp4BackendAdapter) and (
         precision_prefixes or precision_suffixes
     ):
-        fallback = (
-            "native NVFP4 streaming cannot preserve FP8 precision overrides"
-        )
+        fallback = "native NVFP4 streaming cannot preserve FP8 precision overrides"
     else:
         try:
             config = adapter.transformer_stream_config(
@@ -634,15 +617,11 @@ def prepare_native_transformer_format_load(
             fallback = str(exc)
         else:
             return PreparedFormatLoad(
-                descriptor=_descriptor(
-                    adapter, component_name, "streaming"
-                ),
+                descriptor=_descriptor(adapter, component_name, "streaming"),
                 quantization_config=config,
             )
     return PreparedFormatLoad(
-        descriptor=_descriptor(
-            adapter, component_name, "post_load", fallback
-        )
+        descriptor=_descriptor(adapter, component_name, "post_load", fallback)
     )
 
 
@@ -663,9 +642,7 @@ def describe_blockwise_format_load(
             f"{component_name} has no {adapter.format.value.upper()} targets",
         )
     if not wrap_attrs or not any(
-        module_paths_overlap(target, attr)
-        for target in targets
-        for attr in wrap_attrs
+        module_paths_overlap(target, attr) for target in targets for attr in wrap_attrs
     ):
         return _descriptor(
             adapter,

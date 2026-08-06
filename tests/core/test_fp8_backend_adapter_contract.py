@@ -7,11 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 BACKENDS_PATH = (
-    ROOT
-    / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
 )
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
@@ -66,7 +64,8 @@ def test_hardware_and_package_probes_are_injectable(modules):
         torchao_accelerator_probe=lambda: calls.append("accelerator") or True,
         torchao_probe=lambda: calls.append("torchao") or True,
         torchao_diffusers_probe=lambda: calls.append("diffusers") or False,
-        torchao_text_encoder_probe=lambda: calls.append("text_encoder") or (
+        torchao_text_encoder_probe=lambda: calls.append("text_encoder")
+        or (
             False,
             "Transformers TorchAO unavailable",
         ),
@@ -103,9 +102,7 @@ def test_text_encoder_probe_does_not_require_diffusers_transformer_quantizer(
             "text-encoder routing must probe PipelineQuantizationConfig directly"
         ),
     )
-    monkeypatch.setattr(
-        b, "_probe_torchao_fp8_conversion_api", lambda: (True, None)
-    )
+    monkeypatch.setattr(b, "_probe_torchao_fp8_conversion_api", lambda: (True, None))
 
     def missing_transformers(name):
         raise ImportError(f"isolated missing API: {name}")
@@ -300,9 +297,7 @@ def test_non_fsdp_torchao_allows_missing_fsdp_tensor_patches(
     contract = SimpleNamespace(
         requested_format=c.QuantizationFormat.FP4,
         selected_backend=c.QuantizationBackend.TORCHAO,
-        materialization_mode=getattr(
-            c.MaterializationMode, materialization_mode
-        ),
+        materialization_mode=getattr(c.MaterializationMode, materialization_mode),
     )
 
     adapter = b.select_blockwise_fp8_backend(
@@ -416,9 +411,7 @@ def test_missing_target_makes_native_mapping_unavailable(modules):
         )
 
 
-def test_torchao_native_config_uses_structure_derived_exclusions(
-    modules, monkeypatch
-):
+def test_torchao_native_config_uses_structure_derived_exclusions(modules, monkeypatch):
     c, b = modules.contracts, modules.backends
     adapter = b.select_fp8_backend(
         _contract(modules, c.QuantizationBackend.TORCHAO),
@@ -572,9 +565,7 @@ def test_installed_native_config_matches_existing_torchao_fp8_semantics(
     assert all(isinstance(value, PerTensor) for value in quant_type.granularity)
 
 
-def test_native_diffusers_load_quantizes_only_targeted_linears(
-    modules, tmp_path
-):
+def test_native_diffusers_load_quantizes_only_targeted_linears(modules, tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("diffusers")
     pytest.importorskip("torchao")
@@ -619,4 +610,3 @@ def test_native_diffusers_load_quantizes_only_targeted_linears(
     assert isinstance(loaded.blocks[0].weight, TorchAOBaseTensor)
     assert not isinstance(loaded.input_proj.weight, TorchAOBaseTensor)
     assert loaded.input_proj.weight.dtype is torch.bfloat16
-

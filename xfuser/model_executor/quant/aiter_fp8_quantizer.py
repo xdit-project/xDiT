@@ -50,6 +50,7 @@ from xfuser.model_executor.layers.fp8_linear import (
 class AiterQuantMethod(str, Enum):
     """str-Enum so diffusers' `quant_method.value` access works while dict lookups
     keyed by the plain string still match (str subclass)."""
+
     AITER_FP8_BLOCKSCALE = "aiter_fp8_blockscale"
 
 
@@ -86,8 +87,10 @@ def _swap_linears_to_fp8(
                 "weight",
                 nn.Parameter(
                     torch.empty(
-                        child.out_features, child.in_features,
-                        device="meta", dtype=child.weight.dtype,
+                        child.out_features,
+                        child.in_features,
+                        device="meta",
+                        dtype=child.weight.dtype,
                     ),
                     requires_grad=False,
                 ),
@@ -150,6 +153,7 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
 
     def validate_environment(self, *args, **kwargs):
         from xfuser.core.utils.runner_utils import _use_aiter_fp8_rdna4
+
         if not _use_aiter_fp8_rdna4():
             raise RuntimeError(
                 "AiterFp8BlockScaleQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201)."
@@ -263,7 +267,6 @@ from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter imp
     transformers_streaming_requirement,
 )
 
-
 _TE_QUANT_NEEDS_TRANSFORMERS_5 = transformers_streaming_requirement()
 
 
@@ -324,6 +327,7 @@ class AiterFp8BlockScaleTEQuantizer(HfQuantizer):
 
     def validate_environment(self, *args, **kwargs):
         from xfuser.core.utils.runner_utils import _use_aiter_fp8_rdna4
+
         if not _use_aiter_fp8_rdna4():
             raise RuntimeError(
                 "AiterFp8BlockScaleTEQuantizer requires AITER FP8 on RDNA4 (ROCm gfx1200/gfx1201)."
@@ -391,8 +395,13 @@ def register_diffusers_fp8_quantizer() -> None:
         AUTO_QUANTIZER_MAPPING as DIFFUSERS_QUANTIZER_MAPPING,
         AUTO_QUANTIZATION_CONFIG_MAPPING as DIFFUSERS_CONFIG_MAPPING,
     )
-    DIFFUSERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = AiterFp8BlockScaleQuantizer
-    DIFFUSERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = AiterFp8BlockScaleConfig
+
+    DIFFUSERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = (
+        AiterFp8BlockScaleQuantizer
+    )
+    DIFFUSERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_QUANT_METHOD] = (
+        AiterFp8BlockScaleConfig
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -403,5 +412,10 @@ def register_transformers_fp8_quantizer() -> None:
         AUTO_QUANTIZER_MAPPING as TRANSFORMERS_QUANTIZER_MAPPING,
         AUTO_QUANTIZATION_CONFIG_MAPPING as TRANSFORMERS_CONFIG_MAPPING,
     )
-    TRANSFORMERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = AiterFp8BlockScaleTEQuantizer
-    TRANSFORMERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = AiterFp8BlockScaleTEConfig
+
+    TRANSFORMERS_QUANTIZER_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = (
+        AiterFp8BlockScaleTEQuantizer
+    )
+    TRANSFORMERS_CONFIG_MAPPING[AITER_FP8_BLOCKSCALE_TE_QUANT_METHOD] = (
+        AiterFp8BlockScaleTEConfig
+    )

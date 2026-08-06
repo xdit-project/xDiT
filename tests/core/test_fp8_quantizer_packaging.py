@@ -9,6 +9,7 @@ CPU-only.
 Run with:
     pytest tests/core/test_fp8_quantizer_packaging.py -v
 """
+
 import os
 import subprocess
 import sys
@@ -19,7 +20,6 @@ import pytest
 pytest.importorskip("diffusers.quantizers")
 
 from xfuser.model_executor.quant import aiter_fp8_quantizer as quant
-
 
 # Prelude for the probes below: reports (diffusers, transformers) auto-mapping membership.
 _PROBE_PRELUDE = """
@@ -32,7 +32,8 @@ def registered():
 
 def probe_registration(body):
     """Run body in a new interpreter and return its last line: registration is process-global and
-    sticky, so a fresh process is the only honest way to ask what an import alone did."""
+    sticky, so a fresh process is the only honest way to ask what an import alone did.
+    """
     result = subprocess.run(
         [sys.executable, "-c", _PROBE_PRELUDE + textwrap.dedent(body)],
         capture_output=True,

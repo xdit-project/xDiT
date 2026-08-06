@@ -3,19 +3,24 @@
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _class(tree, name):
-    return next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == name)
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == name
+    )
 
 
 def test_meta_load_defines_collective_layout_and_persistent_buffer_helpers():
     path = ROOT / "xfuser/model_executor/models/runner_models/loading/meta_load.py"
     tree = ast.parse(path.read_text())
     functions = {
-        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
     assert {
@@ -41,7 +46,8 @@ def test_args_and_base_both_validate_gemm_flag_ownership():
     base_tree = ast.parse(base_path.read_text())
     base_class = _class(base_tree, "xFuserModel")
     validate = next(
-        node for node in base_class.body
+        node
+        for node in base_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "_validate_config"
     )
     calls = {
@@ -58,7 +64,8 @@ def test_central_gemm_validation_owns_int8_conflicts():
     args_tree = ast.parse(args_source)
     args_class = _class(args_tree, "xFuserArgs")
     validate = next(
-        node for node in args_class.body
+        node
+        for node in args_class.body
         if isinstance(node, ast.FunctionDef)
         and node.name == "_validate_gemm_quantization_flags"
     )
@@ -75,7 +82,8 @@ def test_central_gemm_validation_owns_int8_conflicts():
     base_tree = ast.parse(base_source)
     base_class = _class(base_tree, "xFuserModel")
     base_validate = next(
-        node for node in base_class.body
+        node
+        for node in base_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "_validate_config"
     )
     assert "Cannot use int8 gemms with fp8 or fp4 gemms." not in ast.get_source_segment(
@@ -106,7 +114,8 @@ def test_mxfp4_quantized_weight_is_registered_as_parameter():
     tree = ast.parse(path.read_text())
     cls = _class(tree, "xFuserMXFP4Linear")
     quantize = next(
-        node for node in cls.body
+        node
+        for node in cls.body
         if isinstance(node, ast.FunctionDef) and node.name == "_quantize_weights"
     )
     source = ast.get_source_segment(path.read_text(), quantize)
@@ -118,7 +127,8 @@ def test_mxfp4_quantized_weight_is_registered_as_parameter():
         for node in cls.body
     )
     load_state = next(
-        node for node in cls.body
+        node
+        for node in cls.body
         if isinstance(node, ast.FunctionDef) and node.name == "_load_from_state_dict"
     )
     assert "destination_device" in ast.get_source_segment(path.read_text(), load_state)
@@ -126,11 +136,13 @@ def test_mxfp4_quantized_weight_is_registered_as_parameter():
         path.read_text(), load_state
     )
     load_source = ast.get_source_segment(path.read_text(), load_state)
-    assert "full-precision state cannot replace an FSDP-managed packed parameter" in load_source
+    assert (
+        "full-precision state cannot replace an FSDP-managed packed parameter"
+        in load_source
+    )
     assert "incoming_device" in load_source
     assert any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_is_fsdp_managed_parameter"
+        isinstance(node, ast.FunctionDef) and node.name == "_is_fsdp_managed_parameter"
         for node in cls.body
     )
 
@@ -142,9 +154,13 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     functions = {
         node.name for node in sharding_tree.body if isinstance(node, ast.FunctionDef)
     }
-    assert {"_save_nonpersistent_buffers", "_restore_nonpersistent_buffers"} <= functions
+    assert {
+        "_save_nonpersistent_buffers",
+        "_restore_nonpersistent_buffers",
+    } <= functions
     shard_component = next(
-        node for node in sharding_tree.body
+        node
+        for node in sharding_tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "shard_component"
     )
     shard_source = ast.get_source_segment(sharding_source, shard_component)
@@ -159,14 +175,16 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     init_source = ast.get_source_segment(
         meta_source,
         next(
-            node for node in filler.body
+            node
+            for node in filler.body
             if isinstance(node, ast.FunctionDef) and node.name == "__init__"
         ),
     )
     fill_source = ast.get_source_segment(
         meta_source,
         next(
-            node for node in filler.body
+            node
+            for node in filler.body
             if isinstance(node, ast.FunctionDef) and node.name == "fill_block"
         ),
     )
@@ -179,7 +197,8 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     replicated_fill = ast.get_source_segment(
         meta_source,
         next(
-            node for node in loader.body
+            node
+            for node in loader.body
             if isinstance(node, ast.FunctionDef)
             and node.name == "_fill_transformer_replicated"
         ),
@@ -194,7 +213,8 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     te_load = ast.get_source_segment(
         meta_source,
         next(
-            node for node in loader.body
+            node
+            for node in loader.body
             if isinstance(node, ast.FunctionDef)
             and node.name == "_broadcast_load_component"
         ),
@@ -214,7 +234,8 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
         method_source = ast.get_source_segment(
             meta_source,
             next(
-                node for node in loader.body
+                node
+                for node in loader.body
                 if isinstance(node, ast.FunctionDef) and node.name == method_name
             ),
         )
@@ -224,7 +245,8 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     assert "quantizing replicated transformer block" in replicated_fill
 
     quant_helper = next(
-        node for node in sharding_tree.body
+        node
+        for node in sharding_tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name == "_collective_quantize_call"
     )

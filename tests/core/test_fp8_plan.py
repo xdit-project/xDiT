@@ -8,6 +8,7 @@ to discover.
 Run with:
     pytest tests/core/test_fp8_plan.py -v
 """
+
 from types import SimpleNamespace
 
 import pytest
@@ -82,7 +83,9 @@ def test_text_encoder_targets_included_when_flag_set(monkeypatch):
 def test_flag_without_declared_targets_is_inert(monkeypatch):
     """A model that declares no text-encoder targets is unaffected by the flag."""
     plan = make_plan(
-        monkeypatch, transformer_targets=["transformer.blocks"], use_fp8_text_encoder=True
+        monkeypatch,
+        transformer_targets=["transformer.blocks"],
+        use_fp8_text_encoder=True,
     )
     assert plan.module_list() == ["transformer.blocks"]
 
@@ -115,7 +118,7 @@ def test_targets_are_stripped_of_the_component_prefix(monkeypatch):
 
 
 def test_prefix_match_does_not_leak_across_sibling_components(monkeypatch):
-    """"transformer_2.blocks" must not count as a target of "transformer"."""
+    """ "transformer_2.blocks" must not count as a target of "transformer"."""
     plan = make_plan(
         monkeypatch, transformer_targets=["transformer.blocks", "transformer_2.blocks"]
     )
@@ -214,7 +217,8 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
     leaks = {}
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
         stray = [
-            entry for entry in (cls.settings.fp8_gemm_module_list or [])
+            entry
+            for entry in (cls.settings.fp8_gemm_module_list or [])
             if not entry.startswith("transformer")
         ]
         if stray:

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
@@ -102,8 +101,7 @@ def test_contract_selection_accepts_only_declared_backend_and_mode(contracts):
     assert selected.requested_format is contracts.QuantizationFormat.FP8
     assert selected.selected_backend is contracts.QuantizationBackend.AITER
     assert (
-        selected.materialization_mode
-        is contracts.MaterializationMode.REPLICATED_META
+        selected.materialization_mode is contracts.MaterializationMode.REPLICATED_META
     )
 
 

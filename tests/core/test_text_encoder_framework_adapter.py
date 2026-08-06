@@ -7,15 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = (
-    ROOT
-    / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/text_encoder_adapter.py"
 )
 BACKENDS_PATH = (
-    ROOT
-    / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/fp8_backends.py"
 )
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
@@ -71,12 +68,8 @@ def test_import_has_no_diffusers_or_transformers_dependency(monkeypatch):
 def test_transformers_5_probe_is_lazy_and_actionable(modules):
     a = modules.adapter
 
-    supported = a.probe_transformers_streaming_loader(
-        find_spec=lambda name: object()
-    )
-    unsupported = a.probe_transformers_streaming_loader(
-        find_spec=lambda name: None
-    )
+    supported = a.probe_transformers_streaming_loader(find_spec=lambda name: object())
+    unsupported = a.probe_transformers_streaming_loader(find_spec=lambda name: None)
 
     assert supported.available
     assert supported.reason is None
@@ -91,9 +84,7 @@ def test_torchao_pipeline_mapping_uses_exact_exclusions_for_multiple_encoders(
     a = modules.adapter
     calls = []
     framework = a.TextEncoderFrameworkAdapter(
-        pipeline_config_factory=lambda mapping: SimpleNamespace(
-            quant_mapping=mapping
-        ),
+        pipeline_config_factory=lambda mapping: SimpleNamespace(quant_mapping=mapping),
         torchao_config_factory=lambda exclusions: calls.append(exclusions)
         or ("torchao", tuple(exclusions)),
     )
@@ -126,9 +117,7 @@ def test_torchao_pipeline_mapping_uses_exact_exclusions_for_multiple_encoders(
 def test_aiter_transformers_5_mapping_preserves_targets(modules):
     a = modules.adapter
     framework = a.TextEncoderFrameworkAdapter(
-        pipeline_config_factory=lambda mapping: SimpleNamespace(
-            quant_mapping=mapping
-        ),
+        pipeline_config_factory=lambda mapping: SimpleNamespace(quant_mapping=mapping),
         aiter_config_factory=lambda targets: ("aiter", tuple(targets)),
     )
 
@@ -153,13 +142,9 @@ def test_combined_pipeline_mapping_preserves_transformer_config(modules):
     a = modules.adapter
     transformer = object()
     text_encoder = object()
-    existing = SimpleNamespace(
-        quant_mapping={"transformer": transformer}
-    )
+    existing = SimpleNamespace(quant_mapping={"transformer": transformer})
     framework = a.TextEncoderFrameworkAdapter(
-        pipeline_config_factory=lambda mapping: SimpleNamespace(
-            quant_mapping=mapping
-        )
+        pipeline_config_factory=lambda mapping: SimpleNamespace(quant_mapping=mapping)
     )
 
     combined = framework.pipeline_quantization_config(
@@ -183,15 +168,11 @@ def test_combined_mapping_rejects_component_overwrite(modules):
     with pytest.raises(ValueError, match="refusing to overwrite"):
         framework.pipeline_quantization_config(
             {"transformer": object()},
-            existing=SimpleNamespace(
-                quant_mapping={"transformer": object()}
-            ),
+            existing=SimpleNamespace(quant_mapping={"transformer": object()}),
         )
 
 
-def test_torchao_te_native_plan_derives_safe_negative_mapping(
-    modules, monkeypatch
-):
+def test_torchao_te_native_plan_derives_safe_negative_mapping(modules, monkeypatch):
     b = modules.backends
     adapter = _backend(
         modules,
@@ -235,9 +216,7 @@ def test_transformers_4_aiter_falls_back_to_post_load(modules):
         modules,
         "AITER",
         aiter_transformers_streaming=False,
-        aiter_transformers_reason=(
-            "transformers>=5.0 streaming loader is unavailable"
-        ),
+        aiter_transformers_reason=("transformers>=5.0 streaming loader is unavailable"),
     )
 
     prepared = b.prepare_text_encoder_fp8_load(
@@ -282,9 +261,7 @@ def test_missing_te_target_never_quantizes_all_linears(modules, monkeypatch):
     def unavailable(model, targets):
         raise b.TargetMappingUnavailable("target mapping unavailable: missing")
 
-    monkeypatch.setattr(
-        b, "derive_untargeted_linear_exclusions", unavailable
-    )
+    monkeypatch.setattr(b, "derive_untargeted_linear_exclusions", unavailable)
     prepared = b.prepare_text_encoder_fp8_load(
         adapter,
         component_name="text_encoder",
@@ -326,9 +303,12 @@ def test_installed_torchao_te_pipeline_uses_transformers_config(modules):
         "text_encoder",
         "text_encoder_2",
     }
-    assert pipeline_config._resolve_quant_config(
-        is_diffusers=False, module_name="text_encoder"
-    ) is te_config
+    assert (
+        pipeline_config._resolve_quant_config(
+            is_diffusers=False, module_name="text_encoder"
+        )
+        is te_config
+    )
 
 
 def test_installed_pipeline_accepts_combined_transformer_and_te_mapping(
@@ -358,9 +338,11 @@ def test_installed_pipeline_accepts_combined_transformer_and_te_mapping(
         existing=existing,
     )
 
-    assert combined._resolve_quant_config(
-        is_diffusers=True, module_name="transformer"
-    ) is transformer_config
-    assert combined._resolve_quant_config(
-        is_diffusers=False, module_name="text_encoder"
-    ) is te_config
+    assert (
+        combined._resolve_quant_config(is_diffusers=True, module_name="transformer")
+        is transformer_config
+    )
+    assert (
+        combined._resolve_quant_config(is_diffusers=False, module_name="text_encoder")
+        is te_config
+    )

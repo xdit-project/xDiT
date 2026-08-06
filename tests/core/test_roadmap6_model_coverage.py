@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 RUNNERS = ROOT / "xfuser/model_executor/models/runner_models"
 CONTRACTS = RUNNERS / "loading/contracts.py"
@@ -28,9 +27,7 @@ def _classes(filename):
 def _source(filename, class_name):
     text = (RUNNERS / filename).read_text()
     node = _classes(filename)[class_name]
-    start = min(
-        [node.lineno, *(decorator.lineno for decorator in node.decorator_list)]
-    )
+    start = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
     return "\n".join(text.splitlines()[start - 1 : node.end_lineno])
 
 
@@ -81,10 +78,7 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
     )
 
     assert declaration.args == []
-    assert not any(
-        keyword.arg == "replicated"
-        for keyword in declaration.keywords
-    )
+    assert not any(keyword.arg == "replicated" for keyword in declaration.keywords)
     assert "fully_shard_degree=True" in source
     assert '"wrap_attrs": ["transformer_blocks"]' in source
     assert "self._build_transformer(" in source
@@ -103,9 +97,7 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
                 "fully_shard_degree": True,
             },
         )(),
-        fsdp_strategy={
-            "transformer": {"wrap_attrs": ["transformer_blocks"]}
-        },
+        fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},
         unsupported_reason=reason,
     )
     for mode in (
@@ -197,9 +189,7 @@ def test_named_custom_adapters_reject_standard_collective_modes():
         ),
     ],
 )
-def test_custom_runners_declare_their_dedicated_adapter(
-    filename, class_name, adapter
-):
+def test_custom_runners_declare_their_dedicated_adapter(filename, class_name, adapter):
     source = _source(filename, class_name)
 
     assert f"loader_adapter=LoaderAdapter.{adapter}" in source
@@ -237,12 +227,9 @@ def test_hunyuan_wrapper_keeps_the_parent_config_signature():
 
     assert inspect.signature(
         wrapper_module.xFuserHunyuanVideoTransformer3DWrapper.__init__
-    ) == inspect.signature(
-        HunyuanVideoTransformer3DModel.__init__
-    )
+    ) == inspect.signature(HunyuanVideoTransformer3DModel.__init__)
     assert (
-        "from_config"
-        in wrapper_module.xFuserHunyuanVideoTransformer3DWrapper.__dict__
+        "from_config" in wrapper_module.xFuserHunyuanVideoTransformer3DWrapper.__dict__
     )
 
 

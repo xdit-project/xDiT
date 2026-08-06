@@ -45,9 +45,7 @@ class FilterRecordingFp8Adapter:
         self.calls.append((block, device, filter_fn))
 
 
-def _hybrid_model(
-    *, adapter, format_adapter=None, overrides=(), suffixes=None
-):
+def _hybrid_model(*, adapter, format_adapter=None, overrides=(), suffixes=None):
     return SimpleNamespace(
         config=SimpleNamespace(
             use_fp4_gemms=True,
@@ -207,9 +205,7 @@ def test_blockwise_exact_component_target_routes_wrapped_blocks():
     call_block, call_kwargs = adapter.calls[0]
     filter_fn = call_kwargs.pop("filter_fn")
     assert filter_fn(object(), "anything")
-    assert [(call_block, call_kwargs)] == [
-        (block, {"device": "cuda:1"})
-    ]
+    assert [(call_block, call_kwargs)] == [(block, {"device": "cuda:1"})]
 
 
 def _targeted_block_model(*, format_adapter, fp4=(), int8=(), fp8=()):
@@ -227,12 +223,8 @@ def _targeted_block_model(*, format_adapter, fp4=(), int8=(), fp8=()):
             fp8_precision_override_suffixes=None,
         ),
         fp8=SimpleNamespace(module_list=lambda: list(fp8)),
-        blockwise_fp8_backend=(
-            format_adapter if fp8 else None
-        ),
-        format_backend=(
-            None if fp8 else format_adapter
-        ),
+        blockwise_fp8_backend=(format_adapter if fp8 else None),
+        format_backend=(None if fp8 else format_adapter),
     )
 
 
@@ -330,18 +322,13 @@ def test_whole_component_or_list_target_quantizes_every_wrapped_block(target):
         quantize(block, index)
 
     assert [call[0] for call in adapter.calls] == blocks
-    assert all(
-        call[1]["filter_fn"](object(), "any.linear")
-        for call in adapter.calls
-    )
+    assert all(call[1]["filter_fn"](object(), "any.linear") for call in adapter.calls)
 
 
 def test_exact_component_target_maps_to_transformer_root():
     adapter = object()
     model = SimpleNamespace(
-        load_contract=SimpleNamespace(
-            requested_format=QuantizationFormat.INT8
-        ),
+        load_contract=SimpleNamespace(requested_format=QuantizationFormat.INT8),
         settings=SimpleNamespace(
             fp4_gemm_module_list=[],
             int8_gemm_module_list=["transformer", "transformer_2.blocks"],
@@ -354,15 +341,15 @@ def test_exact_component_target_maps_to_transformer_root():
     )
 
     assert xFuserModel._format_targets_for(model, "transformer") == ("",)
-    assert xFuserModel._format_targets_for(model, "transformer_2") == (
-        "blocks",
+    assert xFuserModel._format_targets_for(model, "transformer_2") == ("blocks",)
+    assert xFuserModel._transformer_quantization_adapter(model, "transformer") == (
+        adapter,
+        ("",),
     )
-    assert xFuserModel._transformer_quantization_adapter(
-        model, "transformer"
-    ) == (adapter, ("",))
-    assert xFuserModel._transformer_quantization_adapter(
-        model, "transformer_2"
-    ) == (adapter, ("blocks",))
+    assert xFuserModel._transformer_quantization_adapter(model, "transformer_2") == (
+        adapter,
+        ("blocks",),
+    )
 
 
 @pytest.mark.parametrize(
@@ -382,9 +369,7 @@ def test_format_fsdp_preflight_uses_boundary_safe_path_containment(
 ):
     model = SimpleNamespace(
         config=SimpleNamespace(fully_shard_degree=2),
-        load_contract=SimpleNamespace(
-            requested_format=QuantizationFormat.INT8
-        ),
+        load_contract=SimpleNamespace(requested_format=QuantizationFormat.INT8),
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": [wrapped]}},
             fp4_gemm_module_list=[],
@@ -392,9 +377,7 @@ def test_format_fsdp_preflight_uses_boundary_safe_path_containment(
         ),
     )
 
-    assert (
-        xFuserModel._places_format_backend_under_fsdp2(model) is expected
-    )
+    assert xFuserModel._places_format_backend_under_fsdp2(model) is expected
 
 
 def test_pure_fp4_wan_targets_require_backend_preflight():
@@ -410,12 +393,8 @@ def test_narrow_fp4_target_preserves_broad_fp8_remainder():
         adapter=fp8_adapter,
         format_adapter=fp4_adapter,
     )
-    model.settings.fp4_gemm_module_list = [
-        "transformer.blocks.0.attn"
-    ]
-    model.fp8 = SimpleNamespace(
-        module_list=lambda: ["transformer.blocks"]
-    )
+    model.settings.fp4_gemm_module_list = ["transformer.blocks.0.attn"]
+    model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
 
     quantize = shard.build_block_quantize_fn(
         model, "transformer", ["blocks"], local_rank=2
@@ -435,12 +414,8 @@ def test_narrow_fp4_target_preserves_broad_fp8_remainder():
 
 def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
     model = _hybrid_model(adapter=RecordingAdapter())
-    model.settings.fp4_gemm_module_list = [
-        "transformer.blocks.0.attn"
-    ]
-    model.fp8 = SimpleNamespace(
-        module_list=lambda: ["transformer.blocks"]
-    )
+    model.settings.fp4_gemm_module_list = ["transformer.blocks.0.attn"]
+    model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
 
     assert xFuserModel._requires_blockwise_fp8_backend(model)
 
@@ -451,21 +426,11 @@ def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
     fp8_calls = []
     broad_module = object()
     model = SimpleNamespace(
-        settings=SimpleNamespace(
-            fp4_gemm_module_list=[
-                "transformer.blocks.0.attn"
-            ]
-        ),
-        fp8=SimpleNamespace(
-            module_list=lambda: ["transformer.blocks"]
-        ),
-        pipe=SimpleNamespace(
-            transformer=SimpleNamespace(blocks=broad_module)
-        ),
+        settings=SimpleNamespace(fp4_gemm_module_list=["transformer.blocks.0.attn"]),
+        fp8=SimpleNamespace(module_list=lambda: ["transformer.blocks"]),
+        pipe=SimpleNamespace(transformer=SimpleNamespace(blocks=broad_module)),
         blockwise_fp8_backend=SimpleNamespace(
-            convert_module=lambda module, **kwargs: fp8_calls.append(
-                (module, kwargs)
-            )
+            convert_module=lambda module, **kwargs: fp8_calls.append((module, kwargs))
         ),
         _quantization_streaming_targets=set(),
     )
@@ -519,11 +484,9 @@ def _fsdp_patch_model(
         ),
         fp8=SimpleNamespace(module_list=lambda: list(fp8_targets)),
     )
-    model._places_torchao_tensor_subclass_under_fsdp2 = (
-        lambda adapter, **kwargs: (
-            xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-                model, adapter, **kwargs
-            )
+    model._places_torchao_tensor_subclass_under_fsdp2 = lambda adapter, **kwargs: (
+        xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
+            model, adapter, **kwargs
         )
     )
     return model
@@ -535,9 +498,7 @@ def test_fp8_only_target_outside_fsdp_strategy_needs_no_torchao_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-        model, adapter
-    )
+    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
 
 
 def test_fsdp_sharded_fp8_only_torchao_target_needs_patches():
@@ -546,9 +507,7 @@ def test_fsdp_sharded_fp8_only_torchao_target_needs_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-        model, adapter
-    )
+    assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
 
 
 @pytest.mark.parametrize(
@@ -573,9 +532,7 @@ def test_fp8_fsdp_preflight_uses_boundary_safe_path_containment(
     adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
     assert (
-        xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-            model, adapter
-        )
+        xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
         is expected
     )
 
@@ -586,9 +543,7 @@ def test_fsdp_sharded_fp8_only_aiter_target_needs_no_torchao_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-        model, adapter
-    )
+    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
 
 
 @pytest.mark.parametrize(
@@ -612,9 +567,7 @@ def test_fsdp_sharded_fp4_torchao_fp8_paths_need_patches(
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-        model, adapter
-    )
+    assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
 
 
 def test_fp4_torchao_fp8_paths_outside_fsdp_strategy_need_no_patches():
@@ -624,9 +577,7 @@ def test_fp4_torchao_fp8_paths_outside_fsdp_strategy_need_no_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-        model, adapter
-    )
+    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
 
 
 def test_fsdp_fp4_override_triggers_startup_backend_preflight():
@@ -848,13 +799,9 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
     fp4_calls = []
     fp8_calls = []
     format_adapter = SimpleNamespace(
-        convert_module=lambda module, **kwargs: fp4_calls.append(
-            (module, kwargs)
-        )
+        convert_module=lambda module, **kwargs: fp4_calls.append((module, kwargs))
     )
-    adapter.convert_module = lambda module, **kwargs: fp8_calls.append(
-        (module, kwargs)
-    )
+    adapter.convert_module = lambda module, **kwargs: fp8_calls.append((module, kwargs))
     monkeypatch.setattr(base_model, "log", lambda *args, **kwargs: None)
     model = SimpleNamespace(
         settings=SimpleNamespace(
@@ -899,9 +846,7 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         converts_before_device_move=False,
         backend=QuantizationBackend.TORCHAO,
         storage_semantics="tensorwise_dynamic",
-        convert_module=lambda module, **kwargs: fp8_calls.append(
-            (module, kwargs)
-        ),
+        convert_module=lambda module, **kwargs: fp8_calls.append((module, kwargs)),
     )
     pipe = SimpleNamespace(
         transformer=SimpleNamespace(
@@ -944,6 +889,4 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
 
     xFuserModel._post_load_and_state_initialization(model, {})
 
-    assert fp8_calls == [
-        (post_load_module, {"device": "cuda:0"})
-    ]
+    assert fp8_calls == [(post_load_module, {"device": "cuda:0"})]

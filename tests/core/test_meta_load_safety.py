@@ -7,7 +7,9 @@ import pytest
 
 @pytest.fixture(scope="module")
 def runtime():
-    torch = pytest.importorskip("torch", reason="PyTorch is required for meta-load tests")
+    torch = pytest.importorskip(
+        "torch", reason="PyTorch is required for meta-load tests"
+    )
     from xfuser.core.distributed import sharding
     from xfuser.model_executor.models.runner_models.loading import meta_load
     from xfuser.model_executor.models.runner_models.loading import shard
@@ -58,9 +60,7 @@ def test_tensor_layout_contract_captures_specs_ties_and_persistence(runtime):
     module.right = torch.nn.Module()
     module.left.register_parameter("weight", shared)
     module.right.register_parameter("weight", shared)
-    module.register_buffer(
-        "saved", torch.ones(3, dtype=torch.float32), persistent=True
-    )
+    module.register_buffer("saved", torch.ones(3, dtype=torch.float32), persistent=True)
     module.register_buffer(
         "cache", torch.ones(4, dtype=torch.float64), persistent=False
     )
@@ -116,19 +116,13 @@ def test_tensor_layout_contract_captures_specs_ties_and_persistence(runtime):
 def test_layout_contract_rejects_tensor_metadata_before_data_collective(
     runtime, field, local
 ):
-    reference = (
-        ("parameter", "weight", (2,), "bf16", "weight", None),
-    )
+    reference = (("parameter", "weight", (2,), "bf16", "weight", None),)
     if field == "persistence":
-        reference = (
-            ("buffer", "cache", (2,), "bf16", "cache", True),
-        )
+        reference = (("buffer", "cache", (2,), "bf16", "cache", True),)
     group = FakeGroup(reference)
 
     with pytest.raises(RuntimeError, match="layout mismatch"):
-        runtime.meta._collective_assert_same_layout(
-            local, group, device="cpu"
-        )
+        runtime.meta._collective_assert_same_layout(local, group, device="cpu")
 
     assert group.calls == ["broadcast_object_list", "all_reduce"]
 
@@ -351,7 +345,9 @@ def test_source_failure_status_makes_every_rank_raise(runtime, rank):
         calls.append("operation")
         raise OSError("checkpoint read failed")
 
-    with pytest.raises(RuntimeError, match="checkpoint map.*OSError.*checkpoint read failed"):
+    with pytest.raises(
+        RuntimeError, match="checkpoint map.*OSError.*checkpoint read failed"
+    ):
         runtime.meta._collective_source_call(
             SourceStatusGroup(),
             is_src=rank == 0,
@@ -394,9 +390,12 @@ def test_collective_build_gate_is_noop_for_single_rank(runtime):
         broadcast_object_list=lambda *args, **kwargs: calls.append("broadcast"),
     )
 
-    assert runtime.meta._collective_build_call(
-        group, lambda: "built", context="meta transformer"
-    ) == "built"
+    assert (
+        runtime.meta._collective_build_call(
+            group, lambda: "built", context="meta transformer"
+        )
+        == "built"
+    )
     assert not calls
 
 
@@ -505,7 +504,9 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
     assert not tensor_broadcasts
 
 
-def test_missing_persistent_checkpoint_key_is_reported_to_peers_before_broadcast(runtime):
+def test_missing_persistent_checkpoint_key_is_reported_to_peers_before_broadcast(
+    runtime,
+):
     filler = object.__new__(runtime.meta._TransformerDiskFiller)
     filler.is_src = False
     filler.subfolder = "transformer"
@@ -518,7 +519,9 @@ def test_missing_persistent_checkpoint_key_is_reported_to_peers_before_broadcast
 
     filler.group = SimpleNamespace(broadcast_object_list=send_missing)
 
-    with pytest.raises(RuntimeError, match="missing checkpoint tensors.*blocks.0.saved"):
+    with pytest.raises(
+        RuntimeError, match="missing checkpoint tensors.*blocks.0.saved"
+    ):
         filler._require_checkpoint_keys(["blocks.0.saved"])
 
     assert calls == ["broadcast_object_list"]
@@ -533,9 +536,7 @@ def test_shard_component_restores_nonpersistent_block_buffers_before_disk_callba
         def __init__(self):
             super().__init__()
             self.register_parameter("weight", torch.nn.Parameter(torch.ones(1)))
-            self.register_buffer(
-                "runtime_cache", torch.tensor([3.0]), persistent=False
-            )
+            self.register_buffer("runtime_cache", torch.tensor([3.0]), persistent=False)
 
         def to_empty(self, *, device, recurse):
             self.runtime_cache = torch.empty_like(self.runtime_cache).fill_(-1)
@@ -574,9 +575,7 @@ def test_replicated_transformer_restores_nonpersistent_buffers_before_fill(
         def __init__(self):
             super().__init__()
             self.register_parameter("weight", torch.nn.Parameter(torch.ones(1)))
-            self.register_buffer(
-                "runtime_cache", torch.tensor([5.0]), persistent=False
-            )
+            self.register_buffer("runtime_cache", torch.tensor([5.0]), persistent=False)
 
         def to_empty(self, *, device, recurse):
             self.runtime_cache = torch.empty_like(self.runtime_cache).fill_(-1)
@@ -647,8 +646,7 @@ def test_replicated_quantize_failure_stops_all_ranks_before_next_block(
         @staticmethod
         def broadcast_object_list(box, src=0):
             box[0] = (
-                ("ValueError", "rank-local quantization failed")
-                if src == 1 else None
+                ("ValueError", "rank-local quantization failed") if src == 1 else None
             )
 
     with pytest.raises(RuntimeError, match="quantizing replicated transformer block 0"):

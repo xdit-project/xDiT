@@ -2,10 +2,11 @@
 
 ## Current status: NOT RUN
 
-This repository contains a reproducible validation plan, not GPU results. The
-matrix was prepared on a system where the GPU end-to-end jobs were deliberately
-not run. A result is evidence only after an operator executes a case on the
-declared hardware and attaches its JSONL record, log, and generated output.
+No GPU results have been recorded. This repository contains a reproducible
+validation plan prepared on a system where the GPU end-to-end jobs were
+deliberately skipped. A result becomes evidence after an operator executes a
+case on the declared hardware and attaches its JSONL record, log, and generated
+output.
 
 The artifacts are:
 
@@ -37,8 +38,8 @@ validation practical. Increase dimensions, frames, or steps only as a separate
 follow-up; preserve the original case ID and command when reporting this
 matrix.
 
-Transformers `4.x` and `5.x` in the matrix are environment requirements, not
-runner-managed installations. Before execution, the runner probes the installed
+The matrix treats Transformers `4.x` and `5.x` as environment requirements; the
+runner does not install them. Before execution, it probes the installed
 Transformers major, CUDA or ROCm platform, accelerator architecture, and the
 required TorchAO or AITER package. A mismatch writes an
 `environment_mismatch` record with `execution: "NOT RUN"` and does not launch
@@ -186,7 +187,7 @@ Attach these files together to the issue or pull request:
 4. the exact matrix file used, if it differs from the checked-in commit.
 
 Report the validated commit SHA and whether the worktree was dirty. Do not edit
-the checked-in `validation_status: "NOT RUN"` to summarize partial external
-runs; result JSONL records are the source of truth. State skipped cases and
-missing metrics explicitly. Passing unit tests or dry-runs do not constitute
-GPU end-to-end validation.
+the checked-in `validation_status: "NOT RUN"` after a partial external run.
+Result JSONL records are the source of truth. State skipped cases and missing
+metrics explicitly. Passing unit tests or dry-runs do not constitute GPU
+end-to-end validation.

@@ -24,7 +24,6 @@ import time
 from typing import Any
 import uuid
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX = ROOT / "tests/gpu_validation/matrix.json"
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -124,9 +123,7 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
         raise ValueError("matrix defaults must be an object")
     default_timeout = matrix["defaults"].get("timeout_seconds")
     if default_timeout is not None:
-        _positive_seconds(
-            default_timeout, field="matrix defaults timeout_seconds"
-        )
+        _positive_seconds(default_timeout, field="matrix defaults timeout_seconds")
     cases = matrix.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ValueError("matrix cases must be a non-empty list")
@@ -202,13 +199,10 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
             or expected.get("outcome") not in EXPECTED_OUTCOMES
         ):
             raise ValueError(f"{case_id}: invalid expected outcome")
-        if (
-            expected["outcome"] == "preflight_failure"
-            and not expected.get("error_pattern")
+        if expected["outcome"] == "preflight_failure" and not expected.get(
+            "error_pattern"
         ):
-            raise ValueError(
-                f"{case_id}: preflight failure needs error_pattern"
-            )
+            raise ValueError(f"{case_id}: preflight failure needs error_pattern")
         if expected.get("error_pattern"):
             re.compile(expected["error_pattern"])
 
@@ -235,10 +229,7 @@ def select_cases(
         for case in cases
         if (not tags or all(tag in case["tags"] for tag in tags))
         and (not models or any(_model_matches(case, model) for model in models))
-        and (
-            not backends
-            or case["hardware"]["backend"] in set(backends)
-        )
+        and (not backends or case["hardware"]["backend"] in set(backends))
         and (not case_ids or case["id"] in set(case_ids))
     ]
 
@@ -272,9 +263,11 @@ def build_command(
     else:
         command.append("xdit")
 
-    output_root = Path(
-        defaults.get("output_root", "gpu-validation-output")
-    ).expanduser().resolve()
+    output_root = (
+        Path(defaults.get("output_root", "gpu-validation-output"))
+        .expanduser()
+        .resolve()
+    )
     if run_id is None:
         timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"{timestamp}-{uuid.uuid4().hex[:12]}"
@@ -373,10 +366,7 @@ def classify_outcome(
         if exit_status != 0 or first_forward != "succeeded":
             return "failed_inference"
         files = output.get("files", [])
-        if not any(
-            item.get("bytes", 0) > 0 and item.get("sha256")
-            for item in files
-        ):
+        if not any(item.get("bytes", 0) > 0 and item.get("sha256") for item in files):
             return "failed_missing_output"
         return "passed"
     if exit_status == 0:
@@ -476,9 +466,7 @@ def probe_environment(
         ]
     )
     rocminfo = command_runner(["rocminfo"])
-    rocm_smi = command_runner(
-        ["rocm-smi", "--showproductname", "--json"]
-    )
+    rocm_smi = command_runner(["rocm-smi", "--showproductname", "--json"])
     accelerators: list[str] = []
     platform_name = "unknown"
     visibility_variable = None
@@ -525,21 +513,14 @@ def probe_environment(
                 for token in tokens
                 for device in devices
                 if token == device["index"]
-                or (
-                    device["uuid"] is not None
-                    and device["uuid"].startswith(token)
-                )
+                or (device["uuid"] is not None and device["uuid"].startswith(token))
             ]
         accelerators.extend(device["accelerator"] for device in devices)
     elif rocminfo or rocm_smi:
         platform_name = "rocm"
-        accelerator_text = "\n".join(
-            value for value in (rocminfo, rocm_smi) if value
-        )
+        accelerator_text = "\n".join(value for value in (rocminfo, rocm_smi) if value)
         accelerators.extend(
-            re.findall(
-                r"(?im)^\s*Name:\s*(gfx\d+)\s*$", accelerator_text
-            )
+            re.findall(r"(?im)^\s*Name:\s*(gfx\d+)\s*$", accelerator_text)
         )
         for variable in (
             "ROCR_VISIBLE_DEVICES",
@@ -557,8 +538,7 @@ def probe_environment(
                 accelerators = [
                     accelerators[int(token)]
                     for token in tokens
-                    if token.isdigit()
-                    and int(token) < len(accelerators)
+                    if token.isdigit() and int(token) < len(accelerators)
                 ]
                 break
 
@@ -598,9 +578,7 @@ def _cuda_capability(accelerator: str) -> tuple[int, int] | None:
     return int(digits[:-1]), int(digits[-1])
 
 
-def environment_mismatches(
-    case: dict[str, Any], observed: dict[str, Any]
-) -> list[str]:
+def environment_mismatches(case: dict[str, Any], observed: dict[str, Any]) -> list[str]:
     backend = case["hardware"]["backend"]
     accelerators = observed.get("accelerators", [])
     mismatches = []
@@ -623,28 +601,22 @@ def environment_mismatches(
         ]
         if backend == "cuda_ada_torchao":
             matching_capabilities = [
-                capability
-                for capability in capabilities
-                if capability == (8, 9)
+                capability for capability in capabilities if capability == (8, 9)
             ]
             requirement = "sm89"
         elif backend == "cuda_hopper_torchao":
             matching_capabilities = [
-                capability
-                for capability in capabilities
-                if capability[0] == 9
+                capability for capability in capabilities if capability[0] == 9
             ]
             requirement = "sm90-sm99"
         else:
             matching_capabilities = [
-                capability
-                for capability in capabilities
-                if capability[0] >= 10
+                capability for capability in capabilities if capability[0] >= 10
             ]
             requirement = "sm100 or newer"
-        valid_accelerator = bool(capabilities) and len(
-            matching_capabilities
-        ) == len(capabilities)
+        valid_accelerator = bool(capabilities) and len(matching_capabilities) == len(
+            capabilities
+        )
         matching_device_count = len(matching_capabilities)
         if not valid_accelerator:
             mismatches.append(
@@ -658,13 +630,11 @@ def environment_mismatches(
                 f"requires ROCm; observed {observed.get('platform', 'unknown')}"
             )
         rdna4 = bool(accelerators) and all(
-            accelerator in {"gfx1200", "gfx1201"}
-            for accelerator in accelerators
+            accelerator in {"gfx1200", "gfx1201"} for accelerator in accelerators
         )
         if backend == "rdna4_aiter":
             matching_device_count = sum(
-                accelerator in {"gfx1200", "gfx1201"}
-                for accelerator in accelerators
+                accelerator in {"gfx1200", "gfx1201"} for accelerator in accelerators
             )
             if not rdna4:
                 mismatches.append(
@@ -679,8 +649,7 @@ def environment_mismatches(
                 for accelerator in accelerators
             )
             if not accelerators or any(
-                accelerator in {"gfx1200", "gfx1201"}
-                for accelerator in accelerators
+                accelerator in {"gfx1200", "gfx1201"} for accelerator in accelerators
             ):
                 mismatches.append(
                     f"requires non-RDNA4 ROCm accelerator; observed "
@@ -848,9 +817,7 @@ class ResourceMonitor:
     def _sample(self) -> None:
         while not self._stop.is_set():
             pids = _proc_tree(self.root_pid)
-            self.peak_host_rss = max(
-                self.peak_host_rss, _process_tree_rss(pids)
-            )
+            self.peak_host_rss = max(self.peak_host_rss, _process_tree_rss(pids))
             cgroup = _cgroup_memory()
             if cgroup is not None:
                 self.peak_cgroup = max(self.peak_cgroup, cgroup)
@@ -870,9 +837,7 @@ def _placeholder_names(command: list[str]) -> list[str]:
         {
             name
             for argument in command
-            for name in re.findall(
-                r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", argument
-            )
+            for name in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", argument)
         }
     )
 
@@ -1003,7 +968,8 @@ def make_environment_mismatch_record(
 
 def aggregate_exit_code(statuses: list[str]) -> int:
     if any(
-        status not in {
+        status
+        not in {
             "passed",
             "passed_expected_rejection",
             "environment_mismatch",
@@ -1051,9 +1017,7 @@ def _terminate_process_group(
 
     reap_deadline = time.monotonic() + grace_seconds
     try:
-        exit_status = process.wait(
-            timeout=max(0.0, reap_deadline - time.monotonic())
-        )
+        exit_status = process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
             f"could not reap timed-out root process {process.pid}"
@@ -1115,9 +1079,7 @@ def execute_case(
     reader = threading.Thread(target=consume_output, daemon=True)
     reader.start()
     try:
-        exit_status = process.wait(
-            timeout=max(0.0, deadline - time.monotonic())
-        )
+        exit_status = process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         timed_out = True
         exit_status = _terminate_process_group(
@@ -1217,9 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
     defaults = dict(matrix["defaults"])
     if args.output_root is not None:
         defaults["output_root"] = str(args.output_root)
-    defaults["output_root"] = str(
-        Path(defaults["output_root"]).expanduser().resolve()
-    )
+    defaults["output_root"] = str(Path(defaults["output_root"]).expanduser().resolve())
     selected = select_cases(
         matrix["cases"],
         tags=args.tag,
@@ -1232,9 +1192,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     validation_probe = probe_environment() if args.execute else None
-    environment = (
-        collect_environment(validation_probe) if validation_probe else None
-    )
+    environment = collect_environment(validation_probe) if validation_probe else None
     statuses: list[str] = []
     for case in selected:
         command = build_command(case, defaults)
@@ -1277,15 +1235,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             statuses.append(record["status"])
             print(f"  result: {record['status']}")
-            if (
-                not args.continue_on_error
-                and not record["status"].startswith("passed")
-            ):
+            if not args.continue_on_error and not record["status"].startswith("passed"):
                 return 1
     if not args.execute and not args.list:
-        print(
-            f"Dry run only: {len(selected)} case(s), GPU validation NOT RUN."
-        )
+        print(f"Dry run only: {len(selected)} case(s), GPU validation NOT RUN.")
     return aggregate_exit_code(statuses)
 
 

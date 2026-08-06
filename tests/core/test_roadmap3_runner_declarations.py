@@ -3,7 +3,6 @@
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 RUNNERS = ROOT / "xfuser/model_executor/models/runner_models"
 
@@ -32,16 +31,14 @@ def _strategy_dict(node, constants):
         fields = {
             field_key.value: field_value
             for field_key, field_value in zip(value.keys, value.values)
-            if isinstance(field_key, ast.Constant)
-            and isinstance(field_key.value, str)
+            if isinstance(field_key, ast.Constant) and isinstance(field_key.value, str)
         }
         wraps = fields.get("wrap_attrs")
         if isinstance(wraps, (ast.List, ast.Tuple)):
             strategy[key.value] = tuple(
                 item.value
                 for item in wraps.elts
-                if isinstance(item, ast.Constant)
-                and isinstance(item.value, str)
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
             )
     return strategy
 
@@ -72,9 +69,7 @@ def _class_strategy(path, class_node):
             ):
                 for keyword in statement.value.keywords:
                     if keyword.arg == "fsdp_strategy":
-                        strategy.update(
-                            _strategy_dict(keyword.value, constants)
-                        )
+                        strategy.update(_strategy_dict(keyword.value, constants))
         if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for node in ast.walk(statement):
@@ -113,9 +108,7 @@ def _assigned_names(class_node):
         target.id
         for node in class_node.body
         if isinstance(node, (ast.Assign, ast.AnnAssign))
-        for target in (
-            node.targets if isinstance(node, ast.Assign) else [node.target]
-        )
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
         if isinstance(target, ast.Name)
     }
 
@@ -136,9 +129,7 @@ def test_base_runner_defaults_to_an_explicit_unsupported_declaration():
     base = classes["xFuserModel"]
 
     assert "load_capability" in _assigned_names(base)
-    methods = {
-        node.name for node in base.body if isinstance(node, ast.FunctionDef)
-    }
+    methods = {node.name for node in base.body if isinstance(node, ast.FunctionDef)}
     assert "_supports_replicated_meta_load" not in methods
 
 
@@ -211,15 +202,14 @@ def test_every_registered_runner_has_its_own_load_declaration():
             if registered and not _declares_load_capability(class_node):
                 missing.append(f"{path.name}:{name}")
 
-    assert not missing, "registered runner inherits an implicit declaration: " + ", ".join(
-        missing
-    )
+    assert (
+        not missing
+    ), "registered runner inherits an implicit declaration: " + ", ".join(missing)
 
 
 def test_strategy_extraction_uses_assignments_not_unrelated_strings(tmp_path):
     path = tmp_path / "runner.py"
-    path.write_text(
-        """
+    path.write_text("""
 COMMON = {
     "transformer": {"wrap_attrs": ["blocks"], "dtype": object()},
 }
@@ -232,8 +222,7 @@ class Example:
         self.settings.fsdp_strategy["transformer_2"] = {
             "wrap_attrs": ["layers"],
         }
-"""
-    )
+""")
     example = _classes(path)["Example"]
 
     assert _class_strategy(path, example) == {
@@ -297,14 +286,9 @@ def test_every_meta_declaration_matches_a_build_seam_and_strategy():
             owner_path = index[owner.name][0]
             strategy.update(_class_strategy(owner_path, owner))
         missing_strategy = [
-            component
-            for component in components
-            if not strategy.get(component)
+            component for component in components if not strategy.get(component)
         ]
-        if (
-            not uses_build_seam
-            or missing_strategy
-        ):
+        if not uses_build_seam or missing_strategy:
             mismatches.append(
                 f"{path.name}:{name} components={components} "
                 f"build={uses_build_seam} missing_strategy={missing_strategy}"

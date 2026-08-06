@@ -64,12 +64,14 @@ def _is_bcast_src(group) -> bool:
 def _tensor_layout(module) -> tuple[tuple[str, str], ...]:
     """Ordered parameter/buffer names, preserving aliases on both builders."""
     return tuple(
-        [("parameter", name) for name, _ in module.named_parameters(
-            recurse=True, remove_duplicate=False
-        )]
-        + [("buffer", name) for name, _ in module.named_buffers(
-            recurse=True, remove_duplicate=False
-        )]
+        [
+            ("parameter", name)
+            for name, _ in module.named_parameters(recurse=True, remove_duplicate=False)
+        ]
+        + [
+            ("buffer", name)
+            for name, _ in module.named_buffers(recurse=True, remove_duplicate=False)
+        ]
     )
 
 
@@ -93,14 +95,8 @@ def _tensor_layout_contract(module) -> tuple[tuple, ...]:
             persistent = None
             if kind == "buffer":
                 parent_name, _, local_name = name.rpartition(".")
-                owner = (
-                    module.get_submodule(parent_name)
-                    if parent_name
-                    else module
-                )
-                persistent = (
-                    local_name not in owner._non_persistent_buffers_set
-                )
+                owner = module.get_submodule(parent_name) if parent_name else module
+                persistent = local_name not in owner._non_persistent_buffers_set
             entries.append(
                 (
                     kind,
@@ -119,9 +115,11 @@ def _collective_assert_same_layout(
 ) -> None:
     """Collectively reject any ordered layout mismatch before data broadcasts begin."""
     box = [
-        (reference_layout if reference_layout is not None else local_layout)
-        if group.rank_in_group == 0
-        else None
+        (
+            (reference_layout if reference_layout is not None else local_layout)
+            if group.rank_in_group == 0
+            else None
+        )
     ]
     group.broadcast_object_list(box, src=0)
     reference = box[0]
@@ -131,20 +129,18 @@ def _collective_assert_same_layout(
     if mismatch_count:
         detail = ""
         if local_mismatch:
-            first = next(
-                (
-                    i, expected, actual
+            first = (
+                next(
+                    (i, expected, actual)
+                    for i, (expected, actual) in enumerate(zip(reference, local_layout))
+                    if expected != actual
                 )
-                for i, (expected, actual) in enumerate(
-                    zip(reference, local_layout)
+                if len(reference) == len(local_layout)
+                else (
+                    min(len(reference), len(local_layout)),
+                    reference[min(len(reference), len(local_layout)) :] or "<end>",
+                    local_layout[min(len(reference), len(local_layout)) :] or "<end>",
                 )
-                if expected != actual
-            ) if len(reference) == len(local_layout) else (
-                min(len(reference), len(local_layout)),
-                reference[min(len(reference), len(local_layout)):]
-                or "<end>",
-                local_layout[min(len(reference), len(local_layout)):]
-                or "<end>",
             )
             detail = f"; first local difference at {first[0]}: rank0={first[1]!r}, local={first[2]!r}"
         raise RuntimeError(
@@ -199,9 +195,7 @@ def _collective_build_call(group, operation, context):
             failures.append((src, *box[0]))
     if failures:
         rank, error_type, message = failures[0]
-        raise RuntimeError(
-            f"{context} failed on rank {rank}: {error_type}: {message}"
-        )
+        raise RuntimeError(f"{context} failed on rank {rank}: {error_type}: {message}")
     return result
 
 
@@ -212,7 +206,8 @@ def _collective_reconcile_tensor_specs(module, names, group, device):
             (name, tuple(rgetattr(module, name).shape), rgetattr(module, name).dtype)
             for name in names
         ]
-        if group.rank_in_group == 0 else None
+        if group.rank_in_group == 0
+        else None
     )
     box = [spec]
     group.broadcast_object_list(box, src=0)
@@ -223,14 +218,8 @@ def _collective_reconcile_tensor_specs(module, names, group, device):
                 tensor = rgetattr(module, name)
                 if tuple(tensor.shape) != shape or tensor.dtype != dtype:
                     parent_name, _, local_name = name.rpartition(".")
-                    owner = (
-                        module.get_submodule(parent_name)
-                        if parent_name
-                        else module
-                    )
-                    replacement = torch.empty(
-                        shape, dtype=dtype, device=device
-                    )
+                    owner = module.get_submodule(parent_name) if parent_name else module
+                    replacement = torch.empty(shape, dtype=dtype, device=device)
                     if local_name in owner._parameters:
                         owner._parameters[local_name] = torch.nn.Parameter(
                             replacement,
@@ -243,7 +232,9 @@ def _collective_reconcile_tensor_specs(module, names, group, device):
                             f"{name} is not a registered parameter or buffer"
                         )
 
-    _collective_build_call(group, reconcile, context="transformer tensor-spec reconciliation")
+    _collective_build_call(
+        group, reconcile, context="transformer tensor-spec reconciliation"
+    )
 
 
 def _collective_reconcile_replicated_tensor_specs(
@@ -252,9 +243,7 @@ def _collective_reconcile_replicated_tensor_specs(
     """Rebuild peer storage and aliases from rank0's authoritative contract."""
 
     source_contract = (
-        _tensor_layout_contract(module)
-        if group.rank_in_group == 0
-        else None
+        _tensor_layout_contract(module) if group.rank_in_group == 0 else None
     )
     box = [source_contract]
     group.broadcast_object_list(box, src=0)
@@ -273,10 +262,7 @@ def _collective_reconcile_replicated_tensor_specs(
             entries = [local_by_name.get(source[1]) for source in sources]
             if any(entry is None for entry in entries):
                 continue
-            if any(
-                entry[0] != source[0]
-                for entry, source in zip(entries, sources)
-            ):
+            if any(entry[0] != source[0] for entry, source in zip(entries, sources)):
                 continue
             desired = {(source[2], source[3]) for source in sources}
             if len(desired) != 1:
@@ -295,16 +281,8 @@ def _collective_reconcile_replicated_tensor_specs(
             )
             for kind, name, *_ in entries:
                 parent_name, _, local_name = name.rpartition(".")
-                owner = (
-                    module.get_submodule(parent_name)
-                    if parent_name
-                    else module
-                )
-                registry = (
-                    owner._parameters
-                    if kind == "parameter"
-                    else owner._buffers
-                )
+                owner = module.get_submodule(parent_name) if parent_name else module
+                registry = owner._parameters if kind == "parameter" else owner._buffers
                 registry[local_name] = registered
 
     _collective_build_call(
@@ -348,9 +326,7 @@ class MemoryEfficientLoader:
         factory = getattr(self.model, "_checkpoint_request", None)
         if factory is not None:
             return factory(subfolder)
-        return CheckpointRequest(
-            self.model.settings.model_name, subfolder=subfolder
-        )
+        return CheckpointRequest(self.model.settings.model_name, subfolder=subfolder)
 
     def _validate_mode(self, mode: MaterializationMode) -> None:
         validate_materialization_contract(
@@ -411,16 +387,22 @@ class MemoryEfficientLoader:
                 or config.tensor_parallel_degree > 1
             )
             if splits_weights_per_rank:
-                log("--memory_efficient_replicated_load ignored: this run splits weights per rank "
+                log(
+                    "--memory_efficient_replicated_load ignored: this run splits weights per rank "
                     "(FSDP/PipeFusion/tensor parallel), so peers hold different weights than rank0 and "
-                    "a broadcast would overwrite them. Loading per rank.")
+                    "a broadcast would overwrite them. Loading per rank."
+                )
             elif world_size == 1:
-                log("--memory_efficient_replicated_load ignored: single-rank run has no peer to "
-                    "broadcast to. Loading normally.")
+                log(
+                    "--memory_efficient_replicated_load ignored: single-rank run has no peer to "
+                    "broadcast to. Loading normally."
+                )
             return False
         self._validate_mode(effective_mode)
-        log("Replicated rank0-broadcast load enabled by --memory_efficient_replicated_load "
-            "(host peak 1x the model, not Nx).")
+        log(
+            "Replicated rank0-broadcast load enabled by --memory_efficient_replicated_load "
+            "(host peak 1x the model, not Nx)."
+        )
         return True
 
     def self_fills_from_disk(self, component) -> bool:
@@ -473,6 +455,7 @@ class MemoryEfficientLoader:
 
         def build():
             from accelerate import init_empty_weights
+
             config = wrapper_cls.load_config(
                 request.model_name_or_path, **request.config_kwargs()
             )
@@ -533,8 +516,10 @@ class MemoryEfficientLoader:
                 return None
             cls, config = resolved
         except (OSError, ImportError, AttributeError) as e:
-            log(f"Meta-init of component '{component_name}' failed "
-                f"({type(e).__name__}: {e}); using normal load.")
+            log(
+                f"Meta-init of component '{component_name}' failed "
+                f"({type(e).__name__}: {e}); using normal load."
+            )
             return None
 
         with init_empty_weights():
@@ -542,14 +527,10 @@ class MemoryEfficientLoader:
         # _from_config defaults to fp32; align meta params to bf16 (dtype-only .to is legal on
         # meta) so their DTensor dtype matches the broadcast source.
         component = component.to(torch.bfloat16)
-        streamed_targets = getattr(
-            self.model, "_fp8_streaming_targets", ()
-        )
+        streamed_targets = getattr(self.model, "_fp8_streaming_targets", ())
         prefix = f"{component_name}."
         local_streamed_targets = tuple(
-            ""
-            if target == component_name
-            else target[len(prefix):]
+            "" if target == component_name else target[len(prefix) :]
             for target in streamed_targets
             if target == component_name or target.startswith(prefix)
         )
@@ -566,12 +547,15 @@ class MemoryEfficientLoader:
         cannot be meta-built, leaving the caller to take its normal load.
         """
         te_components = [
-            name for name in self.model.settings.fsdp_strategy
-            if name != "transformer" and not name.startswith("transformer_")
+            name
+            for name in self.model.settings.fsdp_strategy
+            if name != "transformer"
+            and not name.startswith("transformer_")
             and self.model.load_capability.exclusion_for(name) is None
         ]
         if not te_components:
             return None
+
         def build():
             kwargs = {}
             for name in te_components:
@@ -602,8 +586,10 @@ class MemoryEfficientLoader:
             if _is_bcast_src(world):
                 return {}, te_quant_config
             te_components = [
-                name for name in self.model.settings.fsdp_strategy
-                if name != "transformer" and not name.startswith("transformer_")
+                name
+                for name in self.model.settings.fsdp_strategy
+                if name != "transformer"
+                and not name.startswith("transformer_")
                 and self.model.load_capability.exclusion_for(name) is None
             ]
             kwargs = {}
@@ -638,6 +624,7 @@ class MemoryEfficientLoader:
         layouts are converted by the normal post-load walk.
         """
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
+
         world = get_world_group()
         device = f"cuda:{world.local_rank}"
         strategy = self.model.settings.fsdp_strategy
@@ -651,21 +638,31 @@ class MemoryEfficientLoader:
                     # whose _load_model built the whole pipeline real). _fill_transformer_replicated's
                     # to_empty() would wipe those weights; skip the destructive fill and keep the real
                     # all-rank-symmetric weights (the post-load fp8 walk still quantizes them).
-                    log(f"{name} loaded real on all ranks (unwired for replicated meta load); "
-                        f"skipping broadcast fill, keeping real weights.")
+                    log(
+                        f"{name} loaded real on all ranks (unwired for replicated meta load); "
+                        f"skipping broadcast fill, keeping real weights."
+                    )
                     continue
-                self._fill_transformer_replicated(component, name, strategy[name], device, world)
+                self._fill_transformer_replicated(
+                    component, name, strategy[name], device, world
+                )
             else:
                 if self._all_ranks_loaded_real(component, world, device):
                     # Same unwired-runner case: TE loaded real on EVERY rank; skipping avoids
                     # broadcasting rank0's bytes over each peer's already-correct weights.
-                    log(f"{name} loaded real on all ranks (unwired for replicated meta load); "
-                        f"skipping broadcast fill, keeping real weights.")
+                    log(
+                        f"{name} loaded real on all ranks (unwired for replicated meta load); "
+                        f"skipping broadcast fill, keeping real weights."
+                    )
                     continue
-                self._fill_te_replicated(component, device, world, set_module_tensor_to_device)
+                self._fill_te_replicated(
+                    component, device, world, set_module_tensor_to_device
+                )
             torch.cuda.empty_cache()
-            log(f"Broadcast-filled {name} from rank0 (replicated). "
-                f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB")
+            log(
+                f"Broadcast-filled {name} from rank0 (replicated). "
+                f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
+            )
 
     def _all_ranks_loaded_real(self, component, world, device) -> bool:
         """True only if EVERY rank has this component fully real (no meta params).
@@ -676,7 +673,8 @@ class MemoryEfficientLoader:
         All-reduce the local real flag so the skip decision is identical on every rank.
 
         Deliberately tolerant of disagreement, unlike ``agreed_is_meta``: rank0-real/peer-meta is
-        the normal shape of the replicated path, and it means "fall through to the fill"."""
+        the normal shape of the replicated path, and it means "fall through to the fill".
+        """
         local_real = 0 if any(p.is_meta for p in component.parameters()) else 1
         flag = torch.tensor([local_real], device=device)
         return int(world.all_reduce(flag).item()) == world.world_size
@@ -704,7 +702,9 @@ class MemoryEfficientLoader:
             )
         return n_meta == group.world_size
 
-    def _fill_transformer_replicated(self, component, name, strategy, device, world) -> None:
+    def _fill_transformer_replicated(
+        self, component, name, strategy, device, world
+    ) -> None:
         """Per-block rank0-disk-read + world broadcast + symmetric per-block fp8 quantize (no shard)."""
         wrap_attrs = strategy.get("wrap_attrs", [])
         fill_block, finalize = self.build_transformer_disk_loaders(
@@ -715,6 +715,7 @@ class MemoryEfficientLoader:
             _restore_nonpersistent_buffers,
             _save_nonpersistent_buffers,
         )
+
         quantize_fn = build_block_quantize_fn(
             self.model,
             name,
@@ -739,7 +740,9 @@ class MemoryEfficientLoader:
             torch.cuda.empty_cache()
         finalize(component)
 
-    def _fill_te_replicated(self, component, device, world, set_module_tensor_to_device) -> None:
+    def _fill_te_replicated(
+        self, component, device, world, set_module_tensor_to_device
+    ) -> None:
         """Materialize peer meta to real-empty on device (move any real-CPU tensor on-device), then
         broadcast every param/buffer from world-rank0. Layout already matches (rank0 fp8-streamed,
         peers meta fp8-swapped), so no re-quantize.
@@ -786,10 +789,10 @@ class MemoryEfficientLoader:
                 t = rgetattr(component, name)
                 if t.is_meta:
                     set_module_tensor_to_device(
-                        component, name, device,
-                        value=torch.empty(
-                            t.shape, dtype=t.dtype, device=device
-                        ),
+                        component,
+                        name,
+                        device,
+                        value=torch.empty(t.shape, dtype=t.dtype, device=device),
                     )
                 elif t.device.type != "cuda":
                     set_module_tensor_to_device(
@@ -804,9 +807,7 @@ class MemoryEfficientLoader:
                         else component
                     )
                     registry = (
-                        owner._parameters
-                        if kind == "parameter"
-                        else owner._buffers
+                        owner._parameters if kind == "parameter" else owner._buffers
                     )
                     registry[local_name] = materialized
 
@@ -827,15 +828,23 @@ class MemoryEfficientLoader:
         # before the loop and agree the result, because raising from inside the loop would abort the
         # peer while rank0 blocks in broadcast, trading a silent corruption for a silent hang.
         strided = [
-            name for name in ordered
-            if world.rank_in_group != 0 and not rgetattr(component, name).data.is_contiguous()
+            name
+            for name in ordered
+            if world.rank_in_group != 0
+            and not rgetattr(component, name).data.is_contiguous()
         ]
-        n_bad = int(world.all_reduce(torch.tensor([len(strided)], device=device)).item())
+        n_bad = int(
+            world.all_reduce(torch.tensor([len(strided)], device=device)).item()
+        )
         if n_bad:
             raise RuntimeError(
                 f"replicated broadcast-load: {n_bad} peer destination(s) are not contiguous and "
                 f"cannot receive the broadcast in place"
-                + (f"; on this rank: {strided[:3]}" if strided else " (offenders on other ranks)")
+                + (
+                    f"; on this rank: {strided[:3]}"
+                    if strided
+                    else " (offenders on other ranks)"
+                )
             )
         for name in ordered:
             tensor = rgetattr(component, name).data
@@ -845,7 +854,9 @@ class MemoryEfficientLoader:
                 tensor = tensor.contiguous()
             world.broadcast(tensor, src=0)
 
-    def build_transformer_disk_loaders(self, component, wrap_attrs, subfolder, device, group=None):
+    def build_transformer_disk_loaders(
+        self, component, wrap_attrs, subfolder, device, group=None
+    ):
         """(load_block_fn, load_epilogue_fn) filling a meta transformer from disk (rank0-read + bcast).
 
         group: broadcast group (default get_fs_group() for the FSDP path). The replicated path passes
@@ -886,13 +897,21 @@ class MemoryEfficientLoader:
         import torch.nn as nn
         from xfuser.model_executor.quant.aiter_fp8_quantizer import _swap_linears_to_fp8
         from xfuser.model_executor.layers.fp8_linear import (
-            xFuserFP8BlockScaleLinear, _fp8_dtype,
+            xFuserFP8BlockScaleLinear,
+            _fp8_dtype,
         )
+
         for t in targets:
-            _swap_linears_to_fp8(module.get_submodule(t), preshuffle=False, add_scale_buffer=True)
+            _swap_linears_to_fp8(
+                module.get_submodule(t), preshuffle=False, add_scale_buffer=True
+            )
         fp8 = _fp8_dtype()
         for m in module.modules():
-            if isinstance(m, xFuserFP8BlockScaleLinear) and m.weight is not None and m.weight.is_meta:
+            if (
+                isinstance(m, xFuserFP8BlockScaleLinear)
+                and m.weight is not None
+                and m.weight.is_meta
+            ):
                 m.weight = nn.Parameter(m.weight.to(fp8), requires_grad=False)
                 # Normalize to rank0's post-load layout: fp8 in `weight_fp8` (param) + `weight_scale`
                 # (buffer) + a plain-attr `weight` sentinel. rank0 builds the real component via the
@@ -924,9 +943,13 @@ class MemoryEfficientLoader:
         self, component, component_name: str, offload: bool
     ) -> None:
         from torch.distributed.checkpoint.state_dict import (
-            set_model_state_dict, StateDictOptions,
+            set_model_state_dict,
+            StateDictOptions,
         )
-        wrap_attrs = self.model.settings.fsdp_strategy[component_name].get("wrap_attrs", [])
+
+        wrap_attrs = self.model.settings.fsdp_strategy[component_name].get(
+            "wrap_attrs", []
+        )
         group = get_fs_group()
         is_src = _is_bcast_src(group)
         full_sd: dict = {}
@@ -938,19 +961,25 @@ class MemoryEfficientLoader:
             return src.state_dict()
 
         try:
-            full_sd = _collective_source_call(
-                group,
-                is_src,
-                load_source_state_dict,
-                context=f"loading {component_name} source state dict",
-            ) or {}
+            full_sd = (
+                _collective_source_call(
+                    group,
+                    is_src,
+                    load_source_state_dict,
+                    context=f"loading {component_name} source state dict",
+                )
+                or {}
+            )
 
             # broadcast_from_rank0 scatters rank0's full tensors into each rank's DTensor shard; a
             # partial dict + strict=False lets us scatter one module (block/tail) at a time so peers
             # never receive the whole model at once. cpu_offload places filled params on CPU to
             # satisfy CPUOffloadPolicy (broadcast_from_rank0 otherwise defaults them to cuda).
             opts = StateDictOptions(
-                full_state_dict=True, broadcast_from_rank0=True, strict=False, cpu_offload=offload
+                full_state_dict=True,
+                broadcast_from_rank0=True,
+                strict=False,
+                cpu_offload=offload,
             )
             block_prefixes = tuple(f"{a}." for a in wrap_attrs)
 
@@ -960,15 +989,21 @@ class MemoryEfficientLoader:
                     bp = f"{prefix}{idx}."
                     # from_pretrained has full paths; block.state_dict uses block-relative keys.
                     block_sd = (
-                        {k[len(bp):]: v for k, v in full_sd.items() if k.startswith(bp)}
-                        if is_src else {}
+                        {
+                            k[len(bp) :]: v
+                            for k, v in full_sd.items()
+                            if k.startswith(bp)
+                        }
+                        if is_src
+                        else {}
                     )
                     set_model_state_dict(block, block_sd, options=opts)
 
             # Non-block params/buffers: embeddings, norms, lm_head.
             tail_sd = (
                 {k: v for k, v in full_sd.items() if not k.startswith(block_prefixes)}
-                if is_src else {}
+                if is_src
+                else {}
             )
             set_model_state_dict(component, tail_sd, options=opts)
         finally:
@@ -1024,14 +1059,15 @@ class _TransformerDiskFiller:
         self.is_src = _is_bcast_src(self.group)
         # Only rank0 reads the checkpoint; peers receive via broadcast and never open a file
         # (no per-peer mmap page cache, no redundant hub revalidation HEADs).
-        self.weight_map = _collective_source_call(
-            self.group,
-            self.is_src,
-            lambda: resolve_checkpoint_weight_map(
-                self.request
-            ),
-            context=f"resolving checkpoint map for {self.subfolder}",
-        ) or {}
+        self.weight_map = (
+            _collective_source_call(
+                self.group,
+                self.is_src,
+                lambda: resolve_checkpoint_weight_map(self.request),
+                context=f"resolving checkpoint map for {self.subfolder}",
+            )
+            or {}
+        )
         self.shard_paths = set(self.weight_map.values())
         self._handle_cache: dict[str, object] = {}
         self._stack = ExitStack()
@@ -1043,6 +1079,7 @@ class _TransformerDiskFiller:
 
     def _handle(self, path):
         from safetensors import safe_open
+
         h = self._handle_cache.get(path)
         if h is None:
             h = self._stack.enter_context(safe_open(path, framework="pt", device="cpu"))
@@ -1058,6 +1095,7 @@ class _TransformerDiskFiller:
         real submodules literally named 'module' are left intact.
         """
         from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
+
         cur, out = root, []
         for seg in name.split("."):
             if seg == "module" and isinstance(cur, xFuserBaseWrapper):
@@ -1069,10 +1107,13 @@ class _TransformerDiskFiller:
 
     def _fill(self, module, local_name, key, required):
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
+
         path = self.weight_map.get(key)
         if path is None:
             if required:
-                raise RuntimeError(f"missing checkpoint weight for {key} in {self.subfolder}")
+                raise RuntimeError(
+                    f"missing checkpoint weight for {key} in {self.subfolder}"
+                )
             return
         set_module_tensor_to_device(
             module, local_name, self.device, value=self._handle(path).get_tensor(key)
@@ -1080,7 +1121,9 @@ class _TransformerDiskFiller:
 
     def _require_checkpoint_keys(self, keys):
         """Collectively reject missing persistent tensors before any rank enters data broadcast."""
-        box = [[key for key in keys if key not in self.weight_map] if self.is_src else None]
+        box = [
+            [key for key in keys if key not in self.weight_map] if self.is_src else None
+        ]
         self.group.broadcast_object_list(box, src=0)
         missing = box[0]
         if missing:
@@ -1129,16 +1172,16 @@ class _TransformerDiskFiller:
                 ),
                 context=f"loading checkpoint tensor {key}",
             )
-        broadcast_names = [
-            name for kind, name in layout if kind == "parameter"
-        ] + [name for name, _ in _persistent_named_buffers(block)]
-        _collective_reconcile_tensor_specs(
-            block, broadcast_names, self.group, device
-        )
+        broadcast_names = [name for kind, name in layout if kind == "parameter"] + [
+            name for name, _ in _persistent_named_buffers(block)
+        ]
+        _collective_reconcile_tensor_specs(block, broadcast_names, self.group, device)
         self._broadcast(block)
         if i % 8 == 0:
-            log(f"  self-fill {self.subfolder} block {i}: host cur/anon/file "
-                f"{host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB")
+            log(
+                f"  self-fill {self.subfolder} block {i}: host cur/anon/file "
+                f"{host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
+            )
 
     def finalize(self, comp):
         """Fill the non-block remainder before the component-level shard.
@@ -1150,20 +1193,24 @@ class _TransformerDiskFiller:
         neither required from the checkpoint nor broadcast as uninitialized storage.
         """
         from diffusers.models.model_loading_utils import set_module_tensor_to_device
+
         # Block-membership test must run on the unwrapped name: xFuser wrappers insert 'module'
         # segments, so a raw wrapped name (module.transformer_blocks.0...) never matches the
         # 'transformer_blocks.' prefix and every block param would leak into the tail (then miss,
         # e.g. runtime-only weight_fp8 which has no checkpoint key). fill_block already handled blocks.
         tail = [
-            name for name, _ in comp.named_parameters(remove_duplicate=False)
+            name
+            for name, _ in comp.named_parameters(remove_duplicate=False)
             if not self._ckpt_key(comp, name).startswith(self._block_prefixes)
         ]
         all_tail_bufs = [
-            name for name, _ in comp.named_buffers(remove_duplicate=False)
+            name
+            for name, _ in comp.named_buffers(remove_duplicate=False)
             if not self._ckpt_key(comp, name).startswith(self._block_prefixes)
         ]
         tail_bufs = [
-            name for name, _ in _persistent_named_buffers(comp)
+            name
+            for name, _ in _persistent_named_buffers(comp)
             if not self._ckpt_key(comp, name).startswith(self._block_prefixes)
         ]
         tail_layout = tuple(
@@ -1183,22 +1230,24 @@ class _TransformerDiskFiller:
             t = rgetattr(comp, name)
             if t.is_meta:
                 set_module_tensor_to_device(
-                    comp, name, self.device,
+                    comp,
+                    name,
+                    self.device,
                     value=torch.empty(t.shape, dtype=t.dtype, device=self.device),
                 )
             elif t.device.type != target_type:
                 # Non-persistent buffers (e.g. Wan rope freqs_cos/freqs_sin) are created real on
                 # CPU by init_empty_weights (include_buffers=False), not meta. Their values are
                 # correct and identical across ranks, so move them on-device without broadcasting.
-                set_module_tensor_to_device(comp, name, self.device, value=t.to(self.device))
+                set_module_tensor_to_device(
+                    comp, name, self.device, value=t.to(self.device)
+                )
         for name in tail + tail_bufs:
             key = self._ckpt_key(comp, name)
             _collective_source_call(
                 self.group,
                 self.is_src,
-                lambda name=name, key=key: self._fill(
-                    comp, name, key, required=True
-                ),
+                lambda name=name, key=key: self._fill(comp, name, key, required=True),
                 context=f"loading checkpoint tensor {key}",
             )
         _collective_reconcile_tensor_specs(

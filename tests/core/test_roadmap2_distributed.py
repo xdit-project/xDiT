@@ -208,9 +208,7 @@ def _te_source_error_worker(rank, world_size, init_method, result_queue):
         meta_load.get_fs_group = lambda: Group()
         loader = object.__new__(meta_load.MemoryEfficientLoader)
         loader.model = SimpleNamespace(
-            settings=SimpleNamespace(
-                fsdp_strategy={"text_encoder": {"wrap_attrs": []}}
-            )
+            settings=SimpleNamespace(fsdp_strategy={"text_encoder": {"wrap_attrs": []}})
         )
         loader._load_rank0_source = lambda *args: Source()
         loader._release_rank0_source = lambda *args: None
@@ -273,16 +271,12 @@ def _run_replicated_te_validation_worker(
         elif scenario == "spec_reconcile" and rank == 0:
             component.register_parameter(
                 "weight",
-                torch.nn.Parameter(
-                    torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
-                ),
+                torch.nn.Parameter(torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)),
             )
         elif scenario == "spec_reconcile":
             component.register_parameter(
                 "weight",
-                torch.nn.Parameter(
-                    torch.empty(2, dtype=torch.float16, device="meta")
-                ),
+                torch.nn.Parameter(torch.empty(2, dtype=torch.float16, device="meta")),
             )
         else:
             component.left = torch.nn.Module()
@@ -295,9 +289,7 @@ def _run_replicated_te_validation_worker(
                     left
                     if scenario == "source_tied"
                     else torch.nn.Parameter(
-                        torch.tensor(
-                            [4.0, 5.0, 6.0], dtype=torch.float32
-                        )
+                        torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32)
                     )
                 )
             else:
@@ -308,9 +300,7 @@ def _run_replicated_te_validation_worker(
                     left
                     if scenario == "peer_tied"
                     else torch.nn.Parameter(
-                        torch.empty(
-                            2, dtype=torch.float16, device="meta"
-                        )
+                        torch.empty(2, dtype=torch.float16, device="meta")
                     )
                 )
             component.left.register_parameter("weight", left)
@@ -318,11 +308,7 @@ def _run_replicated_te_validation_worker(
 
         def set_tensor(module, name, device, *, value, dtype=None):
             parent_name, _, local_name = name.rpartition(".")
-            owner = (
-                module.get_submodule(parent_name)
-                if parent_name
-                else module
-            )
+            owner = module.get_submodule(parent_name) if parent_name else module
             value = value.to(device=device, dtype=dtype or value.dtype)
             if local_name in owner._parameters:
                 owner._parameters[local_name] = torch.nn.Parameter(
@@ -384,9 +370,7 @@ def _replicated_te_reconcile_worker(rank, world_size, init_method, result_queue)
     )
 
 
-def _replicated_te_persistence_worker(
-    rank, world_size, init_method, result_queue
-):
+def _replicated_te_persistence_worker(rank, world_size, init_method, result_queue):
     _run_replicated_te_validation_worker(
         rank,
         world_size,
@@ -396,9 +380,7 @@ def _replicated_te_persistence_worker(
     )
 
 
-def _replicated_te_source_tied_worker(
-    rank, world_size, init_method, result_queue
-):
+def _replicated_te_source_tied_worker(rank, world_size, init_method, result_queue):
     _run_replicated_te_validation_worker(
         rank,
         world_size,
@@ -408,9 +390,7 @@ def _replicated_te_source_tied_worker(
     )
 
 
-def _replicated_te_peer_tied_worker(
-    rank, world_size, init_method, result_queue
-):
+def _replicated_te_peer_tied_worker(rank, world_size, init_method, result_queue):
     _run_replicated_te_validation_worker(
         rank,
         world_size,
@@ -457,9 +437,9 @@ def _mxfp4_fsdp2_worker(rank, world_size, init_method, result_queue):
 
         full_precision_state = {
             name: tensor.detach().cpu().clone()
-            for name, tensor in mxfp4_linear.xFuserMXFP4Linear(
-                8, 4, bias=False
-            ).state_dict().items()
+            for name, tensor in mxfp4_linear.xFuserMXFP4Linear(8, 4, bias=False)
+            .state_dict()
+            .items()
         }
         layer = mxfp4_linear.xFuserMXFP4Linear(8, 4, bias=False)
         layer._quantize_weights()
@@ -535,7 +515,10 @@ def _run_spawned(torch, worker, init_method, *, timeout):
 
 def test_two_rank_layout_mismatch_raises_on_all_ranks_without_hanging(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -551,12 +534,17 @@ def test_two_rank_layout_mismatch_raises_on_all_ranks_without_hanging(tmp_path):
         ("raised", 0),
         ("raised", 1),
     ], results
-    assert all("ordered parameter/buffer layout mismatch" in result[2] for result in results)
+    assert all(
+        "ordered parameter/buffer layout mismatch" in result[2] for result in results
+    )
 
 
 def test_two_rank_source_error_raises_on_all_ranks_without_hanging(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -577,7 +565,10 @@ def test_two_rank_source_error_raises_on_all_ranks_without_hanging(tmp_path):
 
 def test_two_rank_meta_build_error_raises_on_all_ranks_without_hanging(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -598,7 +589,10 @@ def test_two_rank_meta_build_error_raises_on_all_ranks_without_hanging(tmp_path)
 
 def test_two_rank_quantize_error_raises_on_all_ranks_without_hanging(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -619,7 +613,10 @@ def test_two_rank_quantize_error_raises_on_all_ranks_without_hanging(tmp_path):
 
 def test_two_rank_text_encoder_source_error_exits_before_scatter(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -635,12 +632,17 @@ def test_two_rank_text_encoder_source_error_exits_before_scatter(tmp_path):
         ("raised", 0),
         ("raised", 1),
     ], results
-    assert all("OSError: text encoder state dict failed" in result[2] for result in results)
+    assert all(
+        "OSError: text encoder state dict failed" in result[2] for result in results
+    )
 
 
 def test_two_rank_replicated_te_reconciles_specs_without_hanging(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -678,7 +680,10 @@ def test_two_rank_replicated_te_matches_source_aliases_without_hanging(
     tmp_path, worker, expected_tied, expected_right, init_name
 ):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -699,7 +704,10 @@ def test_two_rank_replicated_te_matches_source_aliases_without_hanging(
 
 def test_two_rank_replicated_te_layout_failure_is_collective(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_gloo_available()
+    ):
         pytest.skip("torch.distributed gloo backend is unavailable")
 
     processes, hung, results = _run_spawned(
@@ -715,7 +723,9 @@ def test_two_rank_replicated_te_layout_failure_is_collective(tmp_path):
         ("raised", 0),
         ("raised", 1),
     ], results
-    assert all("ordered parameter/buffer layout mismatch" in result[2] for result in results)
+    assert all(
+        "ordered parameter/buffer layout mismatch" in result[2] for result in results
+    )
 
 
 def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):
@@ -724,7 +734,10 @@ def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):
     torch = pytest.importorskip("torch", reason="PyTorch is required for FSDP2 test")
     if torch.cuda.device_count() < 2:
         pytest.skip("FSDP2 shard-size assertion requires two CUDA devices")
-    if not torch.distributed.is_available() or not torch.distributed.is_nccl_available():
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_nccl_available()
+    ):
         pytest.skip("torch.distributed NCCL backend is unavailable")
     try:
         from torch.distributed._composable.fsdp import fully_shard
@@ -750,8 +763,7 @@ def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):
     assert all(result[2] == "DTensor" for result in results)
     assert all(result[3] < result[4] for result in results)
     assert all(
-        "packed state cannot be loaded after FSDP" in result[5]
-        for result in results
+        "packed state cannot be loaded after FSDP" in result[5] for result in results
     )
     assert all(
         "full-precision state cannot replace an FSDP-managed packed parameter"

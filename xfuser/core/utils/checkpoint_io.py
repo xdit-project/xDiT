@@ -18,6 +18,7 @@ from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     resolve_checkpoint_file,
 )
 
+
 def host_mem_gb() -> str:
     """Container memory footprint (the number the OOM killer watches) as 'cur/anon/file GB'.
 
@@ -26,6 +27,7 @@ def host_mem_gb() -> str:
     page-cache eviction cannot touch) from mmap checkpoint cache (file). Host RAM, not VRAM, is
     the binding constraint on the memory-efficient FSDP load path.
     """
+
     def _read_int(path: str):
         try:
             with open(path) as f:
@@ -74,9 +76,7 @@ def drop_file_page_cache(paths) -> None:
             pass
 
 
-def resolve_repo_file(
-    model_name: str | CheckpointRequest, relpath: str
-) -> str | None:
+def resolve_repo_file(model_name: str | CheckpointRequest, relpath: str) -> str | None:
     """Local path of ``relpath`` within a checkpoint, or None when it is not there.
 
     ``model_name`` is either a Hub repo id or a path to a local checkpoint directory; a local
@@ -121,13 +121,13 @@ def resolve_checkpoint_weight_map(
     return discover_checkpoint(request).weight_map
 
 
-def _require_repo_file(
-    model_name: str | CheckpointRequest, relpath: str
-) -> str:
+def _require_repo_file(model_name: str | CheckpointRequest, relpath: str) -> str:
     """resolve_repo_file for a file the checkpoint layout says must exist."""
     path = resolve_repo_file(model_name, relpath)
     if path is None:
-        raise FileNotFoundError(f"checkpoint file '{relpath}' not found in {model_name}")
+        raise FileNotFoundError(
+            f"checkpoint file '{relpath}' not found in {model_name}"
+        )
     return path
 
 

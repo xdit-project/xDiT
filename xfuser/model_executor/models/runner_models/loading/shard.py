@@ -29,9 +29,11 @@ def shard_pipeline_components(model) -> None:
     device_group = get_fs_group().device_group
     for component_name, component in model.pipe.components.items():
         if component_name in model.settings.fsdp_strategy:
-            log(f"Sharding {component_name} with FSDP... "
+            log(
+                f"Sharding {component_name} with FSDP... "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
+                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)"
+            )
             strategy = model.settings.fsdp_strategy[component_name]
             wrap_attrs = strategy.get("wrap_attrs", [])
             dtype = strategy.get("dtype", None)
@@ -61,7 +63,8 @@ def shard_pipeline_components(model) -> None:
                 )
             else:
                 quantize_fn = (
-                    None if is_meta
+                    None
+                    if is_meta
                     else build_block_quantize_fn(
                         model,
                         component_name,
@@ -71,7 +74,11 @@ def shard_pipeline_components(model) -> None:
                     )
                 )
             fsdp_object = shard_component(
-                component, wrap_attrs, device_group, fs_local_rank, dtype,
+                component,
+                wrap_attrs,
+                device_group,
+                fs_local_rank,
+                dtype,
                 quantize_fn=quantize_fn,
                 reshard_after_forward=model.config.reshard_after_forward,
                 memory_efficient_init=model.config.memory_efficient_sharding,
@@ -89,15 +96,19 @@ def shard_pipeline_components(model) -> None:
                 )
             setattr(model.pipe, component_name, fsdp_object)
             torch.cuda.empty_cache()
-            log(f"Sharded {component_name}. "
+            log(
+                f"Sharded {component_name}. "
                 f"(host cur/anon/file: {host_mem_gb()} GB, "
-                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
+                f"VRAM: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)"
+            )
         else:
             log(f"Skipping FSDP wrapping for {component_name}...")
             if hasattr(component, "to"):
                 component.to(f"cuda:{local_rank}")
             else:
-                log(f"Component {component_name} has no .to() method, skipping device move.")
+                log(
+                    f"Component {component_name} has no .to() method, skipping device move."
+                )
 
     _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank)
 
@@ -111,7 +122,8 @@ def _give_cpu_offloaded_components_an_exec_device_hook(model, local_rank: int) -
     continues past them, with cpu-offloaded components advertising cuda.
     """
     cpu_offloaded = {
-        name for name, s in model.settings.fsdp_strategy.items()
+        name
+        for name, s in model.settings.fsdp_strategy.items()
         if s.get("offload_policy") == "cpu"
     }
     if not cpu_offloaded:
@@ -153,22 +165,14 @@ def _block_local_targets(targets, block_path):
 
 def _target_filter(targets, excluded_targets=()):
     return lambda _module, fqn: any(
-        not target
-        or fqn == target
-        or fqn.startswith(f"{target}.")
+        not target or fqn == target or fqn.startswith(f"{target}.")
         for target in targets
-    ) and not any(
-        module_path_is_covered(fqn, target)
-        for target in excluded_targets
-    )
+    ) and not any(module_path_is_covered(fqn, target) for target in excluded_targets)
 
 
 def _has_unowned_target(targets, owners):
     return any(
-        not any(
-            module_path_is_covered(target, owner)
-            for owner in owners
-        )
+        not any(module_path_is_covered(target, owner) for owner in owners)
         for target in targets
     )
 
@@ -207,19 +211,13 @@ def build_block_quantize_fn(
 
     def overlaps_any(targets):
         return any(
-            module_paths_overlap(path, target)
-            for path in paths
-            for target in targets
+            module_paths_overlap(path, target) for path in paths for target in targets
         )
 
     use_fp4_here = config.use_fp4_gemms and overlaps_any(fp4_list)
     # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
-    use_fp8_here = (
-        config.use_fp8_gemms and overlaps_any(fp8_list)
-    ) or (
-        config.use_fp4_gemms
-        and overlaps_any(fp8_list)
-        and not overlaps_any(fp4_list)
+    use_fp8_here = (config.use_fp8_gemms and overlaps_any(fp8_list)) or (
+        config.use_fp4_gemms and overlaps_any(fp8_list) and not overlaps_any(fp4_list)
     )
     use_int8_here = config.use_int8_gemms and overlaps_any(int8_list)
 
@@ -247,29 +245,28 @@ def build_block_quantize_fn(
         local_fp8_targets = _block_local_targets(fp8_list, block_path)
         local_int8_targets = _block_local_targets(int8_list, block_path)
         use_fp4_block = config.use_fp4_gemms and local_fp4_targets is not None
-        use_fp8_block = (
-            config.use_fp8_gemms and local_fp8_targets is not None
-        ) or (
+        use_fp8_block = (config.use_fp8_gemms and local_fp8_targets is not None) or (
             config.use_fp4_gemms
             and local_fp8_targets is not None
             and (
                 local_fp4_targets is None
-                or _has_unowned_target(
-                    local_fp8_targets, local_fp4_targets
-                )
+                or _has_unowned_target(local_fp8_targets, local_fp4_targets)
             )
         )
-        use_int8_block = (
-            config.use_int8_gemms and local_int8_targets is not None
-        )
+        use_int8_block = config.use_int8_gemms and local_int8_targets is not None
         if not use_fp4_block and not use_fp8_block and not use_int8_block:
             return
 
         block_prefix = f"{block_idx}."
         # Strip the block-index prefix so the quantize functions see local FQN paths.
-        local_fp8 = tuple(
-            o[len(block_prefix):] for o in fp8_overrides if o.startswith(block_prefix)
-        ) or None
+        local_fp8 = (
+            tuple(
+                o[len(block_prefix) :]
+                for o in fp8_overrides
+                if o.startswith(block_prefix)
+            )
+            or None
+        )
         if use_fp4_block:
             adapter = model.format_backend
             if adapter is None:
@@ -295,11 +292,7 @@ def build_block_quantize_fn(
                 device=device,
                 filter_fn=_target_filter(
                     local_fp8_targets,
-                    (
-                        local_fp4_targets
-                        if use_fp4_block
-                        else ()
-                    ),
+                    (local_fp4_targets if use_fp4_block else ()),
                 ),
             )
         elif use_int8_block:

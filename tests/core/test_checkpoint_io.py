@@ -8,6 +8,7 @@ network, since a local directory never reaches the Hub.
 Run with:
     pytest tests/core/test_checkpoint_io.py -v
 """
+
 import json
 import os
 
@@ -88,7 +89,9 @@ def test_resolve_repo_file_finds_local_file(single_file_checkpoint):
 
 def test_resolve_repo_file_returns_none_for_absent_local_file(single_file_checkpoint):
     """Absence must be None, not an exception: callers probe for the optional shard index."""
-    assert resolve_repo_file(str(single_file_checkpoint), "transformer/nope.json") is None
+    assert (
+        resolve_repo_file(str(single_file_checkpoint), "transformer/nope.json") is None
+    )
 
 
 def test_resolve_repo_file_does_not_treat_a_directory_as_a_file(single_file_checkpoint):
@@ -105,7 +108,9 @@ def test_weight_map_from_local_single_file(single_file_checkpoint):
     expected_path = str(
         single_file_checkpoint / "transformer" / "diffusion_pytorch_model.safetensors"
     )
-    weight_map = resolve_checkpoint_weight_map(str(single_file_checkpoint), "transformer")
+    weight_map = resolve_checkpoint_weight_map(
+        str(single_file_checkpoint), "transformer"
+    )
     assert weight_map == {
         "blocks.0.weight": expected_path,
         "blocks.1.weight": expected_path,
@@ -141,7 +146,11 @@ def test_shard_paths_from_local_single_file(single_file_checkpoint):
         str(single_file_checkpoint), "transformer", "diffusion_pytorch_model"
     )
     assert paths == {
-        str(single_file_checkpoint / "transformer" / "diffusion_pytorch_model.safetensors")
+        str(
+            single_file_checkpoint
+            / "transformer"
+            / "diffusion_pytorch_model.safetensors"
+        )
     }
 
 
@@ -158,7 +167,10 @@ def test_shard_paths_from_local_shards(sharded_checkpoint):
 
 def test_shard_paths_empty_for_component_without_safetensors(single_file_checkpoint):
     """A component with no safetensors of that basename is not an error; it just isn't dropped."""
-    assert component_shard_paths(str(single_file_checkpoint), "text_encoder", "model") == set()
+    assert (
+        component_shard_paths(str(single_file_checkpoint), "text_encoder", "model")
+        == set()
+    )
 
 
 # ============================================================================

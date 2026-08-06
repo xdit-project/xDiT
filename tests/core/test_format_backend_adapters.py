@@ -7,11 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 BACKENDS_PATH = (
-    ROOT
-    / "xfuser/model_executor/models/runner_models/loading/format_backends.py"
+    ROOT / "xfuser/model_executor/models/runner_models/loading/format_backends.py"
 )
 CONTRACTS_PATH = (
     ROOT / "xfuser/model_executor/models/runner_models/loading/contracts.py"
@@ -226,18 +224,15 @@ def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
         cuda_probe=lambda: False,
         hip_probe=lambda: True,
         cuda_capability_probe=lambda: None,
-        mxfp4_probe=lambda: calls.append("mxfp4") or (
+        mxfp4_probe=lambda: calls.append("mxfp4")
+        or (
             False,
             "missing required AITER MXFP4 API: aiter.gemm_a4w4",
         ),
         nvfp4_probe=lambda: pytest.fail("must not probe NVFP4"),
         int8_probe=lambda: pytest.fail("must not probe INT8"),
-        diffusers_probe=lambda config_kind: pytest.fail(
-            "must not probe Diffusers"
-        ),
-        fsdp_probe=lambda config_kind: pytest.fail(
-            "must not probe TorchAO FSDP"
-        ),
+        diffusers_probe=lambda config_kind: pytest.fail("must not probe Diffusers"),
+        fsdp_probe=lambda config_kind: pytest.fail("must not probe TorchAO FSDP"),
     )
 
     assert calls == ["mxfp4"]
@@ -504,9 +499,7 @@ def test_installed_diffusers_accepts_exact_nvfp4_and_int8_configs(modules):
     )
     assert nvfp4.quant_type.use_dynamic_per_tensor_scale is True
     assert nvfp4.quant_type.use_triton_kernel is True
-    assert type(int8.quant_type).__name__ == (
-        "Int8DynamicActivationInt8WeightConfig"
-    )
+    assert type(int8.quant_type).__name__ == ("Int8DynamicActivationInt8WeightConfig")
     assert int8.quant_type.set_inductor_config is False
 
 
@@ -521,10 +514,7 @@ def test_native_diffusers_load_preserves_format_targets(
     pytest.importorskip("torchao")
     if not torch.cuda.is_available():
         pytest.skip("native TorchAO load requires a CUDA accelerator")
-    if (
-        format_name == "FP4"
-        and torch.cuda.get_device_capability() < (10, 0)
-    ):
+    if format_name == "FP4" and torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("NVFP4 integration requires Blackwell")
 
     from diffusers import ConfigMixin, ModelMixin
@@ -535,9 +525,7 @@ def test_native_diffusers_load_preserves_format_targets(
         @register_to_config
         def __init__(self):
             super().__init__()
-            self.blocks = torch.nn.ModuleList(
-                [torch.nn.Linear(512, 512)]
-            )
+            self.blocks = torch.nn.ModuleList([torch.nn.Linear(512, 512)])
             self.small = torch.nn.Linear(512, 256)
             self.input_proj = torch.nn.Linear(512, 512)
 
@@ -568,4 +556,3 @@ def test_native_diffusers_load_preserves_format_targets(
     assert isinstance(loaded.blocks[0].weight, TorchAOBaseTensor)
     assert not isinstance(loaded.input_proj.weight, TorchAOBaseTensor)
     assert not isinstance(loaded.small.weight, TorchAOBaseTensor)
-

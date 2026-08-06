@@ -41,7 +41,8 @@ def fake_aiter_quantization(runtime, monkeypatch):
 
 
 def test_quantized_weight_is_non_trainable_parameter_and_scale_is_buffer(
-    runtime, fake_aiter_quantization,
+    runtime,
+    fake_aiter_quantization,
 ):
     layer = runtime.module.xFuserMXFP4Linear(8, 4, bias=False)
 
@@ -62,7 +63,8 @@ def test_quantized_weight_is_non_trainable_parameter_and_scale_is_buffer(
 
 
 def test_forward_uses_registered_quantized_parameter_without_aiter_kernel(
-    runtime, fake_aiter_quantization,
+    runtime,
+    fake_aiter_quantization,
 ):
     torch = runtime.torch
     layer = runtime.module.xFuserMXFP4Linear(8, 4, bias=False)
@@ -105,7 +107,9 @@ def test_quantized_state_dict_round_trips(runtime, fake_aiter_quantization):
     assert torch.equal(destination.weight_scale, source.weight_scale)
 
 
-def test_cpu_quantized_state_load_preserves_destination_device(runtime, fake_aiter_quantization):
+def test_cpu_quantized_state_load_preserves_destination_device(
+    runtime, fake_aiter_quantization
+):
     source = runtime.module.xFuserMXFP4Linear(8, 4, bias=False)
     source._quantize_weights()
     destination = runtime.module.xFuserMXFP4Linear(
@@ -146,9 +150,7 @@ def test_packed_state_materializes_fresh_meta_destination(
     torch = runtime.torch
     source = runtime.module.xFuserMXFP4Linear(8, 4, bias=False)
     source._quantize_weights()
-    destination = runtime.module.xFuserMXFP4Linear(
-        8, 4, bias=False, device="meta"
-    )
+    destination = runtime.module.xFuserMXFP4Linear(8, 4, bias=False, device="meta")
 
     result = destination.load_state_dict(source.state_dict())
 

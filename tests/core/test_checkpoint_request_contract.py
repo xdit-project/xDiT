@@ -229,6 +229,41 @@ def test_variant_uses_diffusers_checkpoint_filenames(checkpoint, tmp_path):
     assert manifest.weight_map == {"weight": str(shard)}
 
 
+def test_mapped_checkpoint_preserves_live_and_source_keys(checkpoint, tmp_path):
+    path = tmp_path / "distilled.safetensors"
+    path.write_bytes(b"header")
+
+    manifest = checkpoint.resolve_mapped_checkpoint(
+        path,
+        live_key=lambda key: key.removeprefix("diffusion_model."),
+        key_reader=lambda resolved: (
+            "diffusion_model.blocks.0.weight",
+            "diffusion_model.norm.weight",
+        ),
+    )
+
+    block = manifest.tensor_ref("blocks.0.weight")
+    assert block.path == str(path.resolve())
+    assert block.checkpoint_key == "diffusion_model.blocks.0.weight"
+    assert manifest.weight_map == {
+        "blocks.0.weight": str(path.resolve()),
+        "norm.weight": str(path.resolve()),
+    }
+    assert manifest.strict is True
+
+
+def test_mapped_checkpoint_rejects_live_key_collisions(checkpoint, tmp_path):
+    path = tmp_path / "distilled.safetensors"
+    path.write_bytes(b"header")
+
+    with pytest.raises(ValueError, match="collision.*same"):
+        checkpoint.resolve_mapped_checkpoint(
+            path,
+            live_key=lambda key: "same",
+            key_reader=lambda resolved: ("first", "second"),
+        )
+
+
 def test_variant_index_places_variant_before_json_extension(checkpoint, tmp_path):
     component = tmp_path / "transformer"
     component.mkdir()

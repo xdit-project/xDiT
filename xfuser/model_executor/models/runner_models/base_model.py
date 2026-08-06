@@ -40,9 +40,13 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
-from xfuser.model_executor.models.runner_models.loading.checkpoint import CheckpointRequest
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    CheckpointManifest,
+    CheckpointRequest,
+)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadCapability,
+    UnsupportedLoadContract,
     select_effective_materialization_mode,
     select_load_contract,
     select_runtime_quantization,
@@ -789,6 +793,7 @@ class xFuserModel(abc.ABC):
         init_kwargs: dict | None = None,
         stream_quant: bool = True,
         checkpoint_request: CheckpointRequest | None = None,
+        weight_source: CheckpointManifest | None = None,
     ):
         """Load a transformer through the selected materialization backend.
 
@@ -839,8 +844,13 @@ class xFuserModel(abc.ABC):
                     wrap_attrs,
                     descriptor,
                 )
+            build_kwargs = (
+                {"weight_source": weight_source}
+                if weight_source is not None
+                else {}
+            )
             return self._loader.build_meta_transformer(
-                wrapper_cls, request, init_kwargs
+                wrapper_cls, request, init_kwargs, **build_kwargs
             )
         quantization_config = None
         if adapter is not None:
@@ -904,11 +914,26 @@ class xFuserModel(abc.ABC):
                     wrap_attrs,
                     descriptor,
                 )
+                build_kwargs = (
+                    {"weight_source": weight_source}
+                    if weight_source is not None
+                    else {}
+                )
                 component = loader.build_meta_transformer(
-                    wrapper_cls, request, init_kwargs
+                    wrapper_cls, request, init_kwargs, **build_kwargs
                 )
                 loader.mark_local_blockwise(component)
                 return component
+            if weight_source is not None:
+                reason = (
+                    local_plan.reason
+                    if local_plan is not None
+                    else "local blockwise loading is unavailable"
+                )
+                raise UnsupportedLoadContract(
+                    f"{component_name} uses a mapped checkpoint source but "
+                    f"cannot enter local blockwise loading: {reason}"
+                )
             log(prepared.descriptor.log_message())
             quantization_config = prepared.quantization_config
             if (

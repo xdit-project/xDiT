@@ -23,9 +23,11 @@ from xfuser.model_executor.models.runner_models.loading.meta_load import (
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadCapability,
+    LoaderAdapter,
     UnsupportedLoadContract,
 )
 from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    CheckpointManifest,
     CheckpointRequest,
 )
 
@@ -207,6 +209,25 @@ def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
     del built
     gc.collect()
     assert len(loader._meta_transformers) == 0
+
+
+def test_custom_mapped_source_can_build_meta_only_for_local_fill(monkeypatch):
+    loader = make_loader(monkeypatch, world_size=1)
+    loader.model.load_capability = LoadCapability(
+        local_meta_transformers=("transformer",),
+        loader_adapter=LoaderAdapter.DISTILLED_WAN,
+    )
+    source = CheckpointManifest(
+        weight_map={"blocks.0.weight": "/weights/distilled.safetensors"}
+    )
+
+    built = loader.build_meta_transformer(
+        FakeWrapper,
+        subfolder="transformer",
+        weight_source=source,
+    )
+
+    assert loader._meta_transformers[built] is source
 
 
 def test_disk_filler_receives_the_exact_request_used_for_meta_build(monkeypatch):

@@ -42,6 +42,13 @@ class LoaderAdapter(str, Enum):
     def supports_standard_collectives(self) -> bool:
         return self is LoaderAdapter.STANDARD_TRANSFORMER
 
+    @property
+    def supports_local_blockwise(self) -> bool:
+        return self in {
+            LoaderAdapter.STANDARD_TRANSFORMER,
+            LoaderAdapter.DISTILLED_WAN,
+        }
+
 
 @dataclass(frozen=True)
 class ComponentLoadExclusion:
@@ -78,6 +85,7 @@ class LoadCapability:
 
     fsdp_meta_transformers: tuple[str, ...] = ()
     replicated_meta_transformers: tuple[str, ...] = ()
+    local_meta_transformers: tuple[str, ...] = ()
     materialization_modes: FrozenSet[MaterializationMode] = frozenset(
         {MaterializationMode.EAGER}
     )
@@ -101,6 +109,12 @@ class LoadCapability:
             dict.fromkeys(
                 self.fsdp_meta_transformers + self.replicated_meta_transformers
             )
+        )
+
+    @property
+    def all_meta_transformers(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(self.meta_transformers + self.local_meta_transformers)
         )
 
     def exclusion_for(self, component: str) -> ComponentLoadExclusion | None:
@@ -138,6 +152,7 @@ class LoadCapability:
         return cls(
             fsdp_meta_transformers=tuple(transformers),
             replicated_meta_transformers=(tuple(transformers) if replicated else ()),
+            local_meta_transformers=tuple(transformers),
             materialization_modes=frozenset(modes),
             construction_seam=ConstructionSeam.BUILD_TRANSFORMER,
             quantization_formats=formats,
@@ -200,6 +215,15 @@ class LoadCapability:
         seam = None
         strategy = fsdp_strategy or {}
         standard_collectives = loader_adapter.supports_standard_collectives
+        local_transformers = (
+            tuple(
+                name
+                for name in meta_transformers
+                if strategy.get(name, {}).get("wrap_attrs")
+            )
+            if loader_adapter.supports_local_blockwise
+            else ()
+        )
         fsdp_transformers = (
             tuple(
                 name
@@ -224,6 +248,7 @@ class LoadCapability:
         return cls(
             fsdp_meta_transformers=fsdp_transformers,
             replicated_meta_transformers=replicated_transformers,
+            local_meta_transformers=local_transformers,
             materialization_modes=frozenset(modes),
             construction_seam=seam,
             loader_adapter=loader_adapter,

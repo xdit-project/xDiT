@@ -170,6 +170,39 @@ def test_named_custom_adapters_reject_standard_collective_modes():
             )
 
 
+def test_distilled_wan_declares_local_meta_without_collective_support():
+    contracts = _load_contracts()
+    adapter = contracts.LoaderAdapter.DISTILLED_WAN
+    capability = contracts.LoadCapability.for_runner(
+        type(
+            "Capabilities",
+            (),
+            {
+                "use_fp8_gemms": True,
+                "use_fp4_gemms": True,
+                "use_int8_gemms": False,
+                "fully_shard_degree": True,
+            },
+        )(),
+        meta_transformers=("transformer", "transformer_2"),
+        replicated=True,
+        fsdp_strategy={
+            "transformer": {"wrap_attrs": ["blocks"]},
+            "transformer_2": {"wrap_attrs": ["blocks"]},
+        },
+        loader_adapter=adapter,
+    )
+
+    assert adapter.supports_local_blockwise is True
+    assert adapter.supports_standard_collectives is False
+    assert capability.local_meta_transformers == (
+        "transformer",
+        "transformer_2",
+    )
+    assert capability.meta_transformers == ()
+    assert capability.materialization_modes == {contracts.MaterializationMode.EAGER}
+
+
 @pytest.mark.parametrize(
     ("filename", "class_name", "adapter"),
     [

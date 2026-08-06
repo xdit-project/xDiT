@@ -40,7 +40,7 @@ from xfuser.core.utils.checkpoint_io import (
     component_shard_paths,
 )
 from xfuser.core.utils.runner_utils import log, rgetattr
-from .checkpoint import CheckpointRequest
+from .checkpoint import CheckpointManifest, CheckpointRequest
 from .contracts import (
     MaterializationMode,
     UnsupportedLoadContract,
@@ -435,8 +435,8 @@ class MemoryEfficientLoader:
             wrap_attrs=wrap_attrs,
             world_size=get_world_group().world_size,
             standard_loader=(
-                capability.loader_adapter.supports_standard_collectives
-                and component_name in capability.meta_transformers
+                capability.loader_adapter.supports_local_blockwise
+                and component_name in capability.local_meta_transformers
             ),
             offload_requested=offload_requested,
         )
@@ -475,6 +475,7 @@ class MemoryEfficientLoader:
         init_kwargs: dict | None = None,
         *,
         subfolder: str | None = None,
+        weight_source: CheckpointManifest | None = None,
     ):
         """Build the (diffusers) transformer wrapper on meta from its config only (no weights).
 
@@ -489,15 +490,22 @@ class MemoryEfficientLoader:
             request = self._checkpoint_request(subfolder or request)
         elif subfolder is not None and request.subfolder != subfolder:
             request = request.with_subfolder(subfolder)
-        if not self.model.load_capability.loader_adapter.supports_standard_collectives:
+        capability = self.model.load_capability
+        adapter = capability.loader_adapter
+        local_custom_load = (
+            weight_source is not None
+            and adapter.supports_local_blockwise
+            and get_world_group().world_size == 1
+        )
+        if not adapter.supports_standard_collectives and not local_custom_load:
             raise UnsupportedLoadContract(
                 f"{type(self.model).__name__} uses "
-                f"{self.model.load_capability.loader_adapter.value}; custom "
+                f"{adapter.value}; custom "
                 "loader adapters cannot enter the standard transformer "
                 "collective path"
             )
         component_name = request.subfolder or "transformer"
-        if component_name not in self.model.load_capability.meta_transformers:
+        if component_name not in capability.all_meta_transformers:
             raise UnsupportedLoadContract(
                 f"{type(self.model).__name__} attempted meta construction of "
                 f"'{component_name}' without declaring it in load_capability"
@@ -523,7 +531,7 @@ class MemoryEfficientLoader:
         model = _collective_build_call(
             get_world_group(), build, context=f"meta transformer '{component_name}'"
         )
-        self._meta_transformers[model] = request
+        self._meta_transformers[model] = weight_source or request
         return model
 
     def build_meta_component(self, component_name: str, fp8: bool = True):
@@ -986,8 +994,8 @@ class MemoryEfficientLoader:
         group: broadcast group (default get_fs_group() for the FSDP path). The replicated path passes
         get_world_group() — get_fs_group() has world_size 1 when fully_shard_degree==1, so its
         broadcast would be a no-op and peers would receive garbage."""
-        request = self._meta_transformers.get(component)
-        if request is None:
+        source = self._meta_transformers.get(component)
+        if source is None:
             raise UnsupportedLoadContract(
                 f"no CheckpointRequest recorded for meta transformer '{subfolder}'; "
                 "refusing to reconstruct checkpoint identity before disk fill"
@@ -997,7 +1005,7 @@ class MemoryEfficientLoader:
             self.model,
             component,
             wrap_attrs,
-            request,
+            source,
             device,
             group,
             **filler_kwargs,
@@ -1176,7 +1184,7 @@ class _TransformerDiskFiller:
         model,
         component,
         wrap_attrs,
-        request: CheckpointRequest,
+        source: CheckpointRequest | CheckpointManifest,
         device,
         group=None,
         *,
@@ -1185,20 +1193,32 @@ class _TransformerDiskFiller:
         from contextlib import ExitStack
 
         self.model = model
-        self.request = request
-        self.subfolder = request.subfolder or "transformer"
+        self.source = source
+        self.subfolder = (
+            source.label or "mapped checkpoint"
+            if isinstance(source, CheckpointManifest)
+            else source.subfolder or "transformer"
+        )
         self.device = device
         self.group = (group or get_fs_group()) if collective else None
         self.is_src = self.group is None or _is_bcast_src(self.group)
         # Only rank0 reads the checkpoint; peers receive via broadcast and never open a file
         # (no per-peer mmap page cache, no redundant hub revalidation HEADs).
-        self.weight_map = (
-            self._source_call(
-                lambda: resolve_checkpoint_weight_map(self.request),
-                context=f"resolving checkpoint map for {self.subfolder}",
+        manifest = (
+            source
+            if isinstance(source, CheckpointManifest)
+            else CheckpointManifest(
+                self._source_call(
+                    lambda: resolve_checkpoint_weight_map(source),
+                    context=f"resolving checkpoint map for {self.subfolder}",
+                )
+                or {}
             )
-            or {}
         )
+        self.weight_map = manifest.weight_map
+        self.checkpoint_keys = manifest.checkpoint_keys
+        self.strict = manifest.strict
+        self._used_keys = set()
         self.shard_paths = set(self.weight_map.values())
         self._handle_cache: dict[str, object] = {}
         self._stack = ExitStack()
@@ -1273,9 +1293,14 @@ class _TransformerDiskFiller:
                     f"missing checkpoint weight for {key} in {self.subfolder}"
                 )
             return
+        checkpoint_key = self.checkpoint_keys.get(key, key)
         set_module_tensor_to_device(
-            module, local_name, self.device, value=self._handle(path).get_tensor(key)
+            module,
+            local_name,
+            self.device,
+            value=self._handle(path).get_tensor(checkpoint_key),
         )
+        self._used_keys.add(key)
 
     def _require_checkpoint_keys(self, keys):
         """Collectively reject missing persistent tensors before any rank enters data broadcast."""
@@ -1404,6 +1429,15 @@ class _TransformerDiskFiller:
         if self.group is not None:
             for name in tail + tail_bufs:
                 self.group.broadcast(rgetattr(comp, name).data, src=0)
+        if self.strict:
+            unused = sorted(set(self.weight_map) - self._used_keys)
+            if unused:
+                preview = ", ".join(unused[:3])
+                suffix = f" (+{len(unused) - 3} more)" if len(unused) > 3 else ""
+                raise RuntimeError(
+                    f"unexpected checkpoint tensors in {self.subfolder}: "
+                    f"{preview}{suffix}"
+                )
         self._stack.close()
         if self.is_src:
             drop_file_page_cache(self.shard_paths)

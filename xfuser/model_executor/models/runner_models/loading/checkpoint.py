@@ -1,6 +1,6 @@
 """Checkpoint requests and file discovery, with no model/runtime dependencies."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 import os
 from typing import Callable, Iterable
@@ -51,14 +51,29 @@ class CheckpointRequest:
 
 
 @dataclass(frozen=True)
+class CheckpointTensorRef:
+    path: str
+    checkpoint_key: str
+
+
+@dataclass(frozen=True)
 class CheckpointManifest:
     """Tensor-key mapping produced by discovery, before any tensor is read."""
 
     weight_map: dict[str, str]
+    checkpoint_keys: dict[str, str] = field(default_factory=dict)
+    strict: bool = False
+    label: str | None = None
 
     @property
     def shard_paths(self) -> frozenset[str]:
         return frozenset(self.weight_map.values())
+
+    def tensor_ref(self, live_key: str) -> CheckpointTensorRef:
+        return CheckpointTensorRef(
+            path=self.weight_map[live_key],
+            checkpoint_key=self.checkpoint_keys.get(live_key, live_key),
+        )
 
 
 def _is_within(directory: str, path: str) -> bool:
@@ -132,6 +147,41 @@ def _safetensor_keys(path: str) -> Iterable[str]:
 
     with safe_open(path, framework="pt", device="cpu") as handle:
         return tuple(handle.keys())
+
+
+def resolve_mapped_checkpoint(
+    path: str | os.PathLike,
+    *,
+    live_key: Callable[[str], str],
+    key_reader: Callable[[str], Iterable[str]] = _safetensor_keys,
+) -> CheckpointManifest:
+    """Map one safetensors file's source keys to strict live model keys."""
+
+    resolved = os.path.realpath(os.fspath(path))
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError(f"mapped checkpoint file not found: {resolved}")
+    weight_map = {}
+    checkpoint_keys = {}
+    for checkpoint_key in key_reader(resolved):
+        mapped = live_key(checkpoint_key)
+        if not isinstance(mapped, str) or not mapped:
+            raise ValueError(
+                f"mapped checkpoint key {checkpoint_key!r} produced an empty live key"
+            )
+        previous = checkpoint_keys.get(mapped)
+        if previous is not None:
+            raise ValueError(
+                f"mapped checkpoint collision for live key {mapped!r}: "
+                f"{previous!r} and {checkpoint_key!r}"
+            )
+        weight_map[mapped] = resolved
+        checkpoint_keys[mapped] = checkpoint_key
+    return CheckpointManifest(
+        weight_map=weight_map,
+        checkpoint_keys=checkpoint_keys,
+        strict=True,
+        label=resolved,
+    )
 
 
 def discover_checkpoint(

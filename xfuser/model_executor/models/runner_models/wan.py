@@ -35,6 +35,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadCapability,
     LoaderAdapter,
 )
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    resolve_mapped_checkpoint,
+)
 
 
 COMMON_FSDP_STRATEGY = {
@@ -328,10 +331,12 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 @register_model("Wan2.2-Distilled-I2V")
 @LoadCapability.declare(
+    "transformer",
+    "transformer_2",
     loader_adapter=LoaderAdapter.DISTILLED_WAN,
     unsupported_reason=(
-        "external LightX2V checkpoints require strict key remapping and replace "
-        "both transformer state dicts after standard construction"
+        "external LightX2V checkpoints support mapped local blockwise loading "
+        "but not standard distributed collectives"
     )
 )
 class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
@@ -381,23 +386,43 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         self.settings.output_name = "wan2.2_distilled_i2v"
 
 
+    def _build_distilled_transformer(self, component_name: str, path: str):
+        adapter, _ = self._transformer_quantization_adapter(component_name)
+        init_kwargs = {
+            "attention_kwargs": _build_attention_kwargs(self.config)
+        }
+        if adapter is None:
+            transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+                pretrained_model_name_or_path=self._BASE_MODEL,
+                torch_dtype=torch.bfloat16,
+                subfolder=component_name,
+                low_cpu_mem_usage=True,
+                **init_kwargs,
+            )
+            _load_distilled_weights(transformer, path)
+            return transformer
+
+        weight_source = resolve_mapped_checkpoint(
+            path,
+            live_key=_remap_lightx2v_to_diffusers,
+        )
+        return self._build_transformer(
+            xFuserWanTransformer3DWrapper,
+            subfolder=component_name,
+            init_kwargs=init_kwargs,
+            stream_quant=False,
+            weight_source=weight_source,
+        )
+
     def _load_model(self) -> DiffusionPipeline:
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self._BASE_MODEL,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
-            low_cpu_mem_usage=True,
+        transformer = self._build_distilled_transformer(
+            "transformer",
+            self.config.distilled_transformer_path,
         )
-        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self._BASE_MODEL,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer_2",
-            attention_kwargs=_build_attention_kwargs(self.config),
-            low_cpu_mem_usage=True,
+        transformer_2 = self._build_distilled_transformer(
+            "transformer_2",
+            self.config.distilled_transformer_2_path,
         )
-        _load_distilled_weights(transformer,   self.config.distilled_transformer_path)
-        _load_distilled_weights(transformer_2, self.config.distilled_transformer_2_path)
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self._BASE_MODEL,
             torch_dtype=torch.bfloat16,

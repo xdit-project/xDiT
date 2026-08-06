@@ -236,6 +236,12 @@ FP8, NVFP4, and INT8. NVFP4 can stream around explicitly owned FP8 residual
 leaves. Torchao records an explicit post-load fallback when its API, exact
 target mapping, hybrid ownership, or placement prevents streaming.
 
+On a single rank, a standard runner with declared meta construction and
+block-owned targets promotes that post-load fallback to local blockwise
+loading. The loader materializes one checkpoint block, quantizes it, and
+releases the source block before reading the next. Multi-rank and offloaded
+runs retain their existing placement-specific paths.
+
 “Memory-efficient FSDP” means `--memory_efficient_sharding` can avoid
 materializing the full transformer before FSDP wraps it. “Replicated meta-load”
 means `--memory_efficient_replicated_load` can build the transformer on meta and

@@ -6,7 +6,7 @@ import json
 import functools
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
@@ -82,6 +82,90 @@ def _blockwise_owned_targets(targets, wrap_attrs):
         ):
             minimal.append(target)
     return tuple(minimal)
+
+
+def _record_blockwise_ownership(
+    model,
+    adapter,
+    component_name,
+    targets,
+    wrap_attrs,
+    descriptor,
+):
+    log(descriptor.log_message())
+    if adapter.format.value == "fp8" and hasattr(
+        model, "_fp8_descriptor_components"
+    ):
+        model._fp8_descriptor_components.add(component_name)
+    if hasattr(model, "_quantization_descriptor_components"):
+        model._quantization_descriptor_components.add(component_name)
+    if descriptor.materialization_mode not in {"streaming", "blockwise"}:
+        return
+    owned_targets = _blockwise_owned_targets(targets, wrap_attrs)
+    _record_streaming_targets(
+        model,
+        "_quantization_streaming_targets",
+        component_name,
+        owned_targets,
+    )
+    if descriptor.materialization_mode == "blockwise" and getattr(
+        model.config, "use_fp4_gemms", False
+    ):
+        fp8_targets = tuple(model.fp8.targets_for(component_name))
+        owned_fp8_targets = _blockwise_owned_targets(fp8_targets, wrap_attrs)
+        _record_streaming_targets(
+            model,
+            "_quantization_streaming_targets",
+            component_name,
+            owned_fp8_targets,
+        )
+        _record_streaming_targets(
+            model,
+            "_fp8_streaming_targets",
+            component_name,
+            owned_fp8_targets,
+        )
+    if adapter.format.value == "fp8":
+        _record_streaming_targets(
+            model,
+            "_fp8_streaming_targets",
+            component_name,
+            owned_targets,
+        )
+
+
+def _blockwise_transformer_descriptor(
+    adapter,
+    component_name,
+    targets,
+    wrap_attrs,
+    *,
+    local=False,
+):
+    if adapter.format.value == "fp8":
+        from .loading.fp8_backends import (
+            plan_blockwise_transformer_fp8_load,
+        )
+
+        descriptor = plan_blockwise_transformer_fp8_load(
+            adapter,
+            component_name=component_name,
+            targets=targets,
+            wrap_attrs=wrap_attrs,
+        )
+        return (
+            replace(descriptor, materialization_mode="blockwise")
+            if local and descriptor.materialization_mode == "streaming"
+            else descriptor
+        )
+    from .loading.format_backends import describe_blockwise_format_load
+
+    return describe_blockwise_format_load(
+        adapter,
+        component_name=component_name,
+        targets=targets,
+        wrap_attrs=wrap_attrs,
+    )
 
 
 def _conversion_filter(module_path, excluded_paths):
@@ -741,82 +825,20 @@ class xFuserModel(abc.ABC):
         )
         if fsdp_meta or replicated_meta:
             if adapter is not None:
-                if adapter.format.value == "fp8":
-                    from .loading.fp8_backends import (
-                        plan_blockwise_transformer_fp8_load,
-                    )
-
-                    descriptor = plan_blockwise_transformer_fp8_load(
-                        adapter,
-                        component_name=component_name,
-                        targets=targets,
-                        wrap_attrs=wrap_attrs,
-                    )
-                else:
-                    from .loading.format_backends import (
-                        describe_blockwise_format_load,
-                    )
-
-                    descriptor = describe_blockwise_format_load(
-                        adapter,
-                        component_name=component_name,
-                        targets=targets,
-                        wrap_attrs=wrap_attrs,
-                    )
-                log(descriptor.log_message())
-                if (
-                    adapter.format.value == "fp8"
-                    and hasattr(self, "_fp8_descriptor_components")
-                ):
-                    self._fp8_descriptor_components.add(component_name)
-                if hasattr(self, "_quantization_descriptor_components"):
-                    self._quantization_descriptor_components.add(
-                        component_name
-                    )
-                if descriptor.materialization_mode in {"streaming", "blockwise"}:
-                    owned_targets = _blockwise_owned_targets(
-                        targets, wrap_attrs
-                    )
-                    _record_streaming_targets(
-                        self,
-                        "_quantization_streaming_targets",
-                        component_name,
-                        owned_targets,
-                    )
-                    if (
-                        descriptor.materialization_mode == "blockwise"
-                        and getattr(self.config, "use_fp4_gemms", False)
-                    ):
-                        fp8_targets = tuple(
-                            self.fp8.targets_for(component_name)
-                        )
-                        owned_fp8_targets = _blockwise_owned_targets(
-                            fp8_targets, wrap_attrs
-                        )
-                        _record_streaming_targets(
-                            self,
-                            "_quantization_streaming_targets",
-                            component_name,
-                            owned_fp8_targets,
-                        )
-                        _record_streaming_targets(
-                            self,
-                            "_fp8_streaming_targets",
-                            component_name,
-                            owned_fp8_targets,
-                        )
-                if adapter.format.value == "fp8" and (
-                    descriptor.materialization_mode in {
-                        "streaming",
-                        "blockwise",
-                    }
-                ):
-                    _record_streaming_targets(
-                        self,
-                        "_fp8_streaming_targets",
-                        component_name,
-                        owned_targets,
-                    )
+                descriptor = _blockwise_transformer_descriptor(
+                    adapter,
+                    component_name,
+                    targets,
+                    wrap_attrs,
+                )
+                _record_blockwise_ownership(
+                    self,
+                    adapter,
+                    component_name,
+                    targets,
+                    wrap_attrs,
+                    descriptor,
+                )
             return self._loader.build_meta_transformer(
                 wrapper_cls, request, init_kwargs
             )
@@ -857,6 +879,36 @@ class xFuserModel(abc.ABC):
                         wrapper_cls, request, init_kwargs
                     ),
                 )
+            loader = getattr(self, "_loader", None)
+            local_plan_factory = getattr(
+                loader, "plan_eager_blockwise_fallback", None
+            )
+            local_plan = (
+                local_plan_factory(prepared, targets, wrap_attrs)
+                if local_plan_factory is not None
+                else None
+            )
+            if local_plan is not None and local_plan.enabled:
+                descriptor = _blockwise_transformer_descriptor(
+                    adapter,
+                    component_name,
+                    targets,
+                    wrap_attrs,
+                    local=True,
+                )
+                _record_blockwise_ownership(
+                    self,
+                    adapter,
+                    component_name,
+                    targets,
+                    wrap_attrs,
+                    descriptor,
+                )
+                component = loader.build_meta_transformer(
+                    wrapper_cls, request, init_kwargs
+                )
+                loader.mark_local_blockwise(component)
+                return component
             log(prepared.descriptor.log_message())
             quantization_config = prepared.quantization_config
             if (
@@ -1437,6 +1489,13 @@ class xFuserModel(abc.ABC):
                 or self.config.enable_sequential_cpu_offload
                 or self.config.enable_group_cpu_offload
             )
+            fill_eager = getattr(
+                getattr(self, "_loader", None),
+                "fill_eager_transformers",
+                None,
+            )
+            if fill_eager is not None:
+                fill_eager()
             # Replicated multi-GPU: rank0's real bf16 weights are broadcast to peers' meta components
             # (GPU->GPU) and fp8-quantized per component in place. Bounds VRAM to one bf16 component.
             # The AITER walk below then no-ops (components are already fp8).

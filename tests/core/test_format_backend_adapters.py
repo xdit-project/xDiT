@@ -344,6 +344,59 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
     assert descriptor.fallback_reason is None
 
 
+def test_eager_blockwise_fallback_accepts_owned_single_rank_target(modules):
+    b = modules.backends
+    prepared = SimpleNamespace(
+        descriptor=SimpleNamespace(materialization_mode="post_load")
+    )
+
+    plan = b.plan_eager_blockwise_fallback(
+        prepared=prepared,
+        targets=("blocks",),
+        wrap_attrs=("blocks",),
+        world_size=1,
+        standard_loader=True,
+        offload_requested=False,
+    )
+
+    assert plan.enabled is True
+    assert plan.reason is None
+
+
+@pytest.mark.parametrize(
+    ("prepared_mode", "targets", "wrap_attrs", "world_size", "standard", "offload"),
+    [
+        ("streaming", ("blocks",), ("blocks",), 1, True, False),
+        ("post_load", ("tail",), ("blocks",), 1, True, False),
+        ("post_load", ("blocks",), ("blocks",), 2, True, False),
+        ("post_load", ("blocks",), ("blocks",), 1, False, False),
+        ("post_load", ("blocks",), ("blocks",), 1, True, True),
+    ],
+)
+def test_eager_blockwise_fallback_rejects_unsafe_plan(
+    modules,
+    prepared_mode,
+    targets,
+    wrap_attrs,
+    world_size,
+    standard,
+    offload,
+):
+    plan = modules.backends.plan_eager_blockwise_fallback(
+        prepared=SimpleNamespace(
+            descriptor=SimpleNamespace(materialization_mode=prepared_mode)
+        ),
+        targets=targets,
+        wrap_attrs=wrap_attrs,
+        world_size=world_size,
+        standard_loader=standard,
+        offload_requested=offload,
+    )
+
+    assert plan.enabled is False
+    assert plan.reason
+
+
 def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monkeypatch):
     b = modules.backends
     adapter = b.TorchaoNvfp4BackendAdapter(

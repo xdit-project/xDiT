@@ -321,6 +321,7 @@ class MemoryEfficientLoader:
         # Resolved on first use and cached: several load-time seams consult it, so this keeps the
         # decision identical everywhere and logs the reason once.
         self._replicated_decision = None
+        self._local_blockwise_transformers = weakref.WeakKeyDictionary()
 
     def _checkpoint_request(self, subfolder: str | None = None) -> CheckpointRequest:
         factory = getattr(self.model, "_checkpoint_request", None)
@@ -411,6 +412,61 @@ class MemoryEfficientLoader:
         a rank0 from_pretrained. True only for the component object we built: the two fill paths need
         different collectives, so this must not guess from the component's name."""
         return component in self._meta_transformers
+
+    def plan_eager_blockwise_fallback(self, prepared, targets, wrap_attrs):
+        """Return the component-level local fallback decision."""
+
+        from .format_backends import plan_eager_blockwise_fallback
+
+        config = self.model.config
+        offload_requested = any(
+            getattr(config, name, False)
+            for name in (
+                "enable_model_cpu_offload",
+                "enable_sequential_cpu_offload",
+                "enable_group_cpu_offload",
+            )
+        )
+        component_name = prepared.descriptor.component_name
+        capability = self.model.load_capability
+        return plan_eager_blockwise_fallback(
+            prepared=prepared,
+            targets=targets,
+            wrap_attrs=wrap_attrs,
+            world_size=get_world_group().world_size,
+            standard_loader=(
+                capability.loader_adapter.supports_standard_collectives
+                and component_name in capability.meta_transformers
+            ),
+            offload_requested=offload_requested,
+        )
+
+    def mark_local_blockwise(self, component) -> None:
+        if component not in self._meta_transformers:
+            raise RuntimeError("local blockwise transformer was not built on meta")
+        self._local_blockwise_transformers[component] = True
+
+    def fill_eager_transformers(self) -> None:
+        """Fill all component-level eager blockwise plans before device placement."""
+
+        local_rank = get_world_group().local_rank
+        device = f"cuda:{local_rank}"
+        for name, component in self.model.pipe.components.items():
+            if component not in self._local_blockwise_transformers:
+                continue
+            strategy = self.model.settings.fsdp_strategy[name]
+            self.fill_transformer_local(
+                component,
+                name,
+                strategy,
+                device,
+            )
+            self._local_blockwise_transformers.pop(component, None)
+            log(
+                f"Blockwise-filled {name} locally. "
+                f"host {host_mem_gb()} GB, "
+                f"VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
+            )
 
     def build_meta_transformer(
         self,
@@ -706,23 +762,80 @@ class MemoryEfficientLoader:
         self, component, name, strategy, device, world
     ) -> None:
         """Per-block rank0-disk-read + world broadcast + symmetric per-block fp8 quantize (no shard)."""
+        from .shard import build_block_quantize_fn
+
+        quantize_fn = build_block_quantize_fn(
+            self.model,
+            name,
+            strategy.get("wrap_attrs", []),
+            world.local_rank,
+            component=component,
+        )
+        self._fill_transformer_blocks(
+            component,
+            name,
+            strategy,
+            device,
+            group=world,
+            quantize_fn=quantize_fn,
+        )
+
+    def fill_transformer_local(
+        self,
+        component,
+        name,
+        strategy,
+        device,
+        *,
+        quantize_fn=None,
+    ) -> None:
+        """Fill and quantize one eager meta transformer without collectives."""
+
+        if quantize_fn is None:
+            from .shard import build_block_quantize_fn
+
+            quantize_fn = build_block_quantize_fn(
+                self.model,
+                name,
+                strategy.get("wrap_attrs", []),
+                get_world_group().local_rank,
+                component=component,
+            )
+        self._fill_transformer_blocks(
+            component,
+            name,
+            strategy,
+            device,
+            group=None,
+            quantize_fn=quantize_fn,
+        )
+
+    def _fill_transformer_blocks(
+        self,
+        component,
+        name,
+        strategy,
+        device,
+        *,
+        group,
+        quantize_fn,
+    ) -> None:
+        """Materialize, fill, and quantize blocks through one transport."""
+
         wrap_attrs = strategy.get("wrap_attrs", [])
         fill_block, finalize = self.build_transformer_disk_loaders(
-            component, wrap_attrs, name, device, group=world
+            component,
+            wrap_attrs,
+            name,
+            device,
+            group=group,
+            collective=group is not None,
         )
-        from .shard import build_block_quantize_fn
         from xfuser.core.distributed.sharding import (
             _restore_nonpersistent_buffers,
             _save_nonpersistent_buffers,
         )
 
-        quantize_fn = build_block_quantize_fn(
-            self.model,
-            name,
-            wrap_attrs,
-            world.local_rank,
-            component=component,
-        )
         wrapped = []
         for attr in wrap_attrs:
             wrapped.extend(rgetattr(component, attr))
@@ -732,12 +845,16 @@ class MemoryEfficientLoader:
             _restore_nonpersistent_buffers(nonpersistent_buffers)
             fill_block(block, i)
             if quantize_fn is not None:
-                _collective_build_call(
-                    world,
-                    lambda: quantize_fn(block, i),
-                    context=f"quantizing replicated transformer block {i}",
-                )
-            torch.cuda.empty_cache()
+                if group is None:
+                    quantize_fn(block, i)
+                else:
+                    _collective_build_call(
+                        group,
+                        lambda: quantize_fn(block, i),
+                        context=f"quantizing replicated transformer block {i}",
+                    )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         finalize(component)
 
     def _fill_te_replicated(
@@ -855,7 +972,14 @@ class MemoryEfficientLoader:
             world.broadcast(tensor, src=0)
 
     def build_transformer_disk_loaders(
-        self, component, wrap_attrs, subfolder, device, group=None
+        self,
+        component,
+        wrap_attrs,
+        subfolder,
+        device,
+        group=None,
+        *,
+        collective=True,
     ):
         """(load_block_fn, load_epilogue_fn) filling a meta transformer from disk (rank0-read + bcast).
 
@@ -868,8 +992,15 @@ class MemoryEfficientLoader:
                 f"no CheckpointRequest recorded for meta transformer '{subfolder}'; "
                 "refusing to reconstruct checkpoint identity before disk fill"
             )
+        filler_kwargs = {} if collective else {"collective": False}
         filler = _TransformerDiskFiller(
-            self.model, component, wrap_attrs, request, device, group
+            self.model,
+            component,
+            wrap_attrs,
+            request,
+            device,
+            group,
+            **filler_kwargs,
         )
         return filler.fill_block, filler.finalize
 
@@ -1048,6 +1179,8 @@ class _TransformerDiskFiller:
         request: CheckpointRequest,
         device,
         group=None,
+        *,
+        collective=True,
     ) -> None:
         from contextlib import ExitStack
 
@@ -1055,14 +1188,12 @@ class _TransformerDiskFiller:
         self.request = request
         self.subfolder = request.subfolder or "transformer"
         self.device = device
-        self.group = group or get_fs_group()
-        self.is_src = _is_bcast_src(self.group)
+        self.group = (group or get_fs_group()) if collective else None
+        self.is_src = self.group is None or _is_bcast_src(self.group)
         # Only rank0 reads the checkpoint; peers receive via broadcast and never open a file
         # (no per-peer mmap page cache, no redundant hub revalidation HEADs).
         self.weight_map = (
-            _collective_source_call(
-                self.group,
-                self.is_src,
+            self._source_call(
                 lambda: resolve_checkpoint_weight_map(self.request),
                 context=f"resolving checkpoint map for {self.subfolder}",
             )
@@ -1076,6 +1207,33 @@ class _TransformerDiskFiller:
         for attr in wrap_attrs:
             for idx, mod in enumerate(rgetattr(component, attr)):
                 self._id2fqn[id(mod)] = f"{attr}.{idx}"
+
+    def _source_call(self, fn, *, context):
+        if self.group is None:
+            return fn()
+        return _collective_source_call(
+            self.group,
+            self.is_src,
+            fn,
+            context=context,
+        )
+
+    def _assert_same_layout(self, module):
+        if self.group is not None:
+            _collective_assert_same_layout(
+                _tensor_layout_contract(module),
+                self.group,
+                getattr(self, "device", "cpu"),
+            )
+
+    def _reconcile_tensor_specs(self, module, names):
+        if self.group is not None:
+            _collective_reconcile_tensor_specs(
+                module,
+                names,
+                self.group,
+                getattr(self, "device", "cpu"),
+            )
 
     def _handle(self, path):
         from safetensors import safe_open
@@ -1121,11 +1279,13 @@ class _TransformerDiskFiller:
 
     def _require_checkpoint_keys(self, keys):
         """Collectively reject missing persistent tensors before any rank enters data broadcast."""
-        box = [
+        missing = (
             [key for key in keys if key not in self.weight_map] if self.is_src else None
-        ]
-        self.group.broadcast_object_list(box, src=0)
-        missing = box[0]
+        )
+        if self.group is not None:
+            box = [missing]
+            self.group.broadcast_object_list(box, src=0)
+            missing = box[0]
         if missing:
             preview = ", ".join(missing[:3])
             suffix = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
@@ -1134,6 +1294,8 @@ class _TransformerDiskFiller:
             )
 
     def _broadcast(self, module):
+        if self.group is None:
+            return
         # Collective: all group ranks must call in the same order. Module structure is identical
         # across ranks (meta -> to_empty), so named_* iteration order matches. remove_duplicate=False
         # so tied weights emit the same name count on every rank regardless of per-rank tie state.
@@ -1149,11 +1311,7 @@ class _TransformerDiskFiller:
         if fqn is None:
             raise RuntimeError(f"block {i} not found in wrap_attrs index (id mismatch)")
         layout = _tensor_layout(block)
-        _collective_assert_same_layout(
-            _tensor_layout_contract(block),
-            self.group,
-            device,
-        )
+        self._assert_same_layout(block)
         prefix = fqn + "."
         required = [
             (local_name, prefix + self._ckpt_key(block, local_name))
@@ -1164,9 +1322,7 @@ class _TransformerDiskFiller:
         ]
         self._require_checkpoint_keys([key for _, key in required])
         for local_name, key in required:
-            _collective_source_call(
-                self.group,
-                self.is_src,
+            self._source_call(
                 lambda local_name=local_name, key=key: self._fill(
                     block, local_name, key, required=True
                 ),
@@ -1175,7 +1331,7 @@ class _TransformerDiskFiller:
         broadcast_names = [name for kind, name in layout if kind == "parameter"] + [
             name for name, _ in _persistent_named_buffers(block)
         ]
-        _collective_reconcile_tensor_specs(block, broadcast_names, self.group, device)
+        self._reconcile_tensor_specs(block, broadcast_names)
         self._broadcast(block)
         if i % 8 == 0:
             log(
@@ -1217,11 +1373,7 @@ class _TransformerDiskFiller:
             [("parameter", name) for name in tail]
             + [("buffer", name) for name in all_tail_bufs]
         )
-        _collective_assert_same_layout(
-            _tensor_layout_contract(comp),
-            self.group,
-            self.device,
-        )
+        self._assert_same_layout(comp)
         self._require_checkpoint_keys(
             [self._ckpt_key(comp, name) for name in tail + tail_bufs]
         )
@@ -1244,17 +1396,14 @@ class _TransformerDiskFiller:
                 )
         for name in tail + tail_bufs:
             key = self._ckpt_key(comp, name)
-            _collective_source_call(
-                self.group,
-                self.is_src,
+            self._source_call(
                 lambda name=name, key=key: self._fill(comp, name, key, required=True),
                 context=f"loading checkpoint tensor {key}",
             )
-        _collective_reconcile_tensor_specs(
-            comp, tail + tail_bufs, self.group, self.device
-        )
-        for name in tail + tail_bufs:
-            self.group.broadcast(rgetattr(comp, name).data, src=0)
+        self._reconcile_tensor_specs(comp, tail + tail_bufs)
+        if self.group is not None:
+            for name in tail + tail_bufs:
+                self.group.broadcast(rgetattr(comp, name).data, src=0)
         self._stack.close()
         if self.is_src:
             drop_file_page_cache(self.shard_paths)

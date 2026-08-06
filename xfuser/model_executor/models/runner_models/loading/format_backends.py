@@ -307,6 +307,12 @@ class LinearOwnership:
     residual: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class EagerBlockwisePlan:
+    enabled: bool
+    reason: str | None = None
+
+
 class FormatBackendAdapter:
     storage_semantics = ""
     parameter_semantics = "tensor_subclass_parameter"
@@ -730,6 +736,46 @@ def describe_blockwise_format_load(
             "quantization targets do not align with streamed transformer blocks",
         )
     return _descriptor(adapter, component_name, "blockwise")
+
+
+def plan_eager_blockwise_fallback(
+    *,
+    prepared,
+    targets,
+    wrap_attrs,
+    world_size: int,
+    standard_loader: bool,
+    offload_requested: bool,
+) -> EagerBlockwisePlan:
+    """Decide whether an eager post-load fallback can use local block filling."""
+
+    if prepared.descriptor.materialization_mode != "post_load":
+        return EagerBlockwisePlan(False, "native loading already owns materialization")
+    if world_size != 1:
+        return EagerBlockwisePlan(False, "local blockwise loading requires one rank")
+    if not standard_loader:
+        return EagerBlockwisePlan(
+            False, "loader does not expose the standard checkpoint seam"
+        )
+    if offload_requested:
+        return EagerBlockwisePlan(
+            False, "local blockwise loading does not support offload"
+        )
+    targets = tuple(targets)
+    wrap_attrs = tuple(wrap_attrs)
+    if not targets or not wrap_attrs:
+        return EagerBlockwisePlan(
+            False, "quantization targets or wrap attributes are empty"
+        )
+    if not all(
+        any(module_path_is_covered(target, attr) for attr in wrap_attrs)
+        for target in targets
+    ):
+        return EagerBlockwisePlan(
+            False,
+            "quantization targets are not fully owned by streamed transformer blocks",
+        )
+    return EagerBlockwisePlan(True)
 
 
 def validate_format_fsdp_placement(

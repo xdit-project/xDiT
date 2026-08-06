@@ -874,6 +874,67 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
     )
 
 
+def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading import format_backends
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+
+    adapter = format_backends.AiterMxfp4BackendAdapter(
+        backend=QuantizationBackend.AITER,
+        format_=QuantizationFormat.FP4,
+        native_unavailable_reason="requires full-precision block",
+    )
+    meta_component = object()
+    marked = []
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            pytest.fail("local blockwise plan must bypass eager from_pretrained")
+
+    loader = SimpleNamespace(
+        plan_eager_blockwise_fallback=lambda prepared, targets, wrap_attrs: (
+            SimpleNamespace(enabled=True)
+        ),
+        build_meta_transformer=lambda *args, **kwargs: meta_component,
+        mark_local_blockwise=marked.append,
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        _transformer_quantization_adapter=lambda component: (
+            adapter,
+            ("blocks",),
+        ),
+        _loader=loader,
+        _fp8_descriptor_components=set(),
+        _quantization_descriptor_components=set(),
+        _fp8_streaming_targets=set(),
+        _quantization_streaming_targets=set(),
+        fp8=SimpleNamespace(targets_for=lambda component: ()),
+        settings=SimpleNamespace(
+            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
+            fp8_precision_overrides=None,
+            fp8_precision_override_suffixes=None,
+        ),
+        config=SimpleNamespace(
+            use_fp4_gemms=True,
+            use_hybrid_gemm_schedule=False,
+        ),
+        _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
+    )
+    monkeypatch.setattr(base_model, "log", lambda message: None)
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result is meta_component
+    assert marked == [meta_component]
+    assert runner._quantization_streaming_targets == {"transformer.blocks"}
+
+
 def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading.contracts import (

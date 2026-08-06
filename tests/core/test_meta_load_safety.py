@@ -454,6 +454,36 @@ def test_block_fill_requires_and_broadcasts_only_persistent_buffers(runtime):
     assert broadcasts[1].data_ptr() == block.saved.data_ptr()
 
 
+def test_local_block_fill_uses_no_collective_transport(runtime):
+    torch = runtime.torch
+    block = torch.nn.Module()
+    block.register_parameter("weight", torch.nn.Parameter(torch.ones(1)))
+    block.register_buffer("saved", torch.ones(1), persistent=True)
+
+    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler.group = None
+    filler.is_src = True
+    filler.device = "cpu"
+    filler.subfolder = "transformer"
+    filler._id2fqn = {id(block): "blocks.0"}
+    filler._ckpt_key = lambda root, name: name
+    filler.weight_map = {
+        "blocks.0.weight": "weights.safetensors",
+        "blocks.0.saved": "weights.safetensors",
+    }
+    fills = []
+    filler._fill = lambda module, local_name, key, required: fills.append(
+        (local_name, key)
+    )
+
+    filler.fill_block(block, 1)
+
+    assert fills == [
+        ("weight", "blocks.0.weight"),
+        ("saved", "blocks.0.saved"),
+    ]
+
+
 @pytest.mark.parametrize("rank", [0, 1])
 def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank):
     torch = runtime.torch
@@ -608,6 +638,45 @@ def test_replicated_transformer_restores_nonpersistent_buffers_before_fill(
     assert len(seen) == 1
     assert torch.equal(seen[0], torch.tensor([5.0]))
     assert torch.equal(component.blocks[0].runtime_cache, torch.tensor([5.0]))
+
+
+def test_local_transformer_fills_and_quantizes_each_block_before_tail(
+    runtime,
+):
+    torch = runtime.torch
+    component = torch.nn.Module()
+    component.blocks = torch.nn.ModuleList(
+        [torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)]
+    )
+    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader.model = SimpleNamespace()
+    events = []
+
+    def fill(block, index):
+        block.weight.data.fill_(index + 1)
+        events.append(f"fill:{index}")
+
+    def finalize(module):
+        events.append("tail")
+
+    def quantize(block, index):
+        assert block.weight.item() == index + 1
+        events.append(f"quantize:{index}")
+
+    loader.build_transformer_disk_loaders = lambda *args, **kwargs: (
+        fill,
+        finalize,
+    )
+
+    loader.fill_transformer_local(
+        component,
+        "transformer",
+        {"wrap_attrs": ["blocks"]},
+        "cpu",
+        quantize_fn=quantize,
+    )
+
+    assert events == ["fill:0", "quantize:0", "fill:1", "quantize:1", "tail"]
 
 
 @pytest.mark.parametrize("rank", [0, 1])

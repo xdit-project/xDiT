@@ -241,9 +241,7 @@ def _runs_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
             expected = vae.tiled_decode(latents).sample
 
             dispatch, assemble = vae_tile_parallel.sharing(dist.group.WORLD)
-            # One tile per call, so that what is compared is where the tiles were decoded and
-            # blended and not how many of them shared a call.
-            decode = vae_tiling.tiled_decode_for(vae, 0, dispatch, assemble)
+            decode = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
             assert decode is not None, f"no reimplemented loop for {name}"
             got = decode(latents).sample
 

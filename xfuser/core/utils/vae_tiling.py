@@ -6,7 +6,6 @@ the policy around these numbers lives with the runner instead.
 """
 
 import functools
-import math
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import diffusers
@@ -196,63 +195,35 @@ def smallest_tile_window(
     return None
 
 
-def tile_latent_area(vae) -> Optional[int]:
-    """The latent area of the VAE's current tile, None where it has no square latent window"""
-    # Read either side of a narrowing to get both areas the batch budget is derived from: before,
-    # it is the area the VAE was built to decode in one call; after, the area the caller asked for.
-    size = getattr(vae, "tile_latent_min_size", None)
-    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
-        return None
-    return size * size
+NARROWEST_USEFUL_FRACTION = 4
+"""How far below its own window a VAE's tile window is still worth narrowing: to a quarter
 
+Narrowing the window trades output fidelity for memory, and the trade stops paying well before
+the window runs out. Peak memory falls until the tile's activations no longer dominate the
+weights and the full-resolution sample, and then it flattens; past that point a narrower window
+costs seams and time and buys nothing. Measured on flux2 at 1024x1024 (whose VAE ships a 1024px
+window), sweeping only the window - peak memory 1017 MB at 512px, 469 MB at 256px, then 544 MB at
+128px and 417 MB at 64px, so it has already flattened by a quarter of the window. Time turns at
+the same place, 382.7 ms at 512px against 497.2 ms at 256px and 679.2 ms at 64px, and divergence
+from an untiled decode climbs the whole way: 19.6% max at 512px, 42.0% at 256px, 103.5% at 64px.
 
-SATURATING_LATENT_AREA = 1024
-"""The latent area at which one tile already gives the device enough to do
-
-Below this a decoder call is bound by what it costs to make rather than by the arithmetic in it -
-kernel launches, and a grid too small to occupy the device - and stacking tiles into the call
-spreads that over all of them. Above it the call is bound by the arithmetic, which batching cannot
-make cheaper and in practice makes dearer, since the wider shapes pick worse convolution kernels.
-
-Measured on gfx1201 (see the values in the note below): decoding tiles together rather than one at
-a time costs 2.58x per tile at a latent area of 16384, 1.69x at 4096, 1.13x at 1024, then pays
-0.50x at 256, 0.22x at 64 and 0.09x at 16. The turn is between 1024 and 256 and it is sharp.
-
-Where the device saturates is a property of the device, so this is the one number here that is
-worth re-deriving on new hardware; `distvae_bench --tile-shape-costs` prints the curve above in a
-few minutes. A larger device turns later, so this value only leaves a win unclaimed there rather
-than causing a loss; a smaller one turns earlier, and can lose the ~15% seen just above the turn.
+Expressed as a fraction of the VAE's own window rather than a pixel count, because that window is
+the tile size the VAE was built around and a quarter of it means the same thing across VAEs; the
+pixel count where flux2 flattens says nothing about a VAE that ships a 512px window. Only flux2
+has been swept, so the fraction is the generalisation and it is the part to re-check.
 """
 
 
-def tile_batch_budget(default_area: Optional[int], tile_area: Optional[int]) -> Optional[int]:
-    """The latent area one decoder call should carry, or None to give it a tile and no more
-
-    Stacking tiles into one call buys one thing: it pays what a call costs to make once instead of
-    once per tile. That is worth having only while a tile is too small to keep the device busy on
-    its own, which is what `SATURATING_LATENT_AREA` marks. A tile at or above it is decoded alone,
-    as upstream does and as the VAE was built to be asked - and since a grid's edge tiles are
-    clipped by the latent bounds, this is also what stops them batching where the full-size ones
-    beside them would not, which would leave two ranks holding the same area making very
-    different calls.
-
-    Below the turn, halve --vae_tile_size and this halves: the budget is the geometric mean of the
-    two areas, which is the product of their two edges, so it is linear in the edge the caller
-    asked for. Activation memory follows the area a call carries, so a budget held at the VAE's
-    own window would hand back every byte a narrower window was set to save, while batching a
-    fixed number of tiles would give a narrow window back the per-call cost that makes it slow.
-    Scaling with the edge moves both ways at once: at a 128px window it takes about nine tenths of
-    the available speed-up for a seventh of the memory a full window's batch would have cost.
-    """
-    if not default_area or not tile_area:
+def narrowest_useful_window(vae) -> Optional[int]:
+    """The narrowest window worth setting on this VAE, None where it has no single window"""
+    window = tile_window(vae)
+    if window is None:
         return None
-    if tile_area >= SATURATING_LATENT_AREA:
-        return None
-    return max(tile_area, math.isqrt(default_area * tile_area))
+    return max(1, window // NARROWEST_USEFUL_FRACTION)
 
 
 def tiles_by_overlap_factor(vae) -> bool:
-    """Whether this VAE tiles with the loop `batched_tiled_decode` reimplements"""
+    """Whether this VAE tiles with the loop `overlap_tiled_decode` reimplements"""
     # AutoencoderKL and AutoencoderKLFlux2 walk one square latent window at a stride derived from
     # an overlap fraction. Wan, Qwen-Image and the video VAEs walk a stride they store outright,
     # over a loop with different blending and a frame axis, and keep their own tiled_decode.
@@ -316,14 +287,13 @@ def supports_tile_parallel(vae) -> bool:
 
 def tiled_decode_for(
     vae,
-    budget_elems: int,
     dispatch: Optional[Callable] = None,
     assemble: Optional[Callable] = None,
 ) -> Optional[Callable]:
     """The tiled_decode to install on this VAE, None where its loop is not one reimplemented here"""
-    batched = batched_tiled_decode(vae, budget_elems, dispatch, assemble)
-    if batched is not None:
-        return batched
+    overlapping = overlap_tiled_decode(vae, dispatch, assemble)
+    if overlapping is not None:
+        return overlapping
     # The stride-walked loop is reimplemented for one reason, which is to hand its tiles round;
     # left to decode them all here it would only be diffusers' own loop with a second author.
     if dispatch is None and assemble is None:
@@ -346,29 +316,24 @@ def _latent_areas(down, across, window, bounds) -> List[int]:
     ]
 
 
-def batched_tiled_decode(
+def overlap_tiled_decode(
     vae,
-    budget_elems: int,
     dispatch: Optional[Callable] = None,
     assemble: Optional[Callable] = None,
 ) -> Optional[Callable]:
-    """A tiled_decode for `vae` that decodes same-shaped tiles in one call, None where it can't
+    """A tiled_decode for the overlap-fraction family, None where the VAE is not one of them
 
-    Upstream decodes one tile per decoder call, and under --use_parallel_vae every one of those
-    calls pays a cost that does not shrink with the tile: a Patchify, a halo exchange per
-    convolution, a reduction per norm, and a DePatchify to gather the result. Narrowing the window
-    to save memory therefore multiplies a fixed cost, which is what makes a small tile size so
-    much slower than the VAE's own. Tiles are independent and, away from the right and bottom
-    edges, identically shaped, so they can be stacked on the batch dimension and share all of it.
-
-    `budget_elems` caps the latent area one call may carry; `tile_batch_budget` is what the runner
-    sizes it with. At 0, or wherever the budget only fits one tile, this decodes a tile at a time
-    and does exactly what upstream does.
+    One tile per decoder call, as upstream does. Tiles are independent and, away from the right
+    and bottom edges, identically shaped, so they could instead be stacked on the batch dimension
+    to pay a call's fixed cost once for several of them - and that was done here until 2026-08-06.
+    It was removed rather than tuned: stacking only pays below roughly a thousand latent elements
+    a tile, and every window that small is one where peak memory has already flattened, the decode
+    has got slower, and the sample has diverged past use. `narrowest_useful_window` keeps the
+    window above that instead, which leaves nothing for a batch to win.
 
     `dispatch` decides who makes those calls, and defaults to this rank making all of them in
-    order. `vae_tile_parallel` supplies one that deals them out to a group instead, which is the
-    other way to spend the independence between tiles and the one that removes the per-tile cost
-    above rather than dividing it.
+    order. `vae_tile_parallel` supplies one that deals them out to a group instead, which is how
+    the independence between tiles is actually spent.
 
     `assemble` goes further and divides the blending too, by giving each rank a run of
     neighbouring tiles to decode and stitch by itself. Where it declines - too few tiles to give
@@ -407,43 +372,12 @@ def batched_tiled_decode(
 
         def decode_with(share):
             def decode(where):
-                tiles = {at: latent_at(*at) for at in where}
-
-                by_shape = {}
-                for at, tile in tiles.items():
-                    by_shape.setdefault(tuple(tile.shape), []).append(at)
-
-                batches, calls = [], []
-                for shape, group in by_shape.items():
-                    # Budget by area rather than by tile count. Activation memory follows the
-                    # area being decoded, so one count would batch the widest tiles into an
-                    # allocation the VAE was never sized for while barely helping the narrow
-                    # ones. Edge tiles are clipped by the latent bounds and so group larger than
-                    # the full-shape ones for the same area.
-                    area = max(1, shape[0] * shape[-2] * shape[-1])
-                    per_call = max(1, budget_elems // area) if budget_elems > 0 else 1
-                    for start in range(0, len(group), per_call):
-                        batch = group[start : start + per_call]
-                        # One tile is handed over as it stands, so a budget that fits one tile
-                        # leaves the decoder the same tensor upstream would have given it.
-                        batched = (
-                            tiles[batch[0]]
-                            if len(batch) == 1
-                            else torch.cat([tiles[at] for at in batch], dim=0)
-                        )
-                        batches.append(batch)
-                        # Every call is built before any is made, so that a dispatcher can see
-                        # them all and hand them round. Each holds a latent tile, which is the
-                        # small side of the decode; what they return is not held any longer than
-                        # it was before.
-                        calls.append(functools.partial(vae.decoder, batched))
-
-                made = {}
-                for batch, out in zip(batches, share(calls)):
-                    stride = out.shape[0] // len(batch)
-                    for n, at in enumerate(batch):
-                        made[at] = out[n * stride : (n + 1) * stride]
-                return made
+                # Every call is built before any is made, so that a dispatcher can see them all
+                # and hand them round. Each holds a latent tile, which is the small side of the
+                # decode; what they return is not held any longer than it was before.
+                at_order = list(where)
+                calls = [functools.partial(vae.decoder, latent_at(*at)) for at in at_order]
+                return dict(zip(at_order, share(calls)))
 
             return decode
 
@@ -489,9 +423,9 @@ def strided_tiled_decode(
     feature cache, which is cleared at the start of each one, so a tile is independent of every
     other tile in the way the frames inside it are not.
 
-    Batching, which the overlap-fraction family gets from `batched_tiled_decode`, is not offered:
-    that exists to spread one round of collectives over several tiles, and a decode that hands
-    whole tiles out has no round to spread.
+    A tile per call, as in the other family: what made stacking them look worthwhile there did
+    not survive being measured, and `narrowest_useful_window` now keeps the window out of the
+    only range where it would have paid.
     """
     if not tiles_by_stored_stride(vae):
         return None

@@ -53,11 +53,11 @@ def asymmetric_vae():
     )
 
 
-def overlap_factor_vae():
-    """AutoencoderKL and friends again, carrying the blending the batched decode reuses"""
+def overlap_factor_vae(sample=256):
+    """AutoencoderKL and friends again, carrying the blending the tiled decode reuses"""
     return StubVAE(
-        tile_sample_min_size=256,
-        tile_latent_min_size=32,
+        tile_sample_min_size=sample,
+        tile_latent_min_size=sample // 8,
         tile_overlap_factor=0.25,
         blend_v=lambda above, tile, extent: tile,
         blend_h=lambda left, tile, extent: tile,
@@ -379,8 +379,31 @@ class TestEveryVAEARunnerLoads(unittest.TestCase):
                 )
 
 
-class TestTileBatching(unittest.TestCase):
-    """Decoding same-shaped tiles in one call, which has to leave the image exactly as it was"""
+class TestTheNarrowestUsefulWindow(unittest.TestCase):
+    """How far a window may be narrowed before it stops buying the memory it costs output for"""
+
+    def test_it_is_a_quarter_of_the_vae_s_own_window(self):
+        # A fraction rather than a pixel count, because the window a VAE ships is the tile size it
+        # was built around: 256px is two halvings down from flux2's 1024 and no narrowing at all
+        # for a VAE that ships 256.
+        for window in (1024, 512, 256, 64):
+            with self.subTest(window=window):
+                vae = overlap_factor_vae(sample=window)
+                self.assertEqual(vae_tiling.tile_window(vae), window)
+                self.assertEqual(vae_tiling.narrowest_useful_window(vae), window // 4)
+
+    def test_a_vae_with_no_single_window_has_no_floor_to_give(self):
+        # Nothing to take a quarter of, and the runner refuses --vae_tile_size on these anyway.
+        self.assertIsNone(vae_tiling.narrowest_useful_window(overlap_hw_vae()))
+
+    def test_the_floor_is_never_zero(self):
+        # A VAE whose window is smaller than the fraction would floor at nothing, and a window of
+        # zero pixels is not a window.
+        self.assertEqual(vae_tiling.narrowest_useful_window(overlap_factor_vae(sample=2)), 1)
+
+
+class TestTiledDecode(unittest.TestCase):
+    """The overlap-fraction loop reimplemented, which has to leave the image exactly as it was"""
 
     # The two VAE classes that tile by overlap fraction, reusing the stand-ins above.
     FAMILY = ("AutoencoderKL", "AutoencoderKLFlux2")
@@ -388,62 +411,14 @@ class TestTileBatching(unittest.TestCase):
     # the clipped ones at the right and bottom edges.
     WINDOWS_ACROSS = 3
 
-    def test_only_the_overlap_factor_family_is_batched(self):
+    def test_only_the_overlap_factor_family_has_this_loop(self):
         # The others walk a stride they store outright, over a loop with its own blending and,
         # for the video VAEs, a frame axis this knows nothing about.
         self.assertTrue(vae_tiling.tiles_by_overlap_factor(overlap_factor_vae()))
         self.assertFalse(vae_tiling.tiles_by_overlap_factor(stride_vae()))
         self.assertFalse(vae_tiling.tiles_by_overlap_factor(overlap_hw_vae()))
-        self.assertIsNone(vae_tiling.batched_tiled_decode(stride_vae(), 4096))
-        self.assertIsNotNone(vae_tiling.batched_tiled_decode(overlap_factor_vae(), 4096))
-
-    def test_the_tile_area_is_read_off_the_square_latent_window(self):
-        self.assertEqual(vae_tiling.tile_latent_area(overlap_factor_vae()), 32 * 32)
-        self.assertIsNone(vae_tiling.tile_latent_area(stride_vae()))
-
-    def test_a_tile_that_can_keep_the_device_busy_is_decoded_alone(self):
-        # Batching pays a call's cost once rather than once per tile, which is worth nothing once
-        # a tile is large enough that the call is bound by its arithmetic instead. Above the turn
-        # there is no budget at all, so a run that asked for no window of its own - and every
-        # run at a window only somewhat narrowed - decodes exactly as it always did.
-        default_area = 128 * 128
-        for edge in (128, 64, 32):
-            with self.subTest(latent_window=edge):
-                self.assertGreaterEqual(edge * edge, vae_tiling.SATURATING_LATENT_AREA)
-                self.assertIsNone(vae_tiling.tile_batch_budget(default_area, edge * edge))
-
-    def test_an_edge_tile_is_not_batched_where_a_full_one_beside_it_is_not(self):
-        # A grid's last row and column are clipped by the latent bounds, so they are smaller than
-        # the window without anybody asking for a narrower one. Batching them on that account
-        # would leave two ranks holding the same area making very differently shaped calls.
-        default_area = 128 * 128
-        for clipped in (128 * 64, 64 * 64, 64 * 32):
-            with self.subTest(latent_area=clipped):
-                self.assertIsNone(vae_tiling.tile_batch_budget(default_area, clipped))
-
-    def test_below_the_turn_halving_the_window_halves_the_area_a_call_carries(self):
-        # What --vae_tile_size promises, in the units it is set in: it is an edge, so halving the
-        # number halves the memory a decoder call needs. The tiles sharing each call's cost double
-        # at the same time, which is the other half of the bargain.
-        default_edge = 128
-        default_area = default_edge**2
-        for edge, tiles, carried in ((16, 8, 2048), (8, 16, 1024), (4, 32, 512)):
-            with self.subTest(latent_window=edge):
-                self.assertLess(edge * edge, vae_tiling.SATURATING_LATENT_AREA)
-                budget = vae_tiling.tile_batch_budget(default_area, edge * edge)
-                self.assertEqual(budget, carried)
-                self.assertEqual(budget // (edge * edge), tiles)
-                # Linear in the edge: an eighth of the window is an eighth of the area per call.
-                self.assertEqual(budget * default_edge, default_area * edge)
-
-    def test_a_vae_with_no_square_window_is_not_batched(self):
-        self.assertIsNone(vae_tiling.tile_batch_budget(None, 16))
-        self.assertIsNone(vae_tiling.tile_batch_budget(16384, None))
-
-    def test_the_budget_never_falls_below_a_single_tile(self):
-        # A tile larger than the VAE's own window cannot happen through --vae_tile_size, which
-        # refuses one, but a budget under a tile would decode nothing at all rather than one tile.
-        self.assertEqual(vae_tiling.tile_batch_budget(4, 16), 16)
+        self.assertIsNone(vae_tiling.overlap_tiled_decode(stride_vae()))
+        self.assertIsNotNone(vae_tiling.overlap_tiled_decode(overlap_factor_vae()))
 
     def _tiled_vae(self, name, batch=1):
         """A small VAE of class `name` at a narrowed window, and latents several tiles across"""
@@ -495,119 +470,37 @@ class TestTileBatching(unittest.TestCase):
         vae.decoder = counted
         return counted
 
-    def test_a_batched_decode_gives_the_image_an_unbatched_one_gives(self):
+    def test_it_decodes_a_tile_at_a_time_exactly_as_upstream_does(self):
         import torch
 
+        # This loop exists to hand the calls round, not to compute differently, so with nobody to
+        # hand them to it has to be indistinguishable from the loop it replaces - to the bit, not
+        # to a tolerance. Tiles used to be stacked onto the batch dimension here, which cost a
+        # ~1e-5 residue because a convolution blocks off the rows it is handed; a tile to a call
+        # spends nothing to be exact.
         for name in self.FAMILY:
             with self.subTest(vae=name):
                 vae, latents = self._tiled_vae(name)
                 with torch.no_grad():
                     expected = vae.tiled_decode(latents).sample
                     counted = self._counted(vae)
-                    batched = vae_tiling.batched_tiled_decode(
-                        vae, vae.tile_latent_min_size**2 * 8
-                    )
-                    got = batched(latents).sample
-                # Nothing here changes what is summed, only how many rows a kernel is handed at
-                # once, and a convolution picks its blocking off that. The residue is around
-                # 1e-5 on an image in [-1, 1]; a tile put back in the wrong place would be off by
-                # order one, which this still catches.
+                    got = vae_tiling.overlap_tiled_decode(vae)(latents).sample
                 self.assertEqual(got.shape, expected.shape)
-                torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
-                self.assertTrue(
-                    any(rows > 1 for rows in counted.rows),
-                    f"{name} decoded every tile on its own, so this proved nothing",
-                )
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
+                self.assertEqual(set(counted.rows), {1})
 
-    def test_a_latent_batch_is_taken_apart_again(self):
+    def test_a_latent_batch_is_decoded_as_it_stands(self):
         import torch
 
-        # Each tile carries every sample in the batch, so a call decodes tiles x samples rows and
-        # the split back out has to step by the batch and not by one.
+        # Each tile carries every sample in the batch, so a call already decodes as many rows as
+        # there are samples and the decoder is handed the tensor upstream would have given it.
         vae, latents = self._tiled_vae("AutoencoderKL", batch=2)
         with torch.no_grad():
             expected = vae.tiled_decode(latents).sample
-            got = vae_tiling.batched_tiled_decode(
-                vae, vae.tile_latent_min_size**2 * 8
-            )(latents).sample
-        torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
-
-    def test_a_budget_of_one_tile_decodes_exactly_as_upstream_does(self):
-        import torch
-
-        # This is what the default window gets: the budget is that window's own area, so nothing
-        # about the decode changes for a run that did not ask for a smaller tile.
-        vae, latents = self._tiled_vae("AutoencoderKL")
-        with torch.no_grad():
-            expected = vae.tiled_decode(latents).sample
             counted = self._counted(vae)
-            got = vae_tiling.batched_tiled_decode(
-                vae, vae.tile_latent_min_size**2
-            )(latents).sample
-        self.assertEqual(set(counted.rows), {1})
+            got = vae_tiling.overlap_tiled_decode(vae)(latents).sample
+        self.assertEqual(set(counted.rows), {2})
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
-
-    def test_a_budget_of_zero_decodes_exactly_as_upstream_does(self):
-        import torch
-
-        vae, latents = self._tiled_vae("AutoencoderKL")
-        with torch.no_grad():
-            expected = vae.tiled_decode(latents).sample
-            counted = self._counted(vae)
-            got = vae_tiling.batched_tiled_decode(vae, 0)(latents).sample
-        self.assertEqual(set(counted.rows), {1})
-        torch.testing.assert_close(got, expected, rtol=0, atol=0)
-
-    def test_the_budget_caps_the_area_one_call_carries(self):
-        import torch
-
-        vae, latents = self._tiled_vae("AutoencoderKL")
-        window = vae.tile_latent_min_size
-        decoder = vae.decoder
-        for tiles_per_call in (1, 2, 4):
-            with self.subTest(tiles_per_call=tiles_per_call):
-                budget = window**2 * tiles_per_call
-                vae.decoder = decoder
-                counted = self._counted(vae)
-                with torch.no_grad():
-                    vae_tiling.batched_tiled_decode(vae, budget)(latents)
-                # No call may carry more latent area than the budget, which is what holds peak
-                # memory where the VAE's own window put it.
-                for shape in counted.shapes:
-                    self.assertLessEqual(shape[0] * shape[-2] * shape[-1], budget)
-                # The full-shape tiles spend the budget exactly, so the batch tracks it. Tiles
-                # clipped by the latent bounds are smaller, and group larger for the same area.
-                self.assertEqual(max(counted.rows), tiles_per_call)
-        vae.decoder = decoder
-
-    def test_the_narrowed_window_sets_the_batch_and_leaves_the_image_alone(self):
-        import torch
-        import diffusers
-
-        # The two ends of the rule joined up: the budget the runner computes from the VAE's own
-        # window and the narrowed one, spent by the decode that window produced.
-        kwargs, _, _ = TestEveryVAEARunnerLoads.VAES["AutoencoderKL"]
-        untouched = diffusers.AutoencoderKL(**kwargs).eval()
-        untouched.enable_tiling()
-        default_area = vae_tiling.tile_latent_area(untouched)
-
-        vae, latents = self._tiled_vae("AutoencoderKL")
-        narrowed_area = vae_tiling.tile_latent_area(vae)
-        budget = vae_tiling.tile_batch_budget(default_area, narrowed_area)
-        # Stated as the property rather than the numbers this particular stub lands on: the
-        # budget is the geometric mean, so it sits between the two areas it was taken from.
-        self.assertEqual(budget**2, default_area * narrowed_area)
-        self.assertLess(narrowed_area, budget)
-        self.assertLess(budget, default_area)
-
-        with torch.no_grad():
-            expected = vae.tiled_decode(latents).sample
-            counted = self._counted(vae)
-            got = vae_tiling.batched_tiled_decode(vae, budget)(latents).sample
-        self.assertEqual(max(counted.rows), budget // narrowed_area)
-        for shape in counted.shapes:
-            self.assertLess(shape[0] * shape[-2] * shape[-1], default_area)
-        torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
 
     def test_only_a_reimplemented_loop_can_have_its_tiles_dealt_out(self):
         # Choosing which rank makes which decoder call means owning the loop that makes them.
@@ -619,7 +512,6 @@ class TestTileBatching(unittest.TestCase):
         import torch
 
         vae, latents = self._tiled_vae("AutoencoderKL")
-        budget = vae.tile_latent_min_size**2 * 2
         seen = []
 
         def dispatch(calls):
@@ -629,13 +521,11 @@ class TestTileBatching(unittest.TestCase):
         with torch.no_grad():
             expected = vae.tiled_decode(latents).sample
             counted = self._counted(vae)
-            got = vae_tiling.batched_tiled_decode(vae, budget, dispatch)(latents).sample
+            got = vae_tiling.overlap_tiled_decode(vae, dispatch)(latents).sample
         # One dispatch for the decode, holding every call it would have made itself, which is
         # what lets a group divide them and pay for one exchange rather than one per tile.
         self.assertEqual(seen, [len(counted.shapes)])
-        # Batched, so the same residue as the batching tests above: a convolution blocks off the
-        # rows it is handed, and a tile in the wrong place would be off by order one.
-        torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_the_calls_can_be_made_in_any_order(self):
         import torch
@@ -650,18 +540,18 @@ class TestTileBatching(unittest.TestCase):
 
         with torch.no_grad():
             expected = vae.tiled_decode(latents).sample
-            got = vae_tiling.batched_tiled_decode(vae, 0, backwards)(latents).sample
+            got = vae_tiling.overlap_tiled_decode(vae, backwards)(latents).sample
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_a_tiled_decode_that_fits_in_one_tile_still_works(self):
         import torch
 
-        # A single tile means one shape, one group, and no blending pass at all.
+        # A single tile means one call and no blending pass at all.
         vae, _ = self._tiled_vae("AutoencoderKL")
         latents = torch.randn(1, vae.config.latent_channels, 4, 4)
         with torch.no_grad():
             expected = vae.tiled_decode(latents).sample
-            got = vae_tiling.batched_tiled_decode(vae, 1 << 20)(latents).sample
+            got = vae_tiling.overlap_tiled_decode(vae)(latents).sample
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
 
@@ -765,8 +655,8 @@ class TestStrideTiledDecode(unittest.TestCase):
         # so the VAE keeps its own and only a dispatcher brings this one in.
         vae, _ = self._tiled_vae("AutoencoderKLWan")
         self.assertTrue(vae_tiling.supports_tile_parallel(vae))
-        self.assertIsNone(vae_tiling.tiled_decode_for(vae, 0))
-        self.assertIsNotNone(vae_tiling.tiled_decode_for(vae, 0, lambda calls: []))
+        self.assertIsNone(vae_tiling.tiled_decode_for(vae))
+        self.assertIsNotNone(vae_tiling.tiled_decode_for(vae, lambda calls: []))
 
 
 if __name__ == "__main__":

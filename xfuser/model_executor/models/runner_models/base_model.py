@@ -345,13 +345,8 @@ class xFuserModel(abc.ABC):
                 vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                 log(f"Enabling VAE tiling on {type(vae).__name__}...")
                 vae.enable_tiling()
-                # Read the VAE's own window before the next line can narrow it: the budget is
-                # derived from both areas, so both have to be read either side of the narrowing.
-                default_area = vae_tiling.tile_latent_area(vae)
                 tile_window = self._apply_vae_tile_size(vae)
-                self._install_vae_tiled_decode(
-                    vae, default_area, vae_tiling.tile_latent_area(vae)
-                )
+                self._install_vae_tiled_decode(vae)
             # Installed either way, so a decode that OOMs with tiling off still says so.
             self._install_vae_decode_guard(vae, tile_window)
 
@@ -1123,6 +1118,15 @@ class xFuserModel(abc.ABC):
             log(f"--vae_tile_size {requested} is larger than this VAE's {window}px tile window, "
                 f"which would raise peak memory rather than lower it; leaving it at {window}px.")
             return None
+        # Narrowing buys memory only until the tile stops being what the decode is holding, and
+        # past that it costs seams and time for nothing. Clamped rather than refused, because a
+        # window this narrow is someone reaching for memory that is no longer there to save.
+        narrowest = vae_tiling.narrowest_useful_window(vae)
+        if narrowest is not None and requested < narrowest:
+            log(f"--vae_tile_size {requested} is below a quarter of this VAE's {window}px tile "
+                f"window, where peak memory has stopped falling and only the seams and the time "
+                f"keep growing; using {narrowest}px instead.")
+            requested = narrowest
         pixels, plan = vae_tiling.snap_tile_window(vae, requested)
         if plan is None:
             smallest = vae_tiling.smallest_tile_window(vae, requested, window)
@@ -1167,39 +1171,23 @@ class xFuserModel(abc.ABC):
              f", and no size up to this VAE's own {window}px window gives them one each.")
         )
 
-    def _install_vae_tiled_decode(
-        self, vae, default_area: Optional[int], tile_area: Optional[int]
-    ) -> None:
-        """Decode a tiled VAE's tiles together where they share a call, and apart across a group"""
-        # Two ways to spend the independence between tiles, and they are not alternatives. The
-        # group takes whole tiles, which is what removes the per-tile cost of dividing each one;
-        # the budget decides how many tiles a rank puts through a single call, which is worth
-        # doing only while a tile is too small to keep a device busy. tile_batch_budget holds
-        # that judgement, and it is the same judgement whoever is making the call.
+    def _install_vae_tiled_decode(self, vae) -> None:
+        """Decode a tiled VAE's tiles apart across a group, a tile to a call"""
+        # There is one thing worth doing with the independence between tiles, which is to give
+        # them to different ranks. Stacking several into one call was the other, and it only ever
+        # paid at window sizes _apply_vae_tile_size now refuses, so with no group there is nothing
+        # to install and upstream's own loop stands.
         group = vae_tile_parallel.group_of(vae)
-        dispatch, assemble = (
-            vae_tile_parallel.sharing(group) if group is not None else (None, None)
-        )
-        budget_elems = vae_tiling.tile_batch_budget(default_area, tile_area)
-        if budget_elems is None and dispatch is None:
+        if group is None:
             return
-        installed = vae_tiling.tiled_decode_for(
-            vae, budget_elems or 0, dispatch, assemble
-        )
+        dispatch, assemble = vae_tile_parallel.sharing(group)
+        installed = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
         if installed is None:
             return
         vae.tiled_decode = installed
-        carried = (
-            f"tiles batched up to {budget_elems} latent elements per call, its own window "
-            f"carrying {default_area}"
-            if budget_elems
-            else "a tile per call"
-        )
-        log(f"VAE tiled decode on {type(vae).__name__}: {carried}"
-            + (f", divided across {torch.distributed.get_world_size(group)} ranks, "
-               f"a run of neighbouring tiles each to decode and blend where the grid "
-               f"has the tiles to spare them."
-               if group is not None else "."))
+        log(f"VAE tiled decode on {type(vae).__name__}: a tile per call, divided across "
+            f"{torch.distributed.get_world_size(group)} ranks, a run of neighbouring tiles each "
+            f"to decode and blend where the grid has the tiles to spare them.")
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
         # Point a failed VAE decode at the knob that fixes it. Success path untouched.

@@ -5,6 +5,7 @@ they relate, and which releases have them. Nothing reads xDiT config or touches 
 the policy around these numbers lives with the runner instead.
 """
 
+import functools
 import math
 from typing import Callable, Optional, Tuple
 
@@ -242,7 +243,18 @@ def tiles_by_overlap_factor(vae) -> bool:
     )
 
 
-def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
+def supports_tile_parallel(vae) -> bool:
+    """Whether this VAE's tiling loop is one of the ones reimplemented here
+
+    Deciding which rank makes which decoder call means owning the loop that makes them, so this
+    is what a caller asks before planning to decode a VAE's tiles apart from one another.
+    """
+    return tiles_by_overlap_factor(vae)
+
+
+def batched_tiled_decode(
+    vae, budget_elems: int, dispatch: Optional[Callable] = None
+) -> Optional[Callable]:
     """A tiled_decode for `vae` that decodes same-shaped tiles in one call, None where it can't
 
     Upstream decodes one tile per decoder call, and under --use_parallel_vae every one of those
@@ -255,6 +267,11 @@ def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
     `budget_elems` caps the latent area one call may carry; `tile_batch_budget` is what the runner
     sizes it with. At 0, or wherever the budget only fits one tile, this decodes a tile at a time
     and does exactly what upstream does.
+
+    `dispatch` decides who makes those calls, and defaults to this rank making all of them in
+    order. `vae_tile_parallel` supplies one that deals them out to a group instead, which is the
+    other way to spend the independence between tiles and the one that removes the per-tile cost
+    above rather than dividing it.
     """
     if not tiles_by_overlap_factor(vae):
         return None
@@ -289,7 +306,7 @@ def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
         for index, tile in enumerate(tiles):
             by_shape.setdefault(tuple(tile.shape), []).append(index)
 
-        decoded = [None] * len(tiles)
+        batches, calls = [], []
         for shape, indices in by_shape.items():
             # Budget by area rather than by tile count. Activation memory follows the area being
             # decoded, so one count would batch the widest tiles into an allocation the VAE was
@@ -298,18 +315,26 @@ def batched_tiled_decode(vae, budget_elems: int) -> Optional[Callable]:
             area = max(1, shape[0] * shape[-2] * shape[-1])
             per_call = max(1, budget_elems // area) if budget_elems > 0 else 1
             for start in range(0, len(indices), per_call):
-                group = indices[start : start + per_call]
+                batch = indices[start : start + per_call]
                 # One tile is handed over as it stands, so a budget that fits one tile leaves the
                 # decoder the same tensor upstream would have given it.
                 batched = (
-                    tiles[group[0]]
-                    if len(group) == 1
-                    else torch.cat([tiles[k] for k in group], dim=0)
+                    tiles[batch[0]]
+                    if len(batch) == 1
+                    else torch.cat([tiles[k] for k in batch], dim=0)
                 )
-                out = vae.decoder(batched)
-                stride = out.shape[0] // len(group)
-                for n, k in enumerate(group):
-                    decoded[k] = out[n * stride : (n + 1) * stride]
+                batches.append(batch)
+                # Every call is built before any is made, so that a dispatcher can see them all
+                # and hand them round. Each holds a latent tile, which is the small side of the
+                # decode; what they return is not held any longer than it was before.
+                calls.append(functools.partial(vae.decoder, batched))
+
+        made = dispatch(calls) if dispatch is not None else [call() for call in calls]
+        decoded = [None] * len(tiles)
+        for batch, out in zip(batches, made):
+            stride = out.shape[0] // len(batch)
+            for n, k in enumerate(batch):
+                decoded[k] = out[n * stride : (n + 1) * stride]
 
         columns = len(range(0, z.shape[3], overlap_size))
         rows = [decoded[k : k + columns] for k in range(0, len(decoded), columns)]

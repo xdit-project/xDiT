@@ -594,6 +594,48 @@ class TestTileBatching(unittest.TestCase):
             self.assertLess(shape[0] * shape[-2] * shape[-1], default_area)
         torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
 
+    def test_only_a_reimplemented_loop_can_have_its_tiles_dealt_out(self):
+        # Choosing which rank makes which decoder call means owning the loop that makes them.
+        self.assertTrue(vae_tiling.supports_tile_parallel(overlap_factor_vae()))
+        self.assertFalse(vae_tiling.supports_tile_parallel(stride_vae()))
+        self.assertFalse(vae_tiling.supports_tile_parallel(overlap_hw_vae()))
+
+    def test_the_dispatcher_is_given_every_call_and_the_image_is_unchanged(self):
+        import torch
+
+        vae, latents = self._tiled_vae("AutoencoderKL")
+        budget = vae.tile_latent_min_size**2 * 2
+        seen = []
+
+        def dispatch(calls):
+            seen.append(len(calls))
+            return [call() for call in calls]
+
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            counted = self._counted(vae)
+            got = vae_tiling.batched_tiled_decode(vae, budget, dispatch)(latents).sample
+        # One dispatch for the decode, holding every call it would have made itself, which is
+        # what lets a group divide them and pay for one exchange rather than one per tile.
+        self.assertEqual(seen, [len(counted.shapes)])
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_the_calls_can_be_made_in_any_order(self):
+        import torch
+
+        # What a rank split rests on: the tiles are independent, so which order the decoder sees
+        # them in cannot matter. Only the assembly afterwards has an order, and it works off the
+        # results rather than the calls.
+        vae, latents = self._tiled_vae("AutoencoderKL")
+
+        def backwards(calls):
+            return list(reversed([call() for call in reversed(calls)]))
+
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+            got = vae_tiling.batched_tiled_decode(vae, 0, backwards)(latents).sample
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
     def test_a_tiled_decode_that_fits_in_one_tile_still_works(self):
         import torch
 

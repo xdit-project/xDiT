@@ -37,7 +37,7 @@ from xfuser.core.utils.runner_utils import (
     _use_aiter_fp8_rdna4,
     rgetattr,
 )
-from xfuser.core.utils import vae_parallel, vae_tiling
+from xfuser.core.utils import vae_parallel, vae_tile_parallel, vae_tiling
 
 from xfuser.core.distributed import (
     get_world_group,
@@ -349,7 +349,7 @@ class xFuserModel(abc.ABC):
                 # derived from both areas, so both have to be read either side of the narrowing.
                 default_area = vae_tiling.tile_latent_area(vae)
                 tile_window = self._apply_vae_tile_size(vae)
-                self._install_vae_tile_batching(
+                self._install_vae_tiled_decode(
                     vae, default_area, vae_tiling.tile_latent_area(vae)
                 )
             # Installed either way, so a decode that OOMs with tiling off still says so.
@@ -382,9 +382,21 @@ class xFuserModel(abc.ABC):
         vae_group = get_vae_parallel_group().device_group
         log(f"VAE parallel group: world_size={torch.distributed.get_world_size(vae_group)}, "
             f"rank={torch.distributed.get_rank(vae_group)}", debug=True)
+        # Tiling has already divided the decode into independent pieces, and sharding divides
+        # each piece again: DistVAE splits the rows of every tile it is handed, so the exchanges
+        # that split costs are paid per tile rather than per decode. Where the tiling loop is one
+        # xFuser owns, whole tiles go out to the ranks instead and the decoder is left alone,
+        # each rank decoding a tile the way one GPU would. _enable_options installs that, once
+        # the window whose tiles are being dealt out has been settled.
+        tiling = self.config.enable_tiling or self.config.vae_tile_size is not None
         for vae in self._decoding_vaes():
-            adapter = vae_parallel.parallelize_decoder(vae, vae_group)
-            log(f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}.")
+            if tiling and vae_tiling.supports_tile_parallel(vae):
+                vae_tile_parallel.mark(vae, vae_group)
+                log(f"Parallel VAE will deal whole tiles out to the group on "
+                    f"{type(vae).__name__}, rather than shard the rows within each tile.")
+            else:
+                adapter = vae_parallel.parallelize_decoder(vae, vae_group)
+                log(f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}.")
             # Only an I2V or V2V model encodes anything worth sharding, so this is a capability
             # rather than a flag: there is nothing for a user to decide.
             if self.capabilities.use_parallel_vae_encoder:
@@ -1138,6 +1150,10 @@ class xFuserModel(abc.ABC):
         # split rather than reporting anything.
         if not (self.config.use_parallel_vae and self.capabilities.use_parallel_vae):
             return
+        # Unless the tiles are what the ranks divide, in which case nothing divides a tile and a
+        # window narrower than the group is no longer anybody's problem.
+        if vae_tile_parallel.group_of(vae) is not None:
+            return
         ranks = get_vae_parallel_world_size()
         rows = vae_tiling.latent_rows(vae, plan)
         if ranks < 2 or rows is None or rows >= ranks:
@@ -1151,23 +1167,29 @@ class xFuserModel(abc.ABC):
              f", and no size up to this VAE's own {window}px window gives them one each.")
         )
 
-    def _install_vae_tile_batching(
+    def _install_vae_tiled_decode(
         self, vae, default_area: Optional[int], tile_area: Optional[int]
     ) -> None:
-        """Decode a tiled VAE's same-shaped tiles together, within a budget the window sets"""
-        # Every decoder call costs the same whatever the tile, and under --use_parallel_vae that
-        # cost is a round of collectives rather than arithmetic, so a narrow window pays it over
-        # and over. Batching spreads one round over many tiles without taking back all of the
-        # memory the narrow window was asked for; tile_batch_budget is where that balance is set.
+        """Decode a tiled VAE's tiles together where they share a call, and apart across a group"""
+        # Every decoder call costs the same whatever the tile, and where the group is dividing
+        # each tile that cost is a round of collectives rather than arithmetic, so a narrow window
+        # pays it over and over. Batching spreads one round over many tiles without taking back
+        # all of the memory the narrow window was asked for; tile_batch_budget is where that
+        # balance is set. Where the group is dividing the tiles instead there are no rounds to
+        # spread, and the budget is only holding peak memory to what the window asked for.
+        group = vae_tile_parallel.group_of(vae)
+        dispatch = vae_tile_parallel.dispatch_over(group) if group is not None else None
         budget_elems = vae_tiling.tile_batch_budget(default_area, tile_area)
-        if budget_elems is None:
+        if budget_elems is None and dispatch is None:
             return
-        batched = vae_tiling.batched_tiled_decode(vae, budget_elems)
+        batched = vae_tiling.batched_tiled_decode(vae, budget_elems or 0, dispatch)
         if batched is None:
             return
         vae.tiled_decode = batched
         log(f"VAE tiled decode will batch tiles up to {budget_elems} latent elements per call "
-            f"on {type(vae).__name__} (its own window carries {default_area}).")
+            f"on {type(vae).__name__} (its own window carries {default_area})"
+            + (f", dealt out across {torch.distributed.get_world_size(group)} ranks."
+               if group is not None else "."))
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
         # Point a failed VAE decode at the knob that fixes it. Success path untouched.

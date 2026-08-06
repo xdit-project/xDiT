@@ -443,7 +443,11 @@ class TorchaoFp8BackendAdapter(Fp8BackendAdapter):
         from xfuser.core.utils.runner_utils import (
             _get_fp8_kernel_preference,
         )
+        from xfuser.model_executor.quant.torchao_quantizer import (
+            register_torchao_fp32_policy,
+        )
 
+        register_torchao_fp32_policy()
         quant_type = Float8DynamicActivationFloat8WeightConfig(
             granularity=PerTensor(),
             set_inductor_config=False,

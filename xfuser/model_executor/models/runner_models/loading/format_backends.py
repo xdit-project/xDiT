@@ -549,7 +549,11 @@ def module_path_is_covered(path: str, owner: str) -> bool:
 
 def _torchao_stream_config(kind: str, exclusions):
     from diffusers import TorchAoConfig
+    from xfuser.model_executor.quant.torchao_quantizer import (
+        register_torchao_fp32_policy,
+    )
 
+    register_torchao_fp32_policy()
     if kind == "nvfp4":
         from torchao.prototype.mx_formats.inference_workflow import (
             NVFP4DynamicActivationNVFP4WeightConfig,

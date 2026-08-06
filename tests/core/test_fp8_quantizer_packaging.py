@@ -72,6 +72,60 @@ def test_text_encoder_config_registers_the_transformers_side():
     """) == "(False, True)"
 
 
+@pytest.mark.slow
+def test_importing_the_torchao_policy_registers_nothing():
+    """Swapping diffusers' torchao quantizer is global, so only a streaming load may do it."""
+    assert probe_registration("""
+        import xfuser.model_executor.quant.torchao_quantizer  # noqa: F401
+        from diffusers.quantizers.auto import AUTO_QUANTIZER_MAPPING as d
+        from diffusers.quantizers.quantization_config import QuantizationMethod
+        installed = d[QuantizationMethod.TORCHAO]
+        print(getattr(installed, "use_keep_in_fp32_modules", False))
+    """) == "False"
+
+
+@pytest.mark.slow
+def test_the_torchao_policy_opts_into_the_models_fp32_modules():
+    """Without this, a streamed TorchAO load demotes the modules a model pins to fp32, so it would
+    load different weights than the post-load quantization walk for the same checkpoint."""
+    assert probe_registration("""
+        from diffusers.quantizers.auto import AUTO_QUANTIZER_MAPPING as d
+        from diffusers.quantizers.quantization_config import QuantizationMethod
+        from xfuser.model_executor.quant.torchao_quantizer import (
+            register_torchao_fp32_policy,
+        )
+        original = d[QuantizationMethod.TORCHAO]
+        register_torchao_fp32_policy()
+        installed = d[QuantizationMethod.TORCHAO]
+        print((
+            installed.use_keep_in_fp32_modules,
+            issubclass(installed, original),
+        ))
+    """) == "(True, True)"
+
+
+def test_the_torchao_policy_leaves_an_opted_in_quantizer_alone(monkeypatch):
+    """A no-op once diffusers opts in upstream, rather than a redundant subclass."""
+    from diffusers.quantizers.auto import AUTO_QUANTIZER_MAPPING
+    from diffusers.quantizers.quantization_config import QuantizationMethod
+    from xfuser.model_executor.quant import torchao_quantizer
+
+    class AlreadyOptedIn:
+        use_keep_in_fp32_modules = True
+
+    monkeypatch.setitem(
+        AUTO_QUANTIZER_MAPPING, QuantizationMethod.TORCHAO, AlreadyOptedIn
+    )
+    torchao_quantizer.register_torchao_fp32_policy.cache_clear()
+    try:
+        torchao_quantizer.register_torchao_fp32_policy()
+        assert (
+            AUTO_QUANTIZER_MAPPING[QuantizationMethod.TORCHAO] is AlreadyOptedIn
+        )
+    finally:
+        torchao_quantizer.register_torchao_fp32_policy.cache_clear()
+
+
 def test_missing_streaming_loader_gives_an_actionable_error(monkeypatch):
     """On a transformers below the streaming loader, the failure has to name the requirement rather
     than surface as an ImportError from inside the load."""

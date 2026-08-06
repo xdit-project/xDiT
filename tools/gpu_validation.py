@@ -184,8 +184,6 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
             raise ValueError(f"{case_id}: local checkpoint requires env")
         if not isinstance(case["world_size"], int) or case["world_size"] < 1:
             raise ValueError(f"{case_id}: world_size must be positive")
-        if case["placement"] == "eager" and case["world_size"] != 1:
-            raise ValueError(f"{case_id}: eager placement requires world_size 1")
         if case["placement"] != "eager" and case["world_size"] < 2:
             raise ValueError(
                 f"{case_id}: distributed placement requires multiple ranks"

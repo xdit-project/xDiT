@@ -181,7 +181,7 @@ def test_distributed_commands_declare_a_parallel_degree(runner, matrix):
 def test_every_placement_declares_a_parallel_degree_when_distributed(
     runner, matrix, placement
 ):
-    """The matrix has no multi-rank eager case, so cover the seam directly."""
+    """A multi-rank eager case is the control for the memory-efficient loads."""
 
     case = dict(
         next(case for case in matrix["cases"] if case["world_size"] == 1),
@@ -190,9 +190,13 @@ def test_every_placement_declares_a_parallel_degree_when_distributed(
         world_size=4,
     )
 
+    runner.validate_matrix({**matrix, "cases": [case]})
     command = runner.build_command(case, matrix["defaults"], run_id="test-run")
 
     assert command[command.index("--ulysses_degree") + 1] == "4"
+    memory_efficient = ("--memory_efficient_replicated_load", "--fully_shard_degree")
+    if placement == "eager":
+        assert not any(flag in command for flag in memory_efficient)
 
 
 def test_local_checkpoint_command_keeps_env_placeholder(runner, matrix):

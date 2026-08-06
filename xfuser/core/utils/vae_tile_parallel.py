@@ -96,25 +96,71 @@ def sharing(group) -> Tuple[Dispatch, Callable]:
     return dispatch_over(group), functools.partial(assemble_in_runs, group)
 
 
-def runs(tiles: int, world_size: int) -> List[Tuple[int, int]]:
-    """`tiles` split into one contiguous run per rank, as evenly as they divide
+def runs(weights: Sequence[int], world_size: int) -> List[Tuple[int, int]]:
+    """Tiles split into one contiguous run per rank, as evenly by `weights` as they divide
 
     Contiguous in the order the tiling loop walks, which is what makes a run cheap to blend: its
     tiles' neighbours are mostly its own. Split by tile rather than by row, because a row is too
     coarse a unit to balance with - three rows over two ranks is a two-to-one split, and the rank
     left waiting costs more than dividing the blending saves.
+
+    Weighed by area rather than counted, because the two disagree in exactly the way a contiguous
+    run is worst placed to survive. The latent bounds clip the last row and the last column, so
+    the cheap tiles are not spread through the grid but gathered at the end of it, and an equal
+    count of them hands the last rank the lightest work every time.
+
+    The split minimises the heaviest run, since the decode waits for that one. Found by asking
+    whether a given ceiling can be met, which is a greedy walk, and halving the interval of
+    ceilings around it.
     """
-    base, extra = divmod(tiles, world_size)
-    out, at = [], 0
-    for rank in range(world_size):
-        take = base + (1 if rank < extra else 0)
-        out.append((at, at + take))
-        at += take
+    if world_size < 2:
+        return [(0, len(weights))]
+    low, high = max(weights), sum(weights)
+    while low < high:
+        middle = (low + high) // 2
+        if len(_greedy(weights, middle)) <= world_size:
+            high = middle
+        else:
+            low = middle + 1
+    return _widen(_greedy(weights, low), world_size)
+
+
+def _greedy(weights: Sequence[int], ceiling: int) -> List[Tuple[int, int]]:
+    """The fewest contiguous runs none of which weighs more than `ceiling`"""
+    out, start, carried = [], 0, 0
+    for at, weight in enumerate(weights):
+        if carried and carried + weight > ceiling:
+            out.append((start, at))
+            start, carried = at, 0
+        carried += weight
+    out.append((start, len(weights)))
     return out
 
 
+def _widen(split: List[Tuple[int, int]], world_size: int) -> List[Tuple[int, int]]:
+    """Enough runs for every rank, by halving the ones holding most tiles
+
+    A ceiling that a few ranks can meet leaves the rest with nothing, and a rank holding no tile
+    has no tensor of its own to take a dtype and a device from. Halving cannot raise the heaviest
+    run, so nothing found above is given up here.
+    """
+    while len(split) < world_size:
+        widest = max(range(len(split)), key=lambda n: split[n][1] - split[n][0])
+        start, stop = split[widest]
+        if stop - start < 2:
+            break  # fewer tiles than ranks, which the caller declines before asking
+        middle = (start + stop) // 2
+        split[widest : widest + 1] = [(start, middle), (middle, stop)]
+    return split
+
+
 def assemble_in_runs(
-    group, rows: int, columns: int, decode: Decode, blend: Blend
+    group,
+    rows: int,
+    columns: int,
+    decode: Decode,
+    blend: Blend,
+    weights: Sequence[int],
 ) -> Optional[torch.Tensor]:
     """Assemble a tile grid with each rank decoding and blending its own run, None if it can't
 
@@ -150,7 +196,7 @@ def assemble_in_runs(
         return None
 
     rank = dist.get_rank(group)
-    start, stop = runs(len(order), world_size)[rank]
+    start, stop = runs(weights, world_size)[rank]
     mine = decode(order[start:stop])
 
     # Exchanged before anything is blended, both because the edges are raw at that point and

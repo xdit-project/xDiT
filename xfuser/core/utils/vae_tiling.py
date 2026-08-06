@@ -307,6 +307,21 @@ def tiled_decode_for(
     return strided_tiled_decode(vae, dispatch, assemble)
 
 
+def _latent_areas(down, across, window, bounds) -> List[int]:
+    """The latent area each tile of the grid covers, in the order the loop walks
+
+    What a tile costs to decode follows the latent it is cut from, and the tiles on the last row
+    and the last column are cut short by the bounds. Which of them are short is the same on every
+    rank, being read off the grid rather than off a decoded tile.
+    """
+    deep, wide = window if isinstance(window, tuple) else (window, window)
+    return [
+        (min(top + deep, bounds[0]) - top) * (min(left + wide, bounds[1]) - left)
+        for top in down
+        for left in across
+    ]
+
+
 def batched_tiled_decode(
     vae,
     budget_elems: int,
@@ -419,9 +434,13 @@ def batched_tiled_decode(
         )
         dec = None
         if assemble is not None:
-            # A band decodes its own tiles, so the calls stay here rather than going round again.
+            # A run decodes its own tiles, so the calls stay here rather than going round again.
             dec = assemble(
-                len(down), len(across), decode_with(vae_tile_parallel.in_order), blend
+                len(down),
+                len(across),
+                decode_with(vae_tile_parallel.in_order),
+                blend,
+                _latent_areas(down, across, vae.tile_latent_min_size, z.shape[2:]),
             )
         if dec is None:
             share = dispatch if dispatch is not None else vae_tile_parallel.in_order
@@ -539,7 +558,16 @@ def strided_tiled_decode(
         dec = None
         if assemble is not None:
             dec = assemble(
-                len(down), len(across), decode_with(vae_tile_parallel.in_order), blend
+                len(down),
+                len(across),
+                decode_with(vae_tile_parallel.in_order),
+                blend,
+                _latent_areas(
+                    down,
+                    across,
+                    (latent_min_height, latent_min_width),
+                    (height, width),
+                ),
             )
         if dec is None:
             share = dispatch if dispatch is not None else vae_tile_parallel.in_order

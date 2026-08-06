@@ -1,5 +1,7 @@
 """Dealing a tiled decode's calls out to a group, over gloo, without a GPU or a VAE in sight"""
 
+import itertools
+import random
 import socket
 import unittest
 from datetime import timedelta
@@ -18,6 +20,13 @@ SHAPES = ((2, 3), (2, 3), (2, 3), (2, 3), (1, 3), (2, 1))
 def _result(index: int) -> torch.Tensor:
     """What call `index` returns: its own number, in a shape only it has"""
     return torch.full(SHAPES[index], float(index), dtype=torch.float32)
+
+
+def _every_split(tiles: int, world_size: int):
+    """Every way to cut `tiles` into `world_size` contiguous non-empty runs"""
+    for cuts in itertools.combinations(range(1, tiles), world_size - 1):
+        edges = (0,) + cuts + (tiles,)
+        yield list(zip(edges, edges[1:]))
 
 
 def _free_port() -> int:
@@ -176,32 +185,46 @@ def _bands_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
 class TestBands(unittest.TestCase):
     """Tiles split into a contiguous run per rank, blended locally, gathered back whole"""
 
-    def test_the_tiles_are_split_as_evenly_as_they_divide(self):
-        self.assertEqual(vae_tile_parallel.runs(4, 2), [(0, 2), (2, 4)])
-        self.assertEqual(vae_tile_parallel.runs(5, 4), [(0, 2), (2, 3), (3, 4), (4, 5)])
-        self.assertEqual(vae_tile_parallel.runs(3, 1), [(0, 3)])
+    def test_tiles_of_equal_weight_are_split_as_evenly_as_they_divide(self):
+        self.assertEqual(vae_tile_parallel.runs([1] * 4, 2), [(0, 2), (2, 4)])
+        self.assertEqual(
+            vae_tile_parallel.runs([1] * 5, 4), [(0, 2), (2, 3), (3, 4), (4, 5)]
+        )
+        self.assertEqual(vae_tile_parallel.runs([1] * 3, 1), [(0, 3)])
 
-    def test_no_rank_is_left_more_than_one_tile_behind_another(self):
-        # The whole reason runs are split by tile and not by row: a row is too coarse a unit to
-        # balance with, and the rank left waiting is what a band cost more than it saved.
-        for tiles in range(1, 40):
-            for world_size in range(1, 9):
-                if tiles < world_size:
-                    continue
-                held = [
-                    stop - start
-                    for start, stop in vae_tile_parallel.runs(tiles, world_size)
-                ]
-                self.assertLessEqual(max(held) - min(held), 1, f"{tiles}/{world_size}")
+    def test_the_heaviest_run_is_the_lightest_it_can_be(self):
+        # Against every contiguous split there is, at sizes small enough to enumerate them all.
+        random.seed(7)
+        for tiles in range(2, 9):
+            for world_size in range(2, min(tiles, 5) + 1):
+                for _ in range(20):
+                    weights = [random.randint(1, 9) for _ in range(tiles)]
+                    mine = max(
+                        sum(weights[start:stop])
+                        for start, stop in vae_tile_parallel.runs(weights, world_size)
+                    )
+                    best = min(
+                        max(sum(weights[start:stop]) for start, stop in split)
+                        for split in _every_split(tiles, world_size)
+                    )
+                    self.assertEqual(mine, best, f"{weights} over {world_size}")
 
-    def test_every_tile_is_owned_once(self):
+    def test_the_lighter_tiles_at_the_end_do_not_all_land_on_one_rank(self):
+        # The case that a run split by count got wrong: the latent bounds clip the last row and
+        # the last column, so an equal count of tiles is an unequal amount of work.
+        weights = [9, 9, 4, 9, 9, 4, 4, 4, 2]
+        held = [sum(weights[start:stop]) for start, stop in vae_tile_parallel.runs(weights, 2)]
+        self.assertLessEqual(max(held) / min(held), 1.1, held)
+
+    def test_every_rank_holds_a_tile_and_every_tile_is_held_once(self):
+        random.seed(11)
         for tiles in range(1, 12):
-            for world_size in range(1, 6):
-                covered = [
-                    tile
-                    for start, stop in vae_tile_parallel.runs(tiles, world_size)
-                    for tile in range(start, stop)
-                ]
+            for world_size in range(1, min(tiles, 6) + 1):
+                weights = [random.randint(1, 9) for _ in range(tiles)]
+                split = vae_tile_parallel.runs(weights, world_size)
+                self.assertEqual(len(split), world_size, f"{weights}/{world_size}")
+                self.assertTrue(all(stop > start for start, stop in split), split)
+                covered = [n for start, stop in split for n in range(start, stop)]
                 self.assertEqual(covered, list(range(tiles)), f"{tiles}/{world_size}")
 
     def test_a_band_decode_is_what_one_rank_blending_everything_gives(self):

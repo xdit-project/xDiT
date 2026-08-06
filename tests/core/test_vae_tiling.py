@@ -561,9 +561,10 @@ class TestTiledDecode(unittest.TestCase):
 class TestStrideTiledDecode(unittest.TestCase):
     """The video VAEs' own tiling loop, reimplemented so that its tiles can be handed round"""
 
-    # The two whose loop walks a stride they store: a frame loop per tile, threading a feature
-    # cache that is cleared where each tile starts.
-    FAMILY = ("AutoencoderKLWan", "AutoencoderKLQwenImage")
+    # The families whose loop walks a stride they store. Wan and Qwen-Image decode a tile as a
+    # frame loop threading a feature cache cleared where the tile starts; HunyuanVideo keeps no
+    # cache and decodes a tile in one call, tiling its frames a level up instead.
+    FAMILY = ("AutoencoderKLWan", "AutoencoderKLQwenImage", "AutoencoderKLHunyuanVideo")
     # Wide enough to be several tiles across once the window is halved, and two frames deep so
     # that the cache is threaded through more than the chunk the tile opens with.
     LATENT_GRID = 16
@@ -597,8 +598,8 @@ class TestStrideTiledDecode(unittest.TestCase):
         return vae, torch.randn(1, channels, self.FRAMES, grid, grid)
 
     def test_only_the_families_whose_loop_this_is(self):
-        # Hunyuan, LTX-2 and CogVideoX carry the same stride attributes and the same cache, and
-        # walk them differently, so nothing about a VAE's attributes settles this on its own.
+        # LTX-2, HunyuanVideo 1.5 and CogVideoX carry stride attributes too and walk them into
+        # loops of other shapes, so nothing about a VAE's attributes settles this on its own.
         self.assertFalse(vae_tiling.tiles_by_stored_stride(stride_vae()))
         self.assertFalse(vae_tiling.tiles_by_stored_stride(overlap_factor_vae()))
 
@@ -620,6 +621,7 @@ class TestStrideTiledDecode(unittest.TestCase):
                 },
             ),
             ("AutoencoderKLQwenImage", {}),
+            ("AutoencoderKLHunyuanVideo", {}),
         ):
             with self.subTest(vae=name, **extra):
                 vae, latents = self._tiled_vae(name, **extra)
@@ -647,11 +649,45 @@ class TestStrideTiledDecode(unittest.TestCase):
                     expected = vae.tiled_decode(latents).sample
                     got = vae_tiling.strided_tiled_decode(vae, backwards)(latents).sample
                 # One call per tile, and the order they are made in cannot reach the sample:
-                # a tile's frames share a cache, and no two tiles share anything.
+                # whatever a tile's frames share, no two tiles share anything.
                 stride = vae.tile_sample_stride_height // vae.spatial_compression_ratio
                 across = len(range(0, latents.shape[-1], stride))
                 self.assertEqual(seen, [across * across])
                 torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_the_frames_tiled_above_this_loop_still_reach_it(self):
+        import torch
+
+        # HunyuanVideo tiles its frames a level up, in a temporal loop that calls this one once
+        # per chunk of them. Installing the loop has to reach those calls or the family gains
+        # nothing, and the chunks have to be wide enough that the temporal loop tiles them at all.
+        vae, _ = self._tiled_vae("AutoencoderKLHunyuanVideo")
+        ratio = vae.spatial_compression_ratio
+        latent_stride = vae.tile_sample_stride_width // ratio
+        chunk = vae.tile_sample_stride_num_frames // vae.temporal_compression_ratio
+        # One latent pixel past the window, which is the narrowest grid the temporal loop tiles
+        # at all, and two chunks of frames, which is the shallowest that it walks more than once.
+        grid = vae.tile_sample_min_width // ratio + 1
+        torch.manual_seed(0)
+        latents = torch.randn(1, vae.config.latent_channels, 2 * chunk, grid, grid)
+
+        seen = []
+
+        def counted(calls):
+            seen.append(len(calls))
+            return [call() for call in calls]
+
+        with torch.no_grad():
+            expected = vae.decode(latents).sample
+            vae.tiled_decode = vae_tiling.strided_tiled_decode(vae, counted)
+            got = vae.decode(latents).sample
+
+        across = len(range(0, grid, latent_stride))
+        self.assertGreater(across, 1, "the grid was too narrow to tile")
+        self.assertEqual(
+            seen, [across * across] * 2, "the temporal loop did not reach the installed loop"
+        )
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_the_loop_is_only_reimplemented_to_hand_it_round(self):
         # Without a group there is nothing to gain by replacing a loop that already does this,

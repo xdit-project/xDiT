@@ -244,28 +244,47 @@ def tiles_by_overlap_factor(vae) -> bool:
 
 
 class _StrideLoop(NamedTuple):
-    """Where the two stride-walked tiling loops differ from one another"""
+    """Where the stride-walked tiling loops differ from one another"""
 
     patches: bool  # decodes into a pixel unshuffle, and unpatchifies the assembled sample
     clamps: bool  # holds the assembled sample in [-1, 1]
     first_chunk: bool  # tells the decoder which frame starts the tile
+    frame_cache: bool  # decodes a tile frame by frame, threading the VAE's own feature cache
 
 
 # The VAEs whose stride-walked loop is reimplemented below, by name, because no attribute says
-# which loop body a class has. Hunyuan, LTX-2 and CogVideoX carry the same stride attributes and
-# the same frame cache and walk them differently, tiling over frames as well, which this does not.
+# which loop body a class has.
+#
+# HunyuanVideo walks the same grid without a feature cache, so a tile is one decoder call over all
+# of its frames rather than a loop over them. Its frames are tiled a level up, in a temporal loop
+# that calls this one per chunk of them, so what is handed round here is the tiles of one chunk.
+#
+# Still out: LTX-2 threads a `temb` and a `causal` through a tiled_decode of a different shape,
+# HunyuanVideo 1.5 walks an overlap factor keyed by height and width and hands back a bare tensor,
+# and CogVideoX tiles over frames in the same loop rather than above it.
 _STRIDE_LOOPS = {
-    "AutoencoderKLWan": _StrideLoop(patches=True, clamps=True, first_chunk=True),
-    "AutoencoderKLQwenImage": _StrideLoop(patches=False, clamps=False, first_chunk=False),
+    "AutoencoderKLWan": _StrideLoop(
+        patches=True, clamps=True, first_chunk=True, frame_cache=True
+    ),
+    "AutoencoderKLQwenImage": _StrideLoop(
+        patches=False, clamps=False, first_chunk=False, frame_cache=True
+    ),
+    "AutoencoderKLHunyuanVideo": _StrideLoop(
+        patches=False, clamps=False, first_chunk=False, frame_cache=False
+    ),
 }
 
 
 def tiles_by_stored_stride(vae) -> bool:
-    """Whether this VAE tiles with the frame-cached loop `strided_tiled_decode` reimplements"""
-    if type(vae).__name__ not in _STRIDE_LOOPS:
+    """Whether this VAE tiles with the stride-walked loop `strided_tiled_decode` reimplements"""
+    loop = _STRIDE_LOOPS.get(type(vae).__name__)
+    if loop is None:
         return False
     # The class is the loop, but the pieces it walks are still checked, so that a VAE refactored
     # out from under this fails the question rather than the decode.
+    parts = ["blend_v", "blend_h", "post_quant_conv", "decoder"]
+    if loop.frame_cache:
+        parts.append("clear_cache")
     return all(
         isinstance(getattr(vae, attr, None), int)
         for attr in (
@@ -275,10 +294,7 @@ def tiles_by_stored_stride(vae) -> bool:
             "tile_sample_stride_width",
             "spatial_compression_ratio",
         )
-    ) and all(
-        callable(getattr(vae, attr, None))
-        for attr in ("blend_v", "blend_h", "clear_cache", "post_quant_conv", "decoder")
-    )
+    ) and all(callable(getattr(vae, attr, None)) for attr in parts)
 
 
 def supports_tile_parallel(vae) -> bool:
@@ -424,9 +440,9 @@ def strided_tiled_decode(
     """A tiled_decode for the video VAEs that walk a stride they store, None where it can't
 
     Upstream's loop, with the tiles built as calls rather than made where they are built, so that
-    `dispatch` can hand them round a group. A tile here is a frame loop threading the VAE's own
-    feature cache, which is cleared at the start of each one, so a tile is independent of every
-    other tile in the way the frames inside it are not.
+    `dispatch` can hand them round a group. Where the family keeps a feature cache a tile is a
+    frame loop threading it, cleared at the start of each tile, so a tile is independent of every
+    other tile in the way the frames inside it are not; where it keeps none, a tile is one call.
 
     A tile per call, as in the other family: what made stacking them look worthwhile there did
     not survive being measured, and `narrowest_useful_window` now keeps the window out of the
@@ -468,21 +484,23 @@ def strided_tiled_decode(
         across = range(0, width, latent_stride_width)
 
         def tile_at(i, j):
-            def decode():
+            def cut(frames=slice(None)):
+                return z[
+                    :,
+                    :,
+                    frames,
+                    down[i] : down[i] + latent_min_height,
+                    across[j] : across[j] + latent_min_width,
+                ]
+
+            def decode_frame_by_frame():
                 # The cache is per tile and threaded through the frames of one, which is why the
                 # frames cannot be handed round but the tiles can.
                 vae.clear_cache()
                 frames = []
                 for k in range(num_frames):
                     vae._conv_idx = [0]
-                    tile = z[
-                        :,
-                        :,
-                        k : k + 1,
-                        down[i] : down[i] + latent_min_height,
-                        across[j] : across[j] + latent_min_width,
-                    ]
-                    tile = vae.post_quant_conv(tile)
+                    tile = vae.post_quant_conv(cut(slice(k, k + 1)))
                     extra = {"first_chunk": k == 0} if loop.first_chunk else {}
                     frames.append(
                         vae.decoder(
@@ -491,12 +509,16 @@ def strided_tiled_decode(
                     )
                 return torch.cat(frames, dim=2)
 
-            return decode
+            def decode_at_once():
+                return vae.decoder(vae.post_quant_conv(cut()))
+
+            return decode_frame_by_frame if loop.frame_cache else decode_at_once
 
         def decode_with(share):
             def decode(where):
                 made = share([tile_at(*at) for at in where])
-                vae.clear_cache()
+                if loop.frame_cache:
+                    vae.clear_cache()
                 return dict(zip(where, made))
 
             return decode

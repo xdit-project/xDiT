@@ -10,3 +10,5 @@ profile/
 xfuser.egg-info/
 dist/*
 *.mp4
+gpu-validation-output/
+gpu-validation-results/

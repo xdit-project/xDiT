@@ -156,9 +156,9 @@ def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
         diffusers_probe=lambda config_kind: pytest.fail(
             "must not probe Diffusers for MXFP4"
         ),
-        fsdp_probe=lambda config_kind: pytest.fail(
-            "must not probe TorchAO FSDP for MXFP4"
-        ),
+        fsdp_probe=lambda config_kind: (True, None)
+        if config_kind == "mxfp4"
+        else pytest.fail(f"must not probe {config_kind} FSDP on ROCm"),
     )
 
     adapter = b.select_format_backend(
@@ -629,6 +629,112 @@ def test_fsdp_tensor_subclass_validation_is_format_specific(modules, format_name
             capabilities=capabilities,
             required=True,
         )
+
+
+@pytest.mark.parametrize("fsdp_supported", [False, True])
+def test_mxfp4_fsdp_placement_follows_the_packed_parameter_capability(
+    modules, fsdp_supported
+):
+    b = modules.backends
+    capabilities = b.FormatBackendCapabilities(
+        aiter_mxfp4=True,
+        aiter_mxfp4_fsdp=fsdp_supported,
+        aiter_mxfp4_fsdp_reason=None if fsdp_supported else "torch is too old",
+    )
+    adapter = b.AiterMxfp4BackendAdapter(
+        backend=modules.contracts.QuantizationBackend.AITER,
+        format_=modules.contracts.QuantizationFormat.FP4,
+    )
+    contract = _contract(modules, "FP4", "AITER", "FSDP_META")
+
+    if fsdp_supported:
+        b.validate_format_fsdp_placement(
+            contract, adapter, capabilities=capabilities, required=True
+        )
+        return
+
+    with pytest.raises(
+        modules.contracts.UnsupportedLoadContract,
+        match=r"AITER MXFP4 packed weight cannot be placed under FSDP2: torch is too old",
+    ):
+        b.validate_format_fsdp_placement(
+            contract, adapter, capabilities=capabilities, required=True
+        )
+
+
+def test_mxfp4_fsdp_placement_is_skipped_when_fsdp_is_not_required(modules):
+    b = modules.backends
+    capabilities = b.FormatBackendCapabilities(aiter_mxfp4=True, aiter_mxfp4_fsdp=False)
+    adapter = b.AiterMxfp4BackendAdapter(
+        backend=modules.contracts.QuantizationBackend.AITER,
+        format_=modules.contracts.QuantizationFormat.FP4,
+    )
+
+    b.validate_format_fsdp_placement(
+        _contract(modules, "FP4", "AITER"),
+        adapter,
+        capabilities=capabilities,
+        required=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("self.sharded_param = nn.Parameter(self.to_sharded_dtensor(p))", False),
+        (
+            "self.sharded_param = nn.Parameter(\n"
+            "    self.to_sharded_dtensor(p), requires_grad=param.requires_grad\n)",
+            True,
+        ),
+    ],
+)
+def test_fsdp_non_float_probe_reads_the_sharded_parameter_call_site(
+    modules, monkeypatch, source, expected
+):
+    b = modules.backends
+    fake_inspect = SimpleNamespace(getsource=lambda fn: source)
+    fake_param_module = SimpleNamespace(
+        FSDPParam=SimpleNamespace(_init_sharded_param=object())
+    )
+    monkeypatch.setattr(
+        b,
+        "import_module",
+        lambda name: {
+            "inspect": fake_inspect,
+            "torch.distributed.fsdp._fully_shard._fsdp_param": fake_param_module,
+        }[name],
+    )
+
+    available, reason = b._probe_fsdp_non_float_parameters()
+
+    assert available is expected
+    if expected:
+        assert reason is None
+    else:
+        assert "177948" in reason
+
+
+@pytest.mark.parametrize(
+    ("torch_version", "expected"),
+    [("2.9.1+gitff65f5b", False), ("2.12.0", True)],
+)
+def test_fsdp_non_float_probe_falls_back_to_the_torch_version(
+    modules, monkeypatch, torch_version, expected
+):
+    b = modules.backends
+
+    def import_module(name):
+        if name == "torch":
+            return SimpleNamespace(__version__=torch_version)
+        raise ImportError(name)
+
+    monkeypatch.setattr(b, "import_module", import_module)
+
+    available, reason = b._probe_fsdp_non_float_parameters()
+
+    assert available is expected
+    assert (reason is None) is expected
 
 
 def test_installed_diffusers_accepts_exact_nvfp4_and_int8_configs(modules):

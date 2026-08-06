@@ -748,6 +748,15 @@ def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):
         DeviceMesh, "from_group"
     ):
         pytest.skip("this PyTorch build lacks the FSDP2 device-mesh API used by xDiT")
+    from xfuser.model_executor.models.runner_models.loading.format_backends import (
+        _probe_fsdp_non_float_parameters,
+    )
+
+    non_float_ok, non_float_reason = _probe_fsdp_non_float_parameters()
+    if not non_float_ok:
+        # The same probe gates the load contract, so a run on this PyTorch is
+        # rejected in preflight rather than reaching the sharding path below.
+        pytest.skip(non_float_reason)
 
     processes, hung, results = _run_spawned(
         torch,

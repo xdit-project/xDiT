@@ -35,6 +35,7 @@ class FormatBackendCapabilities:
     torchao_int8_streaming: bool = False
     torchao_nvfp4_fsdp: bool = False
     torchao_int8_fsdp: bool = False
+    aiter_mxfp4_fsdp: bool = False
     torchao_nvfp4_reason: str | None = None
     aiter_mxfp4_reason: str | None = None
     torchao_int8_reason: str | None = None
@@ -42,6 +43,7 @@ class FormatBackendCapabilities:
     torchao_int8_streaming_reason: str | None = None
     torchao_nvfp4_fsdp_reason: str | None = None
     torchao_int8_fsdp_reason: str | None = None
+    aiter_mxfp4_fsdp_reason: str | None = None
 
 
 def _probe_torchao_config(kind: str) -> tuple[bool, str | None]:
@@ -169,6 +171,35 @@ def _probe_aiter_mxfp4_apis() -> tuple[bool, str | None]:
     return _probe_aiter_fp4_kernels()
 
 
+def _probe_fsdp_non_float_parameters() -> tuple[bool, str | None]:
+    """Require an FSDP2 that can wrap the uint8 packed MXFP4 weight.
+
+    Before pytorch/pytorch#177948 (torch 2.12) FSDP2 built the sharded parameter
+    as ``nn.Parameter(dtensor)``, which defaults to ``requires_grad=True`` and
+    therefore raises for any integer dtype, before setting the real flag on the
+    next line. Detect the fix at its call site so a backport is honoured.
+    """
+
+    unsupported = (
+        "this PyTorch cannot shard non-floating-point parameters under FSDP2 "
+        "(needs the pytorch/pytorch#177948 fix, released in 2.12.0)"
+    )
+    try:
+        inspect = import_module("inspect")
+        param_module = import_module("torch.distributed.fsdp._fully_shard._fsdp_param")
+        source = inspect.getsource(param_module.FSDPParam._init_sharded_param)
+    except Exception:
+        try:
+            torch = import_module("torch")
+            fixed = Version(torch.__version__.split("+")[0]) >= Version("2.12.0")
+        except Exception as exc:
+            return False, f"FSDP2 non-float parameter probe failed: {exc}"
+        return (True, None) if fixed else (False, unsupported)
+    if "requires_grad=" not in source:
+        return False, unsupported
+    return True, None
+
+
 def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:
     """Require the exact tensor subclass to expose composable-FSDP gather hooks."""
 
@@ -177,6 +208,8 @@ def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:
             False,
             "NVFP4 tensor-subclass FSDP gather/scatter support is not validated",
         )
+    if kind == "mxfp4":
+        return _probe_fsdp_non_float_parameters()
     try:
         torch = import_module("torch")
         quant = import_module("torchao.quantization.quant_api")
@@ -280,6 +313,9 @@ def probe_format_backend_capabilities(
     int8_fsdp, int8_fsdp_reason = (
         _result(fsdp_probe("int8")) if int8 else (False, int8_reason)
     )
+    mx_fsdp, mx_fsdp_reason = (
+        _result(fsdp_probe("mxfp4")) if mxfp4 else (False, mxfp4_reason)
+    )
     return FormatBackendCapabilities(
         torchao_nvfp4=nvfp4,
         aiter_mxfp4=mxfp4,
@@ -288,6 +324,7 @@ def probe_format_backend_capabilities(
         torchao_int8_streaming=int8_stream,
         torchao_nvfp4_fsdp=nv_fsdp,
         torchao_int8_fsdp=int8_fsdp,
+        aiter_mxfp4_fsdp=mx_fsdp,
         torchao_nvfp4_reason=nvfp4_reason,
         aiter_mxfp4_reason=mxfp4_reason,
         torchao_int8_reason=int8_reason,
@@ -295,6 +332,7 @@ def probe_format_backend_capabilities(
         torchao_int8_streaming_reason=int8_stream_reason,
         torchao_nvfp4_fsdp_reason=nv_fsdp_reason,
         torchao_int8_fsdp_reason=int8_fsdp_reason,
+        aiter_mxfp4_fsdp_reason=mx_fsdp_reason,
     )
 
 
@@ -821,20 +859,24 @@ def validate_format_fsdp_placement(
     capabilities: FormatBackendCapabilities,
     required: bool,
 ) -> None:
-    if not required or adapter is None or adapter.backend.value != "torchao":
+    if not required or adapter is None:
         return
     if isinstance(adapter, TorchaoNvfp4BackendAdapter):
         available = capabilities.torchao_nvfp4_fsdp
         reason = capabilities.torchao_nvfp4_fsdp_reason
-        label = "NVFP4"
+        label = "TorchAO NVFP4 tensor subclass"
     elif isinstance(adapter, TorchaoInt8BackendAdapter):
         available = capabilities.torchao_int8_fsdp
         reason = capabilities.torchao_int8_fsdp_reason
-        label = "INT8"
+        label = "TorchAO INT8 tensor subclass"
+    elif isinstance(adapter, AiterMxfp4BackendAdapter):
+        available = capabilities.aiter_mxfp4_fsdp
+        reason = capabilities.aiter_mxfp4_fsdp_reason
+        label = "AITER MXFP4 packed weight"
     else:
         return
     if not available:
         suffix = f": {reason}" if reason else ""
         raise _unsupported_error(contract)(
-            f"TorchAO {label} tensor subclass cannot be placed under FSDP2{suffix}"
+            f"{label} cannot be placed under FSDP2{suffix}"
         )

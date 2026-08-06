@@ -88,5 +88,115 @@ class TestDispatchOverAGroup(unittest.TestCase):
         self._spawn(4, 3)
 
 
+BAND_VAES = {
+    "AutoencoderKL": (
+        dict(
+            block_out_channels=[8, 8, 16, 16],
+            layers_per_block=1,
+            latent_channels=4,
+            norm_num_groups=8,
+            sample_size=256,
+            down_block_types=["DownEncoderBlock2D"] * 4,
+            up_block_types=["UpDecoderBlock2D"] * 4,
+        ),
+        False,
+    ),
+    "AutoencoderKLWan": (
+        dict(base_dim=8, z_dim=4, dim_mult=[1, 2, 4, 4], num_res_blocks=1),
+        True,
+    ),
+    "AutoencoderKLQwenImage": (
+        dict(base_dim=8, z_dim=4, dim_mult=[1, 2, 4, 4], num_res_blocks=1),
+        True,
+    ),
+}
+# Enough tile rows that four ranks each get one, and an odd number so the bands do not divide
+# evenly and the shapes coming back differ by rank.
+WINDOWS_ACROSS = 5
+
+
+def _tiled_vae(name: str):
+    """The same small VAE and latents on every rank, at a window several tiles across"""
+    import diffusers
+
+    from xfuser.core.utils import vae_tiling
+
+    kwargs, video = BAND_VAES[name]
+    # Seeded because every rank builds its own and they have to agree to the bit.
+    torch.manual_seed(0)
+    vae = getattr(diffusers, name)(**kwargs).eval()
+    vae.enable_tiling()
+    _, plan = vae_tiling.snap_tile_window(vae, vae_tiling.tile_window(vae) // 4)
+    vae_tiling.apply_tile_plan(vae, plan)
+
+    across = vae_tiling.latent_rows(vae, plan) * WINDOWS_ACROSS
+    shape = (1, 4, 2, across, across) if video else (1, 4, across, across)
+    torch.manual_seed(1)
+    return vae, torch.randn(*shape)
+
+
+def _bands_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
+    """One rank blending its own band, checked against the whole grid blended by one rank"""
+    from xfuser.core.utils import vae_tile_parallel, vae_tiling
+
+    dist.init_process_group(
+        "gloo",
+        rank=rank,
+        world_size=world_size,
+        init_method=f"tcp://127.0.0.1:{port}",
+        timeout=timedelta(seconds=300),
+    )
+    try:
+        vae, latents = _tiled_vae(name)
+        with torch.no_grad():
+            expected = vae.tiled_decode(latents).sample
+
+            dispatch, assemble = vae_tile_parallel.sharing(dist.group.WORLD)
+            # One tile per call, so that what is compared is where the tiles were decoded and
+            # blended and not how many of them shared a call.
+            decode = vae_tiling.tiled_decode_for(vae, 0, dispatch, assemble)
+            assert decode is not None, f"no reimplemented loop for {name}"
+            got = decode(latents).sample
+
+        assert got.shape == expected.shape, f"{got.shape} != {expected.shape}"
+        # Bit-exact, not close: a band replays the blending its neighbour would have done on the
+        # same values, so there is no reordering to excuse a difference.
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+class TestBands(unittest.TestCase):
+    """Rows split into a contiguous band per rank, blended locally, gathered back whole"""
+
+    def test_the_rows_are_split_as_evenly_as_they_divide(self):
+        self.assertEqual(vae_tile_parallel.bands(4, 2), [(0, 2), (2, 4)])
+        self.assertEqual(
+            vae_tile_parallel.bands(5, 4), [(0, 2), (2, 3), (3, 4), (4, 5)]
+        )
+        self.assertEqual(vae_tile_parallel.bands(3, 1), [(0, 3)])
+
+    def test_every_row_is_owned_once(self):
+        for rows in range(1, 12):
+            for world_size in range(1, 6):
+                covered = [
+                    row
+                    for start, stop in vae_tile_parallel.bands(rows, world_size)
+                    for row in range(start, stop)
+                ]
+                self.assertEqual(covered, list(range(rows)), f"{rows} over {world_size}")
+
+    def test_a_band_decode_is_what_one_rank_blending_everything_gives(self):
+        for name in BAND_VAES:
+            for world_size in (2, 4):
+                with self.subTest(vae=name, world_size=world_size):
+                    mp.spawn(
+                        _bands_in_a_group,
+                        args=(world_size, _free_port(), name),
+                        nprocs=world_size,
+                        join=True,
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

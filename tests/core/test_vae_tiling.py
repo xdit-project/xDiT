@@ -401,20 +401,35 @@ class TestTileBatching(unittest.TestCase):
         self.assertEqual(vae_tiling.tile_latent_area(overlap_factor_vae()), 32 * 32)
         self.assertIsNone(vae_tiling.tile_latent_area(stride_vae()))
 
-    def test_an_unnarrowed_window_budgets_exactly_one_tile(self):
-        # The area a run gets when it asked for no window of its own, where batching has to be a
-        # no-op: the two areas are the same, so their geometric mean is that area, so one tile.
-        area = 128 * 128
-        self.assertEqual(vae_tiling.tile_batch_budget(area, area), area)
+    def test_a_tile_that_can_keep_the_device_busy_is_decoded_alone(self):
+        # Batching pays a call's cost once rather than once per tile, which is worth nothing once
+        # a tile is large enough that the call is bound by its arithmetic instead. Above the turn
+        # there is no budget at all, so a run that asked for no window of its own - and every
+        # run at a window only somewhat narrowed - decodes exactly as it always did.
+        default_area = 128 * 128
+        for edge in (128, 64, 32):
+            with self.subTest(latent_window=edge):
+                self.assertGreaterEqual(edge * edge, vae_tiling.SATURATING_LATENT_AREA)
+                self.assertIsNone(vae_tiling.tile_batch_budget(default_area, edge * edge))
 
-    def test_halving_the_window_halves_the_area_a_call_carries(self):
+    def test_an_edge_tile_is_not_batched_where_a_full_one_beside_it_is_not(self):
+        # A grid's last row and column are clipped by the latent bounds, so they are smaller than
+        # the window without anybody asking for a narrower one. Batching them on that account
+        # would leave two ranks holding the same area making very differently shaped calls.
+        default_area = 128 * 128
+        for clipped in (128 * 64, 64 * 64, 64 * 32):
+            with self.subTest(latent_area=clipped):
+                self.assertIsNone(vae_tiling.tile_batch_budget(default_area, clipped))
+
+    def test_below_the_turn_halving_the_window_halves_the_area_a_call_carries(self):
         # What --vae_tile_size promises, in the units it is set in: it is an edge, so halving the
-        # number halves the memory a decoder call needs. The tiles sharing each round of
-        # collectives double at the same time, which is the other half of the bargain.
+        # number halves the memory a decoder call needs. The tiles sharing each call's cost double
+        # at the same time, which is the other half of the bargain.
         default_edge = 128
         default_area = default_edge**2
-        for edge, tiles, carried in ((64, 2, 8192), (32, 4, 4096), (16, 8, 2048), (8, 16, 1024)):
+        for edge, tiles, carried in ((16, 8, 2048), (8, 16, 1024), (4, 32, 512)):
             with self.subTest(latent_window=edge):
+                self.assertLess(edge * edge, vae_tiling.SATURATING_LATENT_AREA)
                 budget = vae_tiling.tile_batch_budget(default_area, edge * edge)
                 self.assertEqual(budget, carried)
                 self.assertEqual(budget // (edge * edge), tiles)
@@ -422,13 +437,13 @@ class TestTileBatching(unittest.TestCase):
                 self.assertEqual(budget * default_edge, default_area * edge)
 
     def test_a_vae_with_no_square_window_is_not_batched(self):
-        self.assertIsNone(vae_tiling.tile_batch_budget(None, 1024))
+        self.assertIsNone(vae_tiling.tile_batch_budget(None, 16))
         self.assertIsNone(vae_tiling.tile_batch_budget(16384, None))
 
     def test_the_budget_never_falls_below_a_single_tile(self):
         # A tile larger than the VAE's own window cannot happen through --vae_tile_size, which
         # refuses one, but a budget under a tile would decode nothing at all rather than one tile.
-        self.assertEqual(vae_tiling.tile_batch_budget(64, 4096), 4096)
+        self.assertEqual(vae_tiling.tile_batch_budget(4, 16), 16)
 
     def _tiled_vae(self, name, batch=1):
         """A small VAE of class `name` at a narrowed window, and latents several tiles across"""

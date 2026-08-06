@@ -206,23 +206,47 @@ def tile_latent_area(vae) -> Optional[int]:
     return size * size
 
 
+SATURATING_LATENT_AREA = 1024
+"""The latent area at which one tile already gives the device enough to do
+
+Below this a decoder call is bound by what it costs to make rather than by the arithmetic in it -
+kernel launches, and a grid too small to occupy the device - and stacking tiles into the call
+spreads that over all of them. Above it the call is bound by the arithmetic, which batching cannot
+make cheaper and in practice makes dearer, since the wider shapes pick worse convolution kernels.
+
+Measured on gfx1201 (see the values in the note below): decoding tiles together rather than one at
+a time costs 2.58x per tile at a latent area of 16384, 1.69x at 4096, 1.13x at 1024, then pays
+0.50x at 256, 0.22x at 64 and 0.09x at 16. The turn is between 1024 and 256 and it is sharp.
+
+Where the device saturates is a property of the device, so this is the one number here that is
+worth re-deriving on new hardware; `distvae_bench --tile-shape-costs` prints the curve above in a
+few minutes. A larger device turns later, so this value only leaves a win unclaimed there rather
+than causing a loss; a smaller one turns earlier, and can lose the ~15% seen just above the turn.
+"""
+
+
 def tile_batch_budget(default_area: Optional[int], tile_area: Optional[int]) -> Optional[int]:
-    """The latent area one decoder call should carry, given the VAE's window and the narrowed one
+    """The latent area one decoder call should carry, or None to give it a tile and no more
 
-    Halve --vae_tile_size and this halves: the budget is the geometric mean of the two areas,
-    which is the product of their two edges, so it is linear in the edge the caller asked for.
-    Equivalently, a batched decode at window W costs what an unbatched decode at the geometric
-    mean of W and the VAE's own window costs. At the VAE's own window the two are equal, the
-    budget is one tile, and a run that asked for nothing decodes exactly as it always did.
+    Stacking tiles into one call buys one thing: it pays what a call costs to make once instead of
+    once per tile. That is worth having only while a tile is too small to keep the device busy on
+    its own, which is what `SATURATING_LATENT_AREA` marks. A tile at or above it is decoded alone,
+    as upstream does and as the VAE was built to be asked - and since a grid's edge tiles are
+    clipped by the latent bounds, this is also what stops them batching where the full-size ones
+    beside them would not, which would leave two ranks holding the same area making very
+    different calls.
 
-    Two costs pull against each other, which is why the budget is neither of the obvious ones.
-    Activation memory follows the area a call carries, so holding that area at the VAE's own
-    window - the fastest choice - would hand back every byte a narrower window was set to save.
-    A round of collectives costs the same whatever the call carries, so batching a fixed number
-    of tiles - the thriftiest choice - would give a narrow window back the per-tile collective
-    tax that makes it slow. Scaling with the edge moves both ways at once.
+    Below the turn, halve --vae_tile_size and this halves: the budget is the geometric mean of the
+    two areas, which is the product of their two edges, so it is linear in the edge the caller
+    asked for. Activation memory follows the area a call carries, so a budget held at the VAE's
+    own window would hand back every byte a narrower window was set to save, while batching a
+    fixed number of tiles would give a narrow window back the per-call cost that makes it slow.
+    Scaling with the edge moves both ways at once: at a 128px window it takes about nine tenths of
+    the available speed-up for a seventh of the memory a full window's batch would have cost.
     """
     if not default_area or not tile_area:
+        return None
+    if tile_area >= SATURATING_LATENT_AREA:
         return None
     return max(tile_area, math.isqrt(default_area * tile_area))
 

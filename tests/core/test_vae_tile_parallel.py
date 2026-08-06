@@ -204,11 +204,18 @@ class TestRuns(unittest.TestCase):
     """Tiles split into a contiguous run per rank, blended locally, gathered back whole"""
 
     def test_tiles_of_equal_weight_are_split_as_evenly_as_they_divide(self):
-        self.assertEqual(vae_tile_parallel.runs([1] * 4, 2), [(0, 2), (2, 4)])
-        self.assertEqual(
-            vae_tile_parallel.runs([1] * 5, 4), [(0, 2), (2, 3), (3, 4), (4, 5)]
-        )
-        self.assertEqual(vae_tile_parallel.runs([1] * 3, 1), [(0, 3)])
+        # Evenly means no run heavier than it has to be, which for equal weights is the share
+        # rounded up. It does not mean the runs are the same length: ten tiles over three ranks
+        # divides 4, 4, 2, and the 2 costs nothing because the 4s are what the decode waits for.
+        for tiles, world_size in ((4, 2), (5, 4), (3, 1), (9, 4), (10, 3), (12, 5)):
+            split = vae_tile_parallel.runs([1] * tiles, world_size)
+            self.assertEqual(len(split), world_size, split)
+            self.assertEqual(split[0][0], 0, split)
+            self.assertEqual(split[-1][1], tiles, split)
+            for (_, stop), (start, _) in zip(split, split[1:]):
+                self.assertEqual(stop, start, split)
+            longest = max(stop - start for start, stop in split)
+            self.assertEqual(longest, -(-tiles // world_size), split)
 
     def test_the_heaviest_run_is_the_lightest_it_can_be(self):
         # Against every contiguous split there is, at sizes small enough to enumerate them all.
@@ -229,9 +236,15 @@ class TestRuns(unittest.TestCase):
 
     def test_the_lighter_tiles_at_the_end_do_not_all_land_on_one_rank(self):
         # The case that a run split by count got wrong: the latent bounds clip the last row and
-        # the last column, so an equal count of tiles is an unequal amount of work.
+        # the last column, so an equal count of tiles is an unequal amount of work. Weighing the
+        # split is not enough on its own here - the best contiguous cut of these nine is 31
+        # against 23 - so it takes the levelling to move one tile across and even them up.
         weights = [9, 9, 4, 9, 9, 4, 4, 4, 2]
-        held = [sum(weights[start:stop]) for start, stop in vae_tile_parallel.runs(weights, 2)]
+        owner = vae_tile_parallel.shares(weights, 2)
+        held = [
+            sum(weight for n, weight in enumerate(weights) if owner[n] == rank)
+            for rank in range(2)
+        ]
         self.assertLessEqual(max(held) / min(held), 1.1, held)
 
     def test_levelling_never_leaves_a_rank_worse_off_than_the_runs_it_started_from(self):

@@ -1171,12 +1171,11 @@ class xFuserModel(abc.ABC):
         self, vae, default_area: Optional[int], tile_area: Optional[int]
     ) -> None:
         """Decode a tiled VAE's tiles together where they share a call, and apart across a group"""
-        # Every decoder call costs the same whatever the tile, and where the group is dividing
-        # each tile that cost is a round of collectives rather than arithmetic, so a narrow window
-        # pays it over and over. Batching spreads one round over many tiles without taking back
-        # all of the memory the narrow window was asked for; tile_batch_budget is where that
-        # balance is set. Where the group is dividing the tiles instead there are no rounds to
-        # spread, and the budget is only holding peak memory to what the window asked for.
+        # Two ways to spend the independence between tiles, and they are not alternatives. The
+        # group takes whole tiles, which is what removes the per-tile cost of dividing each one;
+        # the budget decides how many tiles a rank puts through a single call, which is worth
+        # doing only while a tile is too small to keep a device busy. tile_batch_budget holds
+        # that judgement, and it is the same judgement whoever is making the call.
         group = vae_tile_parallel.group_of(vae)
         dispatch, assemble = (
             vae_tile_parallel.sharing(group) if group is not None else (None, None)

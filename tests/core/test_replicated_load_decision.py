@@ -994,6 +994,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     logs = []
     sentinel = SimpleNamespace(quant_mapping={})
     runner = SimpleNamespace(
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: False,
         fp8_backend=SimpleNamespace(),
@@ -1093,12 +1094,61 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     }
 
 
+def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+
+    sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))
+    runner = SimpleNamespace(
+        load_contract=SimpleNamespace(
+            requested_format=SimpleNamespace(value="fp8_fp4")
+        ),
+        fp8_backend=None,
+        blockwise_fp8_backend=sentinel,
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: True,
+        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            fp8_text_encoder_module_list=["text_encoder.encoder.block"]
+        ),
+        _loader=SimpleNamespace(
+            meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
+            build_meta_component=lambda name, fp8=False: object(),
+        ),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_targets=set(),
+    )
+    observed = []
+
+    def prepare(adapter, **kwargs):
+        observed.append(adapter)
+        return SimpleNamespace(
+            descriptor=SimpleNamespace(
+                materialization_mode="post_load",
+                log_message=lambda: "post-load",
+            ),
+            quantization_config=None,
+        )
+
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.fp8_backends."
+        "prepare_text_encoder_fp8_load",
+        prepare,
+    )
+    monkeypatch.setattr(base_model, "log", lambda message: None)
+
+    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+
+    assert (kwargs, config) == ({"text_encoder": "meta"}, None)
+    assert observed == [sentinel]
+
+
 def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
     monkeypatch,
 ):
     from xfuser.model_executor.models.runner_models import base_model
 
     runner = SimpleNamespace(
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="torchao")),
@@ -1142,6 +1192,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
     runner = SimpleNamespace(
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
         _replicated_broadcast_load=lambda: False,
         _memory_efficient_fsdp_load=lambda: True,
         fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),

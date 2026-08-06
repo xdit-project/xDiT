@@ -113,6 +113,19 @@ def _conversion_filter(module_path, excluded_paths):
     return True, filter_fn
 
 
+def _fp8_adapter_for_contract(model):
+    """Return the backend that owns FP8 storage for the active contract."""
+
+    if model.load_contract is None:
+        return None
+    format_value = model.load_contract.requested_format.value
+    if format_value == "fp8":
+        return model.fp8_backend
+    if format_value in {"fp4", "fp8_fp4"}:
+        return model.blockwise_fp8_backend
+    return None
+
+
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
 MODEL_REGISTRY = {}
@@ -609,11 +622,7 @@ class xFuserModel(abc.ABC):
         fp8_targets = tuple(self.fp8.targets_for(component_name))
         if not fp8_targets:
             return None, ()
-        if self.load_contract.requested_format.value == "fp8":
-            return self.fp8_backend, fp8_targets
-        if self.load_contract.requested_format.value in {"fp4", "fp8_fp4"}:
-            return self.blockwise_fp8_backend, fp8_targets
-        return None, ()
+        return _fp8_adapter_for_contract(self), fp8_targets
 
     def _uses_blockwise_fp8_backend(self) -> bool:
         if self._requires_blockwise_fp8_backend():
@@ -904,7 +913,7 @@ class xFuserModel(abc.ABC):
         fsdp_meta = (
             False if replicated_meta else self._memory_efficient_fsdp_load()
         )
-        adapter = self.fp8_backend
+        adapter = _fp8_adapter_for_contract(self)
         component_configs = {}
         entries = self.settings.fp8_text_encoder_module_list or ()
         component_names = tuple(

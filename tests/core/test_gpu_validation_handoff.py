@@ -447,6 +447,41 @@ def test_environment_probe_is_injectable(runner):
     assert observed["aiter_available"] is True
 
 
+def test_probe_detects_dependencies_without_distribution_metadata(runner):
+    """AITER vendored as a source checkout has no dist-info but still works.
+
+    The amdsiloai/pytorch-xdit image ships AITER this way. Keying availability
+    on importlib.metadata alone reported aiter_available False while the runner
+    reported has_aiter True, which would refuse every rdna4_aiter case on
+    genuine RDNA4 hardware.
+    """
+    observed = runner.probe_environment(
+        command_runner=lambda command: (
+            "Name: gfx1201" if command[0] == "rocminfo" else None
+        ),
+        version_getter={"transformers": "5.1.0"}.get,
+        module_probe=lambda name: name in {"aiter", "torchao"},
+        environ={},
+    )
+
+    assert observed["aiter_available"] is True
+    assert observed["torchao_available"] is True
+
+
+def test_probe_reports_missing_dependencies_as_unavailable(runner):
+    observed = runner.probe_environment(
+        command_runner=lambda command: (
+            "Name: gfx1201" if command[0] == "rocminfo" else None
+        ),
+        version_getter={"transformers": "5.1.0"}.get,
+        module_probe=lambda name: False,
+        environ={},
+    )
+
+    assert observed["aiter_available"] is False
+    assert observed["torchao_available"] is False
+
+
 def test_environment_probe_applies_cuda_visible_devices_mask(runner):
     responses = {
         "nvidia-smi": ("0, GPU-aaaa, 8.9\n" "1, GPU-bbbb, 8.9\n" "2, GPU-cccc, 9.0")

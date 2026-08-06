@@ -8,6 +8,7 @@ from collections.abc import Mapping
 import datetime as dt
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -513,10 +514,29 @@ def _package_version(name: str) -> str | None:
         return None
 
 
+def _module_importable(name: str) -> bool:
+    """Whether ``name`` can be imported, ignoring distribution metadata.
+
+    AITER is commonly vendored as a source checkout on a PYTHONPATH with no
+    dist-info, so importlib.metadata cannot see it even though the runner uses
+    it. find_spec locates the module without executing it, which matters because
+    importing AITER triggers a JIT build.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _dependency_available(name: str, version_getter, module_probe) -> bool:
+    return version_getter(name) is not None or module_probe(name)
+
+
 def probe_environment(
     *,
     command_runner=_run_text,
     version_getter=_package_version,
+    module_probe=_module_importable,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if environ is None:
@@ -621,8 +641,10 @@ def probe_environment(
         },
         "transformers_version": transformers_version,
         "transformers_major": transformers_major,
-        "aiter_available": version_getter("aiter") is not None,
-        "torchao_available": version_getter("torchao") is not None,
+        "aiter_available": _dependency_available("aiter", version_getter, module_probe),
+        "torchao_available": _dependency_available(
+            "torchao", version_getter, module_probe
+        ),
         "raw": {
             "nvidia_compute_capability": nvidia,
             "rocminfo": rocminfo,

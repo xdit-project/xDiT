@@ -217,6 +217,62 @@ def test_aiter_mxfp4_probe_requires_exact_runtime_symbols(
     assert expected_reason in reason
 
 
+def test_aiter_mxfp4_probe_rejects_architectures_without_fp4_kernels(
+    modules, monkeypatch
+):
+    b = modules.backends
+    aiter = SimpleNamespace(
+        get_hip_quant=lambda quant: object(),
+        QuantType=SimpleNamespace(per_1x32=object()),
+        gemm_a4w4=lambda *args, **kwargs: object(),
+    )
+    shuffle = SimpleNamespace(shuffle_weight=lambda weight, layout: weight)
+    monkeypatch.setattr(
+        b,
+        "import_module",
+        lambda name: {"aiter": aiter, "aiter.ops.shuffle": shuffle}[name],
+    )
+    monkeypatch.setattr(b, "_gcn_arch_name", lambda: "gfx942:sramecc+:xnack-")
+
+    available, reason = b._probe_aiter_mxfp4_apis()
+
+    assert not available
+    assert "gfx942" in reason
+
+
+@pytest.mark.parametrize(
+    ("arch", "fp4x2", "expected_available", "expected_reason"),
+    [
+        ("gfx1201", None, True, None),
+        ("gfx950:sramecc+:xnack-", None, True, None),
+        ("gfx942:sramecc+:xnack-", None, False, "gfx942"),
+        ("gfx1201", "0", False, "AITER_FP4x2=0"),
+        (None, None, False, "cannot determine the ROCm architecture"),
+    ],
+)
+def test_aiter_fp4_kernel_probe_mirrors_the_aiter_build_gate(
+    modules,
+    monkeypatch,
+    arch,
+    fp4x2,
+    expected_available,
+    expected_reason,
+):
+    b = modules.backends
+    if fp4x2 is None:
+        monkeypatch.delenv("AITER_FP4x2", raising=False)
+    else:
+        monkeypatch.setenv("AITER_FP4x2", fp4x2)
+
+    available, reason = b._probe_aiter_fp4_kernels(gcn_arch_probe=lambda: arch)
+
+    assert available is expected_available
+    if expected_reason is None:
+        assert reason is None
+    else:
+        assert expected_reason in reason
+
+
 def test_aiter_mxfp4_capability_preserves_symbol_probe_reason(modules):
     b = modules.backends
     calls = []

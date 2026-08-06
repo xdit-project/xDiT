@@ -1,5 +1,6 @@
 """FP4/INT8 backend adapters and dependency-light materialization planning."""
 
+import os
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
@@ -12,6 +13,11 @@ MXFP4_STREAMING_FALLBACK = (
     "AITER MXFP4 conversion requires each full-precision weight before creating "
     "xFuserMXFP4Linear packed state; no safe Diffusers per-weight loader exists"
 )
+# AITER only compiles -D__Float4_e2m1fn_x2 when the build arch is not gfx942 and
+# AITER_FP4x2 is enabled (aiter/jit/core.py). Without that define, its FP4 quant
+# entry points reach an AITER_CHECK(false) that aborts the process, so this has
+# to be caught in the probe rather than by try/except at the call site.
+_AITER_FP4_UNSUPPORTED_ARCHS = ("gfx942",)
 
 
 def _result(value: _ProbeResult) -> tuple[bool, str | None]:
@@ -101,6 +107,34 @@ def _probe_diffusers_config(kind: str) -> tuple[bool, str | None]:
     return True, None
 
 
+def _gcn_arch_name() -> str | None:
+    try:
+        torch = import_module("torch")
+        device = torch.cuda.current_device()
+        return torch.cuda.get_device_properties(device).gcnArchName
+    except Exception:
+        return None
+
+
+def _probe_aiter_fp4_kernels(
+    gcn_arch_probe: Callable[[], str | None] | None = None,
+) -> tuple[bool, str | None]:
+    """Reject architectures where AITER builds its FP4 kernels out."""
+
+    if int(os.getenv("AITER_FP4x2", "1")) <= 0:
+        return False, "AITER FP4 kernels are disabled by AITER_FP4x2=0"
+    arch = (gcn_arch_probe or _gcn_arch_name)()
+    if arch is None:
+        return False, "cannot determine the ROCm architecture for AITER FP4 support"
+    unsupported = [name for name in _AITER_FP4_UNSUPPORTED_ARCHS if name in arch]
+    if unsupported:
+        return (
+            False,
+            f"AITER builds no FP4 (Float4_e2m1fn_x2) kernels for {unsupported[0]}",
+        )
+    return True, None
+
+
 def _probe_aiter_mxfp4_apis() -> tuple[bool, str | None]:
     """Probe only the AITER symbols used by xFuserMXFP4Linear."""
 
@@ -130,7 +164,9 @@ def _probe_aiter_mxfp4_apis() -> tuple[bool, str | None]:
             False,
             "missing required AITER MXFP4 API: aiter.QuantType.per_1x32",
         )
-    return True, None
+    # The symbols above exist on every ROCm arch; only the kernels behind them
+    # are arch-gated, so the device check has to happen too.
+    return _probe_aiter_fp4_kernels()
 
 
 def _probe_fsdp_support(kind: str) -> tuple[bool, str | None]:

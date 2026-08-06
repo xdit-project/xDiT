@@ -299,8 +299,13 @@ def build_command(
             ]
         )
     elif case["placement"] == "fsdp_blockwise":
+        # FSDP sharding is orthogonal to the parallel degree: the runner asserts
+        # dp*cfg*sp*tp*pp == dit_parallel_size, which --fully_shard_degree does
+        # not contribute to.
         command.extend(
             [
+                "--ulysses_degree",
+                str(case["world_size"]),
                 "--fully_shard_degree",
                 str(case["world_size"]),
                 "--memory_efficient_sharding",

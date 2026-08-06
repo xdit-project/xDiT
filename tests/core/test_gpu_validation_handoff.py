@@ -148,6 +148,35 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
     assert eager_command[output_index + 1].endswith(f"{eager['id']}/test-run")
 
 
+def test_distributed_commands_declare_a_parallel_degree(runner, matrix):
+    """Every multi-rank command must satisfy dp*cfg*sp*tp*pp == dit_parallel_size.
+
+    --fully_shard_degree does not contribute to that product, so an FSDP case
+    that only sets it aborts in config validation before the model is built.
+    """
+    degree_flags = (
+        "--ulysses_degree",
+        "--ring_degree",
+        "--data_parallel_degree",
+        "--tensor_parallel_degree",
+        "--pipefusion_parallel_degree",
+        "--use_cfg_parallel",
+    )
+    for case in matrix["cases"]:
+        if case["world_size"] < 2:
+            continue
+        command = runner.build_command(case, matrix["defaults"], run_id="test-run")
+        declared = [flag for flag in degree_flags if flag in command]
+        assert declared, (
+            f"{case['id']}: multi-rank command declares no parallel degree; "
+            f"the runner will reject it before model allocation"
+        )
+        for flag in declared:
+            if flag == "--use_cfg_parallel":
+                continue
+            assert command[command.index(flag) + 1] == str(case["world_size"])
+
+
 def test_local_checkpoint_command_keeps_env_placeholder(runner, matrix):
     case = next(
         case for case in matrix["cases"] if case["checkpoint"]["source"] == "local"

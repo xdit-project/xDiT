@@ -250,27 +250,53 @@ class _StrideLoop(NamedTuple):
     clamps: bool  # holds the assembled sample in [-1, 1]
     first_chunk: bool  # tells the decoder which frame starts the tile
     frame_cache: bool  # decodes a tile frame by frame, threading the VAE's own feature cache
+    post_quant: bool  # puts a tile through post_quant_conv before decoding it
+    conditioned: bool  # carries a timestep embedding and a causality flag into the decoder
 
 
 # The VAEs whose stride-walked loop is reimplemented below, by name, because no attribute says
-# which loop body a class has.
+# which loop body a class has. All four walk the same grid and blend it the same way, and differ
+# only in what a tile costs to turn into a decoder call.
 #
-# HunyuanVideo walks the same grid without a feature cache, so a tile is one decoder call over all
-# of its frames rather than a loop over them. Its frames are tiled a level up, in a temporal loop
-# that calls this one per chunk of them, so what is handed round here is the tiles of one chunk.
+# HunyuanVideo and LTX-2 keep no feature cache, so a tile is one decoder call over all of its
+# frames rather than a loop over them. Both also tile their frames a level up, in a temporal loop
+# that calls this one per chunk of them, so what is handed round here is the tiles of one chunk;
+# LTX-2 ships with that loop off, and HunyuanVideo with it on.
 #
-# Still out: LTX-2 threads a `temb` and a `causal` through a tiled_decode of a different shape,
-# HunyuanVideo 1.5 walks an overlap factor keyed by height and width and hands back a bare tensor,
-# and CogVideoX tiles over frames in the same loop rather than above it.
+# Still out: HunyuanVideo 1.5 walks an overlap factor keyed by height and width and hands back a
+# bare tensor, and CogVideoX tiles over frames in this loop rather than above it.
 _STRIDE_LOOPS = {
     "AutoencoderKLWan": _StrideLoop(
-        patches=True, clamps=True, first_chunk=True, frame_cache=True
+        patches=True,
+        clamps=True,
+        first_chunk=True,
+        frame_cache=True,
+        post_quant=True,
+        conditioned=False,
     ),
     "AutoencoderKLQwenImage": _StrideLoop(
-        patches=False, clamps=False, first_chunk=False, frame_cache=True
+        patches=False,
+        clamps=False,
+        first_chunk=False,
+        frame_cache=True,
+        post_quant=True,
+        conditioned=False,
     ),
     "AutoencoderKLHunyuanVideo": _StrideLoop(
-        patches=False, clamps=False, first_chunk=False, frame_cache=False
+        patches=False,
+        clamps=False,
+        first_chunk=False,
+        frame_cache=False,
+        post_quant=True,
+        conditioned=False,
+    ),
+    "AutoencoderKLLTX2Video": _StrideLoop(
+        patches=False,
+        clamps=False,
+        first_chunk=False,
+        frame_cache=False,
+        post_quant=False,
+        conditioned=True,
     ),
 }
 
@@ -282,7 +308,9 @@ def tiles_by_stored_stride(vae) -> bool:
         return False
     # The class is the loop, but the pieces it walks are still checked, so that a VAE refactored
     # out from under this fails the question rather than the decode.
-    parts = ["blend_v", "blend_h", "post_quant_conv", "decoder"]
+    parts = ["blend_v", "blend_h", "decoder"]
+    if loop.post_quant:
+        parts.append("post_quant_conv")
     if loop.frame_cache:
         parts.append("clear_cache")
     return all(
@@ -458,7 +486,10 @@ def strided_tiled_decode(
     loop = _STRIDE_LOOPS[type(vae).__name__]
     patch_size = getattr(vae.config, "patch_size", None) if loop.patches else None
 
-    def tiled_decode(z, return_dict: bool = True):
+    # `temb` and `causal` are LTX-2's, which conditions its decoder on them and passes them
+    # through its own tiled_decode to reach it. The families that do not take them never send
+    # them, so they sit at the default and this stays one signature for all four loops.
+    def tiled_decode(z, temb=None, causal=None, return_dict: bool = True):
         _, _, num_frames, height, width = z.shape
         ratio = vae.spatial_compression_ratio
         sample_height = height * ratio
@@ -510,7 +541,10 @@ def strided_tiled_decode(
                 return torch.cat(frames, dim=2)
 
             def decode_at_once():
-                return vae.decoder(vae.post_quant_conv(cut()))
+                tile = vae.post_quant_conv(cut()) if loop.post_quant else cut()
+                if loop.conditioned:
+                    return vae.decoder(tile, temb, causal=causal)
+                return vae.decoder(tile)
 
             return decode_frame_by_frame if loop.frame_cache else decode_at_once
 

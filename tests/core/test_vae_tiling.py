@@ -562,9 +562,17 @@ class TestStrideTiledDecode(unittest.TestCase):
     """The video VAEs' own tiling loop, reimplemented so that its tiles can be handed round"""
 
     # The families whose loop walks a stride they store. Wan and Qwen-Image decode a tile as a
-    # frame loop threading a feature cache cleared where the tile starts; HunyuanVideo keeps no
-    # cache and decodes a tile in one call, tiling its frames a level up instead.
-    FAMILY = ("AutoencoderKLWan", "AutoencoderKLQwenImage", "AutoencoderKLHunyuanVideo")
+    # frame loop threading a feature cache cleared where the tile starts; HunyuanVideo and LTX-2
+    # keep no cache and decode a tile in one call, tiling their frames a level up instead.
+    FAMILY = (
+        "AutoencoderKLWan",
+        "AutoencoderKLQwenImage",
+        "AutoencoderKLHunyuanVideo",
+        "AutoencoderKLLTX2Video",
+    )
+    # LTX-2 conditions its decoder on a timestep embedding and a causality flag, and takes them
+    # through tiled_decode to reach it, the embedding positionally. Nothing else here takes either.
+    CONDITIONED = ("AutoencoderKLLTX2Video",)
     # Wide enough to be several tiles across once the window is halved, and two frames deep so
     # that the cache is threaded through more than the chunk the tile opens with.
     LATENT_GRID = 16
@@ -597,9 +605,13 @@ class TestStrideTiledDecode(unittest.TestCase):
         grid = self.LATENT_GRID
         return vae, torch.randn(1, channels, self.FRAMES, grid, grid)
 
+    def _conditioning(self, vae):
+        """What a tiled_decode of this family takes between the latents and `return_dict`"""
+        return (None,) if type(vae).__name__ in self.CONDITIONED else ()
+
     def test_only_the_families_whose_loop_this_is(self):
-        # LTX-2, HunyuanVideo 1.5 and CogVideoX carry stride attributes too and walk them into
-        # loops of other shapes, so nothing about a VAE's attributes settles this on its own.
+        # HunyuanVideo 1.5 and CogVideoX carry stride attributes too and walk them into loops of
+        # other shapes, so nothing about a VAE's attributes settles this on its own.
         self.assertFalse(vae_tiling.tiles_by_stored_stride(stride_vae()))
         self.assertFalse(vae_tiling.tiles_by_stored_stride(overlap_factor_vae()))
 
@@ -622,12 +634,14 @@ class TestStrideTiledDecode(unittest.TestCase):
             ),
             ("AutoencoderKLQwenImage", {}),
             ("AutoencoderKLHunyuanVideo", {}),
+            ("AutoencoderKLLTX2Video", {}),
         ):
             with self.subTest(vae=name, **extra):
                 vae, latents = self._tiled_vae(name, **extra)
+                args = self._conditioning(vae)
                 with torch.no_grad():
-                    expected = vae.tiled_decode(latents).sample
-                    got = vae_tiling.strided_tiled_decode(vae)(latents).sample
+                    expected = vae.tiled_decode(latents, *args).sample
+                    got = vae_tiling.strided_tiled_decode(vae)(latents, *args).sample
                 # The same calls in the same order on the same tensors, so exactly the same
                 # sample: this loop exists to hand the calls round, not to compute differently.
                 self.assertEqual(got.shape, expected.shape)
@@ -639,6 +653,7 @@ class TestStrideTiledDecode(unittest.TestCase):
         for name in self.FAMILY:
             with self.subTest(vae=name):
                 vae, latents = self._tiled_vae(name)
+                args = self._conditioning(vae)
                 seen = []
 
                 def backwards(calls):
@@ -646,8 +661,10 @@ class TestStrideTiledDecode(unittest.TestCase):
                     return list(reversed([call() for call in reversed(calls)]))
 
                 with torch.no_grad():
-                    expected = vae.tiled_decode(latents).sample
-                    got = vae_tiling.strided_tiled_decode(vae, backwards)(latents).sample
+                    expected = vae.tiled_decode(latents, *args).sample
+                    got = vae_tiling.strided_tiled_decode(vae, backwards)(
+                        latents, *args
+                    ).sample
                 # One call per tile, and the order they are made in cannot reach the sample:
                 # whatever a tile's frames share, no two tiles share anything.
                 stride = vae.tile_sample_stride_height // vae.spatial_compression_ratio

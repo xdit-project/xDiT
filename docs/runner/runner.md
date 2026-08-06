@@ -186,7 +186,7 @@ checks and target declarations also apply.
 | ROCm RDNA4 without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
 | Other ROCm + AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback; AITER FP8 block-scale is RDNA4-only | AITER MXFP4 | Excluded: INT8 is rejected on ROCm |
 | Other ROCm without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
-| CUDA capability 10.0+ (Blackwell) | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | torchao NVFP4 with dynamic per-tensor activation scaling; native Diffusers per-weight streaming only without FP8 overrides/hybrid ownership | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming preserves target and minimum-size exclusions |
+| CUDA capability 10.0+ (Blackwell) | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | torchao NVFP4 with dynamic per-tensor activation scaling; native Diffusers streams NVFP4 leaves while explicit FP8 overrides remain full precision for post-load FP8 conversion; hybrid ownership is excluded | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming preserves target and minimum-size exclusions |
 | CUDA capability 8.9 through 9.x | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming where accepted |
 | CUDA capability below 8.9 | Excluded: TorchAO FP8 is rejected during backend preflight before model allocation | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8; runtime kernel support remains hardware-dependent |
 
@@ -203,12 +203,12 @@ rejects the mode before allocation when those hooks are absent. With sequence
 parallelism, Z-Image leaves `context_refiner` unquantized because its local
 sequence can be too short for `torch._int_mm`.
 
-CUDA NVFP4 uses native Diffusers `TorchAoConfig` per-weight streaming when the
-component has no FP8 prefix/suffix overrides or hybrid schedule. The explicit
-FP4 adapter owns FP8 precision overrides and converts them post-load or
-blockwise. CUDA NVFP4 lacks the ROCm runtime high/low precision wrapper.
-Therefore, xDiT rejects `--use_hybrid_gemm_schedule` before model allocation
-with guidance to disable it or use ROCm+AITER.
+CUDA NVFP4 uses native Diffusers `TorchAoConfig` per-weight streaming. FP8
+prefix/suffix overrides are excluded from the native config; the FP4 adapter
+converts those residual leaves to FP8 after loading. CUDA NVFP4 lacks the ROCm
+runtime high/low precision wrapper. Therefore, xDiT rejects
+`--use_hybrid_gemm_schedule` before model allocation with guidance to disable
+it or use ROCm+AITER.
 
 ROCm MXFP4 has no native per-weight streaming path. AITER needs the full source
 weight to create and shuffle `xFuserMXFP4Linear` state. Ordinary loads convert
@@ -232,9 +232,9 @@ targets.
 
 “Streaming” means native transformer quantization during ordinary loading:
 AITER for supported FP8 paths, or torchao through supported Diffusers APIs for
-FP8, ordinary NVFP4, and INT8. Torchao records an explicit post-load fallback
-when its API, exact target mapping, mixed-precision ownership, or placement
-prevents streaming.
+FP8, NVFP4, and INT8. NVFP4 can stream around explicitly owned FP8 residual
+leaves. Torchao records an explicit post-load fallback when its API, exact
+target mapping, hybrid ownership, or placement prevents streaming.
 
 “Memory-efficient FSDP” means `--memory_efficient_sharding` can avoid
 materializing the full transformer before FSDP wraps it. “Replicated meta-load”

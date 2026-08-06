@@ -869,18 +869,21 @@ class xFuserModel(abc.ABC):
             if (
                 quantization_config is not None
             ):
+                streamed_targets = (
+                    getattr(prepared, "streamed_targets", ()) or targets
+                )
                 _record_streaming_targets(
                     self,
                     "_quantization_streaming_targets",
                     component_name,
-                    targets,
+                    streamed_targets,
                 )
                 if adapter.format.value == "fp8":
                     _record_streaming_targets(
                         self,
                         "_fp8_streaming_targets",
                         component_name,
-                        targets,
+                        streamed_targets,
                     )
         load_kwargs = request.from_pretrained_kwargs()
         device_map_factory = getattr(

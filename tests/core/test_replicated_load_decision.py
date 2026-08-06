@@ -988,6 +988,63 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
     assert runner._quantization_streaming_targets == {"transformer.blocks"}
 
 
+def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
+    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading import format_backends
+    from xfuser.model_executor.models.runner_models.loading.contracts import (
+        QuantizationBackend,
+        QuantizationFormat,
+    )
+
+    adapter = format_backends.TorchaoNvfp4BackendAdapter(
+        backend=QuantizationBackend.TORCHAO,
+        format_=QuantizationFormat.FP4,
+        native_transformer_streaming=True,
+    )
+    sentinel = object()
+    monkeypatch.setattr(adapter, "_stream_config_factory", lambda exclusions: sentinel)
+
+    class Wrapper:
+        @classmethod
+        def from_pretrained(cls, model_name, **kwargs):
+            return "streamed"
+
+    structure = SimpleNamespace(
+        named_modules=lambda: [
+            ("", object()),
+            ("blocks", object()),
+            ("blocks.0.keep", torch.nn.Linear(16, 16)),
+            ("blocks.0.override", torch.nn.Linear(16, 16)),
+            ("input_proj", torch.nn.Linear(16, 16)),
+        ],
+        get_submodule=lambda name: object(),
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        _transformer_quantization_adapter=lambda component: (
+            adapter,
+            ("blocks",),
+        ),
+        _native_quantization_device_map=lambda: {"": 0},
+        _fp8_streaming_targets=set(),
+        _quantization_streaming_targets=set(),
+        _build_transformer_structure=lambda *args, **kwargs: structure,
+        settings=SimpleNamespace(
+            fsdp_strategy={},
+            fp8_precision_overrides=("0.override",),
+            fp8_precision_override_suffixes=None,
+        ),
+        config=SimpleNamespace(use_hybrid_gemm_schedule=False),
+        _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
+    )
+
+    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+
+    assert result == "streamed"
+    assert runner._quantization_streaming_targets == {"transformer.blocks.0.keep"}
+
+
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 

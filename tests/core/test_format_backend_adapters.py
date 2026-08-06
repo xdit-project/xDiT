@@ -344,12 +344,46 @@ def test_component_root_target_aligns_with_blockwise_wrapped_paths(modules):
     assert descriptor.fallback_reason is None
 
 
-def test_nvfp4_native_streaming_rejects_precision_overrides(modules):
+def test_nvfp4_native_streaming_excludes_only_precision_overrides(modules, monkeypatch):
     b = modules.backends
     adapter = b.TorchaoNvfp4BackendAdapter(
         backend=modules.contracts.QuantizationBackend.TORCHAO,
         format_=modules.contracts.QuantizationFormat.FP4,
         native_transformer_streaming=True,
+    )
+    sentinel = object()
+    captured = []
+
+    class Linear:
+        in_features = 512
+        out_features = 512
+
+    class FakeModel:
+        def named_modules(self):
+            return [
+                ("", object()),
+                ("blocks", object()),
+                ("blocks.0.attn.q_proj", Linear()),
+                ("blocks.0.mlp", Linear()),
+                ("blocks.1.attn.out_proj", Linear()),
+                ("blocks.1.mlp", Linear()),
+                ("input_proj", Linear()),
+            ]
+
+        def get_submodule(self, name):
+            if name == "blocks":
+                return object()
+            raise AttributeError(name)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(nn=SimpleNamespace(Linear=Linear)),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_stream_config_factory",
+        lambda exclusions: captured.append(list(exclusions)) or sentinel,
     )
 
     prepared = b.prepare_native_transformer_format_load(
@@ -358,14 +392,24 @@ def test_nvfp4_native_streaming_rejects_precision_overrides(modules):
         targets=("blocks",),
         stream_quant=True,
         precision_prefixes=("0.attn",),
-        precision_suffixes=(),
+        precision_suffixes=(".out_proj",),
         hybrid=False,
-        model_factory=lambda: pytest.fail("must not inspect structure"),
+        model_factory=FakeModel,
     )
 
-    assert prepared.quantization_config is None
-    assert prepared.descriptor.materialization_mode == "post_load"
-    assert "FP8 precision overrides" in prepared.descriptor.fallback_reason
+    assert prepared.quantization_config is sentinel, prepared.descriptor.fallback_reason
+    assert captured == [
+        [
+            "blocks.0.attn.q_proj",
+            "blocks.1.attn.out_proj",
+            "input_proj",
+        ]
+    ]
+    assert prepared.streamed_targets == ("blocks.0.mlp", "blocks.1.mlp")
+    assert prepared.residual_targets == (
+        "blocks.0.attn.q_proj",
+        "blocks.1.attn.out_proj",
+    )
 
 
 def test_nvfp4_native_streaming_rejects_hybrid_ownership(modules):

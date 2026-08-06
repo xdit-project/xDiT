@@ -563,7 +563,10 @@ class MemoryEfficientLoader:
             with init_empty_weights():
                 model = wrapper_cls.from_config(config, **(init_kwargs or {}))
             # Match the checkpoint dtype before disk fill and quantization.
-            return _cast_meta_to_checkpoint_dtype(model, torch.bfloat16)
+            _cast_meta_to_checkpoint_dtype(model, torch.bfloat16)
+            # from_config leaves nn.Module's training default; from_pretrained
+            # ends with eval(), and only that path normally reaches inference.
+            return model.eval()
 
         model = _collective_build_call(
             get_world_group(), build, context=f"meta transformer '{component_name}'"
@@ -625,9 +628,10 @@ class MemoryEfficientLoader:
 
         with init_empty_weights():
             component = cls._from_config(config)
-        # _from_config defaults to fp32; align meta params to bf16 (dtype-only .to is legal on
-        # meta) so their DTensor dtype matches the broadcast source.
-        component = _cast_meta_to_checkpoint_dtype(component, torch.bfloat16)
+        # _from_config defaults to fp32 and to training mode; align meta params to bf16 (dtype-only
+        # .to is legal on meta) so their DTensor dtype matches the broadcast source, and match
+        # from_pretrained's eval().
+        component = _cast_meta_to_checkpoint_dtype(component, torch.bfloat16).eval()
         streamed_targets = getattr(self.model, "_fp8_streaming_targets", ())
         prefix = f"{component_name}."
         local_streamed_targets = tuple(

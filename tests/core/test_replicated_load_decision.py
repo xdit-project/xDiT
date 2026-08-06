@@ -231,6 +231,17 @@ def test_the_meta_transformer_keeps_the_wrappers_fp32_modules(monkeypatch):
     assert dtypes["blocks.0.attn.weight"] is torch.bfloat16
 
 
+def test_the_meta_transformer_is_built_in_eval_mode(monkeypatch):
+    """from_pretrained ends with eval(); from_config leaves nn.Module's training
+    default, which would run inference with dropout active."""
+    loader = make_loader(monkeypatch)
+
+    built = loader.build_meta_transformer(FakeWrapper, subfolder="transformer")
+
+    assert not built.training
+    assert all(not module.training for module in built.modules())
+
+
 def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
     """The bookkeeping must not pin a component the pipeline has replaced or dropped."""
     import gc

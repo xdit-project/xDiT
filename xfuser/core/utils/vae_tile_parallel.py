@@ -45,10 +45,11 @@ class Blend(NamedTuple):
     deep_down: int
     deep_across: int
     crop: Callable[[torch.Tensor], torch.Tensor]  # the corner of a blended tile that is kept
-    # How deep a whole tile is, which decides whether bands are possible at all. Taken from the
-    # window rather than from a decoded tile, because every rank has to reach the same answer:
-    # one rank falling back while the others gather would hang the decode rather than fail it.
+    # How big a whole tile is, which decides whether a run can be blended alone at all. Taken
+    # from the window rather than from a decoded tile, because every rank has to reach the same
+    # answer: one rank falling back while the others gather would hang the decode, not fail it.
     tile_down: int
+    tile_across: int
 
 
 def mark(vae, group) -> None:
@@ -86,18 +87,24 @@ def dispatch_over(group) -> Dispatch:
 
 
 def sharing(group) -> Tuple[Dispatch, Callable]:
-    """The two ways a group divides a tiled decode: by band where it can, by call where it can't
+    """The two ways a group divides a tiled decode: by run where it can, by call where it can't
 
-    Bands divide the blending as well as the decoding and send back a disjoint piece of the image
-    rather than every tile, so they are what a tiled decode should use. They need at least one
-    row of tiles per rank, and a grid that coarse is why the other one is still here.
+    Runs divide the blending as well as the decoding and send back the image once rather than
+    every overlapping tile, so they are what a tiled decode should use. They need a tile per rank
+    and tiles wider and deeper than two blends, and those are why the other one is still here.
     """
-    return dispatch_over(group), functools.partial(assemble_in_bands, group)
+    return dispatch_over(group), functools.partial(assemble_in_runs, group)
 
 
-def bands(rows: int, world_size: int) -> List[Tuple[int, int]]:
-    """`rows` of tiles split into one contiguous run per rank, as evenly as they divide"""
-    base, extra = divmod(rows, world_size)
+def runs(tiles: int, world_size: int) -> List[Tuple[int, int]]:
+    """`tiles` split into one contiguous run per rank, as evenly as they divide
+
+    Contiguous in the order the tiling loop walks, which is what makes a run cheap to blend: its
+    tiles' neighbours are mostly its own. Split by tile rather than by row, because a row is too
+    coarse a unit to balance with - three rows over two ranks is a two-to-one split, and the rank
+    left waiting costs more than dividing the blending saves.
+    """
+    base, extra = divmod(tiles, world_size)
     out, at = [], 0
     for rank in range(world_size):
         take = base + (1 if rank < extra else 0)
@@ -106,87 +113,92 @@ def bands(rows: int, world_size: int) -> List[Tuple[int, int]]:
     return out
 
 
-def assemble_in_bands(
+def assemble_in_runs(
     group, rows: int, columns: int, decode: Decode, blend: Blend
 ) -> Optional[torch.Tensor]:
-    """Assemble a tile grid with each rank decoding and blending one band of rows, None if it can't
+    """Assemble a tile grid with each rank decoding and blending its own run, None if it can't
 
-    Dealing tiles out divides the decoding and leaves the blending on every rank, which is a cost
-    that does not shrink with the group however many ranks join it. Giving a rank a contiguous
-    band of tile rows instead lets it blend its own band and send only that, so the blending
-    divides too and what comes back is a disjoint piece of the image rather than every tile.
+    Dealing tiles out divides the decoding and leaves the blending on every rank, a cost that
+    does not shrink however many ranks join the group. Giving a rank a contiguous run of tiles
+    lets it blend its own and send only the finished pieces, so the blending divides too.
 
-    The reason a band can be blended alone is a property of the two blends. `blend_v` writes a
-    tile's *first* rows and `blend_h` its *first* columns, so neither ever writes the last rows of
-    a tile - which is the only part of the row above that the row below reads. The bottom edge of
-    a band is therefore already final before any blending starts, and one exchange of those edges,
-    made while the tiles are still raw, is all a rank needs to blend its band exactly as a single
-    rank walking the whole grid would have. No rank waits for another to finish blending.
+    The reason a run can be blended alone is a property of the two blends. `blend_v` writes a
+    tile's *first* rows and `blend_h` its *first* columns, so neither ever writes the last rows or
+    the last columns - and those are the only parts of a tile that the tiles after it read. A
+    tile's edges are therefore final while it is still raw, and one exchange of raw edges lets
+    every rank blend its run exactly as a single rank walking the whole grid would, waiting on
+    nobody else's blending.
 
-    Where the tiles are shallower than twice the blend, that argument fails: the rows `blend_v`
-    writes would reach into the rows the band below reads. None comes back and the caller falls
-    back to a scheme that does not divide the blending.
+    What comes back is each rank's cropped tiles, which are disjoint and tile the image exactly,
+    so the gather carries the image once rather than every overlapping tile.
 
-    Every reason to decline is one every rank reaches the same way, from the grid and the window
-    rather than from the tiles a rank happens to hold. A rank that fell back alone would leave
-    the others waiting in a gather it never joins, which hangs a decode rather than failing it.
+    Where a tile is smaller than twice the blend the argument fails, because the rows and columns
+    the blends write would reach into the ones their neighbours read. Every reason to decline is
+    one every rank reaches the same way, from the grid and the window rather than from the tiles
+    a rank happens to hold: a rank that fell back alone would leave the others waiting in a
+    gather it never joins, which hangs a decode rather than failing it.
     """
     world_size = dist.get_world_size(group)
     if world_size < 2:
         return None
-    # Fewer rows than ranks and some rank would hold no band at all. Round-robin over the calls
-    # still divides that decode; bands cannot.
-    if rows < world_size:
+    order = [(i, j) for i in range(rows) for j in range(columns)]
+    # Fewer tiles than ranks and some rank would hold nothing, with no tensor of its own to take a
+    # dtype and a device from. A decode that small has nothing worth dividing anyway.
+    if len(order) < world_size:
         return None
-    if blend.tile_down < 2 * blend.deep_down:
+    if blend.tile_down < 2 * blend.deep_down or blend.tile_across < 2 * blend.deep_across:
         return None
 
     rank = dist.get_rank(group)
-    start, stop = bands(rows, world_size)[rank]
-    mine = decode([(i, j) for i in range(start, stop) for j in range(columns)])
+    start, stop = runs(len(order), world_size)[rank]
+    mine = decode(order[start:stop])
 
-    # Sent before anything is blended, both because the edge is raw at that point and because a
-    # rank that had to wait for its neighbour's blending would serialise the very thing this is
-    # dividing.
-    sending = _bottom_edge(mine, stop - 1, columns, blend.deep_down)
-    received = [torch.empty_like(sending) for _ in range(world_size)]
-    dist.all_gather(received, sending, group=group)
+    # Exchanged before anything is blended, both because the edges are raw at that point and
+    # because a rank waiting on a neighbour's blending would serialise what this is dividing.
+    edges = _share_edges(order, mine, start, stop, group, world_size, blend)
 
-    above = None
-    if start > 0:
-        widths = [mine[(start, j)].shape[ACROSS] for j in range(columns)]
-        above = list(torch.split(received[rank - 1], widths, dim=ACROSS))
-        # The edge arrives as the tiles decoded it, so the row above's own blending across its
-        # columns is replayed here. It reads each left neighbour's *last* columns, which no blend
-        # writes, so replaying it needs nothing further from anyone.
-        for j in range(1, columns):
-            above[j] = blend.across(above[j - 1], above[j], blend.deep_across)
+    blended: Dict[Where, torch.Tensor] = {}
+    kept: List[Optional[torch.Tensor]] = [None] * len(order)
+    for n in range(start, stop):
+        i, j = order[n]
+        tile = mine[(i, j)]
+        if i > 0:
+            # The neighbour itself where this rank blended it, and its edge rebuilt from the raw
+            # ones otherwise. Both carry the same values; only the cost differs.
+            above = blended.get((i - 1, j))
+            tile = blend.down(
+                above if above is not None else _edge_above(edges, i, j, blend),
+                tile,
+                blend.deep_down,
+            )
+        if j > 0:
+            left = blended.get((i, j - 1))
+            tile = blend.across(
+                left if left is not None else _edge_left(edges, i, j, blend),
+                tile,
+                blend.deep_across,
+            )
+        blended[(i, j)] = tile
+        kept[n] = blend.crop(tile)
 
-    band = _blend_rows(range(start, stop), columns, mine, blend, above)
-    return _share_bands(band, group, world_size)
+    shared = _share(kept, group, world_size)
+    return torch.cat(
+        [
+            torch.cat(shared[i * columns : (i + 1) * columns], dim=ACROSS)
+            for i in range(rows)
+        ],
+        dim=DOWN,
+    )
 
 
 def assemble_here(rows: int, columns: int, decode: Decode, blend: Blend) -> torch.Tensor:
     """Assemble the whole grid on this rank, which is what diffusers' own loop does"""
     mine = decode([(i, j) for i in range(rows) for j in range(columns)])
-    return _blend_rows(range(rows), columns, mine, blend, None)
-
-
-def _blend_rows(
-    which: Sequence[int],
-    columns: int,
-    mine: Dict[Where, torch.Tensor],
-    blend: Blend,
-    above: Optional[List[torch.Tensor]],
-) -> torch.Tensor:
-    """Diffusers' assembly, over the rows given rather than all of them
-
-    `above` is the row before the first, blended, or None where there is none. Both blends write
-    into the tile they are handed, so each tile is blended against neighbours that were themselves
-    already blended, and the scan order that produces is part of the result.
-    """
+    # Both blends write into the tile they are handed, so each tile is blended against neighbours
+    # that were themselves already blended, and the scan order that makes is part of the result.
     made = []
-    for i in which:
+    above: Optional[List[torch.Tensor]] = None
+    for i in range(rows):
         row = [mine[(i, j)] for j in range(columns)]
         kept = []
         for j, tile in enumerate(row):
@@ -201,42 +213,55 @@ def _blend_rows(
     return torch.cat(made, dim=DOWN)
 
 
-def _bottom_edge(
-    mine: Dict[Where, torch.Tensor], row: int, columns: int, deep: int
-) -> torch.Tensor:
-    """The last `deep` rows of a band's bottom row of tiles, as one tensor across the columns
+def _share_edges(
+    order: Sequence[Where],
+    mine: Dict[Where, torch.Tensor],
+    start: int,
+    stop: int,
+    group,
+    world_size: int,
+    blend: Blend,
+) -> Dict[Where, Tuple[torch.Tensor, torch.Tensor]]:
+    """Every tile's last rows and last columns, raw, on every rank
 
-    The last band's edge is sent along with everyone else's, because all_gather asks every rank
-    for the same shape, and nothing is read out of it. That row is the one the latent bounds clip,
-    so it is also the one that can come back shallower than the rest and need padding out.
+    The edges rather than the tiles: what a neighbour reads is one blend deep, so this carries a
+    fraction of what dealing the tiles themselves round would have to.
     """
-    tiles = [mine[(row, j)] for j in range(columns)]
-    edge = torch.cat([tile[..., -deep:, :] for tile in tiles], dim=ACROSS).clone()
-    short = deep - edge.shape[DOWN]
-    if short > 0:
-        edge = torch.nn.functional.pad(edge, (0, 0, 0, short))
-    return edge
+    sending: List[Optional[torch.Tensor]] = [None] * (2 * len(order))
+    for n in range(start, stop):
+        tile = mine[order[n]]
+        # Cloned because the blending below writes into the tiles these came from, and an edge is
+        # only the edge a neighbour needs while it is still raw.
+        sending[2 * n] = tile[..., -blend.deep_down :, :].clone()
+        sending[2 * n + 1] = tile[..., -blend.deep_across :].clone()
+    shared = _share(sending, group, world_size)
+    return {at: (shared[2 * n], shared[2 * n + 1]) for n, at in enumerate(order)}
 
 
-def _share_bands(band: torch.Tensor, group, world_size: int) -> torch.Tensor:
-    """Every rank's band, stacked back into the whole image on every rank"""
-    # Bands differ in height wherever the rows do not divide by the ranks, so the shapes are
-    # exchanged before the pixels, and the send is padded to the largest.
-    manifest: List = [None] * world_size
-    dist.all_gather_object(manifest, tuple(band.shape), group=group)
-    width = max(math.prod(shape) for shape in manifest)
+def _edge_above(edges, i: int, j: int, blend: Blend) -> torch.Tensor:
+    """The last rows of the tile above, as its own rank would have blended them
 
-    sending = torch.empty(width, dtype=band.dtype, device=band.device)
-    sending[: band.numel()] = band.reshape(-1)
-    received = [torch.empty_like(sending) for _ in range(world_size)]
-    dist.all_gather(received, sending, group=group)
-    return torch.cat(
-        [
-            buffer[: math.prod(shape)].view(shape)
-            for shape, buffer in zip(manifest, received)
-        ],
-        dim=DOWN,
-    )
+    Only its blending across the columns reaches its last rows, and that reads its left
+    neighbour's last columns, which nothing writes. One blend of two raw edges rebuilds it.
+    """
+    below, _ = edges[(i - 1, j)]
+    if j == 0:
+        return below
+    left, _ = edges[(i - 1, j - 1)]
+    return blend.across(left, below.clone(), blend.deep_across)
+
+
+def _edge_left(edges, i: int, j: int, blend: Blend) -> torch.Tensor:
+    """The last columns of the tile to the left, as its own rank would have blended them
+
+    Only its blending down the rows reaches its last columns, and that reads the corner where the
+    tile above it meets the tile above and to its left - raw on both counts.
+    """
+    _, beside = edges[(i, j - 1)]
+    if i == 0:
+        return beside
+    above, _ = edges[(i - 1, j - 1)]
+    return blend.down(above[..., -blend.deep_across :], beside.clone(), blend.deep_down)
 
 
 def _share(

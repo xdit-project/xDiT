@@ -110,10 +110,12 @@ BAND_VAES = {
         True,
     ),
 }
-# Three windows across comes out as four tile rows at a quarter overlap, which is the smallest
-# grid that still gives four ranks a band each. The tiles are decoded on a CPU here, so a wider
-# grid costs minutes rather than the coverage it looks like it buys.
-WINDOWS_ACROSS = 3
+# Two windows down by three across comes out as a 3x4 grid of tiles at a quarter overlap. It is
+# deliberately not square and deliberately not a multiple of the ranks: twelve tiles over four
+# ranks is three each against four columns, so every rank's run starts and ends mid-row, which is
+# the case a split by whole rows would never reach. The tiles are decoded on a CPU here, so a
+# wider grid costs minutes rather than the coverage it looks like it buys.
+WINDOWS_DOWN, WINDOWS_ACROSS = 2, 3
 
 
 def _tiled_vae(name: str):
@@ -133,8 +135,9 @@ def _tiled_vae(name: str):
     _, plan = vae_tiling.snap_tile_window(vae, vae_tiling.tile_window(vae) // 4)
     vae_tiling.apply_tile_plan(vae, plan)
 
-    across = vae_tiling.latent_rows(vae, plan) * WINDOWS_ACROSS
-    shape = (1, 4, 2, across, across) if video else (1, 4, across, across)
+    window = vae_tiling.latent_rows(vae, plan)
+    down, across = window * WINDOWS_DOWN, window * WINDOWS_ACROSS
+    shape = (1, 4, 2, down, across) if video else (1, 4, down, across)
     torch.manual_seed(1)
     return vae, torch.randn(*shape)
 
@@ -171,24 +174,35 @@ def _bands_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
 
 
 class TestBands(unittest.TestCase):
-    """Rows split into a contiguous band per rank, blended locally, gathered back whole"""
+    """Tiles split into a contiguous run per rank, blended locally, gathered back whole"""
 
-    def test_the_rows_are_split_as_evenly_as_they_divide(self):
-        self.assertEqual(vae_tile_parallel.bands(4, 2), [(0, 2), (2, 4)])
-        self.assertEqual(
-            vae_tile_parallel.bands(5, 4), [(0, 2), (2, 3), (3, 4), (4, 5)]
-        )
-        self.assertEqual(vae_tile_parallel.bands(3, 1), [(0, 3)])
+    def test_the_tiles_are_split_as_evenly_as_they_divide(self):
+        self.assertEqual(vae_tile_parallel.runs(4, 2), [(0, 2), (2, 4)])
+        self.assertEqual(vae_tile_parallel.runs(5, 4), [(0, 2), (2, 3), (3, 4), (4, 5)])
+        self.assertEqual(vae_tile_parallel.runs(3, 1), [(0, 3)])
 
-    def test_every_row_is_owned_once(self):
-        for rows in range(1, 12):
+    def test_no_rank_is_left_more_than_one_tile_behind_another(self):
+        # The whole reason runs are split by tile and not by row: a row is too coarse a unit to
+        # balance with, and the rank left waiting is what a band cost more than it saved.
+        for tiles in range(1, 40):
+            for world_size in range(1, 9):
+                if tiles < world_size:
+                    continue
+                held = [
+                    stop - start
+                    for start, stop in vae_tile_parallel.runs(tiles, world_size)
+                ]
+                self.assertLessEqual(max(held) - min(held), 1, f"{tiles}/{world_size}")
+
+    def test_every_tile_is_owned_once(self):
+        for tiles in range(1, 12):
             for world_size in range(1, 6):
                 covered = [
-                    row
-                    for start, stop in vae_tile_parallel.bands(rows, world_size)
-                    for row in range(start, stop)
+                    tile
+                    for start, stop in vae_tile_parallel.runs(tiles, world_size)
+                    for tile in range(start, stop)
                 ]
-                self.assertEqual(covered, list(range(rows)), f"{rows} over {world_size}")
+                self.assertEqual(covered, list(range(tiles)), f"{tiles}/{world_size}")
 
     def test_a_band_decode_is_what_one_rank_blending_everything_gives(self):
         for name in BAND_VAES:

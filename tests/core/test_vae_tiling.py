@@ -700,8 +700,17 @@ class TestStrideTiledDecode(unittest.TestCase):
         for name, extra in (
             ("AutoencoderKLWan", {}),
             # Wan 2.2 folds a pixel unshuffle into the decode, which the assembly undoes at the
-            # end and which moves every stride and blend the loop measures in.
-            ("AutoencoderKLWan", {"patch_size": 2}),
+            # end and which moves every stride and blend the loop measures in. Its channels
+            # carry the patch, and its spatial ratio carries it too, so both are given here.
+            (
+                "AutoencoderKLWan",
+                {
+                    "patch_size": 2,
+                    "in_channels": 12,
+                    "out_channels": 12,
+                    "scale_factor_spatial": 16,
+                },
+            ),
             ("AutoencoderKLQwenImage", {}),
         ):
             with self.subTest(vae=name, **extra):

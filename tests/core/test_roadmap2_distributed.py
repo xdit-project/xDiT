@@ -484,6 +484,85 @@ def _mxfp4_fsdp2_worker(rank, world_size, init_method, result_queue):
             dist.destroy_process_group()
 
 
+def _pinned_fp32_component(torch):
+    """A two-block stand-in for a diffusers transformer that pins a norm to fp32."""
+
+    class Block(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = torch.nn.Linear(32, 32, bias=False)
+            self.norm2 = torch.nn.LayerNorm(32)
+
+        def forward(self, hidden):
+            return self.norm2(self.proj(hidden).float()).to(hidden.dtype)
+
+    class Component(torch.nn.Module):
+        _keep_in_fp32_modules = ["norm2"]
+
+        def __init__(self):
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([Block(), Block()])
+
+        def forward(self, hidden):
+            for block in self.blocks:
+                hidden = block(hidden)
+            return hidden
+
+    return Component()
+
+
+def _pinned_fp32_sharding_worker(rank, world_size, init_method, result_queue):
+    dist = None
+    try:
+        import torch
+        import torch.distributed as dist
+
+        torch.cuda.set_device(rank)
+        dist.init_process_group(
+            backend="nccl",
+            init_method=init_method,
+            rank=rank,
+            world_size=world_size,
+        )
+        from xfuser.core.distributed.sharding import shard_component
+
+        facts = {}
+        for label, kwargs in (
+            ("fsdp2", {"memory_efficient_init": True}),
+            ("fsdp1", {}),
+        ):
+            component = _pinned_fp32_component(torch)
+            sharded = shard_component(
+                component,
+                ["blocks"],
+                dist.group.WORLD,
+                rank,
+                torch.bfloat16,
+                sync_module_states=False,
+                **kwargs,
+            )
+            hidden = torch.randn(2, 32, device=f"cuda:{rank}", dtype=torch.bfloat16)
+            output = sharded(hidden)
+            # FSDP1 prefixes wrapped names, so match on the leaf rather than the full path.
+            named = dict(sharded.named_parameters())
+            pinned = next(v for k, v in named.items() if k.endswith("norm2.weight"))
+            projected = next(v for k, v in named.items() if k.endswith("proj.weight"))
+            facts[label] = {
+                "forward_dtype": str(output.dtype),
+                "pinned_dtype": str(pinned.dtype),
+                "pinned_class": type(pinned).__name__,
+                "pinned_numel": pinned.numel(),
+                "proj_dtype": str(projected.dtype),
+                "proj_class": type(projected).__name__,
+            }
+        result_queue.put(("sharded", rank, facts))
+    except BaseException:
+        result_queue.put(("error", rank, traceback.format_exc()))
+    finally:
+        if dist is not None and dist.is_initialized():
+            dist.destroy_process_group()
+
+
 def _run_spawned(torch, worker, init_method, *, timeout):
     context = torch.multiprocessing.get_context("spawn")
     result_queue = context.Queue()
@@ -726,6 +805,43 @@ def test_two_rank_replicated_te_layout_failure_is_collective(tmp_path):
     assert all(
         "ordered parameter/buffer layout mismatch" in result[2] for result in results
     )
+
+
+def test_sharding_keeps_the_models_fp32_modules_out_of_the_shards(tmp_path):
+    """A unit is one flat allocation, so FSDP rejects a mixture of dtypes inside it. The pinned norm
+    therefore has to stay a plain replicated fp32 parameter while the block's weights shard, or
+    xFuser has to demote it and load a lower-precision model than an ordinary load."""
+
+    torch = pytest.importorskip("torch", reason="PyTorch is required for FSDP test")
+    if torch.cuda.device_count() < 2:
+        pytest.skip("sharding assertions require two CUDA devices")
+    if (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_nccl_available()
+    ):
+        pytest.skip("torch.distributed NCCL backend is unavailable")
+
+    processes, hung, results = _run_spawned(
+        torch,
+        _pinned_fp32_sharding_worker,
+        f"file://{tmp_path / 'nccl-init'}",
+        timeout=180,
+    )
+
+    assert not hung, f"sharding hung worker pids: {hung}"
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert len(results) == 2
+    assert all(result[0] == "sharded" for result in results), results
+
+    for _, rank, facts in results:
+        for label, fact in facts.items():
+            assert fact["forward_dtype"] == "torch.bfloat16", (label, rank, fact)
+            assert fact["pinned_dtype"] == "torch.float32", (label, rank, fact)
+            assert fact["pinned_class"] == "Parameter", (label, rank, fact)
+            # Replicated, so every rank holds all 32 elements rather than a shard of them.
+            assert fact["pinned_numel"] == 32, (label, rank, fact)
+            assert fact["proj_dtype"] == "torch.bfloat16", (label, rank, fact)
+        assert facts["fsdp2"]["proj_class"] == "DTensor", facts
 
 
 def test_mxfp4_packed_weight_is_sharded_by_fsdp2(tmp_path):

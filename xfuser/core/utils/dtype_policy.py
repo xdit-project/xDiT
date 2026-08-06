@@ -66,6 +66,30 @@ def persistent_named_buffers(module):
     return persistent
 
 
+def pinned_fp32_parameters(module, fp32_modules) -> set:
+    """The parameters under ``module`` that ``fp32_modules`` pins, by identity.
+
+    FSDP groups parameters into one flat allocation per unit and rejects a unit whose parameters do
+    not share a dtype, so a caller that shards a model has to hand these to FSDP as ignored
+    parameters rather than let them into a group.
+
+    Takes the resolved module names rather than a dtype so a caller can ask about a sub-module, whose
+    own class carries no policy, and so it can be re-asked after a load: filling a parameter through
+    ``set_module_tensor_to_device`` rebinds the slot to a new object, which leaves any set collected
+    beforehand pointing at parameters the module no longer holds.
+    """
+
+    if not fp32_modules:
+        return set()
+    return {
+        parameter
+        for name, parameter in module.named_parameters(
+            recurse=True, remove_duplicate=False
+        )
+        if torch.is_floating_point(parameter) and keeps_fp32(name, fp32_modules)
+    }
+
+
 def cast_preserving_fp32_modules(model, dtype):
     """Cast ``model``'s floating-point tensors to ``dtype``, minus the ones pinned to fp32.
 

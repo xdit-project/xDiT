@@ -13,6 +13,7 @@ from xfuser.core.utils.dtype_policy import (  # noqa: E402
     cast_preserving_fp32_modules,
     fp32_modules_for,
     keeps_fp32,
+    pinned_fp32_parameters,
 )
 
 
@@ -153,3 +154,45 @@ def test_a_transformers_model_pins_the_plain_list_at_fp16_only(dtype, expected):
 )
 def test_a_transformers_model_pins_the_strict_list_at_bf16_too(dtype, expected):
     assert fp32_modules_for(_transformers_model(strict=["wo"]), dtype) == expected
+
+
+def test_pinned_parameters_are_reported_by_identity_for_fsdp():
+    """FSDP takes the parameters themselves as the set to leave out of its units."""
+
+    model = _pinned_model()
+
+    pinned = pinned_fp32_parameters(model, fp32_modules_for(model, torch.bfloat16))
+
+    assert pinned == {
+        model.blocks[0].norm2.weight,
+        model.blocks[0].norm2.bias,
+        model.blocks[0].scale_shift_table,
+        model.time_embedder.weight,
+        model.time_embedder.bias,
+    }
+    assert model.blocks[0].attn.weight not in pinned
+
+
+def test_pinned_parameters_can_be_asked_of_a_submodule():
+    """A block's own class carries no policy, but a caller sharding block by block has to ask about
+    the block, and has to ask again after a fill rebinds its parameter slots."""
+
+    model = _pinned_model()
+    fp32_modules = fp32_modules_for(model, torch.bfloat16)
+    block = model.blocks[0]
+
+    assert pinned_fp32_parameters(block, fp32_modules) == {
+        block.norm2.weight,
+        block.norm2.bias,
+        block.scale_shift_table,
+    }
+
+    replacement = torch.nn.Parameter(torch.ones(4))
+    block.norm2.weight = replacement
+    assert replacement in pinned_fp32_parameters(block, fp32_modules)
+
+
+def test_no_parameters_are_pinned_without_a_policy():
+    model = torch.nn.Linear(4, 4)
+
+    assert pinned_fp32_parameters(model, fp32_modules_for(model, torch.bfloat16)) == set()

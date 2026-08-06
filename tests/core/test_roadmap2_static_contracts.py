@@ -267,7 +267,28 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
         and node.name == "_collective_quantize_call"
     )
     assert quant_helper is not None
-    shard_source = ast.get_source_segment(sharding_source, shard_component)
-    assert shard_source.index("_collective_quantize_call") < shard_source.index(
-        "fully_shard(block, mesh="
+
+    # A block has to be quantized before it is sharded: afterwards its weight is a DTensor holding
+    # one rank's slice, which no quantizer can scale. Compared by position in the tree rather than in
+    # the text so reformatting the call cannot quietly retire the contract.
+    def _call_line(predicate):
+        return min(
+            node.lineno
+            for node in ast.walk(shard_component)
+            if isinstance(node, ast.Call) and predicate(node)
+        )
+
+    def _is_block_shard(node):
+        return (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "fully_shard"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "block"
+        )
+
+    quantize_line = _call_line(
+        lambda node: isinstance(node.func, ast.Name)
+        and node.func.id == "_collective_quantize_call"
     )
+    assert quantize_line < _call_line(_is_block_shard)

@@ -29,6 +29,12 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 from torch.distributed.device_mesh import DeviceMesh
 
+from xfuser.core.utils.dtype_policy import (
+    cast_preserving_fp32_modules,
+    fp32_modules_for,
+    pinned_fp32_parameters,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -342,11 +348,34 @@ def shard_component(
     for wrap_attr in wrap_attrs:
         wrapped_blocks.extend(rgetattr(component, wrap_attr))
 
+    # The modules the model's loader keeps in fp32 have to stay out of every FSDP unit: a unit is one
+    # flat allocation and FSDP rejects a mixture of dtypes within it. They are a rounding error in
+    # size next to the weights they normalise (a few MB across all of Wan's blocks), so replicating
+    # them costs nothing measurable, whereas casting them down loses precision the ordinary load of
+    # the same checkpoint keeps.
+    fp32_modules = fp32_modules_for(component, dtype) if dtype else ()
     if dtype and not meta_init:
-        component = component.to(dtype)
+        component = cast_preserving_fp32_modules(component, dtype)
+
+    def ignore_fp32(module):
+        """This module's pinned parameters, resolved now: a fill rebinds parameter slots, so a set
+        collected earlier would name parameters the module no longer holds and FSDP would take them
+        into a unit anyway. FSDP also leaves ignored parameters where they are, so they need the
+        device move themselves; meta ones get it from the caller's fill.
+        """
+        pinned = pinned_fp32_parameters(module, fp32_modules)
+        if pinned and device_id is not None:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu", device_id
+            )
+            for parameter in pinned:
+                if not parameter.is_meta and parameter.device != device:
+                    parameter.data = parameter.data.to(device)
+        return pinned or None
 
     if not use_fsdp2:
         # FSDP1: Fastest path for non-quantized inference.
+        ignored = ignore_fp32(component)
         return FSDP(
             component,
             process_group=process_group,
@@ -356,6 +385,7 @@ def shard_component(
             sync_module_states=sync_module_states,
             use_orig_params=use_orig_params,
             forward_prefetch=forward_prefetch,
+            ignored_states=list(ignored) if ignored else None,
         )
 
     # FSDP2: Required for torchao quantized tensors, or when use_fsdp2=True for
@@ -402,14 +432,26 @@ def shard_component(
                     process_group,
                     context=f"quantizing FSDP block {i}",
                 )
-        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
+        fully_shard(
+            block,
+            mesh=mesh,
+            reshard_after_forward=reshard_after_forward,
+            offload_policy=cpu_offload,
+            ignored_params=ignore_fp32(block),
+        )
 
     # Fill non-block params/buffers before the component-level fully_shard turns them into DTensors
     # (a plain assignment onto a DTensor slot would diverge across ranks).
     if load_epilogue_fn is not None:
         load_epilogue_fn(component)
 
-    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
+    fully_shard(
+        component,
+        mesh=mesh,
+        reshard_after_forward=reshard_after_forward,
+        offload_policy=cpu_offload,
+        ignored_params=ignore_fp32(component),
+    )
 
     # FSDP2 forward prefetch: each block pre-fetches the next two blocks' all-gathers
     # so communication overlaps with compute. The first block has no predecessor to

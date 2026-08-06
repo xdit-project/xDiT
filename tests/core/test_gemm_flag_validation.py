@@ -11,11 +11,24 @@ def runtime():
     from xfuser.config.args import xFuserArgs
     from xfuser.model_executor.models.runner_models import base_model
 
+    class _StubModel(base_model.xFuserModel):
+        """Concrete runner used to exercise base-class flag validation.
+
+        xFuserModel is an ABC, so object.__new__ on it raises rather than
+        producing the uninitialized instance these tests poke at.
+        """
+
+        def _load_model(self):
+            raise NotImplementedError
+
+        def _run_pipe(self, input_args):
+            raise NotImplementedError
+
     return SimpleNamespace(
         args_cls=xFuserArgs,
         base=base_model,
         capabilities_cls=base_model.ModelCapabilities,
-        model_cls=base_model.xFuserModel,
+        model_cls=_StubModel,
     )
 
 
@@ -124,7 +137,16 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
         fp8_precision_override_suffixes=None,
         int8_gemm_module_list=None,
     )
-    model.fp8 = SimpleNamespace(aiter_active=False, module_list=lambda: ["transformer"])
+    # fp8 is a read-only property on the base runner, so stub it on the class.
+    monkeypatch.setattr(
+        type(model),
+        "fp8",
+        property(
+            lambda _self: SimpleNamespace(
+                aiter_active=False, module_list=lambda: ["transformer"]
+            )
+        ),
+    )
     model.pipe = SimpleNamespace(to=lambda device: model.pipe)
     model._replicated_broadcast_load = lambda: False
     model._setup_mxfp4_gemms = lambda local_rank: calls.append(("fp4", local_rank))
@@ -132,16 +154,25 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
         ("schedule", input_args)
     )
 
+    # The generic FP8 walk now runs through the selected backend adapter, which
+    # the FP4 path must not reach; fp8_backend is a cached_property, so seed its
+    # cache rather than assigning to the attribute.
+    model.__dict__["fp8_backend"] = SimpleNamespace(
+        converts_before_device_move=False,
+        backend=SimpleNamespace(value="torchao"),
+        storage_semantics="torchao_fp8",
+        convert_module=lambda module, **kwargs: calls.append(("generic-fp8", kwargs)),
+    )
+
+    # No meta loader in this scenario; otherwise the eager fill runs and reaches
+    # the real distributed state.
+    monkeypatch.setattr(type(model), "_loader", None, raising=False)
+
     monkeypatch.setattr(
         runtime.base, "get_world_group", lambda: SimpleNamespace(local_rank=0)
     )
     monkeypatch.setattr(runtime.base, "_is_cuda", lambda: False)
     monkeypatch.setattr(runtime.base, "_use_aiter_fp8_rdna4", lambda: False)
-    monkeypatch.setattr(
-        runtime.base,
-        "quantize_linear_layers_to_fp8",
-        lambda module, device: calls.append(("generic-fp8", device)),
-    )
 
     model._post_load_and_state_initialization({"num_inference_steps": 4})
 

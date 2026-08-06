@@ -618,7 +618,9 @@ class TestTileBatching(unittest.TestCase):
         # One dispatch for the decode, holding every call it would have made itself, which is
         # what lets a group divide them and pay for one exchange rather than one per tile.
         self.assertEqual(seen, [len(counted.shapes)])
-        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+        # Batched, so the same residue as the batching tests above: a convolution blocks off the
+        # rows it is handed, and a tile in the wrong place would be off by order one.
+        torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
 
     def test_the_calls_can_be_made_in_any_order(self):
         import torch
@@ -646,6 +648,101 @@ class TestTileBatching(unittest.TestCase):
             expected = vae.tiled_decode(latents).sample
             got = vae_tiling.batched_tiled_decode(vae, 1 << 20)(latents).sample
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+
+class TestStrideTiledDecode(unittest.TestCase):
+    """The video VAEs' own tiling loop, reimplemented so that its tiles can be handed round"""
+
+    # The two whose loop walks a stride they store: a frame loop per tile, threading a feature
+    # cache that is cleared where each tile starts.
+    FAMILY = ("AutoencoderKLWan", "AutoencoderKLQwenImage")
+    # Wide enough to be several tiles across once the window is halved, and two frames deep so
+    # that the cache is threaded through more than the chunk the tile opens with.
+    LATENT_GRID = 16
+    FRAMES = 2
+
+    def _tiled_vae(self, name, **extra):
+        """A small video VAE of class `name` at a halved window, and latents a few tiles across"""
+        import torch
+        import diffusers
+
+        cls = getattr(diffusers, name, None)
+        if cls is None:
+            self.skipTest(f"{name} is not in diffusers {diffusers.__version__}")
+        kwargs, _, channels = TestEveryVAEARunnerLoads.VAES[name]
+        vae = cls(**{**kwargs, **extra}).eval()
+        if not hasattr(vae, "use_tiling"):
+            self.skipTest(f"diffusers {diffusers.__version__} cannot tile {name}")
+        vae.enable_tiling()
+
+        window = vae_tiling.tile_window(vae)
+        pixels, plan = vae_tiling.snap_tile_window(vae, window // 2)
+        self.assertIsNotNone(plan, f"{name} refused every window at or below {window // 2}")
+        vae_tiling.apply_tile_plan(vae, plan)
+        self.assertTrue(
+            vae_tiling.tiles_by_stored_stride(vae),
+            f"{name} was expected to tile by a stride it stores",
+        )
+
+        torch.manual_seed(0)
+        grid = self.LATENT_GRID
+        return vae, torch.randn(1, channels, self.FRAMES, grid, grid)
+
+    def test_only_the_families_whose_loop_this_is(self):
+        # Hunyuan, LTX-2 and CogVideoX carry the same stride attributes and the same cache, and
+        # walk them differently, so nothing about a VAE's attributes settles this on its own.
+        self.assertFalse(vae_tiling.tiles_by_stored_stride(stride_vae()))
+        self.assertFalse(vae_tiling.tiles_by_stored_stride(overlap_factor_vae()))
+
+    def test_it_decodes_what_the_vae_decodes_for_itself(self):
+        import torch
+
+        for name, extra in (
+            ("AutoencoderKLWan", {}),
+            # Wan 2.2 folds a pixel unshuffle into the decode, which the assembly undoes at the
+            # end and which moves every stride and blend the loop measures in.
+            ("AutoencoderKLWan", {"patch_size": 2}),
+            ("AutoencoderKLQwenImage", {}),
+        ):
+            with self.subTest(vae=name, **extra):
+                vae, latents = self._tiled_vae(name, **extra)
+                with torch.no_grad():
+                    expected = vae.tiled_decode(latents).sample
+                    got = vae_tiling.strided_tiled_decode(vae)(latents).sample
+                # The same calls in the same order on the same tensors, so exactly the same
+                # sample: this loop exists to hand the calls round, not to compute differently.
+                self.assertEqual(got.shape, expected.shape)
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_a_tile_is_a_call_and_they_can_be_made_in_any_order(self):
+        import torch
+
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                seen = []
+
+                def backwards(calls):
+                    seen.append(len(calls))
+                    return list(reversed([call() for call in reversed(calls)]))
+
+                with torch.no_grad():
+                    expected = vae.tiled_decode(latents).sample
+                    got = vae_tiling.strided_tiled_decode(vae, backwards)(latents).sample
+                # One call per tile, and the order they are made in cannot reach the sample:
+                # a tile's frames share a cache, and no two tiles share anything.
+                stride = vae.tile_sample_stride_height // vae.spatial_compression_ratio
+                across = len(range(0, latents.shape[-1], stride))
+                self.assertEqual(seen, [across * across])
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_the_loop_is_only_reimplemented_to_hand_it_round(self):
+        # Without a group there is nothing to gain by replacing a loop that already does this,
+        # so the VAE keeps its own and only a dispatcher brings this one in.
+        vae, _ = self._tiled_vae("AutoencoderKLWan")
+        self.assertTrue(vae_tiling.supports_tile_parallel(vae))
+        self.assertIsNone(vae_tiling.tiled_decode_for(vae, 0))
+        self.assertIsNotNone(vae_tiling.tiled_decode_for(vae, 0, lambda calls: []))
 
 
 if __name__ == "__main__":

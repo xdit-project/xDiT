@@ -1182,12 +1182,17 @@ class xFuserModel(abc.ABC):
         budget_elems = vae_tiling.tile_batch_budget(default_area, tile_area)
         if budget_elems is None and dispatch is None:
             return
-        batched = vae_tiling.batched_tiled_decode(vae, budget_elems or 0, dispatch)
-        if batched is None:
+        installed = vae_tiling.tiled_decode_for(vae, budget_elems or 0, dispatch)
+        if installed is None:
             return
-        vae.tiled_decode = batched
-        log(f"VAE tiled decode will batch tiles up to {budget_elems} latent elements per call "
-            f"on {type(vae).__name__} (its own window carries {default_area})"
+        vae.tiled_decode = installed
+        carried = (
+            f"tiles batched up to {budget_elems} latent elements per call, its own window "
+            f"carrying {default_area}"
+            if budget_elems
+            else "a tile per call"
+        )
+        log(f"VAE tiled decode on {type(vae).__name__}: {carried}"
             + (f", dealt out across {torch.distributed.get_world_size(group)} ranks."
                if group is not None else "."))
 

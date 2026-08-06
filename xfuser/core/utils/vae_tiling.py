@@ -7,7 +7,7 @@ the policy around these numbers lives with the runner instead.
 
 import functools
 import math
-from typing import Callable, Optional, Tuple
+from typing import Callable, NamedTuple, Optional, Tuple
 
 import diffusers
 import torch
@@ -243,13 +243,63 @@ def tiles_by_overlap_factor(vae) -> bool:
     )
 
 
+class _StrideLoop(NamedTuple):
+    """Where the two stride-walked tiling loops differ from one another"""
+
+    patches: bool  # decodes into a pixel unshuffle, and unpatchifies the assembled sample
+    clamps: bool  # holds the assembled sample in [-1, 1]
+    first_chunk: bool  # tells the decoder which frame starts the tile
+
+
+# The VAEs whose stride-walked loop is reimplemented below, by name, because no attribute says
+# which loop body a class has. Hunyuan, LTX-2 and CogVideoX carry the same stride attributes and
+# the same frame cache and walk them differently, tiling over frames as well, which this does not.
+_STRIDE_LOOPS = {
+    "AutoencoderKLWan": _StrideLoop(patches=True, clamps=True, first_chunk=True),
+    "AutoencoderKLQwenImage": _StrideLoop(patches=False, clamps=False, first_chunk=False),
+}
+
+
+def tiles_by_stored_stride(vae) -> bool:
+    """Whether this VAE tiles with the frame-cached loop `strided_tiled_decode` reimplements"""
+    if type(vae).__name__ not in _STRIDE_LOOPS:
+        return False
+    # The class is the loop, but the pieces it walks are still checked, so that a VAE refactored
+    # out from under this fails the question rather than the decode.
+    return all(
+        isinstance(getattr(vae, attr, None), int)
+        for attr in (
+            "tile_sample_min_height",
+            "tile_sample_min_width",
+            "tile_sample_stride_height",
+            "tile_sample_stride_width",
+            "spatial_compression_ratio",
+        )
+    ) and all(
+        callable(getattr(vae, attr, None))
+        for attr in ("blend_v", "blend_h", "clear_cache", "post_quant_conv", "decoder")
+    )
+
+
 def supports_tile_parallel(vae) -> bool:
     """Whether this VAE's tiling loop is one of the ones reimplemented here
 
     Deciding which rank makes which decoder call means owning the loop that makes them, so this
     is what a caller asks before planning to decode a VAE's tiles apart from one another.
     """
-    return tiles_by_overlap_factor(vae)
+    return tiles_by_overlap_factor(vae) or tiles_by_stored_stride(vae)
+
+
+def tiled_decode_for(
+    vae, budget_elems: int, dispatch: Optional[Callable] = None
+) -> Optional[Callable]:
+    """The tiled_decode to install on this VAE, None where its loop is not one reimplemented here"""
+    batched = batched_tiled_decode(vae, budget_elems, dispatch)
+    if batched is not None:
+        return batched
+    # The stride-walked loop is reimplemented for one reason, which is to hand its tiles round;
+    # left to decode them all here it would only be diffusers' own loop with a second author.
+    return strided_tiled_decode(vae, dispatch) if dispatch is not None else None
 
 
 def batched_tiled_decode(
@@ -354,6 +404,108 @@ def batched_tiled_decode(
             result_rows.append(torch.cat(result_row, dim=3))
 
         dec = torch.cat(result_rows, dim=2)
+        if not return_dict:
+            return (dec,)
+        return DecoderOutput(sample=dec)
+
+    return tiled_decode
+
+
+def strided_tiled_decode(vae, dispatch: Optional[Callable] = None) -> Optional[Callable]:
+    """A tiled_decode for the video VAEs that walk a stride they store, None where it can't
+
+    Upstream's loop, with the tiles built as calls rather than made where they are built, so that
+    `dispatch` can hand them round a group. A tile here is a frame loop threading the VAE's own
+    feature cache, which is cleared at the start of each one, so a tile is independent of every
+    other tile in the way the frames inside it are not.
+
+    Batching, which the overlap-fraction family gets from `batched_tiled_decode`, is not offered:
+    that exists to spread one round of collectives over several tiles, and a decode that hands
+    whole tiles out has no round to spread.
+    """
+    if not tiles_by_stored_stride(vae):
+        return None
+
+    from diffusers.models.autoencoders.vae import DecoderOutput
+
+    loop = _STRIDE_LOOPS[type(vae).__name__]
+    patch_size = getattr(vae.config, "patch_size", None) if loop.patches else None
+
+    def tiled_decode(z, return_dict: bool = True):
+        _, _, num_frames, height, width = z.shape
+        ratio = vae.spatial_compression_ratio
+        sample_height = height * ratio
+        sample_width = width * ratio
+        latent_min_height = vae.tile_sample_min_height // ratio
+        latent_min_width = vae.tile_sample_min_width // ratio
+        latent_stride_height = vae.tile_sample_stride_height // ratio
+        latent_stride_width = vae.tile_sample_stride_width // ratio
+        sample_stride_height = vae.tile_sample_stride_height
+        sample_stride_width = vae.tile_sample_stride_width
+        if patch_size is not None:
+            sample_height //= patch_size
+            sample_width //= patch_size
+            sample_stride_height //= patch_size
+            sample_stride_width //= patch_size
+            blend_height = vae.tile_sample_min_height // patch_size - sample_stride_height
+            blend_width = vae.tile_sample_min_width // patch_size - sample_stride_width
+        else:
+            blend_height = vae.tile_sample_min_height - sample_stride_height
+            blend_width = vae.tile_sample_min_width - sample_stride_width
+
+        def tile_at(i, j):
+            def decode():
+                # The cache is per tile and threaded through the frames of one, which is why the
+                # frames cannot be handed round but the tiles can.
+                vae.clear_cache()
+                frames = []
+                for k in range(num_frames):
+                    vae._conv_idx = [0]
+                    tile = z[:, :, k : k + 1, i : i + latent_min_height, j : j + latent_min_width]
+                    tile = vae.post_quant_conv(tile)
+                    extra = {"first_chunk": k == 0} if loop.first_chunk else {}
+                    frames.append(
+                        vae.decoder(
+                            tile, feat_cache=vae._feat_map, feat_idx=vae._conv_idx, **extra
+                        )
+                    )
+                return torch.cat(frames, dim=2)
+
+            return decode
+
+        calls = [
+            tile_at(i, j)
+            for i in range(0, height, latent_stride_height)
+            for j in range(0, width, latent_stride_width)
+        ]
+        made = dispatch(calls) if dispatch is not None else [call() for call in calls]
+        vae.clear_cache()
+
+        columns = len(range(0, width, latent_stride_width))
+        rows = [made[k : k + columns] for k in range(0, len(made), columns)]
+
+        # Upstream's assembly, unchanged.
+        result_rows = []
+        for i, row in enumerate(rows):
+            result_row = []
+            for j, tile in enumerate(row):
+                if i > 0:
+                    tile = vae.blend_v(rows[i - 1][j], tile, blend_height)
+                if j > 0:
+                    tile = vae.blend_h(row[j - 1], tile, blend_width)
+                result_row.append(
+                    tile[:, :, :, :sample_stride_height, :sample_stride_width]
+                )
+            result_rows.append(torch.cat(result_row, dim=-1))
+        dec = torch.cat(result_rows, dim=3)[:, :, :, :sample_height, :sample_width]
+
+        if patch_size is not None:
+            from diffusers.models.autoencoders.autoencoder_kl_wan import unpatchify
+
+            dec = unpatchify(dec, patch_size=patch_size)
+        if loop.clamps:
+            dec = torch.clamp(dec, min=-1.0, max=1.0)
+
         if not return_dict:
             return (dec,)
         return DecoderOutput(sample=dec)

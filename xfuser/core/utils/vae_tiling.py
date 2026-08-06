@@ -7,7 +7,7 @@ the policy around these numbers lives with the runner instead.
 
 import functools
 import math
-from typing import Callable, NamedTuple, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import diffusers
 import torch

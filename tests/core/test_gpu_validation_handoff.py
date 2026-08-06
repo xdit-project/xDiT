@@ -177,6 +177,24 @@ def test_distributed_commands_declare_a_parallel_degree(runner, matrix):
             assert command[command.index(flag) + 1] == str(case["world_size"])
 
 
+@pytest.mark.parametrize("placement", ["eager", "replicated", "fsdp_blockwise"])
+def test_every_placement_declares_a_parallel_degree_when_distributed(
+    runner, matrix, placement
+):
+    """The matrix has no multi-rank eager case, so cover the seam directly."""
+
+    case = dict(
+        next(case for case in matrix["cases"] if case["world_size"] == 1),
+        id="synthetic",
+        placement=placement,
+        world_size=4,
+    )
+
+    command = runner.build_command(case, matrix["defaults"], run_id="test-run")
+
+    assert command[command.index("--ulysses_degree") + 1] == "4"
+
+
 def test_local_checkpoint_command_keeps_env_placeholder(runner, matrix):
     case = next(
         case for case in matrix["cases"] if case["checkpoint"]["source"] == "local"

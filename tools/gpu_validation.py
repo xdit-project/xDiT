@@ -291,22 +291,16 @@ def build_command(
         ]
     )
 
+    if case["world_size"] > 1:
+        # The runner asserts dp*cfg*sp*tp*pp == dit_parallel_size, and
+        # --fully_shard_degree does not contribute to that product, so every
+        # multi-rank case needs a parallel degree of its own.
+        command.extend(["--ulysses_degree", str(case["world_size"])])
     if case["placement"] == "replicated":
-        command.extend(
-            [
-                "--ulysses_degree",
-                str(case["world_size"]),
-                "--memory_efficient_replicated_load",
-            ]
-        )
+        command.append("--memory_efficient_replicated_load")
     elif case["placement"] == "fsdp_blockwise":
-        # FSDP sharding is orthogonal to the parallel degree: the runner asserts
-        # dp*cfg*sp*tp*pp == dit_parallel_size, which --fully_shard_degree does
-        # not contribute to.
         command.extend(
             [
-                "--ulysses_degree",
-                str(case["world_size"]),
                 "--fully_shard_degree",
                 str(case["world_size"]),
                 "--memory_efficient_sharding",

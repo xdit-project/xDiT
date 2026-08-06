@@ -459,6 +459,39 @@ def test_checkpoint_dtype_cast_leaves_nonpersistent_buffers_and_integers(runtime
     assert model.token_ids.dtype is torch.long
 
 
+def test_checkpoint_dtype_cast_never_rounds_a_pinned_tensor_on_the_way(runtime):
+    """Casting per tensor rather than through module.to matters for a component whose weights are
+    already real: an upcast afterwards could not recover the discarded bits."""
+
+    torch = runtime.torch
+    model = _keep_in_fp32_model(torch)
+    with torch.no_grad():
+        model.blocks[0].norm2.weight.fill_(1.0 + 2.0**-20)
+    original = model.blocks[0].norm2.weight.clone()
+
+    runtime.meta._cast_meta_to_checkpoint_dtype(model, torch.bfloat16)
+
+    assert torch.equal(model.blocks[0].norm2.weight, original)
+    assert not torch.equal(
+        model.blocks[0].norm2.weight, original.to(torch.bfloat16).float()
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("blocks.0.norm2.weight", True),
+        ("norm2", True),
+        ("blocks.0.norm2_extra.weight", False),
+        ("blocks.0.attn.to_q.weight", False),
+    ],
+)
+def test_fp32_pinning_matches_whole_path_segments(runtime, name, expected):
+    """Substring matching would pin unrelated modules that merely share a prefix."""
+
+    assert runtime.meta._keeps_fp32(name, ("norm2", "time_embedder")) is expected
+
+
 def test_checkpoint_dtype_cast_handles_a_model_without_an_fp32_policy(runtime):
     torch = runtime.torch
     model = torch.nn.Linear(4, 4)

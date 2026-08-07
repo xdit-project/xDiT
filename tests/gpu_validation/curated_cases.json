@@ -1,0 +1,1640 @@
+{
+  "schema_version": 1,
+  "description": "External GPU end-to-end validation matrix for loading and quantization roadmap task 8. Entries are plans, not results.",
+  "rationale": "Cases written by hand because their expected outcome is a claim about the world rather than about the code: which archs AITER builds FP4 kernels for, which torch versions can shard uint8 MXFP4, which inputs a model needs. A generator reading the same probe functions the runner calls could only assert that the code agrees with itself. These win any collision with a generated case, so their IDs and result history stay stable.",
+  "defaults": {
+    "prompt": "A red origami fox on a slate table, studio light",
+    "seed": 1234,
+    "num_inference_steps": 4,
+    "height": 512,
+    "width": 512,
+    "output_root": "gpu-validation-output",
+    "timeout_seconds": 3600
+  },
+  "cases": [
+    {
+      "id": "rdna4-flux2-fp8-eager-te-tf5",
+      "tags": [
+        "smoke",
+        "rdna4",
+        "aiter",
+        "fp8",
+        "te-fp8",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Compare text fidelity and composition against the bf16 case with the same seed."
+    },
+    {
+      "id": "rdna4-flux2-fp8-eager-te-tf4-offload",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp8",
+        "te-fp8",
+        "transformers4",
+        "post-load",
+        "offload",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "model",
+      "transformers": "4.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Confirm the logged Transformers 4 text-encoder fallback is post-load, then compare to the Transformers 5 result."
+    },
+    {
+      "id": "rdna4-flux1-fp8-replicated-no-te",
+      "tags": [
+        "smoke",
+        "rdna4",
+        "aiter",
+        "fp8",
+        "replicated",
+        "hub"
+      ],
+      "model": "FLUX.1-dev",
+      "model_family": "flux1",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "sequential",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-dev"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Verify peer ranks do not independently retain a full host copy of replicated weights."
+    },
+    {
+      "id": "rdna4-wan22-hybrid-fsdp",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp4",
+        "fp8",
+        "hybrid",
+        "fsdp",
+        "dual-transformer",
+        "video",
+        "hub"
+      ],
+      "model": "Wan2.2-T2V",
+      "model_family": "wan22",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "hybrid_fp8_fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Inspect both transformer phases; transformer_2 is expected to remain FP8. Unrun, and the success expectation needs checking against the MXFP4 FSDP2 gate: the FP4 half targets transformer.blocks, which the strategy also wraps, so validate_format_fsdp_placement is required and refuses unless torch carries pytorch/pytorch#177948 (2.12). On an older torch expect a preflight_failure instead."
+    },
+    {
+      "id": "rdna4-krea2-fp4-eager-group-offload",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp4",
+        "streaming",
+        "offload",
+        "hub"
+      ],
+      "model": "Krea-2-Raw",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "group",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/Krea-2-Raw"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "The Qwen3VL text encoder is excluded from quantization; record host transfer behavior."
+    },
+    {
+      "id": "rdna4-cosmos3-hybrid-replicated-lowcpu",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp4",
+        "fp8",
+        "hybrid",
+        "replicated",
+        "offload",
+        "hub"
+      ],
+      "model": "Cosmos3-Super",
+      "model_family": "cosmos3",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "replicated",
+      "quantization": "hybrid_fp8_fp4",
+      "te_fp8": false,
+      "offload": "group_low_cpu_mem",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "nvidia/Cosmos3-Super"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Compare first/last FP8 override ranges to an all-FP8 reference."
+    },
+    {
+      "id": "rdna4-zimage-int8-rejected",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "int8",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "eager",
+      "quantization": "int8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "INT8.*ROCm|ROCm.*INT8"
+      },
+      "quality_notes": "Expected rejection must occur before checkpoint allocation."
+    },
+    {
+      "id": "rdna4-wan22-distilled-fsdp-rejected-local",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp8",
+        "fsdp",
+        "dual-transformer",
+        "custom-exclusion",
+        "expected-failure",
+        "preflight",
+        "local"
+      ],
+      "model": "Wan2.2-Distilled-I2V",
+      "model_family": "wan22-distilled",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "local",
+        "env": "XDIT_LOCAL_HF_HOME",
+        "value": "Wan2.2-Distilled-I2V"
+      },
+      "world_size": 4,
+      "args": [
+        "--distilled_transformer_path",
+        "${XDIT_WAN_HIGH_NOISE}",
+        "--distilled_transformer_2_path",
+        "${XDIT_WAN_LOW_NOISE}",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "collective-safe|distilled_wan_remap|custom checkpoint"
+      },
+      "quality_notes": "Expected rejection must precede reads of the external LightX2V state dicts."
+    },
+    {
+      "id": "rdna4-sd35-replicated-rejected",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp8",
+        "replicated",
+        "custom-exclusion",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "SD3.5",
+      "model_family": "stable-diffusion-3.5",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "stabilityai/stable-diffusion-3.5-large"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "composition|collective-safe|replicated"
+      },
+      "quality_notes": "The composition adapter has no standard meta-construction seam."
+    },
+    {
+      "id": "rdna4-causalwan-fsdp-rejected",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fsdp",
+        "custom-exclusion",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "CausalWan",
+      "model_family": "causal-wan",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "CausalWan"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "collective-safe|causal_wan_custom|fallback"
+      },
+      "quality_notes": "The manual single-file fallback is intentionally excluded from collective loading."
+    },
+    {
+      "id": "rdna4-flux2-fsdp-te-tf4-rejected",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp8",
+        "te-fp8",
+        "fsdp",
+        "transformers4",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "4.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "Transformers.*5|text.encoder.*stream|post-load"
+      },
+      "quality_notes": "FSDP cannot safely apply the Transformers 4 text-encoder post-load fallback."
+    },
+    {
+      "id": "rdna4-hunyuan-fp8-fsdp",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp8",
+        "fsdp",
+        "video",
+        "hub"
+      ],
+      "model": "HunyuanVideo",
+      "model_family": "hunyuan-video",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "tencent/HunyuanVideo"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Record the pinned refs/pr/18 transformer load and blockwise fill."
+    },
+    {
+      "id": "rocm-flux2-fp8-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "torchao",
+        "fp8",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "non_rdna4_rocm"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Confirm TorchAO is selected instead of AITER block-scale FP8."
+    },
+    {
+      "id": "rocm-qwen-fp8-replicated-te",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "te-fp8",
+        "replicated",
+        "hub"
+      ],
+      "model": "Qwen-Image",
+      "model_family": "qwen-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "non_rdna4_rocm"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Qwen/Qwen-Image"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Check native TorchAO text-encoder loading and rank-to-rank output determinism."
+    },
+    {
+      "id": "rocm-flux2-fp4-rejected",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp4",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "FP4.*AITER|AITER.*FP4"
+      },
+      "quality_notes": "Narrowed from non_rdna4_rocm to gfx942: _AITER_FP4_UNSUPPORTED_ARCHS names only gfx942, so this rejection is that arch's behaviour rather than all of non-RDNA4 ROCm. gfx950 accepts FP4 and is covered by rocm-gfx950-flux2-fp4-eager. FLUX.2-dev is a gated repo, so a run needs hub auth; a 401 previously matched the rejection pattern and was mis-scored."
+    },
+    {
+      "id": "rocm-gfx950-krea2-fp4-eager",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "gfx950",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First FP4 success expected on ROCm outside RDNA4. probe_format_backend_capabilities on gfx950 reports aiter_mxfp4 available with no reason, where gfx942 refuses it because AITER compiles no Float4_e2m1fn_x2 kernels for that arch. Predicted from the probe; not yet run."
+    },
+    {
+      "id": "rocm-gfx950-krea2-fp4-replicated4",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "gfx950",
+        "replicated",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Replicated meta load does not shard, so the packed MXFP4 weight never reaches FSDP2 and the torch limitation that blocks the fsdp_blockwise case does not apply. Text encoder stays unquantized by declaration."
+    },
+    {
+      "id": "rocm-gfx950-krea2-fp4-fsdp4",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "gfx950",
+        "fsdp",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "MXFP4.*FSDP2|FSDP2.*non-floating-point|177948"
+      },
+      "quality_notes": "Still rejected on gfx950, but for the torch version rather than the architecture: MXFP4 packs two 4-bit values into a uint8, and FSDP2 before pytorch/pytorch#177948 (torch 2.12) cannot shard a non-floating-point parameter. This image carries 2.9.1. Krea-2 quantizes transformer.transformer_blocks and wraps the same blocks for FSDP, so the placement check is required and fires. Expect this case to flip to inference_success on a torch 2.12 image."
+    },
+    {
+      "id": "rocm-zimage-int8-rejected",
+      "tags": [
+        "rocm",
+        "torchao",
+        "int8",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "non_rdna4_rocm"
+      },
+      "placement": "eager",
+      "quantization": "int8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "INT8.*ROCm|ROCm.*INT8"
+      },
+      "quality_notes": "ROCm INT8 must reject before model allocation."
+    },
+    {
+      "id": "ada-flux1-fp8-eager-te",
+      "tags": [
+        "smoke",
+        "cuda",
+        "ada",
+        "torchao",
+        "fp8",
+        "te-fp8",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.1-dev",
+      "model_family": "flux1",
+      "hardware": {
+        "backend": "cuda_ada_torchao",
+        "accelerator": "sm89"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Compare transformer-only and text-encoder FP8 quality using the same prompt and seed."
+    },
+    {
+      "id": "ada-zimage-int8-replicated",
+      "tags": [
+        "cuda",
+        "ada",
+        "torchao",
+        "int8",
+        "replicated",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "cuda_ada_torchao",
+        "accelerator": "sm89"
+      },
+      "placement": "replicated",
+      "quantization": "int8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Verify minimum-size exclusions and context_refiner exclusion under sequence parallelism."
+    },
+    {
+      "id": "ada-flux2-nvfp4-rejected",
+      "tags": [
+        "cuda",
+        "ada",
+        "torchao",
+        "nvfp4",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "cuda_ada_torchao",
+        "accelerator": "sm89"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "capability 10|Blackwell|NVFP4"
+      },
+      "quality_notes": "NVFP4 requires CUDA capability 10.0 or newer."
+    },
+    {
+      "id": "hopper-wan22-fp8-fsdp",
+      "tags": [
+        "smoke",
+        "cuda",
+        "hopper",
+        "torchao",
+        "fp8",
+        "fsdp",
+        "dual-transformer",
+        "video",
+        "hub"
+      ],
+      "model": "Wan2.2-T2V",
+      "model_family": "wan22",
+      "hardware": {
+        "backend": "cuda_hopper_torchao",
+        "accelerator": "sm90"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Verify both transformer components fill and execute under FSDP."
+    },
+    {
+      "id": "hopper-zimage-int8-eager-sequential",
+      "tags": [
+        "cuda",
+        "hopper",
+        "torchao",
+        "int8",
+        "offload",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "cuda_hopper_torchao",
+        "accelerator": "sm90"
+      },
+      "placement": "eager",
+      "quantization": "int8",
+      "te_fp8": false,
+      "offload": "sequential",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Record transfer overhead and compare output to the non-offloaded INT8 case."
+    },
+    {
+      "id": "hopper-qwen-fp8-eager-model-offload",
+      "tags": [
+        "cuda",
+        "hopper",
+        "torchao",
+        "fp8",
+        "te-fp8",
+        "offload",
+        "hub"
+      ],
+      "model": "Qwen-Image-Edit",
+      "model_family": "qwen-image",
+      "hardware": {
+        "backend": "cuda_hopper_torchao",
+        "accelerator": "sm90"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "model",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Qwen/Qwen-Image-Edit"
+      },
+      "world_size": 1,
+      "args": [
+        "--input_images",
+        "${XDIT_QWEN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Use a fixed source image and retain it with the result bundle."
+    },
+    {
+      "id": "hopper-ltx2-fp8-eager",
+      "tags": [
+        "cuda",
+        "hopper",
+        "torchao",
+        "fp8",
+        "video",
+        "hub"
+      ],
+      "model": "LTX-2",
+      "model_family": "ltx2",
+      "hardware": {
+        "backend": "cuda_hopper_torchao",
+        "accelerator": "sm90"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Lightricks/LTX-2"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Validate the shared transformer construction seam with stage-2 LoRA application."
+    },
+    {
+      "id": "hopper-ltx2-fsdp-rejected",
+      "tags": [
+        "cuda",
+        "hopper",
+        "torchao",
+        "fp8",
+        "fsdp",
+        "custom-exclusion",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "LTX-2",
+      "model_family": "ltx2",
+      "hardware": {
+        "backend": "cuda_hopper_torchao",
+        "accelerator": "sm90"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Lightricks/LTX-2"
+      },
+      "world_size": 2,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "stage.?2 distilled LoRA|meta transformer"
+      },
+      "quality_notes": "The LoRA-before-fill ordering is not valid for the FSDP meta path."
+    },
+    {
+      "id": "blackwell-flux2-nvfp4-eager",
+      "tags": [
+        "smoke",
+        "cuda",
+        "blackwell",
+        "torchao",
+        "nvfp4",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "cuda_blackwell_torchao",
+        "accelerator": "sm100_or_newer"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Confirm native Diffusers NVFP4 streaming and compare against bf16 and FP8 references."
+    },
+    {
+      "id": "blackwell-krea2-nvfp4-replicated",
+      "tags": [
+        "cuda",
+        "blackwell",
+        "torchao",
+        "nvfp4",
+        "replicated",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "cuda_blackwell_torchao",
+        "accelerator": "sm100_or_newer"
+      },
+      "placement": "replicated",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/Krea-2-Turbo"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Text encoder remains unquantized by declaration."
+    },
+    {
+      "id": "blackwell-cosmos3-nvfp4-fsdp",
+      "tags": [
+        "cuda",
+        "blackwell",
+        "torchao",
+        "nvfp4",
+        "fsdp",
+        "hub"
+      ],
+      "model": "Cosmos3-Nano",
+      "model_family": "cosmos3",
+      "hardware": {
+        "backend": "cuda_blackwell_torchao",
+        "accelerator": "sm100_or_newer"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "nvidia/Cosmos3-Nano"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Record whether installed TorchAO tensor subclasses satisfy composable FSDP hooks. Unrun, and as written the code cannot satisfy it: _probe_fsdp_support returns a hardcoded false for nvfp4 with \"NVFP4 tensor-subclass FSDP gather/scatter support is not validated\", so this rejects on any Blackwell box until that probe is implemented. Keep it as the target, but expect a preflight_failure today."
+    },
+    {
+      "id": "blackwell-flux2-hybrid-rejected",
+      "tags": [
+        "cuda",
+        "blackwell",
+        "torchao",
+        "nvfp4",
+        "fp8",
+        "hybrid",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "cuda_blackwell_torchao",
+        "accelerator": "sm100_or_newer"
+      },
+      "placement": "eager",
+      "quantization": "hybrid_fp8_fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "hybrid.*ROCm|ROCm.*hybrid|disable.*hybrid"
+      },
+      "quality_notes": "CUDA NVFP4 has no runtime FP8/FP4 hybrid wrapper."
+    },
+    {
+      "id": "blackwell-zimage-int8-group-offload",
+      "tags": [
+        "cuda",
+        "blackwell",
+        "torchao",
+        "int8",
+        "offload",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "cuda_blackwell_torchao",
+        "accelerator": "sm100_or_newer"
+      },
+      "placement": "eager",
+      "quantization": "int8",
+      "te_fp8": false,
+      "offload": "group",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Record host and device peaks while group offload streams quantized components."
+    },
+    {
+      "id": "blackwell-flux2-nvfp4-local-cache",
+      "tags": [
+        "cuda",
+        "blackwell",
+        "torchao",
+        "nvfp4",
+        "local",
+        "offline",
+        "streaming"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "cuda_blackwell_torchao",
+        "accelerator": "sm100_or_newer"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "4.x",
+      "checkpoint": {
+        "source": "local",
+        "env": "XDIT_LOCAL_HF_HOME",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Run with a pre-populated HF_HOME and network disabled; retain the resolved snapshot revision."
+    },
+    {
+      "id": "rocm-wan22-i2v-bf16-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "baseline",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Unquantized reference for every other case in this file."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp8-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "torchao",
+        "fp8",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Confirm TorchAO FP8 is selected on gfx942, not AITER block-scale (RDNA4-only)."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp8-te-eager",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "te-fp8",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Native TorchAO text-encoder streaming for the UMT5 encoder; watch for text-conditioning loss."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp8-fsdp4",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "fsdp",
+        "dual-transformer",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Memory-efficient FSDP blockwise meta-load across both Wan2.2 transformers; compare peak VRAM against the eager FP8 case."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp8-replicated2",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "replicated",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 2,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Control for the ulysses=4 replicated case; the RoPE buffer-dtype corruption survived ulysses<=2."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp8-replicated4",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "replicated",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Rank0 broadcast load at the sequence-parallel degree where buffer-dtype corruption previously produced black output. Inspect the video, not just the exit status."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp8-ulysses4-control",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "control",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Same parallel degree as the replicated case but with the ordinary N-rank load, so a pixel diff against mi300x-wan22-i2v-fp8-replicated4 isolates the memory-efficient load from sequence-parallel attention numerics."
+    },
+    {
+      "id": "rocm-wan22-i2v-bf16-ulysses4-control",
+      "tags": [
+        "rocm",
+        "baseline",
+        "control",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Unquantized ulysses-4 reference. Paired with mi300x-wan22-i2v-bf16-replicated4 this isolates the memory-efficient load itself: with no quantization in the way, the two must agree bit for bit."
+    },
+    {
+      "id": "rocm-wan22-i2v-bf16-replicated4",
+      "tags": [
+        "rocm",
+        "baseline",
+        "replicated",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Rank0 broadcast load with no quantization. Any pixel difference against the eager ulysses-4 control is attributable to the load path alone."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp4-eager",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "MXFP4.*unavailable|Float4_e2m1fn_x2.*gfx942"
+      },
+      "quality_notes": "AITER compiles no FP4 kernels for gfx942, so this must be rejected in preflight. Before the gate landed it reached AITER_CHECK(false) after a full model load and died on SIGABRT."
+    },
+    {
+      "id": "rocm-wan22-i2v-fp4-fsdp4",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "fsdp",
+        "hub"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "MXFP4.*unavailable|Float4_e2m1fn_x2.*gfx942|MXFP4.*FSDP2"
+      },
+      "quality_notes": "Rejected twice over on this node: no AITER FP4 kernels for gfx942, and torch 2.9.1 FSDP2 cannot shard the uint8 MXFP4 packed parameter. The arch gate fires first."
+    },
+    {
+      "id": "rocm-klein4b-bf16-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "torchao",
+        "baseline",
+        "hub"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Unquantized reference for the klein-4B memory-efficient cases; compare composition and text fidelity against them at the same seed.",
+      "observed_on_gfx942": "PASSED on gfx942. Promoted from tests/gpu_validation/supplementary/matrix-mi300x-seeded.json; the JSONL record did not survive the node being reclaimed, so this note is provenance rather than an attached result."
+    },
+    {
+      "id": "rocm-klein4b-fp8-fsdp4",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "fsdp",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First blockwise-fill coverage for klein-4B; compare peak VRAM and host anon against the eager baseline.",
+      "observed_on_gfx942": "PASSED on gfx942. Promoted from tests/gpu_validation/supplementary/matrix-mi300x-seeded.json; the JSONL record did not survive the node being reclaimed, so this note is provenance rather than an attached result."
+    },
+    {
+      "id": "rocm-klein4b-fp8-replicated4",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "replicated",
+        "hub"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Rank0 host load plus GPU broadcast for klein-4B; host peak should stay at 1x the model rather than scaling with ranks.",
+      "observed_on_gfx942": "PASSED on gfx942. Promoted from tests/gpu_validation/supplementary/matrix-mi300x-seeded.json; the JSONL record did not survive the node being reclaimed, so this note is provenance rather than an attached result."
+    }
+  ]
+}

@@ -66,6 +66,40 @@ Where a case merely happened to run on one machine first, record that under
 `observed_on_<arch>` and leave the accelerator token as wide as the behaviour
 allows, so the case stays eligible on the other hardware.
 
+## Where the cases come from
+
+`tests/gpu_validation/matrix.json` is generated, not hand-edited:
+
+```bash
+python tools/generate_validation_matrix.py           # rewrite the matrix
+python tools/generate_validation_matrix.py --check    # fail if it is stale
+```
+
+Hand-authoring did not scale. Fifty runners carry a usable load declaration between
+them, covering 444 placement-and-quantization combinations before any hardware
+profile or rank count multiplies that, and each hand-written case restated a
+runner's `LoadDeclaration` and could drift from it. The enumeration is now derived
+from those declarations, so two inputs stay hand-written:
+
+`tests/gpu_validation/profiles.json` holds what cannot be derived: which
+quantizations a hardware profile may attempt, how many ranks each placement gets,
+and which models need an input image the harness cannot supply.
+
+`tests/gpu_validation/curated_cases.json` holds cases whose expected outcome is a
+claim about the world rather than about the code, which in practice means every
+expected rejection: that AITER ships no FP4 kernels for gfx942, that FSDP2 cannot
+shard uint8 MXFP4 before torch 2.12. Deriving those from the same probe functions
+the runner calls would leave the suite asserting only that the code agrees with
+itself. A curated case wins any collision with a generated one, so its ID, and
+therefore its result history, survives regeneration.
+
+Generated cases only ever expect success, which is not circular: the declaration
+decides what is worth attempting and the GPU decides whether it works. Generation
+is also blind to the local HF cache on purpose. The matrix is a plan, and which
+weights a machine happens to hold is an execution-time fact; filtering on it would
+make the file differ per node and make case IDs come and go. Use
+`tools/cache_inventory.py` to see what the current machine can actually reach.
+
 ## Selecting and executing cases
 
 Filters compose. Repeated tags are ANDed; repeated models are ORed.

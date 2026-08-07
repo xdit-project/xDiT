@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "description": "Hand-maintained inputs for tools/generate_validation_matrix.py. Everything a runner already declares (which placements and quantization formats it supports) is read from its LoadDeclaration and must not be repeated here. This file holds only what cannot be derived: what each hardware profile can attempt, how many ranks a placement gets, and which models need an input this harness cannot supply.",
+  "world_size_policy": {
+    "eager": 1,
+    "replicated": 4,
+    "fsdp_blockwise": 4
+  },
+  "world_size_rationale": "One rank for eager because it shards nothing; four for the memory-efficient paths because that is where a per-rank shard is small enough for the saving to show and matches the ranks the curated cases used.",
+  "profiles": [
+    {
+      "id": "mi3xx",
+      "backend": "rocm_torchao",
+      "accelerator": "gfx942_or_gfx950",
+      "transformers": "5.x",
+      "tags": ["rocm", "torchao", "generated"],
+      "quantizations": ["none", "fp8"],
+      "quantizations_withheld": {
+        "int8": "TorchAO INT8 has no ROCm kernel path, so every case would be a rejection. Rejections stay curated: their value is a human asserting an external fact, which a generator reading the same probe code cannot do.",
+        "fp4": "The outcome differs across the two archs this token covers, since AITER ships no FP4 kernels for gfx942 but does for gfx950, so an FP4 case cannot share the pair token. The gfx950 FP4 cases are curated and pinned.",
+        "fp8_fp4": "Needs the FP4 half, so it inherits the same split."
+      }
+    }
+  ],
+  "requires_input_image": {
+    "reason": "These runners need a real input image or video, which the harness has no generic way to supply, so a generated case would fail for reasons unrelated to loading. Cases for them stay curated and pass the input through a placeholder.",
+    "models": [
+      "CausalWan",
+      "FLUX.1-Kontext-dev",
+      "Hunyuanvideo-1.5",
+      "Hunyuanvideo-1.5-Distilled",
+      "Hunyuanvideo-1.5-Sparse",
+      "LTX-2",
+      "LTX-2.3",
+      "MiniMax-H3-Ref2VA",
+      "Qwen-Image-Edit",
+      "Wan2.1-I2V",
+      "Wan2.1-VACE-1.3B",
+      "Wan2.1-VACE-14B",
+      "Wan2.2-Distilled-I2V",
+      "Wan2.2-I2V",
+      "Wan2.2-TI2V"
+    ]
+  }
+}

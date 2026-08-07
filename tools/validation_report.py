@@ -22,6 +22,9 @@ DEFAULT_MATRIX = ROOT / "tests/gpu_validation/matrix.json"
 
 GREEN_STATUSES = {"passed", "passed_expected_rejection"}
 NOT_RUN_STATUSES = {"environment_mismatch"}
+# Mirrors gpu_validation.GPU_METRICS_VERSION; a record below it holds memory figures this report
+# cannot put in the same column as the rest.
+CURRENT_METRICS_VERSION = 2
 
 
 def load_records(paths: list[Path]) -> list[dict]:
@@ -153,8 +156,15 @@ def build_report(results: list[Path], matrix_path: Path) -> dict:
     matrix = json.loads(matrix_path.read_text())
     planned = {case["id"]: case for case in matrix["cases"]}
 
-    ran = [r for r in records if r.get("status") not in NOT_RUN_STATUSES]
-    skipped = [r for r in records if r.get("status") in NOT_RUN_STATUSES]
+    # A record whose case the matrix no longer plans describes a configuration nobody asked about
+    # any more — a renamed case, or one dropped when a profile changed its rank counts. Judging the
+    # run by it would report a failure that cannot be reproduced or fixed, so it is set aside and
+    # listed rather than counted.
+    stale = [r for r in records if r["case_id"] not in planned]
+    current = [r for r in records if r["case_id"] in planned]
+
+    ran = [r for r in current if r.get("status") not in NOT_RUN_STATUSES]
+    skipped = [r for r in current if r.get("status") in NOT_RUN_STATUSES]
     green = [r for r in ran if r["status"] in GREEN_STATUSES]
     failed = [r for r in ran if r["status"] not in GREEN_STATUSES]
 
@@ -173,6 +183,7 @@ def build_report(results: list[Path], matrix_path: Path) -> dict:
         "skipped": skipped,
         "green": green,
         "failed": failed,
+        "stale": stale,
         "planned": planned,
         "relevant": relevant,
         "accelerators": accelerators,
@@ -233,7 +244,10 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 _seconds(metrics.get("load_duration_seconds")),
                 _seconds(_post_load(metrics)),
                 _seconds(metrics.get("wall_duration_seconds")),
-                _gib(metrics.get("peak_gpu_memory_bytes")),
+                _gib(metrics.get("peak_load_gpu_memory_bytes")),
+                _gib(metrics.get("peak_gpu_memory_bytes"))
+                if _memory_is_comparable(metrics)
+                else "stale",
                 _gib(metrics.get("peak_host_rss_bytes")),
             ]
         )
@@ -245,6 +259,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "load s",
         "post-load s",
         "wall s",
+        "load vram",
         "peak vram",
         "peak host",
     ]
@@ -263,6 +278,19 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "post-load s is wall minus load, so it covers inference, VAE decode, saving and "
         "teardown rather than inference alone."
     )
+    lines.append(
+        "vram figures are the busiest single device, not a sum over the run's devices, so they "
+        "are comparable across rank counts. load vram is the peak while the load was in flight, "
+        "which is the figure a memory-efficient load is meant to move; peak vram covers the whole "
+        "run and is usually dominated by inference activations."
+    )
+
+    if any(not _memory_is_comparable(r.get("metrics", {})) for r in ran):
+        lines.append(
+            "stale in the vram column means the record predates the current memory definition, "
+            "when the figure was summed over the node's devices rather than taken per device. "
+            "Those numbers are not comparable with the rest, so re-run the case to replace them."
+        )
 
     scopes = {
         r.get("metrics", {}).get("gpu_memory_scope")
@@ -289,6 +317,17 @@ def render(report: dict, *, markdown: bool = False) -> str:
             notes = (record.get("quality", {}) or {}).get("matrix_notes")
             if notes:
                 lines.append(f"    {notes[:160]}")
+        lines.append("")
+
+    stale = report["stale"]
+    if stale:
+        lines.append("## Stale records" if markdown else "Stale records")
+        lines.append(
+            "The matrix no longer plans these cases, so they are excluded from the verdict above. "
+            "Re-run the case that replaced them to get a current result."
+        )
+        for record in sorted(stale, key=lambda r: r["case_id"]):
+            lines.append(f"  {record['case_id']}: {record.get('status')}")
         lines.append("")
 
     lines.append("## Coverage by model" if markdown else "Coverage by model")
@@ -326,6 +365,18 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "so it is covered but is not usable."
     )
     return "\n".join(lines) + "\n"
+
+
+def _memory_is_comparable(metrics: dict) -> bool:
+    """Whether this record's GPU memory means what the current column heading says.
+
+    Records written before the definition changed carry a node-wide sum, which is a different
+    quantity and larger the more ranks the run used. Showing it beside a per-device peak would
+    invite exactly the comparison the change was made to enable.
+    """
+    if not metrics.get("peak_gpu_memory_bytes"):
+        return True
+    return metrics.get("metrics_version", 1) >= CURRENT_METRICS_VERSION
 
 
 def _case_targets(case: dict, accelerators: set[str]) -> bool:

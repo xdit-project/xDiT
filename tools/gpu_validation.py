@@ -27,6 +27,10 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX = ROOT / "tests/gpu_validation/matrix.json"
+# Bumped when a metric's meaning changes, so a reader never puts two definitions in one column.
+# 2: GPU memory became the busiest single device's peak; it was previously summed over every device
+# on the node, which grew with the rank count and so hid what sharding did.
+GPU_METRICS_VERSION = 2
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED_CASE_FIELDS = {
     "id",
@@ -848,28 +852,36 @@ def _cgroup_memory() -> int | None:
     return None
 
 
-def _nvidia_process_memory(pids: set[int]) -> int | None:
+def _nvidia_process_memory(pids: set[int]) -> dict[str, int] | None:
+    """This run's GPU bytes per device, keyed by device.
+
+    Per device rather than summed: a rank count is not a memory cost, and summing a sharded run
+    across eight devices reports a bigger number the more ranks it is spread over, which inverts
+    what sharding does.
+    """
     output = _run_text(
         [
             "nvidia-smi",
-            "--query-compute-apps=pid,used_gpu_memory",
+            "--query-compute-apps=pid,gpu_uuid,used_gpu_memory",
             "--format=csv,noheader,nounits",
         ]
     )
     if output is None:
         return None
-    total_mib = 0
+    by_device: dict[str, int] = {}
     for line in output.splitlines():
         try:
-            pid_text, memory_text = (part.strip() for part in line.split(",", 1))
+            pid_text, device, memory_text = (part.strip() for part in line.split(",", 2))
             if int(pid_text) in pids:
-                total_mib += int(memory_text)
+                # Summed within a device: several ranks can share one GPU.
+                by_device[device] = by_device.get(device, 0) + int(memory_text) * 1024**2
         except (ValueError, TypeError):
             continue
-    return total_mib * 1024 * 1024
+    return by_device
 
 
-def _rocm_global_memory() -> int | None:
+def _rocm_global_memory() -> dict[str, int] | None:
+    """Whole-device used VRAM per device, keyed by card."""
     output = _run_text(["rocm-smi", "--showmeminfo", "vram", "--json"])
     if output is None:
         return None
@@ -877,23 +889,24 @@ def _rocm_global_memory() -> int | None:
         data = json.loads(output)
     except json.JSONDecodeError:
         return None
-    values: list[int] = []
+    by_device: dict[str, int] = {}
 
-    def visit(value: Any, key: str = "") -> None:
+    def visit(value: Any, key: str = "", device: str = "") -> None:
         if isinstance(value, dict):
             for child_key, child in value.items():
-                visit(child, child_key)
+                visit(child, child_key, device or key)
         elif isinstance(value, list):
             for child in value:
-                visit(child, key)
+                visit(child, key, device)
         elif "used" in key.casefold() and "memory" in key.casefold():
             try:
-                values.append(int(value))
+                by_device[device or key] = by_device.get(device or key, 0) + int(value)
             except (TypeError, ValueError):
                 pass
 
-    visit(data)
-    return sum(values) if values else None
+    for card, readings in data.items() if isinstance(data, dict) else ():
+        visit(readings, device=card)
+    return by_device
 
 
 class ResourceMonitor:
@@ -904,6 +917,9 @@ class ResourceMonitor:
         self.peak_cgroup = 0
         self.peak_gpu: int | None = None
         self.gpu_scope: str | None = None
+        # (monotonic time, busiest device's bytes), so a phase's peak can be recovered afterwards
+        # from markers the child process reports only once it has finished.
+        self.gpu_samples: list[tuple[float, int]] = []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._sample, daemon=True)
 
@@ -921,15 +937,22 @@ class ResourceMonitor:
             cgroup = _cgroup_memory()
             if cgroup is not None:
                 self.peak_cgroup = max(self.peak_cgroup, cgroup)
-            gpu = _nvidia_process_memory(pids)
+            by_device = _nvidia_process_memory(pids)
             scope = "process_tree"
-            if gpu is None:
-                gpu = _rocm_global_memory()
+            if by_device is None:
+                by_device = _rocm_global_memory()
                 scope = "device_global"
-            if gpu is not None:
-                self.peak_gpu = max(self.peak_gpu or 0, gpu)
+            if by_device:
+                busiest = max(by_device.values())
+                self.peak_gpu = max(self.peak_gpu or 0, busiest)
                 self.gpu_scope = scope
+                self.gpu_samples.append((time.monotonic(), busiest))
             self._stop.wait(self.interval)
+
+    def peak_gpu_between(self, start: float, end: float) -> int | None:
+        """The busiest device's peak within one phase, or None if no sample landed in it."""
+        within = [value for at, value in self.gpu_samples if start <= at <= end]
+        return max(within) if within else None
 
 
 def _placeholder_names(command: list[str]) -> list[str]:
@@ -1218,7 +1241,15 @@ def execute_case(
         "first_forward": first_forward,
         "peak_host_rss_bytes": monitor.peak_host_rss or None,
         "peak_cgroup_memory_bytes": monitor.peak_cgroup or None,
+        "metrics_version": GPU_METRICS_VERSION,
         "peak_gpu_memory_bytes": monitor.peak_gpu,
+        # The whole-run peak is dominated by inference activations, so on its own it cannot show what
+        # a memory-efficient load achieved. This is the peak while the load was in flight.
+        "peak_load_gpu_memory_bytes": (
+            monitor.peak_gpu_between(markers["load_start"], markers["load_end"])
+            if "load_start" in markers and "load_end" in markers
+            else None
+        ),
         "gpu_memory_scope": monitor.gpu_scope,
     }
     record = make_result_record(

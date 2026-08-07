@@ -819,6 +819,9 @@ def test_execute_case_times_out_and_kills_isolated_process_group(
         peak_gpu = None
         gpu_scope = None
 
+        def peak_gpu_between(self, start, end):
+            return None
+
         def __init__(self, root_pid):
             pass
 
@@ -963,6 +966,9 @@ def test_term_grace_is_not_shortened_when_root_closes_stdout(
         peak_gpu = None
         gpu_scope = None
 
+        def peak_gpu_between(self, start, end):
+            return None
+
         def __init__(self, root_pid):
             pass
 
@@ -1076,6 +1082,9 @@ def test_execute_case_bounds_drain_when_ready_descendant_retains_stdout(
         peak_cgroup = 0
         peak_gpu = None
         gpu_scope = None
+
+        def peak_gpu_between(self, start, end):
+            return None
 
         def __init__(self, root_pid):
             pass
@@ -1279,6 +1288,44 @@ def test_list_is_mutually_exclusive_with_action_modes(runner, arguments):
         runner._parser().parse_args(arguments)
 
     assert exc.value.code == 2
+
+
+def test_vram_is_reported_per_device_so_rank_count_cannot_inflate_it(runner, monkeypatch):
+    """Eight ranks holding a shard each must not read as eight times the memory.
+
+    Summing devices made a sharded run look worse the wider it was spread, which is the opposite of
+    what sharding does and made the dashboard unable to show the load feature working at all.
+    """
+    idle, busy = 300 * 1024**2, 25 * 1024**3
+    monkeypatch.setattr(
+        runner,
+        "_run_text",
+        lambda command: json.dumps(
+            {
+                f"card{index}": {"VRAM Total Used Memory (B)": str(busy if index else idle)}
+                for index in range(8)
+            }
+        ),
+    )
+
+    by_device = runner._rocm_global_memory()
+
+    assert len(by_device) == 8
+    assert max(by_device.values()) == busy
+    assert sum(by_device.values()) > busy, "the test data must distinguish max from sum"
+
+
+def test_the_load_phase_peak_is_taken_from_the_load_window_only(runner):
+    """The whole-run peak is dominated by inference, so it cannot show what the load cost."""
+    monitor = runner.ResourceMonitor(root_pid=os.getpid())
+    monitor.gpu_samples = [
+        (100.0, 3 * 1024**3),  # during load
+        (110.0, 4 * 1024**3),  # during load
+        (200.0, 90 * 1024**3),  # inference, long after the load finished
+    ]
+
+    assert monitor.peak_gpu_between(99.0, 120.0) == 4 * 1024**3
+    assert monitor.peak_gpu_between(300.0, 400.0) is None
 
 
 def test_result_record_serializes_required_fields(runner, tmp_path, matrix):

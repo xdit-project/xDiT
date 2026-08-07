@@ -26,6 +26,11 @@ def report_tool():
 
 
 @pytest.fixture(scope="module")
+def runner():
+    return _load("gpu_validation", ROOT / "tools/gpu_validation.py")
+
+
+@pytest.fixture(scope="module")
 def matrix():
     return json.loads(MATRIX_PATH.read_text())
 
@@ -39,6 +44,8 @@ def _record(case, status, **metrics):
         "peak_cgroup_memory_bytes": None,
         "peak_gpu_memory_bytes": None,
         "gpu_memory_scope": None,
+        # What the runner writes today; tests for older records drop it deliberately.
+        "metrics_version": 2,
     }
     base.update(metrics)
     return {
@@ -129,6 +136,55 @@ def test_a_failure_makes_the_whole_report_not_green(report_tool, matrix, tmp_pat
     text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
     assert "NOT GREEN" in text
     assert failing["id"] in text.split("Failures", 1)[1]
+
+
+def test_memory_from_before_the_definition_changed_is_not_shown_as_comparable(
+    report_tool, matrix, tmp_path
+):
+    """The old figure summed the node's devices, so it grew with the rank count.
+
+    Printing it in the same column as a per-device peak would invite the comparison the change was
+    made to enable, and would make sharding look like it cost eight times the memory.
+    """
+    case = _cases_for(matrix, "gfx950")[0]
+    old = _record(case, "passed", wall_duration_seconds=1.0, peak_gpu_memory_bytes=280 * 1024**3)
+    old["metrics"].pop("metrics_version", None)
+    path = _write(tmp_path, [old])
+
+    text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
+
+    assert "280" not in text
+    assert "stale" in text
+
+
+def test_the_report_and_the_runner_agree_on_the_metrics_version(report_tool, runner):
+    """Two constants naming one definition drift apart silently."""
+    assert report_tool.CURRENT_METRICS_VERSION == runner.GPU_METRICS_VERSION
+
+
+def test_a_record_for_a_case_the_matrix_dropped_does_not_make_the_report_red(
+    report_tool, matrix, tmp_path
+):
+    """Profiles change their rank counts, which renames generated cases.
+
+    A leftover failure under the old name describes a case nobody can re-run, so counting it would
+    leave the report permanently red with no action available.
+    """
+    passing = _cases_for(matrix, "gfx950")[0]
+    dropped = _record(passing, "failed_inference")
+    dropped["case_id"] = f"{passing['id']}-removed-when-the-profile-changed"
+    path = _write(
+        tmp_path,
+        [_record(passing, "passed", wall_duration_seconds=1.0), dropped],
+    )
+
+    report = report_tool.build_report([path], MATRIX_PATH)
+    text = report_tool.render(report)
+
+    assert [r["case_id"] for r in report["stale"]] == [dropped["case_id"]]
+    assert not report["failed"]
+    assert "GREEN" in text and "NOT GREEN" not in text
+    assert dropped["case_id"] in text.split("Stale records", 1)[1]
 
 
 @pytest.mark.parametrize(

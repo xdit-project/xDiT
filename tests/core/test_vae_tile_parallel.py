@@ -267,6 +267,13 @@ def _runs_in_a_group(
         assert got.shape == expected.shape, f"{got.shape} != {expected.shape}"
         # Bit-exact, not close: a run replays the blending its neighbour would have done on the
         # same values, so there is no reordering to excuse a difference.
+        #
+        # That holds on gloo, which is what -TestGpus 1 runs and where this is checked. On four
+        # devices over RCCL it has been seen to miss by 2.1e-06 on AutoencoderKL at two ranks
+        # while passing at four and passing on Wan and Qwen-Image at both, which is the shape of
+        # an accelerator picking its convolution differently rather than of the assembly putting
+        # a tile in the wrong place - but it has not been run down, so read a failure here on a
+        # device as unexplained rather than as this code.
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
     finally:
         dist.destroy_process_group()

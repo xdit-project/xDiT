@@ -38,6 +38,12 @@
             "role": "the blockwise disk fill on its own, with nothing quantized to confuse a failure"
           },
           {
+            "placement": "fsdp_eager_fill",
+            "quantization": "none",
+            "te_fp8": false,
+            "role": "control for the case above: same ranks and same FSDP sharding, materialized in full first, so the memory difference between the two is the blockwise fill rather than the rank count"
+          },
+          {
             "placement": "fsdp_blockwise",
             "quantization": "fp8",
             "te_fp8": true,

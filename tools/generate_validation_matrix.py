@@ -51,7 +51,12 @@ PLACEMENT_SLUG = {
     "eager": "eager",
     "replicated": "replicated",
     "fsdp_blockwise": "fsdp",
+    "fsdp_eager_fill": "fsdp-control",
 }
+# No materialization mode maps to fsdp_eager_fill, since it is the absence of the memory-efficient
+# fill rather than a mode of its own. It is admissible exactly when the case it controls for is:
+# a runner that cannot load blockwise has nothing for this to be a baseline against.
+CONTROL_FOR_PLACEMENT = {"fsdp_eager_fill": "fsdp_blockwise"}
 QUANTIZATION_SLUG = {"none": "bf16"}
 # Fields that make two cases the same test, so a curated case can be recognised as already
 # covering a generated one. Tags, notes and IDs are deliberately absent. So is the
@@ -124,7 +129,8 @@ def screened_variants(plan, declaration, cls) -> list[dict]:
     seen: set[tuple[str, str, bool]] = set()
     for entry in plan["cases"]:
         placement, quantization = entry["placement"], entry["quantization"]
-        if (placement, quantization) not in declared:
+        declares = CONTROL_FOR_PLACEMENT.get(placement, placement)
+        if (declares, quantization) not in declared:
             continue
         te_fp8 = bool(entry["te_fp8"]) and quantizes_te
         identity = (placement, quantization, te_fp8)
@@ -213,7 +219,12 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
         allowed = set(profile["quantizations"])
         # A profile's own rank counts win, so hardware that ships eight devices is not
         # measured at a rank count nobody deploys.
-        policy = profile.get("world_size_policy", profiles["world_size_policy"])
+        policy = dict(profile.get("world_size_policy", profiles["world_size_policy"]))
+        # A control derives its rank count from the case it controls for rather than declaring one,
+        # so the two cannot drift apart and stop being comparable.
+        for control, controlled in CONTROL_FOR_PLACEMENT.items():
+            if controlled in policy:
+                policy[control] = policy[controlled]
         for alias, cls in canonical_runners(registry):
             declaration = getattr(cls, "load_declaration", None)
             if declaration is None:

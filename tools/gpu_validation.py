@@ -68,7 +68,11 @@ ROCM_ACCELERATORS = {
 # Unknown tokens have to be rejected here: a token nothing recognises matches no device,
 # so a typo would silently skip every case that carries it instead of failing.
 ACCELERATORS = ROCM_ACCELERATORS | {"sm89", "sm90", "sm100_or_newer"}
-PLACEMENTS = {"eager", "replicated", "fsdp_blockwise"}
+# fsdp_eager_fill is the control for fsdp_blockwise: same rank count, same FSDP sharding, same
+# final sharded state, but weights are materialised in full before being sharded. Without it a
+# memory figure from a blockwise run cannot be attributed to the fill strategy, since spreading a
+# model over more ranks changes host and device memory on its own.
+PLACEMENTS = {"eager", "replicated", "fsdp_blockwise", "fsdp_eager_fill"}
 QUANTIZATION = {"none", "fp8", "fp4", "int8", "hybrid_fp8_fp4"}
 OFFLOADS = {"none", "model", "sequential", "group", "group_low_cpu_mem"}
 EXPECTED_OUTCOMES = {"inference_success", "preflight_failure"}
@@ -320,6 +324,8 @@ def build_command(
                 "--memory_efficient_sharding",
             ]
         )
+    elif case["placement"] == "fsdp_eager_fill":
+        command.extend(["--fully_shard_degree", str(case["world_size"])])
 
     quantization_flags = {
         "none": [],

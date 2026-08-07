@@ -93,6 +93,27 @@ def test_generated_cases_run_the_profile_runtime_args(matrix):
         assert case["args"] == expected[profile_id], case["id"]
 
 
+def test_each_control_case_matches_the_rank_count_it_controls_for(matrix):
+    """A control at a different rank count would not isolate anything.
+
+    Spreading a model over more ranks moves host and device memory by itself, so the pair has to
+    agree on world size for their difference to be attributable to the fill strategy.
+    """
+    controls = [
+        case for case in matrix["cases"] if case["placement"] == "fsdp_eager_fill"
+    ]
+    assert controls, "the control placement stopped being generated"
+    for control in controls:
+        counterpart = next(
+            case
+            for case in matrix["cases"]
+            if case["placement"] == "fsdp_blockwise"
+            and case["model"] == control["model"]
+            and case["quantization"] == control["quantization"]
+        )
+        assert control["world_size"] == counterpart["world_size"], control["id"]
+
+
 def test_every_rejection_case_is_curated(matrix):
     curated = {case["id"] for case in json.loads(CURATED_PATH.read_text())["cases"]}
     for case in matrix["cases"]:

@@ -148,6 +148,23 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
     assert eager_command[output_index + 1].endswith(f"{eager['id']}/test-run")
 
 
+def test_the_control_shards_the_same_way_without_the_memory_efficient_fill(runner, matrix):
+    """The control's whole purpose is to differ from its blockwise case in exactly one flag.
+
+    If it dropped --fully_shard_degree too it would stop being a control, because the memory
+    difference between the pair would then include not sharding rather than only the fill strategy.
+    """
+    control = next(
+        case for case in matrix["cases"] if case["placement"] == "fsdp_eager_fill"
+    )
+
+    command = runner.build_command(control, matrix["defaults"], run_id="test-run")
+
+    assert "--fully_shard_degree" in command
+    assert "--memory_efficient_sharding" not in command
+    assert "--memory_efficient_replicated_load" not in command
+
+
 def test_distributed_commands_declare_a_parallel_degree(runner, matrix):
     """Every multi-rank command must satisfy dp*cfg*sp*tp*pp == dit_parallel_size.
 

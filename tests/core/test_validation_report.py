@@ -45,7 +45,7 @@ def _record(case, status, **metrics):
         "peak_gpu_memory_bytes": None,
         "gpu_memory_scope": None,
         # What the runner writes today; tests for older records drop it deliberately.
-        "metrics_version": 3,
+        "metrics_version": 4,
     }
     base.update(metrics)
     return {
@@ -220,6 +220,20 @@ def test_post_load_time_is_never_negative(report_tool, matrix, tmp_path):
     case = _cases_for(matrix, "gfx950")[0]
     metrics = {"wall_duration_seconds": 5.0, "load_duration_seconds": 9.0}
     assert report_tool._post_load(metrics) == 0.0
+
+
+def test_compile_time_is_not_charged_to_the_work_after_the_load(report_tool):
+    """Compile sits between the load and the first forward, so it belongs to neither neighbour.
+
+    Leaving it in post-load would move tens of seconds out of one unexplained column into another.
+    """
+    metrics = {
+        "wall_duration_seconds": 100.0,
+        "load_duration_seconds": 30.0,
+        "compile_duration_seconds": 22.0,
+    }
+
+    assert report_tool._post_load(metrics) == 48.0
 
 
 def test_every_case_for_one_model_on_one_arch_gets_a_distinct_label(

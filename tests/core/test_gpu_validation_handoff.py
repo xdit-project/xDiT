@@ -1375,6 +1375,74 @@ def test_the_load_phase_peak_is_taken_from_the_load_window_only(runner):
     assert monitor.peak_gpu_between(300.0, 400.0) is None
 
 
+def test_compile_warmup_is_timed_separately_from_the_load(runner, monkeypatch, tmp_path):
+    """Compile runs inside model initialization, so the load window used to swallow it.
+
+    It is near-constant for a model while the load is what we are changing, so including it shrank
+    the measured difference between load strategies towards nothing.
+    """
+    output_dir = tmp_path / "output"
+    results = tmp_path / "results.jsonl"
+    child_code = (
+        "import time,sys;"
+        "print('Initializing model: fake',flush=True);"
+        "time.sleep(0.2);"
+        "print('Torch.compile enabled. Warming up torch compiler ...',flush=True);"
+        "time.sleep(0.6);"
+        "print('Model initialization complete.',flush=True);"
+        "print('Running model...',flush=True)"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        child_code,
+        "--output_directory",
+        str(output_dir),
+    ]
+    case = {
+        "id": "compile-split",
+        "expected": {"outcome": "inference_success"},
+        "quality_notes": "",
+    }
+
+    class NullMonitor:
+        peak_host_rss = 0
+        peak_cgroup = 0
+        peak_gpu = None
+        gpu_scope = None
+        peak_host_anon = 0
+        peak_host_file_cache = 0
+
+        def peak_gpu_between(self, start, end):
+            return None
+
+        def __init__(self, root_pid):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(runner, "ResourceMonitor", NullMonitor)
+
+    record = runner.execute_case(
+        case,
+        command,
+        results_path=results,
+        quality_notes="",
+        reference=None,
+        environment={},
+        timeout_seconds=30,
+    )
+
+    metrics = record["metrics"]
+    # Generous bounds: the point is which side of the marker each phase lands on, not the sleeps.
+    assert metrics["load_duration_seconds"] < 0.5
+    assert metrics["compile_duration_seconds"] > 0.5
+
+
 def test_result_record_serializes_required_fields(runner, tmp_path, matrix):
     case = matrix["cases"][0]
     record = runner.make_result_record(

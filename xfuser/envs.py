@@ -49,6 +49,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             ),
     "AITER_SAGE_V2_BLOCK_R": lambda: os.environ.get("XFUSER_AITER_SAGE_V2_BLOCK_R", "128"),
     "XDIT_FBCACHE_THRESH": lambda: os.environ.get("XDIT_FBCACHE_THRESH", None),
+    # opt-in breakdown of where a memory-efficient fill spends its time. Off by default because an
+    # honest breakdown has to synchronise at each phase boundary, and that serialises a fill which
+    # otherwise overlaps its reads, broadcasts and sharding: measured 2.3x slower with it on.
+    "XDIT_FILL_PHASE_TIMING": lambda: os.environ.get("XDIT_FILL_PHASE_TIMING", "0"),
 }
 
 

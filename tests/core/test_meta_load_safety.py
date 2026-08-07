@@ -624,11 +624,57 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
         OSError("safetensors read failed")
     )
 
-    with pytest.raises(RuntimeError, match="loading checkpoint tensor.*OSError"):
+    with pytest.raises(
+        RuntimeError, match="loading transformer checkpoint tensors.*OSError"
+    ):
         filler.fill_block(block, 1)
 
+    # Layout, required-keys, then one status for the whole block's reads. The reads share a status
+    # exchange rather than paying one each; test_a_failing_read_names_the_tensor_it_could_not_read
+    # covers the key surviving that batching.
     assert object_broadcasts == 3
     assert not tensor_broadcasts
+
+
+def test_phase_timing_stays_off_unless_asked_for(runtime, monkeypatch):
+    """The breakdown synchronises to attribute time correctly, and that costs the fill 2.3x.
+
+    So it has to be opt-in. A default-on breakdown would make every production load pay for a
+    diagnostic, which is the opposite of what this load path exists to do.
+    """
+    monkeypatch.delenv("XDIT_FILL_PHASE_TIMING", raising=False)
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+
+    with filler._timed("read"):
+        pass
+
+    assert not getattr(filler, "_phase_seconds", None)
+
+    monkeypatch.setenv("XDIT_FILL_PHASE_TIMING", "1")
+    with filler._timed("read"):
+        pass
+
+    assert "read" in filler._phase_seconds
+
+
+def test_a_failing_read_names_the_tensor_it_could_not_read(runtime):
+    """One status exchange per block must not cost the reader which tensor failed.
+
+    Peers only ever see the message text the status carries, so the key has to be inside it; without
+    that, a missing weight would name the block and leave fifteen candidates.
+    """
+    torch = runtime.torch
+    module = torch.nn.Module()
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler.group = None
+    filler.is_src = True
+    filler.subfolder = "transformer"
+    filler._fill = lambda *args, **kwargs: (_ for _ in ()).throw(
+        OSError("safetensors read failed")
+    )
+
+    with pytest.raises(RuntimeError, match="blocks.0.attn.qkv.weight"):
+        filler._read_tensors(module, [("weight", "blocks.0.attn.qkv.weight")])
 
 
 def test_missing_persistent_checkpoint_key_is_reported_to_peers_before_broadcast(

@@ -35,8 +35,11 @@ can be mapped onto checkpoint keys:
 (``model.fp8``, see ``fp8_plan``) and settings without duplicating them.
 """
 
+import collections
 import gc
+import time
 import weakref
+from contextlib import contextmanager
 
 import torch
 
@@ -180,6 +183,17 @@ def _collective_source_call(group, is_src, operation, context):
     return result
 
 
+def _fill_phase_timing_enabled() -> bool:
+    from xfuser import envs
+
+    return str(envs.environment_variables["XDIT_FILL_PHASE_TIMING"]()).lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+    )
+
+
 def _collective_build_call(group, operation, context):
     """Run a build locally, then make every participating rank agree on any failure."""
     if (
@@ -196,15 +210,26 @@ def _collective_build_call(group, operation, context):
     except Exception as error:
         local_error = (type(error).__name__, str(error))
 
-    failures = []
-    for src in range(group.world_size):
-        box = [local_error if group.rank_in_group == src else None]
-        group.broadcast_object_list(box, src=src)
-        if box[0] is not None:
-            failures.append((src, *box[0]))
-    if failures:
-        rank, error_type, message = failures[0]
-        raise RuntimeError(f"{context} failed on rank {rank}: {error_type}: {message}")
+    # One all_gather_object rather than a broadcast per rank: the loop cost world_size collectives
+    # per block to carry a failure that is almost always absent, which is eight per block at the rank
+    # count this path is used at. Matches _collective_quantize_call on the FSDP path. The per-rank
+    # loop stays as the fallback so a group without a backing process group still agrees.
+    dist = torch.distributed
+    device_group = getattr(group, "device_group", None)
+    failures: list = [None] * group.world_size
+    if device_group is not None and dist.is_available() and dist.is_initialized():
+        dist.all_gather_object(failures, local_error, group=device_group)
+    else:
+        for src in range(group.world_size):
+            box = [local_error if group.rank_in_group == src else None]
+            group.broadcast_object_list(box, src=src)
+            failures[src] = box[0]
+    for rank, failure in enumerate(failures):
+        if failure is not None:
+            error_type, message = failure
+            raise RuntimeError(
+                f"{context} failed on rank {rank}: {error_type}: {message}"
+            )
     return result
 
 
@@ -1373,6 +1398,9 @@ class _BlockwiseDiskFiller:
         self.strict = manifest.strict
         self._used_keys = set()
         self.shard_paths = set(self.weight_map.values())
+        # Wall seconds per fill phase, reported once in finalize. Without a split, a slow fill gives
+        # no clue whether to attack the reading, the transport or the collective bookkeeping.
+        self._phase_seconds: dict[str, float] = collections.defaultdict(float)
         self._handle_cache: dict[str, object] = {}
         self._stack = ExitStack()
         self._block_prefixes = tuple(f"{a}." for a in wrap_attrs)
@@ -1380,6 +1408,34 @@ class _BlockwiseDiskFiller:
         for attr in wrap_attrs:
             for idx, mod in enumerate(rgetattr(component, attr)):
                 self._id2fqn[id(mod)] = f"{attr}.{idx}"
+
+    @contextmanager
+    def _timed(self, phase: str):
+        """Charge wall time to a fill phase, under XDIT_FILL_PHASE_TIMING.
+
+        Opt-in because a truthful breakdown and a fast fill are in conflict here. Reads and
+        broadcasts queue asynchronous device work, so timing without a synchronise measures only
+        submissions: the broadcast read as 0.0s and the reads silently absorbed it, which is worse
+        than no breakdown because it points at the wrong phase. Synchronising fixes the attribution
+        but serialises a fill that otherwise overlaps its reads, broadcasts and sharding, and that
+        measured 2.3x slower end to end. So the default is neither: no timing and no stalls.
+        """
+        if not _fill_phase_timing_enabled():
+            yield
+            return
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            device = torch.device(getattr(self, "device", "cpu"))
+            if device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            # Lazily, because timing must never be the reason a fill fails: callers build this class
+            # attribute-by-attribute in places, and a phase tally is not worth an AttributeError.
+            phases = getattr(self, "_phase_seconds", None)
+            if phases is None:
+                phases = self._phase_seconds = collections.defaultdict(float)
+            phases[phase] += time.monotonic() - started
 
     def _source_call(self, fn, *, context):
         if self.group is None:
@@ -1446,9 +1502,17 @@ class _BlockwiseDiskFiller:
 
         A tensor already read stays valid: get_tensor hands back an owned copy, not a view into the
         mapping, so weights already assigned to the module survive the close.
+
+        Dropping the closed shard's page cache here rather than only at the end of the component is
+        what keeps the cache near one shard instead of the whole checkpoint: blocks are read in key
+        order with one shard open at a time, so a shard being closed means the fill is done with it.
+        If a later block did reopen it, the cost is a re-read and not a wrong answer.
         """
+        closed = list(self._handle_cache)
         self._handle_cache.clear()
         self._stack.close()
+        if closed and getattr(self, "is_src", False):
+            drop_file_page_cache(closed)
 
     def _ckpt_key(self, root, name):
         """Map a live (possibly wrapped) param/buffer name to its checkpoint key.
@@ -1510,10 +1574,63 @@ class _BlockwiseDiskFiller:
         # Collective: all group ranks must call in the same order. Module structure is identical
         # across ranks (meta -> to_empty), so named_* iteration order matches. remove_duplicate=False
         # so tied weights emit the same name count on every rank regardless of per-rank tie state.
-        for _, p in module.named_parameters(recurse=True, remove_duplicate=False):
-            self.group.broadcast(p.data, src=0)
-        for _, b in _persistent_named_buffers(module):
-            self.group.broadcast(b.data, src=0)
+        self._broadcast_tensors(
+            [
+                p.data
+                for _, p in module.named_parameters(
+                    recurse=True, remove_duplicate=False
+                )
+            ]
+            + [b.data for _, b in _persistent_named_buffers(module)]
+        )
+
+    def _broadcast_tensors(self, tensors) -> None:
+        """Broadcast a module's tensors from rank0 as one batch of collectives.
+
+        One broadcast per tensor is fifteen launches per block on Z-Image, each paying its own
+        latency for a few hundred megabytes. _coalescing_manager submits them as a group, which is
+        preferred over flattening into one contiguous buffer precisely because flattening would cost
+        an extra block-sized allocation on every rank during a fill whose whole point is to hold at
+        most one block.
+
+        Falls back to the per-tensor loop when the manager is unavailable or the group exposes no
+        process group to coalesce on, so this stays an optimisation rather than a requirement.
+        """
+        if not tensors:
+            return
+        device_group = getattr(self.group, "device_group", None)
+        manager = getattr(torch.distributed, "_coalescing_manager", None)
+        if manager is None or device_group is None:
+            for tensor in tensors:
+                self.group.broadcast(tensor, src=0)
+            return
+        src = torch.distributed.get_global_rank(device_group, 0)
+        with manager(group=device_group, device=torch.device(self.device)):
+            for tensor in tensors:
+                torch.distributed.broadcast(tensor, src=src, group=device_group)
+
+    def _read_tensors(self, module, required) -> None:
+        """Read every tensor a module needs under one collective status exchange.
+
+        A _source_call per tensor meant a pickled broadcast_object_list per tensor: fifteen of them
+        per block on Z-Image, so several hundred across a transformer, all to report a failure that
+        almost never happens. One exchange per module says the same thing.
+
+        The key has to move into the exception for that to be free of cost to diagnosis, since peers
+        only ever see the message text that _collective_source_call forwards. Without it a missing
+        tensor would name the block and leave the reader to guess which of fifteen it was.
+        """
+
+        def read_all():
+            for local_name, key in required:
+                try:
+                    self._fill(module, local_name, key, required=True)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"reading checkpoint tensor {key}: {type(error).__name__}: {error}"
+                    ) from error
+
+        self._source_call(read_all, context=f"loading {self.subfolder} checkpoint tensors")
 
     def fill_block(self, block, i):
         """Fill + broadcast one wrapped block, excluding only non-persistent buffers."""
@@ -1522,7 +1639,8 @@ class _BlockwiseDiskFiller:
         if fqn is None:
             raise RuntimeError(f"block {i} not found in wrap_attrs index (id mismatch)")
         layout = _tensor_layout(block)
-        self._assert_same_layout(block)
+        with self._timed("agree"):
+            self._assert_same_layout(block)
         prefix = fqn + "."
         required = [
             (local_name, prefix + self._ckpt_key(block, local_name))
@@ -1531,19 +1649,17 @@ class _BlockwiseDiskFiller:
             (local_name, prefix + self._ckpt_key(block, local_name))
             for local_name, _ in _persistent_named_buffers(block)
         ]
-        self._require_checkpoint_keys([key for _, key in required])
-        for local_name, key in required:
-            self._source_call(
-                lambda local_name=local_name, key=key: self._fill(
-                    block, local_name, key, required=True
-                ),
-                context=f"loading checkpoint tensor {key}",
-            )
+        with self._timed("agree"):
+            self._require_checkpoint_keys([key for _, key in required])
+        with self._timed("read"):
+            self._read_tensors(block, required)
         broadcast_names = [name for kind, name in layout if kind == "parameter"] + [
             name for name, _ in _persistent_named_buffers(block)
         ]
-        self._reconcile_tensor_specs(block, broadcast_names)
-        self._broadcast(block)
+        with self._timed("agree"):
+            self._reconcile_tensor_specs(block, broadcast_names)
+        with self._timed("broadcast"):
+            self._broadcast(block)
         if i % 8 == 0:
             log(
                 f"  self-fill {self.subfolder} block {i}: host cur/anon/file "
@@ -1605,16 +1721,18 @@ class _BlockwiseDiskFiller:
                 set_module_tensor_to_device(
                     comp, name, self.device, value=t.to(self.device)
                 )
-        for name in tail + tail_bufs:
-            key = self._ckpt_key(comp, name)
-            self._source_call(
-                lambda name=name, key=key: self._fill(comp, name, key, required=True),
-                context=f"loading checkpoint tensor {key}",
+        with self._timed("read"):
+            self._read_tensors(
+                comp,
+                [(name, self._ckpt_key(comp, name)) for name in tail + tail_bufs],
             )
-        self._reconcile_tensor_specs(comp, tail + tail_bufs)
+        with self._timed("agree"):
+            self._reconcile_tensor_specs(comp, tail + tail_bufs)
         if self.group is not None:
-            for name in tail + tail_bufs:
-                self.group.broadcast(rgetattr(comp, name).data, src=0)
+            with self._timed("broadcast"):
+                self._broadcast_tensors(
+                    [rgetattr(comp, name).data for name in tail + tail_bufs]
+                )
         if self.strict:
             unused = sorted(set(self.weight_map) - self._used_keys)
             if unused:
@@ -1627,7 +1745,22 @@ class _BlockwiseDiskFiller:
         self._retie_weights(comp)
         self._release_handles()
         if self.is_src:
+            # Backstop: _release_handles drops each shard as the fill leaves it, but a shard that was
+            # never the open one (a tail-only shard, say) would otherwise keep its cache.
             drop_file_page_cache(self.shard_paths)
+        self._log_phase_breakdown()
+
+    def _log_phase_breakdown(self) -> None:
+        """Report where the fill spent its time, so a slow fill points at what to change."""
+        if not self._phase_seconds:
+            return
+        parts = " ".join(
+            f"{phase} {self._phase_seconds[phase]:.1f}s"
+            for phase in ("read", "broadcast", "agree")
+            if self._phase_seconds.get(phase)
+        )
+        if parts:
+            log(f"  self-fill {self.subfolder} phases: {parts}")
 
     def _retie_weights(self, comp) -> None:
         """Restore tied weights, which the fill unpicked.

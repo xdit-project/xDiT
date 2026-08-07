@@ -32,7 +32,9 @@ DEFAULT_MATRIX = ROOT / "tests/gpu_validation/matrix.json"
 #    on the node, which grew with the rank count and so hid what sharding did.
 # 3: Host memory became the container's anonymous pages. It was summed RSS over the process tree,
 #    which re-counted the pages ranks share and so also grew with the rank count.
-GPU_METRICS_VERSION = 3
+# 4: The load window now ends at compile warmup instead of running to the end of initialization, so
+#    load seconds and the load-phase VRAM peak no longer include tens of seconds of compiling.
+GPU_METRICS_VERSION = 4
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED_CASE_FIELDS = {
     "id",
@@ -1236,6 +1238,10 @@ def execute_case(
                 captured_lines.append((line, stamped))
                 if "Initializing model:" in line:
                     markers.setdefault("load_start", now)
+                # Compile warmup runs inside model initialization, so it lands between load_start
+                # and load_end and would otherwise be charged to the load.
+                if "Warming up torch compiler" in line:
+                    markers.setdefault("compile_start", now)
                 if "Model initialization complete." in line:
                     markers.setdefault("load_end", now)
                 if "Running model..." in line:
@@ -1273,13 +1279,24 @@ def execute_case(
         first_forward = "succeeded"
     else:
         first_forward = "failed"
+    # Compile warmup is not loading, and it is a near-constant tens of seconds, so leaving it inside
+    # the load window buried what the load itself did: an eight-rank blockwise fill and a full
+    # materialization of the same model looked 1.7x apart when the fills are 3.4x apart. It ends the
+    # load window rather than being subtracted so the load-phase VRAM peak narrows with it.
+    load_end_marker = "compile_start" if "compile_start" in markers else "load_end"
     load_duration = None
-    if "load_start" in markers and "load_end" in markers:
-        load_duration = markers["load_end"] - markers["load_start"]
+    if "load_start" in markers and load_end_marker in markers:
+        load_duration = markers[load_end_marker] - markers["load_start"]
+    compile_duration = None
+    if "compile_start" in markers and "load_end" in markers:
+        compile_duration = markers["load_end"] - markers["compile_start"]
     metrics = {
         "wall_duration_seconds": round(elapsed, 3),
         "load_duration_seconds": (
             round(load_duration, 3) if load_duration is not None else None
+        ),
+        "compile_duration_seconds": (
+            round(compile_duration, 3) if compile_duration is not None else None
         ),
         "first_forward": first_forward,
         "peak_host_rss_bytes": monitor.peak_host_rss or None,
@@ -1291,8 +1308,8 @@ def execute_case(
         # The whole-run peak is dominated by inference activations, so on its own it cannot show what
         # a memory-efficient load achieved. This is the peak while the load was in flight.
         "peak_load_gpu_memory_bytes": (
-            monitor.peak_gpu_between(markers["load_start"], markers["load_end"])
-            if "load_start" in markers and "load_end" in markers
+            monitor.peak_gpu_between(markers["load_start"], markers[load_end_marker])
+            if "load_start" in markers and load_end_marker in markers
             else None
         ),
         "gpu_memory_scope": monitor.gpu_scope,

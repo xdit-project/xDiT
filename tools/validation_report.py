@@ -24,7 +24,7 @@ GREEN_STATUSES = {"passed", "passed_expected_rejection"}
 NOT_RUN_STATUSES = {"environment_mismatch"}
 # Mirrors gpu_validation.GPU_METRICS_VERSION; a record below it holds memory figures this report
 # cannot put in the same column as the rest.
-CURRENT_METRICS_VERSION = 3
+CURRENT_METRICS_VERSION = 4
 
 
 def load_records(paths: list[Path]) -> list[dict]:
@@ -85,11 +85,16 @@ def _combination(case: dict) -> str:
 
 
 def _post_load(metrics: dict):
+    """Wall minus the two phases the runner times, so the columns account for the whole run.
+
+    Compile has to come out too. It sits between the load and the first forward, so charging it to
+    post-load would move tens of seconds from one unexplained column into another.
+    """
     wall = metrics.get("wall_duration_seconds")
     load = metrics.get("load_duration_seconds")
     if wall is None or load is None:
         return None
-    return max(wall - load, 0.0)
+    return max(wall - load - (metrics.get("compile_duration_seconds") or 0.0), 0.0)
 
 
 def _table(rows: list[list[str]], headers: list[str]) -> list[str]:
@@ -242,6 +247,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 case["model"],
                 _combination(case),
                 _seconds(metrics.get("load_duration_seconds")),
+                _seconds(metrics.get("compile_duration_seconds")),
                 _seconds(_post_load(metrics)),
                 _seconds(metrics.get("wall_duration_seconds")),
                 _gib(metrics.get("peak_load_gpu_memory_bytes")),
@@ -260,6 +266,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "model",
         "placement/quant/world",
         "load s",
+        "compile s",
         "post-load s",
         "wall s",
         "load vram",
@@ -279,7 +286,12 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "the load and there are no timings to report."
     )
     lines.append(
-        "post-load s is wall minus load, so it covers inference, VAE decode, saving and "
+        "load s ends where compile warmup begins, so it measures loading rather than loading plus "
+        "compiling; compile s is that warmup, which is near-constant for a model and swamps the "
+        "difference between load strategies when the two are added together."
+    )
+    lines.append(
+        "post-load s is wall minus load and compile, so it covers inference, VAE decode, saving and "
         "teardown rather than inference alone."
     )
     lines.append(

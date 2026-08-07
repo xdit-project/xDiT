@@ -240,6 +240,37 @@ def shard_t5_encoder(
     return transformer
 
 
+def _keep_recording_outputs(component: torch.nn.Module) -> None:
+    """Re-key transformers' output recording onto the class fully_shard just rebound.
+
+    A transformers model decides which submodule outputs to record — ``hidden_states``,
+    ``attentions`` — by looking its own class up in a registry populated when the model was
+    constructed. ``fully_shard`` rebinds ``__class__`` on what it wraps, so after sharding that
+    lookup misses and a forward asked for ``output_hidden_states=True`` returns ``None`` instead of
+    raising, which surfaces much later as a pipeline subscripting ``hidden_states[-2]``.
+
+    The root has to be wrapped, so the recording has to follow it: the blocks share the root's
+    lazily-initialized comm context, and leaving the root unwrapped makes each block its own root
+    and breaks the cross-block prefetch. Registering the sharded class under the same spec is what
+    lets both hold.
+
+    Absence of the registry is not an error: it means the installed transformers does not resolve
+    recording this way, in which case there is nothing to carry over. The end-to-end behaviour is
+    pinned by tests/core/test_sharded_text_encoder_outputs.py, so a reworked mechanism fails there
+    rather than silently costing a caller its hidden states.
+    """
+    try:
+        from transformers.modeling_utils import (  # noqa: PLC0415
+            _CAN_RECORD_REGISTRY,
+        )
+    except ImportError:
+        return
+
+    recordable = getattr(component, "_can_record_outputs", None)
+    if recordable:
+        _CAN_RECORD_REGISTRY[str(type(component))] = recordable
+
+
 def shard_component(
     component: torch.nn.Module,
     wrap_attrs: list[str],
@@ -452,6 +483,7 @@ def shard_component(
         offload_policy=cpu_offload,
         ignored_params=ignore_fp32(component),
     )
+    _keep_recording_outputs(component)
 
     # FSDP2 forward prefetch: each block pre-fetches the next two blocks' all-gathers
     # so communication overlaps with compute. The first block has no predecessor to

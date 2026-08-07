@@ -337,10 +337,11 @@ class xFuserModel(abc.ABC):
                 vae.enable_slicing()
 
             tile_window = None
-            if tiling_flag is not None:
-                vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
-                log(f"Enabling VAE tiling on {type(vae).__name__}...")
-                vae.enable_tiling()
+            if self._tiles(vae):
+                if tiling_flag is not None:
+                    vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
+                    log(f"Enabling VAE tiling on {type(vae).__name__}...")
+                    vae.enable_tiling()
                 tile_window = self._apply_vae_tile_size(vae)
                 # After the window, never before: the overlap is a fraction of the window, and
                 # sizing the window rescales the stride to keep whatever overlap the VAE had.
@@ -358,15 +359,10 @@ class xFuserModel(abc.ABC):
 
 
     def _tiling_flag(self) -> Optional[str]:
-        """ The flag asking this run to tile its VAE decode, None where nothing asks """
-        # Either knob is a request to tile, so either turns tiling on by itself. LTX 2.3 tiles
-        # its stage-2 VAE at load, and without this the only way to size that window would be
-        # --enable_tiling, which tiles every stage to reach the one that ran out of memory.
-        #
-        # Asked in two places that have to agree - here, and where the parallel VAE chooses
-        # between dealing whole tiles out and sharding the rows inside each one - so it is worked
-        # out once. A VAE marked for tiles it never cuts would leave its group waiting on an
-        # exchange that never comes.
+        """ The flag asking this run to tile its VAE decode, None where none does """
+        # Either knob is a request to tile, so either turns tiling on by itself. Sizing the
+        # window would otherwise mean passing --enable_tiling as well, which tiles every stage
+        # to reach the one that ran out of memory.
         for asked, flag in (
             (self.config.enable_tiling, "--enable_tiling"),
             (self.config.vae_tile_size is not None, "--vae_tile_size"),
@@ -375,6 +371,19 @@ class xFuserModel(abc.ABC):
             if asked:
                 return flag
         return None
+
+    def _tiles(self, vae) -> bool:
+        """ Whether this VAE's decode will be cut into tiles """
+        # Off the VAE as well as off the config, because a model can arrive already tiling: LTX
+        # 2.3 turns it on for its stage-2 VAE at load, where nothing on the command line says so.
+        #
+        # Asked in the two places that have to agree - where the tiled decode is installed, and
+        # where the parallel VAE chooses between dealing whole tiles out and sharding the rows
+        # inside each one - so it is answered once. Disagreeing is not a slower decode but a hung
+        # one: reading the config alone left a tiling VAE on the sharding path, where a tile
+        # holding fewer latent rows than the group leaves the surplus ranks indexing off the end
+        # of a split the rest are waiting in.
+        return self._tiling_flag() is not None or getattr(vae, "use_tiling", False)
 
     def _decoding_vaes(self) -> List:
         """ Every VAE a run decodes through, staged models included """
@@ -401,9 +410,8 @@ class xFuserModel(abc.ABC):
         # xFuser owns, whole tiles go out to the ranks instead and the decoder is left alone,
         # each rank decoding a tile the way one GPU would. _enable_options installs that, once
         # the window whose tiles are being dealt out has been settled.
-        tiling = self._tiling_flag() is not None
         for vae in self._decoding_vaes():
-            if tiling and vae_tiling.supports_tile_parallel(vae):
+            if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
                 vae_tile_parallel.mark(vae, vae_group)
                 log(f"Parallel VAE will deal whole tiles out to the group on "
                     f"{type(vae).__name__}, rather than shard the rows within each tile.")

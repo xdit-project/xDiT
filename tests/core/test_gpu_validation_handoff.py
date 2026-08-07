@@ -1618,3 +1618,65 @@ def test_a_missing_artifact_is_reported_as_unscored_not_as_a_pass(runner):
 def test_nothing_is_scored_when_the_case_has_no_reference(runner):
     """Scoring stays opt-in, so an ordinary run keeps whatever the operator recorded."""
     assert runner.score_against_reference({"path": "a.png"}, None, reference_id=None) is None
+
+
+def _reference_record(recorded_at, path, compiled=False, execution="RAN"):
+    return {
+        "case_id": "ref",
+        "execution": execution,
+        "recorded_at": recorded_at,
+        "command": ["torchrun"] + (["--use_torch_compile"] if compiled else []),
+        "output": {"path": path, "sha256": "ab"},
+    }
+
+
+def test_a_reference_already_run_is_reused_instead_of_run_again(runner, tmp_path):
+    """Scoring one case is the normal use, and re-running an 8-rank reference for it costs more
+    than the candidate does."""
+    results = tmp_path / "results.jsonl"
+    results.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in [
+                _reference_record("2026-01-01T00:00:00+00:00", "old.png"),
+                _reference_record("2026-03-01T00:00:00+00:00", "new.png"),
+            ]
+        )
+        + "\n"
+    )
+
+    assert runner.recorded_reference_output(results, "ref")["path"] == "new.png"
+
+
+def test_a_compiled_reference_is_not_reused(runner, tmp_path):
+    """It would put back the kernel-choice spread scoring exists to remove, and do it invisibly."""
+    results = tmp_path / "results.jsonl"
+    results.write_text(json.dumps(_reference_record("2026-01-01T00:00:00+00:00", "c.png", compiled=True)) + "\n")
+
+    assert runner.recorded_reference_output(results, "ref") is None
+
+
+def test_a_reference_that_never_ran_is_not_invented(runner, tmp_path):
+    """Nothing to compare against has to stay nothing, not a stale or absent artifact."""
+    results = tmp_path / "results.jsonl"
+    results.write_text(
+        json.dumps(_reference_record("2026-01-01T00:00:00+00:00", None))
+        + "\n"
+        + json.dumps(_reference_record("2026-02-01T00:00:00+00:00", "x.png", execution="NOT RUN"))
+        + "\n"
+    )
+
+    assert runner.recorded_reference_output(results, "ref") is None
+    assert runner.recorded_reference_output(tmp_path / "absent.jsonl", "ref") is None
+
+
+def test_a_truncated_results_file_does_not_stop_the_lookup(runner, tmp_path):
+    """Results are appended per case, so an interrupted run can leave a partial final line."""
+    results = tmp_path / "results.jsonl"
+    results.write_text(
+        json.dumps(_reference_record("2026-01-01T00:00:00+00:00", "good.png"))
+        + "\n"
+        + '{"case_id": "ref", "output": {"path": "trunc'
+    )
+
+    assert runner.recorded_reference_output(results, "ref")["path"] == "good.png"

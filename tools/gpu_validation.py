@@ -1098,6 +1098,38 @@ def order_references_first(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def recorded_reference_output(
+    results_path: Path | str, reference_id: str
+) -> dict[str, Any] | None:
+    """The newest already-recorded artifact for a reference case, so it need not be re-run.
+
+    Scoring one case is the normal way to use this, and re-running an eight-rank reference to judge
+    a single candidate would cost more than the candidate. Only compile-free runs count: a compiled
+    reference reintroduces the kernel-choice spread the scoring path exists to remove, and it would
+    do so invisibly, as a score that moved for no stated reason.
+    """
+    path = Path(results_path)
+    if not path.exists():
+        return None
+    newest = None
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("case_id") != reference_id or record.get("execution") != "RAN":
+            continue
+        if "--use_torch_compile" in (record.get("command") or []):
+            continue
+        if not (record.get("output") or {}).get("path"):
+            continue
+        if newest is None or record.get("recorded_at", "") >= newest.get("recorded_at", ""):
+            newest = record
+    return (newest or {}).get("output") or None
+
+
 def without_compile(command: list[str]) -> list[str]:
     """Drop torch.compile from a command, for runs whose output will be compared.
 
@@ -1482,7 +1514,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "compare each case's image against its model's eager bf16 case and fail the case if it "
-            "diverges; disables torch.compile for every run so the comparison is deterministic"
+            "diverges; disables torch.compile for every run so the comparison is deterministic. The "
+            "reference is reused from --results if it already ran there, so scoring one case does "
+            "not re-run it, and a fresh results file means the reference has to be selected too"
         ),
     )
     parser.add_argument(
@@ -1554,8 +1588,11 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.continue_on_error:
                     return aggregate_exit_code(statuses)
                 continue
+            # Resolved against the whole matrix rather than the selection: the reference is a
+            # property of the model, and looking only at what was asked for would silently skip
+            # scoring whenever a case was run on its own.
             reference_id = (
-                reference_case_id(case, selected) if args.score_quality else None
+                reference_case_id(case, matrix["cases"]) if args.score_quality else None
             )
             record = execute_case(
                 case,
@@ -1568,7 +1605,12 @@ def main(argv: list[str] | None = None) -> int:
                     case, defaults, args.timeout_seconds
                 ),
                 reference_id=reference_id,
-                reference_output=outputs.get(reference_id) if reference_id else None,
+                reference_output=(
+                    outputs.get(reference_id)
+                    or recorded_reference_output(args.results, reference_id)
+                    if reference_id
+                    else None
+                ),
                 thresholds=thresholds,
             )
             outputs[case["id"]] = record.get("output") or {}

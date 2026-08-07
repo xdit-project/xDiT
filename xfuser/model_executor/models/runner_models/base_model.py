@@ -119,6 +119,7 @@ class ModelCapabilities:
     pipefusion_parallel_degree: bool = False
     data_parallel_degree: bool = True
     tensor_parallel_degree: bool = False
+    text_encoder_tp_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
     use_parallel_vae_encoder: bool = False
@@ -165,6 +166,7 @@ class ModelSettings:
     fps: Optional[int] = None
     int8_gemm_module_list: List[str] = None
     fp8_gemm_module_list: List[str] = None
+    fp8_gemm_include_suffixes: Optional[Tuple[str, ...]] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_suffixes: Tuple[str] = None
@@ -307,7 +309,7 @@ class xFuserModel(abc.ABC):
         self.pipe = self._load_model_checked()
 
         log("Initializing runtime state...")
-        initialize_runtime_state(self.pipe, self.engine_config)
+        initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
         self._enable_options()
@@ -339,6 +341,9 @@ class xFuserModel(abc.ABC):
         elif self.config.enable_model_cpu_offload:
             log("Enabling model CPU offload...")
             self.pipe.enable_model_cpu_offload()
+
+    def _get_runtime_state_pipeline(self):
+        return self.pipe
 
 
     def _validate_config(self, config: xFuserArgs) -> None:
@@ -746,7 +751,9 @@ class xFuserModel(abc.ABC):
                 for module_name in self.settings.fp8_gemm_module_list:
                     log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
                     quantize_linear_layers_to_fp8_blockscale(
-                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}"
+                        rgetattr(self.pipe, module_name),
+                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
+                        device=f"cuda:{local_rank}",
                     )
             if not offload_requested:
                 self.pipe = self.pipe.to(f"cuda:{local_rank}")
@@ -758,7 +765,11 @@ class xFuserModel(abc.ABC):
             if self.config.use_fp8_gemms and not _use_aiter_fp8_rdna4():
                 for module_name in self.settings.fp8_gemm_module_list:
                     log(f"Quantizing {module_name} to FP8 (torchao)...")
-                    quantize_linear_layers_to_fp8(rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}")
+                    quantize_linear_layers_to_fp8(
+                        rgetattr(self.pipe, module_name),
+                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
+                        device=f"cuda:{local_rank}",
+                    )
             if self.config.use_int8_gemms:
                 for module_name in self.settings.int8_gemm_module_list:
                     log(f"Quantizing {module_name} to W8A8 INT8 (torchao)...")
@@ -919,9 +930,17 @@ class xFuserModel(abc.ABC):
                     )
             elif use_fp8_here:
                 if _use_aiter_fp8_rdna4():
-                    quantize_linear_layers_to_fp8_blockscale(block, device=device)
+                    quantize_linear_layers_to_fp8_blockscale(
+                        block,
+                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
+                        device=device,
+                    )
                 else:
-                    quantize_linear_layers_to_fp8(block, device=device)
+                    quantize_linear_layers_to_fp8(
+                        block,
+                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
+                        device=device,
+                    )
             else:
                 # use_int8_here
                 quantize_linear_layers_to_int8(block, device=device, min_layer_size=512)
@@ -951,7 +970,11 @@ class xFuserModel(abc.ABC):
                 continue
             log(f"Quantizing linear layers in {module_name} to FP8...")
             module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+            quantize_linear_layers_to_fp8(
+                module,
+                include_suffixes=self.settings.fp8_gemm_include_suffixes,
+                device=f"cuda:{local_rank}",
+            )
 
     def _setup_nvfp4_gemms(self, local_rank):
         for module_name in self.settings.fp4_gemm_module_list:
@@ -968,7 +991,11 @@ class xFuserModel(abc.ABC):
                 continue
             log(f"Quantizing linear layers in {module_name} to FP8...")
             module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp8(module, device=f"cuda:{local_rank}")
+            quantize_linear_layers_to_fp8(
+                module,
+                include_suffixes=self.settings.fp8_gemm_include_suffixes,
+                device=f"cuda:{local_rank}",
+            )
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

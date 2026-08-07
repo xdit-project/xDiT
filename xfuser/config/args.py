@@ -93,6 +93,7 @@ class xFuserArgs:
     ring_degree: Optional[int] = 1
     # tensor parallel
     tensor_parallel_degree: int = 1
+    text_encoder_tp_degree: int = 1
     split_scheme: Optional[str] = "row"
     # ray arguments
     use_ray: bool = False
@@ -323,6 +324,12 @@ class xFuserArgs:
             help="Tensor parallel degree.",
         )
         parallel_group.add_argument(
+            "--text_encoder_tp_degree",
+            type=int,
+            default=1,
+            help="Tensor parallel degree for supported text encoders, reusing the existing model ranks.",
+        )
+        parallel_group.add_argument(
             "--split_scheme",
             type=str,
             default="row",
@@ -523,6 +530,12 @@ class xFuserArgs:
             type=int,
             default=1,
             help="Tensor parallel degree.",
+        )
+        parser.add_argument(
+            "--text_encoder_tp_degree",
+            type=int,
+            default=1,
+            help="Tensor parallel degree for supported text encoders, reusing the existing model ranks.",
         )
         parser.add_argument(
             "--fully_shard_degree",

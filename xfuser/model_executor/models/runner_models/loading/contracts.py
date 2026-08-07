@@ -324,6 +324,14 @@ class LoadContract:
     materialization_mode: MaterializationMode
 
 
+def _splits_weights(config) -> bool:
+    return (
+        config.fully_shard_degree > 1
+        or config.pipefusion_parallel_degree > 1
+        or config.tensor_parallel_degree > 1
+    )
+
+
 def select_effective_materialization_mode(
     config,
     *,
@@ -333,18 +341,44 @@ def select_effective_materialization_mode(
 
     if config.memory_efficient_sharding and config.fully_shard_degree > 1:
         return MaterializationMode.FSDP_META
-    splits_weights = (
-        config.fully_shard_degree > 1
-        or config.pipefusion_parallel_degree > 1
-        or config.tensor_parallel_degree > 1
-    )
     if (
         config.memory_efficient_replicated_load
         and world_size > 1
-        and not splits_weights
+        and not _splits_weights(config)
     ):
         return MaterializationMode.REPLICATED_META
     return MaterializationMode.EAGER
+
+
+def assert_requested_materialization_is_honoured(config, *, world_size: int) -> None:
+    """Refuse a memory-efficient request that the mode selection would quietly drop.
+
+    Replicated meta loading holds one full copy per rank, so it is defined only when nothing else
+    splits the weights. Asking for it alongside a degree that does split them used to return an
+    eager load and no diagnostic, which reads as the feature being enabled and doing nothing.
+
+    A single-rank run is not such a case and is deliberately left alone: there is no peer to fill,
+    so falling back to an eager load is the honest answer, and refusing would stop the same command
+    line from working on one GPU.
+    """
+    if not config.memory_efficient_replicated_load:
+        return
+    if config.fully_shard_degree > 1:
+        raise UnsupportedLoadContract(
+            "--memory_efficient_replicated_load conflicts with --fully_shard_degree "
+            f"{config.fully_shard_degree}: replicated loading keeps a whole copy per rank, "
+            "while sharding splits it. Use --memory_efficient_sharding to shard."
+        )
+    if _splits_weights(config):
+        splitters = {
+            "--pipefusion_parallel_degree": config.pipefusion_parallel_degree,
+            "--tensor_parallel_degree": config.tensor_parallel_degree,
+        }
+        named = ", ".join(f"{flag} {value}" for flag, value in splitters.items() if value > 1)
+        raise UnsupportedLoadContract(
+            f"--memory_efficient_replicated_load conflicts with {named}: that degree already "
+            "splits the weights, so there is no replicated copy to fill."
+        )
 
 
 def validate_materialization_contract(

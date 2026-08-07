@@ -50,6 +50,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadDeclaration,
     LoadContract,
     UnsupportedLoadContract,
+    assert_requested_materialization_is_honoured,
     select_effective_materialization_mode,
     select_load_contract,
     select_runtime_quantization,
@@ -333,6 +334,9 @@ class xFuserModel(abc.ABC):
 
     def _select_preload_contract(self, *, world_size: int):
         """Resolve and validate loading before model allocation or load collectives."""
+        assert_requested_materialization_is_honoured(
+            self.config, world_size=world_size
+        )
         mode = select_effective_materialization_mode(
             self.config, world_size=world_size
         )

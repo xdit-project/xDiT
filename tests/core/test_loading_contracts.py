@@ -310,6 +310,59 @@ def test_effective_replicated_mode_applies_runtime_exclusions(
 
 
 @pytest.mark.parametrize(
+    ("degrees", "world_size", "expected_in_reason"),
+    [
+        ({"fully_shard_degree": 8}, 8, "--fully_shard_degree"),
+        ({"tensor_parallel_degree": 2}, 8, "--tensor_parallel_degree"),
+        ({"pipefusion_parallel_degree": 2}, 8, "--pipefusion_parallel_degree"),
+    ],
+)
+def test_a_replicated_request_that_would_be_dropped_is_refused(
+    contracts, degrees, world_size, expected_in_reason
+):
+    """Silently returning an eager load reads as the feature being on and doing nothing."""
+    config = type(
+        "Config",
+        (),
+        {
+            "memory_efficient_sharding": False,
+            "memory_efficient_replicated_load": True,
+            "fully_shard_degree": 1,
+            "pipefusion_parallel_degree": 1,
+            "tensor_parallel_degree": 1,
+            **degrees,
+        },
+    )()
+
+    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
+        contracts.assert_requested_materialization_is_honoured(
+            config, world_size=world_size
+        )
+
+    assert expected_in_reason in str(refusal.value)
+
+
+@pytest.mark.parametrize("world_size", [1, 8])
+def test_a_request_nothing_contradicts_is_allowed_through(contracts, world_size):
+    """A single rank degrades to eager rather than failing, so the same command line still runs."""
+    config = type(
+        "Config",
+        (),
+        {
+            "memory_efficient_sharding": False,
+            "memory_efficient_replicated_load": True,
+            "fully_shard_degree": 1,
+            "pipefusion_parallel_degree": 1,
+            "tensor_parallel_degree": 1,
+        },
+    )()
+
+    contracts.assert_requested_materialization_is_honoured(
+        config, world_size=world_size
+    )
+
+
+@pytest.mark.parametrize(
     ("flags", "aiter_fp8", "cuda", "expected"),
     [
         (

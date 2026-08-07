@@ -147,7 +147,7 @@
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Inspect both transformer phases; transformer_2 is expected to remain FP8."
+      "quality_notes": "Inspect both transformer phases; transformer_2 is expected to remain FP8. Unrun, and the success expectation needs checking against the MXFP4 FSDP2 gate: the FP4 half targets transformer.blocks, which the strategy also wraps, so validate_format_fsdp_placement is required and refuses unless torch carries pytorch/pytorch#177948 (2.12). On an older torch expect a preflight_failure instead."
     },
     {
       "id": "rdna4-krea2-fp4-eager-group-offload",
@@ -510,7 +510,7 @@
       "model_family": "flux2",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "non_rdna4_rocm"
+        "accelerator": "gfx942"
       },
       "placement": "eager",
       "quantization": "fp4",
@@ -527,7 +527,108 @@
         "outcome": "preflight_failure",
         "error_pattern": "FP4.*AITER|AITER.*FP4"
       },
-      "quality_notes": "ROCm FP4 without AITER must reject before model allocation."
+      "quality_notes": "Narrowed from non_rdna4_rocm to gfx942: _AITER_FP4_UNSUPPORTED_ARCHS names only gfx942, so this rejection is that arch's behaviour rather than all of non-RDNA4 ROCm. gfx950 accepts FP4 and is covered by rocm-gfx950-flux2-fp4-eager. FLUX.2-dev is a gated repo, so a run needs hub auth; a 401 previously matched the rejection pattern and was mis-scored."
+    },
+    {
+      "id": "rocm-gfx950-krea2-fp4-eager",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "gfx950",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First FP4 success expected on ROCm outside RDNA4. probe_format_backend_capabilities on gfx950 reports aiter_mxfp4 available with no reason, where gfx942 refuses it because AITER compiles no Float4_e2m1fn_x2 kernels for that arch. Predicted from the probe; not yet run."
+    },
+    {
+      "id": "rocm-gfx950-krea2-fp4-replicated4",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "gfx950",
+        "replicated",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Replicated meta load does not shard, so the packed MXFP4 weight never reaches FSDP2 and the torch limitation that blocks the fsdp_blockwise case does not apply. Text encoder stays unquantized by declaration."
+    },
+    {
+      "id": "rocm-gfx950-krea2-fp4-fsdp4",
+      "tags": [
+        "rocm",
+        "aiter",
+        "fp4",
+        "mxfp4",
+        "gfx950",
+        "fsdp",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "MXFP4.*FSDP2|FSDP2.*non-floating-point|177948"
+      },
+      "quality_notes": "Still rejected on gfx950, but for the torch version rather than the architecture: MXFP4 packs two 4-bit values into a uint8, and FSDP2 before pytorch/pytorch#177948 (torch 2.12) cannot shard a non-floating-point parameter. This image carries 2.9.1. Krea-2 quantizes transformer.transformer_blocks and wraps the same blocks for FSDP, so the placement check is required and fires. Expect this case to flip to inference_success on a torch 2.12 image."
     },
     {
       "id": "rocm-zimage-int8-rejected",
@@ -937,7 +1038,7 @@
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Record whether installed TorchAO tensor subclasses satisfy composable FSDP hooks."
+      "quality_notes": "Record whether installed TorchAO tensor subclasses satisfy composable FSDP hooks. Unrun, and as written the code cannot satisfy it: _probe_fsdp_support returns a hardcoded false for nvfp4 with \"NVFP4 tensor-subclass FSDP gather/scatter support is not validated\", so this rejects on any Blackwell box until that probe is implemented. Keep it as the target, but expect a preflight_failure today."
     },
     {
       "id": "blackwell-flux2-hybrid-rejected",

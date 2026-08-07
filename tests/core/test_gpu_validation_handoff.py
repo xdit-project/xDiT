@@ -557,6 +557,84 @@ def test_environment_validation_rejects_backend_accelerator_and_major_mismatch(
     assert any("Transformers 5.x" in mismatch for mismatch in mismatches)
 
 
+def test_rocm_cases_are_pinned_to_the_arch_they_declare(runner, matrix):
+    """A gfx942 case must not be selected on gfx950, and the reverse.
+
+    The backend token only separates RDNA4 from the rest, so before this was enforced
+    every gfx942 case also matched a gfx950 host. That silently mis-scores FP4: AITER
+    builds no FP4 kernels for gfx942, so those cases assert a rejection that does not
+    happen on gfx950, where the probe reports MXFP4 as available.
+    """
+    case = next(
+        case
+        for case in matrix["cases"]
+        if case["hardware"]["accelerator"] == "gfx942" and case["world_size"] == 1
+    )
+    observed = {
+        "platform": "rocm",
+        "transformers_major": 5,
+        "aiter_available": True,
+        "torchao_available": True,
+    }
+
+    assert runner.environment_mismatches(
+        case, {**observed, "accelerators": ["gfx942"]}
+    ) == []
+    assert any(
+        "gfx942" in mismatch
+        for mismatch in runner.environment_mismatches(
+            case, {**observed, "accelerators": ["gfx950"]}
+        )
+    )
+
+    gfx950_case = next(
+        case
+        for case in matrix["cases"]
+        if case["hardware"]["accelerator"] == "gfx950" and case["world_size"] == 1
+    )
+
+    assert runner.environment_mismatches(
+        gfx950_case, {**observed, "accelerators": ["gfx950"]}
+    ) == []
+    assert any(
+        "gfx950" in mismatch
+        for mismatch in runner.environment_mismatches(
+            gfx950_case, {**observed, "accelerators": ["gfx942"]}
+        )
+    )
+
+
+def test_non_rdna4_token_still_admits_any_non_rdna4_arch(runner, matrix):
+    """Narrowing must not have turned the broad token into an exact match.
+
+    FP8 and INT8 keep it deliberately: their gates are RDNA4-versus-rest and
+    CUDA-versus-ROCm, neither of which distinguishes gfx942 from gfx950.
+    """
+    case = next(
+        case
+        for case in matrix["cases"]
+        if case["hardware"]["accelerator"] == "non_rdna4_rocm"
+        and case["world_size"] == 1
+    )
+    observed = {
+        "platform": "rocm",
+        "transformers_major": 5,
+        "aiter_available": True,
+        "torchao_available": True,
+    }
+
+    for accelerator in ("gfx942", "gfx950", "gfx90a"):
+        assert runner.environment_mismatches(
+            case, {**observed, "accelerators": [accelerator]}
+        ) == [], accelerator
+    assert any(
+        "non_rdna4_rocm" in mismatch
+        for mismatch in runner.environment_mismatches(
+            case, {**observed, "accelerators": ["gfx1201"]}
+        )
+    )
+
+
 def test_environment_validation_rejects_insufficient_matching_devices(runner, matrix):
     case = next(
         case

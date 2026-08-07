@@ -645,6 +645,24 @@ def probe_environment(
     }
 
 
+_ROCM_RDNA4 = {"gfx1200", "gfx1201"}
+
+
+def _rocm_accelerator_matches(token: str, accelerator: str) -> bool:
+    """Whether one observed gfx name satisfies a case's declared accelerator.
+
+    On ROCm the backend token only separates RDNA4 from everything else, so the arch a
+    case was written for lives solely in this field and has to be honoured. FP4 is why:
+    AITER builds no FP4 kernels for gfx942 but does for gfx950, so a case pinned to
+    gfx942 asserts a rejection that simply does not happen on gfx950.
+    """
+    if token == "non_rdna4_rocm":
+        return accelerator not in _ROCM_RDNA4
+    if token == "gfx1200_or_gfx1201":
+        return accelerator in _ROCM_RDNA4
+    return accelerator == token
+
+
 def _cuda_capability(accelerator: str) -> tuple[int, int] | None:
     match = re.fullmatch(r"sm(\d+)", accelerator)
     if not match:
@@ -706,32 +724,19 @@ def environment_mismatches(case: dict[str, Any], observed: dict[str, Any]) -> li
             mismatches.append(
                 f"requires ROCm; observed {observed.get('platform', 'unknown')}"
             )
-        rdna4 = bool(accelerators) and all(
-            accelerator in {"gfx1200", "gfx1201"} for accelerator in accelerators
+        token = case["hardware"]["accelerator"]
+        matching_device_count = sum(
+            _rocm_accelerator_matches(token, accelerator)
+            for accelerator in accelerators
         )
-        if backend == "rdna4_aiter":
-            matching_device_count = sum(
-                accelerator in {"gfx1200", "gfx1201"} for accelerator in accelerators
+        if not accelerators or matching_device_count != len(accelerators):
+            mismatches.append(
+                f"requires {token}; observed {accelerators or ['unknown']}"
             )
-            if not rdna4:
-                mismatches.append(
-                    f"requires gfx1200 or gfx1201; observed "
-                    f"{accelerators or ['unknown']}"
-                )
+        if backend == "rdna4_aiter":
             if not observed.get("aiter_available"):
                 mismatches.append("requires installed AITER")
         else:
-            matching_device_count = sum(
-                accelerator not in {"gfx1200", "gfx1201"}
-                for accelerator in accelerators
-            )
-            if not accelerators or any(
-                accelerator in {"gfx1200", "gfx1201"} for accelerator in accelerators
-            ):
-                mismatches.append(
-                    f"requires non-RDNA4 ROCm accelerator; observed "
-                    f"{accelerators or ['unknown']}"
-                )
             if not observed.get("torchao_available"):
                 mismatches.append("requires installed TorchAO")
     if matching_device_count < case["world_size"]:

@@ -16,9 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
-from xfuser.model_executor.models.transformers.transformer_ideogram4 import (
-    get_ideogram4_transformer_wrapper_class,
-)
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 from xfuser.model_executor.pipelines.pipeline_ideogram4 import (
     get_ideogram4_pipeline_class,
 )
@@ -190,6 +188,14 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 @register_model("ideogram-ai/ideogram-4-fp8")
 @register_model("CalamitousFelicitousness/Ideogram-4-bf16-Diffusers")
 @register_model("Ideogram-4")
+@LoadCapability.declare(
+    unsupported_reason=(
+        "the fp8 checkpoint path builds each transformer with from_config and then "
+        "applies a single-file state dict outside _build_transformer, and the "
+        "unconditional transformer is a second denoiser loaded from its own "
+        "subfolder; neither has been verified for config-only collective loading"
+    )
+)
 class xFuserIdeogram4Model(xFuserModel):
     min_diffusers_version = "0.39.0"
 
@@ -251,6 +257,10 @@ class xFuserIdeogram4Model(xFuserModel):
         model_id: str,
         subfolder: str,
     ):
+        from xfuser.model_executor.models.transformers.transformer_ideogram4 import (
+            get_ideogram4_transformer_wrapper_class,
+        )
+
         transformer_class = get_ideogram4_transformer_wrapper_class()
         transformer = transformer_class.from_config(
             transformer_class.load_config(model_id, subfolder=subfolder)
@@ -296,6 +306,10 @@ class xFuserIdeogram4Model(xFuserModel):
         return text_encoder
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_ideogram4 import (
+            get_ideogram4_transformer_wrapper_class,
+        )
+
         model_id = self.config.model
         transformer_class = get_ideogram4_transformer_wrapper_class()
 

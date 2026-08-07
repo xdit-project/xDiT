@@ -1481,3 +1481,140 @@ def test_result_record_serializes_required_fields(runner, tmp_path, matrix):
     assert loaded["metrics"]["first_forward"] == "succeeded"
     assert loaded["output"]["sha256"] == "deadbeef"
     assert loaded["quality"]["reference"] == "reference.png"
+
+
+def test_a_case_is_scored_against_an_unquantized_single_rank_load_of_its_own_model(runner):
+    """Judging a quantized or sharded load needs something known-good to judge it against.
+
+    Matched on attributes rather than by name, so a regenerated or renamed matrix cannot leave a
+    case quietly scoring against the wrong thing.
+    """
+    cases = [
+        {
+            "id": "ref",
+            "model": "Z",
+            "placement": "eager",
+            "quantization": "none",
+            "offload": "none",
+            "te_fp8": False,
+            "world_size": 1,
+        },
+        {
+            "id": "other-model-ref",
+            "model": "Y",
+            "placement": "eager",
+            "quantization": "none",
+            "offload": "none",
+            "te_fp8": False,
+            "world_size": 1,
+        },
+        {
+            "id": "fp8",
+            "model": "Z",
+            "placement": "fsdp_blockwise",
+            "quantization": "fp8",
+            "offload": "none",
+            "te_fp8": True,
+            "world_size": 8,
+        },
+    ]
+
+    assert runner.reference_case_id(cases[2], cases) == "ref"
+    assert runner.reference_case_id(cases[0], cases) is None, (
+        "the reference cannot be scored against itself"
+    )
+
+
+def test_a_case_with_no_reference_in_the_matrix_is_left_unscored(runner):
+    """Better to report nothing than to invent a baseline from a different model or rank count."""
+    cases = [
+        {
+            "id": "fp8",
+            "model": "Z",
+            "placement": "fsdp_blockwise",
+            "quantization": "fp8",
+            "offload": "none",
+            "te_fp8": True,
+            "world_size": 8,
+        }
+    ]
+
+    assert runner.reference_case_id(cases[0], cases) is None
+
+
+def test_references_run_before_the_cases_that_need_them(runner):
+    """Otherwise whether a case gets scored depends on the order it was asked for."""
+    cases = [
+        {
+            "id": "fp8",
+            "model": "Z",
+            "placement": "fsdp_blockwise",
+            "quantization": "fp8",
+            "offload": "none",
+            "te_fp8": True,
+            "world_size": 8,
+        },
+        {
+            "id": "ref",
+            "model": "Z",
+            "placement": "eager",
+            "quantization": "none",
+            "offload": "none",
+            "te_fp8": False,
+            "world_size": 1,
+        },
+    ]
+
+    assert [case["id"] for case in runner.order_references_first(cases)] == ["ref", "fp8"]
+
+
+def test_scoring_runs_drop_torch_compile(runner):
+    """Compile picks kernels by timing, and different fp8 kernels give different images.
+
+    Measured 2 distinct outputs in 3 compiled runs against byte-identical output in 3 uncompiled
+    ones, a spread as large as quantization itself, so a compiled comparison mostly reports which
+    kernel won.
+    """
+    command = ["torchrun", "-m", "xfuser.runner", "--use_fp8_gemms", "--use_torch_compile"]
+
+    assert runner.without_compile(command) == [
+        "torchrun",
+        "-m",
+        "xfuser.runner",
+        "--use_fp8_gemms",
+    ]
+
+
+def test_a_divergent_image_fails_the_case_rather_than_only_annotating_it(runner):
+    """A gate that records a number nobody acts on is not a gate."""
+    failed = {"verdict": "fail", "scores": {"comparable": True, "ssim": 0.1}}
+
+    assert runner.quality_status("passed", failed) == "failed_quality"
+    assert runner.quality_status("passed", {"verdict": "pass"}) == "passed"
+    assert runner.quality_status("passed", None) == "passed"
+
+
+def test_a_run_that_already_failed_keeps_its_own_reason(runner):
+    """The earlier status says what went wrong; a quality verdict would only make it vaguer."""
+    failed = {"verdict": "fail", "scores": {"comparable": True, "ssim": 0.1}}
+
+    assert runner.quality_status("failed_inference", failed) == "failed_inference"
+    assert runner.quality_status("failed_no_output", failed) == "failed_no_output"
+
+
+def test_a_missing_artifact_is_reported_as_unscored_not_as_a_pass(runner):
+    """Silence here would read as agreement, when nothing was actually compared."""
+    result = runner.score_against_reference(
+        {"path": None}, {"path": "ref.png"}, reference_id="ref"
+    )
+
+    assert result["verdict"] == "unscored"
+    assert "no image artifact" in result["reason"]
+    assert runner.quality_status("passed", result) == "passed", (
+        "an unscored run is not a failing one"
+    )
+
+
+def test_nothing_is_scored_when_the_case_has_no_reference(runner):
+    """Scoring stays opt-in, so an ordinary run keeps whatever the operator recorded."""
+    assert runner.score_against_reference({"path": "a.png"}, None, reference_id=None) is None

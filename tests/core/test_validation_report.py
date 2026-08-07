@@ -273,3 +273,54 @@ def test_missing_results_file_reports_nothing_ran(report_tool, tmp_path):
     report = report_tool.build_report([tmp_path / "absent.jsonl"], MATRIX_PATH)
     text = report_tool.render(report)
     assert "No case has been run" in text
+
+
+def test_a_scored_case_shows_how_close_it_came_to_its_reference(report_tool, matrix, tmp_path):
+    """The number matters, not just the verdict: it says whether a case is fine or near the floor."""
+    case = _cases_for(matrix, "gfx950")[0]
+    record = _record(case, "passed", wall_duration_seconds=10.0)
+    record["quality"] = {
+        "matrix_notes": "",
+        "reference": {
+            "case_id": "some-eager-bf16-case",
+            "verdict": "pass",
+            "scores": {"comparable": True, "ssim": 0.982, "psnr": 24.9, "mse": 3.25e-3},
+        },
+    }
+
+    text = report_tool.render(report_tool.build_report([_write(tmp_path, [record])], MATRIX_PATH))
+
+    assert "vs ref" in text
+    assert "0.982" in text
+
+
+def test_a_failed_comparison_is_marked_and_not_just_printed(report_tool, matrix, tmp_path):
+    """A score below the floor has to be visible as a failure in the row, not only in the number."""
+    case = _cases_for(matrix, "gfx950")[0]
+    record = _record(case, "failed_quality", wall_duration_seconds=10.0)
+    record["quality"] = {
+        "matrix_notes": "",
+        "reference": {
+            "case_id": "some-eager-bf16-case",
+            "verdict": "fail",
+            "scores": {"comparable": True, "ssim": 0.412, "psnr": 9.1, "mse": 0.12},
+        },
+    }
+
+    text = report_tool.render(report_tool.build_report([_write(tmp_path, [record])], MATRIX_PATH))
+
+    assert "0.412 FAIL" in text
+    assert "FAIL" in text.split("0.412")[0], "the row itself has to read as failed"
+
+
+def test_an_unscored_run_leaves_the_column_empty_rather_than_implying_a_pass(
+    report_tool, matrix, tmp_path
+):
+    """Most records predate scoring, and the reference has nothing to compare itself against."""
+    case = _cases_for(matrix, "gfx950")[0]
+    record = _record(case, "passed", wall_duration_seconds=10.0)
+
+    text = report_tool.render(report_tool.build_report([_write(tmp_path, [record])], MATRIX_PATH))
+
+    assert "vs ref" in text
+    assert "FAIL" not in text

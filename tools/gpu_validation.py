@@ -498,6 +498,19 @@ def make_result_record(
     }
 
 
+def quality_status(status: str, reference: Any) -> str:
+    """Fold a failed comparison into the case status, so a gate that fails is not just a field.
+
+    Only downgrades a case that otherwise passed: a run that already failed to produce an image has
+    a more specific status than the score would give it, and overwriting that would lose the reason.
+    """
+    if not status.startswith("passed"):
+        return status
+    if isinstance(reference, dict) and reference.get("verdict") == "fail":
+        return "failed_quality"
+    return status
+
+
 def append_result(path: Path | str, record: dict[str, Any]) -> None:
     result_path = Path(path)
     result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1045,6 +1058,103 @@ def _redact(text: str, redactions: dict[str, str]) -> str:
     return text
 
 
+def reference_case_id(case: dict[str, Any], cases: list[dict[str, Any]]) -> str | None:
+    """The case whose output this one should be judged against, or None if it is that case.
+
+    An unquantized eager load at one rank, on the same model: no quantization, no sharding, nothing
+    offloaded. Matched on those attributes rather than by name so a renamed or regenerated matrix
+    cannot silently leave a case scoring against the wrong thing.
+    """
+    wanted = {
+        "model": case["model"],
+        "placement": "eager",
+        "quantization": "none",
+        "offload": "none",
+        "te_fp8": False,
+        "world_size": 1,
+    }
+    if all(case.get(key) == value for key, value in wanted.items()):
+        return None
+    for candidate in cases:
+        if all(candidate.get(key) == value for key, value in wanted.items()):
+            return candidate["id"]
+    return None
+
+
+def order_references_first(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run the cases others are scored against before the cases that need them.
+
+    Without this, scoring a case depends on whether its reference happened to be selected earlier,
+    which would make the same command produce scores or not depending on argument order.
+    """
+    ids = {case["id"] for case in cases}
+    referenced = {
+        reference
+        for case in cases
+        if (reference := reference_case_id(case, cases)) is not None and reference in ids
+    }
+    return [case for case in cases if case["id"] in referenced] + [
+        case for case in cases if case["id"] not in referenced
+    ]
+
+
+def without_compile(command: list[str]) -> list[str]:
+    """Drop torch.compile from a command, for runs whose output will be compared.
+
+    Compile picks kernels by measured timing, and different fp8 kernels accumulate differently, so
+    the same case can render two different images: measured 2 distinct outputs in 3 runs with it on
+    and byte-identical output in 3 runs with it off. Since that spread is as large as the difference
+    quantization makes, a score taken with compile on would mostly report which kernel won.
+    """
+    return [argument for argument in command if argument != "--use_torch_compile"]
+
+
+def score_against_reference(
+    output: dict[str, Any],
+    reference_output: dict[str, Any] | None,
+    *,
+    reference_id: str | None,
+    thresholds: dict[str, float] | None = None,
+) -> dict[str, Any] | None:
+    """Compare a run's artifact against its reference's, or explain why it could not be.
+
+    Returns a block rather than a bare score so a recorded verdict stays interpretable: which case
+    it was compared against, which artifact, and which thresholds applied.
+    """
+    if reference_id is None:
+        return None
+    actual_path = (output or {}).get("path")
+    reference_path = (reference_output or {}).get("path")
+    if not actual_path or not reference_path:
+        missing = "this case" if not actual_path else reference_id
+        return {
+            "case_id": reference_id,
+            "verdict": "unscored",
+            "reason": f"no image artifact for {missing}",
+        }
+    module = _image_quality()
+    scores = module.score_images(reference_path, actual_path)
+    return {
+        "case_id": reference_id,
+        "artifact": reference_path,
+        "sha256": (reference_output or {}).get("sha256"),
+        "scores": scores,
+        **module.verdict(scores, thresholds),
+    }
+
+
+def _image_quality():
+    """Imported lazily so a dry run needs neither numpy nor pillow."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "image_quality.py"
+    spec = importlib.util.spec_from_file_location("image_quality", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _output_directory(command: list[str]) -> Path:
     index = command.index("--output_directory")
     return Path(command[index + 1])
@@ -1203,6 +1313,9 @@ def execute_case(
     reference: str | None,
     environment: dict[str, Any],
     timeout_seconds: float,
+    reference_id: str | None = None,
+    reference_output: dict[str, Any] | None = None,
+    thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     expanded = expand_command(command)
     redactions = _redactions(command)
@@ -1314,19 +1427,26 @@ def execute_case(
         ),
         "gpu_memory_scope": monitor.gpu_scope,
     }
+    output = hash_outputs(output_dir)
+    # A computed comparison supersedes the operator's free-text pointer, since both answer the same
+    # question about what this run was judged against and only one of them was measured.
+    comparison = score_against_reference(
+        output, reference_output, reference_id=reference_id, thresholds=thresholds
+    )
     record = make_result_record(
         case=case,
         command=command,
         environment=environment,
         exit_status=exit_status,
         metrics=metrics,
-        output=hash_outputs(output_dir),
+        output=output,
         log="".join(log_lines),
         quality_notes=quality_notes,
-        reference=reference,
+        reference=comparison if comparison is not None else reference,
     )
     record["timed_out"] = timed_out
     record["timeout_seconds"] = timeout_seconds
+    record["status"] = quality_status(record["status"], comparison)
     if timed_out:
         record["status"] = "timed_out"
     record["log_path"] = str(log_path)
@@ -1358,6 +1478,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--quality-note", default="")
     parser.add_argument("--reference")
     parser.add_argument(
+        "--score-quality",
+        action="store_true",
+        help=(
+            "compare each case's image against its model's eager bf16 case and fail the case if it "
+            "diverges; disables torch.compile for every run so the comparison is deterministic"
+        ),
+    )
+    parser.add_argument(
+        "--ssim-min",
+        type=float,
+        help="override the SSIM floor used by --score-quality",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=_timeout_argument,
         help="override the matrix timeout for every selected case",
@@ -1384,11 +1517,17 @@ def main(argv: list[str] | None = None) -> int:
         print("No validation cases matched the requested filters.", file=sys.stderr)
         return 2
 
+    thresholds = {"ssim_min": args.ssim_min} if args.ssim_min is not None else None
+    if args.score_quality:
+        selected = order_references_first(selected)
     validation_probe = probe_environment() if args.execute else None
     environment = collect_environment(validation_probe) if validation_probe else None
     statuses: list[str] = []
+    outputs: dict[str, dict[str, Any]] = {}
     for case in selected:
         command = build_command(case, defaults)
+        if args.score_quality:
+            command = without_compile(command)
         expected = case["expected"]["outcome"]
         print(f"{case['id']} [{expected}]")
         print(f"  {format_command(command)}")
@@ -1415,6 +1554,9 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.continue_on_error:
                     return aggregate_exit_code(statuses)
                 continue
+            reference_id = (
+                reference_case_id(case, selected) if args.score_quality else None
+            )
             record = execute_case(
                 case,
                 command,
@@ -1425,9 +1567,24 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_seconds=resolve_timeout_seconds(
                     case, defaults, args.timeout_seconds
                 ),
+                reference_id=reference_id,
+                reference_output=outputs.get(reference_id) if reference_id else None,
+                thresholds=thresholds,
             )
+            outputs[case["id"]] = record.get("output") or {}
             statuses.append(record["status"])
             print(f"  result: {record['status']}")
+            comparison = (record.get("quality") or {}).get("reference")
+            if isinstance(comparison, dict):
+                scores = comparison.get("scores") or {}
+                detail = (
+                    f"ssim {scores['ssim']:.4f} psnr {scores['psnr']:.1f}"
+                    if scores.get("comparable")
+                    else comparison.get("reason", "not scored")
+                )
+                print(f"    quality vs {comparison['case_id']}: {comparison['verdict']} ({detail})")
+                for failure in comparison.get("failures") or []:
+                    print(f"      - {failure}")
             if not args.continue_on_error and not record["status"].startswith("passed"):
                 return 1
     if not args.execute and not args.list:

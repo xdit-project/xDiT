@@ -65,6 +65,22 @@ def _gib(value) -> str:
     return f"{value / (1024 ** 3):.1f}G"
 
 
+def _quality(record: dict) -> str:
+    """How the case's image compared against its reference, when it was scored.
+
+    Shows the SSIM rather than only pass or fail, because the number is what tells you whether a
+    case is comfortably fine or sitting near the floor. A dash means nobody scored this run: most
+    records predate scoring, and the reference case has nothing to compare itself against.
+    """
+    reference = (record.get("quality") or {}).get("reference")
+    if not isinstance(reference, dict):
+        return "-"
+    scores = reference.get("scores") or {}
+    if not scores.get("comparable"):
+        return "n/c"
+    return f"{scores['ssim']:.3f}" + ("" if reference.get("verdict") == "pass" else " FAIL")
+
+
 def _combination(case: dict) -> str:
     """Label carrying every dimension that distinguishes cases for the same model.
 
@@ -258,6 +274,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 if _memory_is_comparable(metrics)
                 else "stale",
                 _gib(metrics.get("peak_host_file_cache_bytes")),
+                _quality(record),
             ]
         )
     headers = [
@@ -273,6 +290,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "peak vram",
         "host anon",
         "host cache",
+        "vs ref",
     ]
     lines.append("## Per case" if markdown else "Per case")
     if fence:
@@ -284,6 +302,13 @@ def render(report: dict, *, markdown: bool = False) -> str:
     lines.append(
         "rej means the case was refused as the matrix expects, so a guard fired before "
         "the load and there are no timings to report."
+    )
+    lines.append(
+        "vs ref is SSIM against the same model's eager bf16 case, and only appears for runs scored "
+        "with --score-quality, which disables torch.compile so the comparison is deterministic. It "
+        "is a gross-correctness check: quantization moves an image about as much as compile picking "
+        "a different kernel does, so a passing score means the model still drew the picture rather "
+        "than that quality is unchanged."
     )
     lines.append(
         "load s ends where compile warmup begins, so it measures loading rather than loading plus "

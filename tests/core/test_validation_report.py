@@ -313,6 +313,21 @@ def test_a_failed_comparison_is_marked_and_not_just_printed(report_tool, matrix,
     assert "FAIL" in text.split("0.412")[0], "the row itself has to read as failed"
 
 
+def test_the_report_warns_that_load_times_depend_on_page_cache(report_tool, matrix, tmp_path):
+    """The same case measured 56.7s cold and 18.2s warm, and nothing in a row says which it was.
+
+    Two separate readings of this dashboard drew the wrong conclusion from rows whose runs did not
+    share cache state, so the caveat is part of the report rather than tribal knowledge.
+    """
+    case = _cases_for(matrix, "gfx950")[0]
+    record = _record(case, "passed", load_duration_seconds=40.0, wall_duration_seconds=80.0)
+
+    text = report_tool.render(report_tool.build_report([_write(tmp_path, [record])], MATRIX_PATH))
+
+    assert "page cache" in text
+    assert "comparable" in text
+
+
 def test_a_scoring_run_does_not_replace_the_timings_of_a_real_one(report_tool, matrix, tmp_path):
     """Scoring runs disable compile, so their timings are not the case as declared.
 

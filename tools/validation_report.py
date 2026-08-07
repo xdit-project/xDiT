@@ -347,6 +347,12 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "than that quality is unchanged."
     )
     lines.append(
+        "load s depends on how much of the checkpoint was already in page cache, and the same case "
+        "has measured 56.7s cold against 18.2s warm. Rows are only comparable to each other when "
+        "their runs shared that state, so a row re-run on its own can look better than its "
+        "neighbours for no other reason."
+    )
+    lines.append(
         "load s ends where compile warmup begins, so it measures loading rather than loading plus "
         "compiling; compile s is that warmup, which is near-constant for a model and swamps the "
         "difference between load strategies when the two are added together."

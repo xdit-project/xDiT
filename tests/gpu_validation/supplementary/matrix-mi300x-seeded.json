@@ -1,0 +1,320 @@
+{
+  "schema_version": 2,
+  "validation_status": "NOT RUN",
+  "notes": "Supplementary, not part of the checked-in coverage claim. Probes the four models seeded into a local HF cache that tests/gpu_validation/matrix.json leaves without any rocm_torchao coverage, so cases can be landed against observed outcomes rather than guessed ones. Per-case observed_on_gfx942 records what one MI300X node actually saw before the GPUs were reclaimed. Run these serially: the single-process eager path binds port 29500 regardless of PET_MASTER_PORT.",
+  "defaults": {
+    "prompt": "A red origami fox on a slate table, studio light",
+    "seed": 1234,
+    "num_inference_steps": 4,
+    "height": 512,
+    "width": 512,
+    "output_root": "/validation/output",
+    "timeout_seconds": 3600
+  },
+  "cases": [
+    {
+      "id": "mi300x-klein4b-bf16-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "mi300x",
+        "baseline",
+        "hub"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Unquantized reference for the klein-4B memory-efficient cases.",
+      "observed_on_gfx942": "PASSED on gfx942 (an earlier failure was a port-29500 collision, not the model)"
+    },
+    {
+      "id": "mi300x-klein4b-fp8-fsdp4",
+      "tags": [
+        "rocm",
+        "mi300x",
+        "fp8",
+        "fsdp",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First blockwise-fill coverage for klein-4B.",
+      "observed_on_gfx942": "PASSED on gfx942"
+    },
+    {
+      "id": "mi300x-klein4b-fp8-replicated4",
+      "tags": [
+        "rocm",
+        "mi300x",
+        "fp8",
+        "replicated",
+        "hub"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Rank0 host load plus GPU broadcast for klein-4B.",
+      "observed_on_gfx942": "PASSED on gfx942"
+    },
+    {
+      "id": "mi300x-zimage-turbo-bf16-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "mi300x",
+        "baseline",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z_image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First rocm_torchao run for Z-Image-Turbo.",
+      "observed_on_gfx942": "NOT PROVEN: interrupted mid-run when the GPUs were reclaimed"
+    },
+    {
+      "id": "mi300x-zimage-turbo-fp8-fsdp4",
+      "tags": [
+        "rocm",
+        "mi300x",
+        "fp8",
+        "fsdp",
+        "streaming",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z_image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 4,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First blockwise-fill coverage for Z-Image-Turbo.",
+      "observed_on_gfx942": "NOT RUN"
+    },
+    {
+      "id": "mi300x-wan22-ti2v-bf16-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "mi300x",
+        "baseline",
+        "hub"
+      ],
+      "model": "Wan2.2-TI2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Unquantized reference for the TI2V memory-efficient cases.",
+      "observed_on_gfx942": "NOT RUN"
+    },
+    {
+      "id": "mi300x-wan22-ti2v-fp8-fsdp4",
+      "tags": [
+        "rocm",
+        "mi300x",
+        "fp8",
+        "fsdp",
+        "streaming",
+        "hub"
+      ],
+      "model": "Wan2.2-TI2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First blockwise-fill coverage for Wan2.2-TI2V.",
+      "observed_on_gfx942": "NOT RUN"
+    },
+    {
+      "id": "mi300x-kontext-bf16-eager",
+      "tags": [
+        "smoke",
+        "rocm",
+        "mi300x",
+        "baseline",
+        "hub"
+      ],
+      "model": "FLUX.1-Kontext-dev",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-Kontext-dev"
+      },
+      "world_size": 1,
+      "args": [
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Unquantized reference for the Kontext memory-efficient cases.",
+      "observed_on_gfx942": "NOT RUN"
+    },
+    {
+      "id": "mi300x-kontext-fp8-fsdp4",
+      "tags": [
+        "rocm",
+        "mi300x",
+        "fp8",
+        "fsdp",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.1-Kontext-dev",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-Kontext-dev"
+      },
+      "world_size": 4,
+      "args": [
+        "--input_images",
+        "${XDIT_WAN_INPUT_IMAGE}"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "First blockwise-fill coverage for FLUX.1-Kontext.",
+      "observed_on_gfx942": "NOT RUN"
+    }
+  ]
+}

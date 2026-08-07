@@ -29,8 +29,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX = ROOT / "tests/gpu_validation/matrix.json"
 # Bumped when a metric's meaning changes, so a reader never puts two definitions in one column.
 # 2: GPU memory became the busiest single device's peak; it was previously summed over every device
-# on the node, which grew with the rank count and so hid what sharding did.
-GPU_METRICS_VERSION = 2
+#    on the node, which grew with the rank count and so hid what sharding did.
+# 3: Host memory became the container's anonymous pages. It was summed RSS over the process tree,
+#    which re-counted the pages ranks share and so also grew with the rank count.
+GPU_METRICS_VERSION = 3
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED_CASE_FIELDS = {
     "id",
@@ -828,6 +830,13 @@ def _proc_tree(root_pid: int) -> set[int]:
 
 
 def _process_tree_rss(pids: set[int]) -> int:
+    """Summed RSS over the tree. Kept for continuity, but not the figure to judge a load by.
+
+    Ranks share the ROCm and torch libraries and mmap the same checkpoint files, and every rank's
+    RSS counts those shared pages again, so this reads high in proportion to the rank count. It also
+    misses page cache that no process maps, so it can read low as well. _cgroup_memory_breakdown is
+    the honest measure: the kernel counts each physical page once for the container.
+    """
     total_kib = 0
     for pid in pids:
         try:
@@ -838,6 +847,27 @@ def _process_tree_rss(pids: set[int]) -> int:
         except (OSError, ValueError, IndexError):
             continue
     return total_kib * 1024
+
+
+def _cgroup_memory_breakdown() -> tuple[int | None, int | None]:
+    """(anonymous, file-backed) container bytes, each physical page counted once.
+
+    The split is what makes the number interpretable, and mirrors what the load path already logs
+    via checkpoint_io.host_mem_gb: anonymous pages are the tensors a load actually allocated and
+    cannot be reclaimed under pressure, while file-backed pages are mmap'd checkpoint cache the
+    kernel drops when it needs to. Reporting their sum would let page cache masquerade as cost.
+    """
+    anon = file_backed = None
+    try:
+        for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines():
+            key, _, value = line.partition(" ")
+            if key == "anon":
+                anon = int(value)
+            elif key == "file":
+                file_backed = int(value)
+    except (OSError, ValueError):
+        return None, None
+    return anon, file_backed
 
 
 def _cgroup_memory() -> int | None:
@@ -915,6 +945,8 @@ class ResourceMonitor:
         self.interval = interval
         self.peak_host_rss = 0
         self.peak_cgroup = 0
+        self.peak_host_anon = 0
+        self.peak_host_file_cache = 0
         self.peak_gpu: int | None = None
         self.gpu_scope: str | None = None
         # (monotonic time, busiest device's bytes), so a phase's peak can be recovered afterwards
@@ -937,6 +969,11 @@ class ResourceMonitor:
             cgroup = _cgroup_memory()
             if cgroup is not None:
                 self.peak_cgroup = max(self.peak_cgroup, cgroup)
+            anon, file_cache = _cgroup_memory_breakdown()
+            if anon is not None:
+                self.peak_host_anon = max(self.peak_host_anon, anon)
+            if file_cache is not None:
+                self.peak_host_file_cache = max(self.peak_host_file_cache, file_cache)
             by_device = _nvidia_process_memory(pids)
             scope = "process_tree"
             if by_device is None:
@@ -1241,6 +1278,8 @@ def execute_case(
         "first_forward": first_forward,
         "peak_host_rss_bytes": monitor.peak_host_rss or None,
         "peak_cgroup_memory_bytes": monitor.peak_cgroup or None,
+        "peak_host_anon_bytes": monitor.peak_host_anon or None,
+        "peak_host_file_cache_bytes": monitor.peak_host_file_cache or None,
         "metrics_version": GPU_METRICS_VERSION,
         "peak_gpu_memory_bytes": monitor.peak_gpu,
         # The whole-run peak is dominated by inference activations, so on its own it cannot show what

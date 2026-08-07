@@ -45,7 +45,7 @@ def _record(case, status, **metrics):
         "peak_gpu_memory_bytes": None,
         "gpu_memory_scope": None,
         # What the runner writes today; tests for older records drop it deliberately.
-        "metrics_version": 2,
+        "metrics_version": 3,
     }
     base.update(metrics)
     return {

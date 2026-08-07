@@ -818,6 +818,8 @@ def test_execute_case_times_out_and_kills_isolated_process_group(
         peak_cgroup = 0
         peak_gpu = None
         gpu_scope = None
+        peak_host_anon = 0
+        peak_host_file_cache = 0
 
         def peak_gpu_between(self, start, end):
             return None
@@ -965,6 +967,8 @@ def test_term_grace_is_not_shortened_when_root_closes_stdout(
         peak_cgroup = 0
         peak_gpu = None
         gpu_scope = None
+        peak_host_anon = 0
+        peak_host_file_cache = 0
 
         def peak_gpu_between(self, start, end):
             return None
@@ -1082,6 +1086,8 @@ def test_execute_case_bounds_drain_when_ready_descendant_retains_stdout(
         peak_cgroup = 0
         peak_gpu = None
         gpu_scope = None
+        peak_host_anon = 0
+        peak_host_file_cache = 0
 
         def peak_gpu_between(self, start, end):
             return None
@@ -1313,6 +1319,30 @@ def test_vram_is_reported_per_device_so_rank_count_cannot_inflate_it(runner, mon
     assert len(by_device) == 8
     assert max(by_device.values()) == busy
     assert sum(by_device.values()) > busy, "the test data must distinguish max from sum"
+
+
+def test_host_memory_separates_allocations_from_reclaimable_cache(runner, monkeypatch, tmp_path):
+    """Summing RSS over ranks re-counted shared pages; the cgroup counts each page once.
+
+    The split matters as much as the total: mmap'd checkpoint cache is reclaimable, so folding it
+    into the reported figure would let page cache look like a load cost.
+    """
+    stat = tmp_path / "memory.stat"
+    stat.write_text("anon 42000000000\nfile 31000000000\nkernel 5000\n")
+    monkeypatch.setattr(runner, "Path", lambda p: stat if "memory.stat" in str(p) else Path(p))
+
+    anon, file_cache = runner._cgroup_memory_breakdown()
+
+    assert anon == 42_000_000_000
+    assert file_cache == 31_000_000_000
+
+
+def test_host_memory_breakdown_is_absent_rather_than_wrong_off_cgroups(runner, monkeypatch):
+    monkeypatch.setattr(
+        runner, "Path", lambda p: Path("/nonexistent/memory.stat")
+    )
+
+    assert runner._cgroup_memory_breakdown() == (None, None)
 
 
 def test_the_load_phase_peak_is_taken_from_the_load_window_only(runner):

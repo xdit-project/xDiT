@@ -24,7 +24,7 @@ GREEN_STATUSES = {"passed", "passed_expected_rejection"}
 NOT_RUN_STATUSES = {"environment_mismatch"}
 # Mirrors gpu_validation.GPU_METRICS_VERSION; a record below it holds memory figures this report
 # cannot put in the same column as the rest.
-CURRENT_METRICS_VERSION = 2
+CURRENT_METRICS_VERSION = 3
 
 
 def load_records(paths: list[Path]) -> list[dict]:
@@ -248,7 +248,10 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 _gib(metrics.get("peak_gpu_memory_bytes"))
                 if _memory_is_comparable(metrics)
                 else "stale",
-                _gib(metrics.get("peak_host_rss_bytes")),
+                _gib(metrics.get("peak_host_anon_bytes"))
+                if _memory_is_comparable(metrics)
+                else "stale",
+                _gib(metrics.get("peak_host_file_cache_bytes")),
             ]
         )
     headers = [
@@ -261,7 +264,8 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "wall s",
         "load vram",
         "peak vram",
-        "peak host",
+        "host anon",
+        "host cache",
     ]
     lines.append("## Per case" if markdown else "Per case")
     if fence:
@@ -277,6 +281,12 @@ def render(report: dict, *, markdown: bool = False) -> str:
     lines.append(
         "post-load s is wall minus load, so it covers inference, VAE decode, saving and "
         "teardown rather than inference alone."
+    )
+    lines.append(
+        "host anon is the container's anonymous pages, which is what a load actually allocated and "
+        "what the OOM killer watches; host cache is mmap'd checkpoint page cache, which the kernel "
+        "reclaims under pressure and so is not a cost. Neither is summed over ranks, so they do not "
+        "grow just because a run used more of them."
     )
     lines.append(
         "vram figures are the busiest single device, not a sum over the run's devices, so they "

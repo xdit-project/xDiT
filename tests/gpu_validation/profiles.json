@@ -6,7 +6,7 @@
     "replicated": 4,
     "fsdp_blockwise": 4
   },
-  "world_size_rationale": "One rank for eager because it shards nothing; four for the memory-efficient paths because that is where a per-rank shard is small enough for the saving to show and matches the ranks the curated cases used.",
+  "world_size_rationale": "One rank for eager because it shards nothing. The multi-rank default is deliberately conservative for profiles whose machines are small; a profile whose hardware ships more devices should override it, because testing a rank count nobody deploys measures a configuration that does not exist. Profiles override this with their own world_size_policy.",
   "profiles": [
     {
       "id": "mi3xx",
@@ -14,6 +14,43 @@
       "accelerator": "gfx942_or_gfx950",
       "transformers": "5.x",
       "tags": ["rocm", "torchao", "generated"],
+      "world_size_policy": {
+        "eager": 1,
+        "replicated": 8,
+        "fsdp_blockwise": 8
+      },
+      "world_size_note": "Eight ranks because an MI300X or MI355X node ships eight devices and that is how these models are actually served, so a four-rank result would describe a deployment nobody runs.",
+      "runtime_args": ["--attention_backend", "aiter", "--use_torch_compile"],
+      "runtime_args_note": "Taken from .ci/benchmark_configs, where every eight-GPU Instinct entry pins attention_backend: aiter and use_torch_compile: true. Both were previously left unset: attention selection happened to resolve to AITER anyway, so the sweep agreed with production by accident and would have drifted silently if the selector changed, while compile was simply never exercised even though nothing is served without it.",
+      "screening_plan": {
+        "rationale": "A screening set, not a full cross. Crossing placement by transformer quantization by text-encoder quantization is twelve cases per model, and running it for every model spends most of its time re-confirming that the same loading machinery works. These four cover every level of every factor, deliberately loading two of them densely: if a dense case fails, the model is expanded into the unconfounded cross to localize it. The bf16 sharded case is kept unconfounded on purpose, so a failure in the dense sharded case can be attributed by comparing the two rather than by re-running.",
+        "cases": [
+          {
+            "placement": "eager",
+            "quantization": "none",
+            "te_fp8": false,
+            "role": "reference for the image comparison, and the cheapest proof the model loads at all"
+          },
+          {
+            "placement": "fsdp_blockwise",
+            "quantization": "none",
+            "te_fp8": false,
+            "role": "the blockwise disk fill on its own, with nothing quantized to confuse a failure"
+          },
+          {
+            "placement": "fsdp_blockwise",
+            "quantization": "fp8",
+            "te_fp8": true,
+            "role": "dense: blockwise fill, per-block quantize and a quantized text encoder together"
+          },
+          {
+            "placement": "replicated",
+            "quantization": "fp8",
+            "te_fp8": true,
+            "role": "dense: broadcast fill with both quantizations, the path that has no per-block fill"
+          }
+        ]
+      },
       "quantizations": ["none", "fp8"],
       "quantizations_withheld": {
         "int8": "TorchAO INT8 has no ROCm kernel path, so every case would be a rejection. Rejections stay curated: their value is a human asserting an external fact, which a generator reading the same probe code cannot do.",

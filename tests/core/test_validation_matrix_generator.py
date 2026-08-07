@@ -75,6 +75,24 @@ def test_generated_cases_never_assert_a_rejection(matrix):
             assert case["expected"]["outcome"] == "inference_success", case["id"]
 
 
+def test_generated_cases_run_the_profile_runtime_args(matrix):
+    """A sweep that leaves these unset measures a configuration nobody serves.
+
+    Every eight-GPU Instinct entry in .ci/benchmark_configs pins an attention backend and enables
+    torch.compile, so a generated case that omits them is not testing the deployed path.
+    """
+    profiles = json.loads(PROFILES_PATH.read_text())
+    expected = {
+        profile["id"]: profile.get("runtime_args", [])
+        for profile in profiles["profiles"]
+    }
+    generated = [case for case in matrix["cases"] if case["id"].startswith("gen-")]
+    assert generated
+    for case in generated:
+        profile_id = case["id"].split("-")[1]
+        assert case["args"] == expected[profile_id], case["id"]
+
+
 def test_every_rejection_case_is_curated(matrix):
     curated = {case["id"] for case in json.loads(CURATED_PATH.read_text())["cases"]}
     for case in matrix["cases"]:

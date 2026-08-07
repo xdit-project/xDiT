@@ -105,6 +105,38 @@ def declared_variants(declaration) -> list[tuple[str, str]]:
     return [(p, q) for p in placements for q in quantizations]
 
 
+def quantizes_its_text_encoder(cls) -> bool:
+    """Whether --use_fp8_text_encoder would do anything for this runner.
+
+    A runner with no text-encoder FP8 targets accepts the flag and logs that it has no effect, so
+    emitting a te_fp8 case for it would duplicate the plain FP8 case under a name claiming to test
+    something it does not.
+    """
+    settings = getattr(cls, "settings", None)
+    return bool(getattr(settings, "fp8_text_encoder_module_list", None))
+
+
+def screened_variants(plan, declaration, cls) -> list[dict]:
+    """The plan's cases this runner declares support for, with te_fp8 dropped where it is inert."""
+    declared = set(declared_variants(declaration))
+    quantizes_te = quantizes_its_text_encoder(cls)
+    chosen: list[dict] = []
+    seen: set[tuple[str, str, bool]] = set()
+    for entry in plan["cases"]:
+        placement, quantization = entry["placement"], entry["quantization"]
+        if (placement, quantization) not in declared:
+            continue
+        te_fp8 = bool(entry["te_fp8"]) and quantizes_te
+        identity = (placement, quantization, te_fp8)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        chosen.append(
+            {"placement": placement, "quantization": quantization, "te_fp8": te_fp8}
+        )
+    return chosen
+
+
 def canonical_runners(registry) -> list[tuple[str, type]]:
     """One alias per runner class, matching how cache_inventory reports them.
 
@@ -173,13 +205,15 @@ def accelerators_overlap(left: str, right: str) -> bool:
 
 def generate_cases(registry, profiles: dict) -> tuple[list, list]:
     """Cases the profiles permit, plus a reason for every runner left out."""
-    policy = profiles["world_size_policy"]
     needs_input = set(profiles["requires_input_image"]["models"])
     cases: list[dict] = []
     skipped: list[dict] = []
 
     for profile in profiles["profiles"]:
         allowed = set(profile["quantizations"])
+        # A profile's own rank counts win, so hardware that ships eight devices is not
+        # measured at a rank count nobody deploys.
+        policy = profile.get("world_size_policy", profiles["world_size_policy"])
         for alias, cls in canonical_runners(registry):
             declaration = getattr(cls, "load_declaration", None)
             if declaration is None:
@@ -202,9 +236,11 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                 continue
 
             variants = [
-                (placement, quantization)
-                for placement, quantization in declared_variants(declaration)
-                if quantization in allowed and placement in policy
+                variant
+                for variant in screened_variants(
+                    profile["screening_plan"], declaration, cls
+                )
+                if variant["quantization"] in allowed and variant["placement"] in policy
             ]
             if not variants:
                 skipped.append(
@@ -215,7 +251,10 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                 )
                 continue
             family = _slug(cls.__module__.rsplit(".", 1)[-1])
-            for placement, quantization in variants:
+            for variant in variants:
+                placement = variant["placement"]
+                quantization = variant["quantization"]
+                te_fp8 = variant["te_fp8"]
                 world_size = policy[placement]
                 quant_slug = QUANTIZATION_SLUG.get(quantization, quantization)
                 case_id = "-".join(
@@ -224,6 +263,7 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                         profile["id"],
                         _slug(alias),
                         quant_slug,
+                        *(["te"] if te_fp8 else []),
                         PLACEMENT_SLUG[placement],
                         f"w{world_size}",
                     ]
@@ -232,7 +272,12 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                     {
                         "id": case_id,
                         "tags": sorted(
-                            {*profile["tags"], quant_slug, PLACEMENT_SLUG[placement]}
+                            {
+                                *profile["tags"],
+                                quant_slug,
+                                PLACEMENT_SLUG[placement],
+                                *(["te-fp8"] if te_fp8 else []),
+                            }
                         ),
                         "model": alias,
                         "model_family": family,
@@ -242,12 +287,12 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                         },
                         "placement": placement,
                         "quantization": quantization,
-                        "te_fp8": False,
+                        "te_fp8": te_fp8,
                         "offload": "none",
                         "transformers": profile["transformers"],
                         "checkpoint": {"source": "hub", "value": checkpoint},
                         "world_size": world_size,
-                        "args": [],
+                        "args": list(profile.get("runtime_args", [])),
                         "expected": {"outcome": "inference_success"},
                         "quality_notes": (
                             f"Generated from the {alias} load declaration. Compare the "

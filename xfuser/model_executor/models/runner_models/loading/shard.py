@@ -39,10 +39,11 @@ def shard_pipeline_components(model) -> None:
             dtype = strategy.get("dtype", None)
             offload_policy = strategy.get("offload_policy", None)
             # A meta component was built on-config to avoid a full bf16 copy per rank. Two meta
-            # paths: a transformer we meta-built self-fills each block from disk (never full
-            # anywhere, quantized per block). Anything else (text encoders, or a meta component
-            # we did not build) is filled by a rank0 broadcast, with no per-block quantize since
-            # the source stays bf16/streamed-fp8 on rank0.
+            # paths: a component that can map its live names onto checkpoint keys self-fills each
+            # block from disk (never full anywhere, quantized per block), which covers transformers
+            # and the text encoders whose mapping was proven. Anything else is filled by a rank0
+            # broadcast, with no per-block quantize since the source stays bf16/streamed-fp8 on
+            # rank0.
             # Agreed across the fs group: this picks a collective branch, so a rank-local
             # answer that diverged would hang instead of raising.
             is_meta = loader.agreed_is_meta(
@@ -58,7 +59,7 @@ def shard_pipeline_components(model) -> None:
                     fs_local_rank,
                     component=component,
                 )
-                load_block_fn, load_epilogue_fn = loader.build_transformer_disk_loaders(
+                load_block_fn, load_epilogue_fn = loader.build_blockwise_disk_loaders(
                     component, wrap_attrs, component_name, f"cuda:{fs_local_rank}"
                 )
             else:

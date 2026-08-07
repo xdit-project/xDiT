@@ -422,7 +422,7 @@ def test_block_fill_requires_and_broadcasts_only_persistent_buffers(runtime):
     block.register_buffer("saved", torch.ones(1), persistent=True)
     block.register_buffer("runtime_cache", torch.ones(1), persistent=False)
 
-    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
     filler.is_src = True
     filler.subfolder = "transformer"
     filler._id2fqn = {id(block): "blocks.0"}
@@ -482,7 +482,7 @@ def _handle_counting_filler(runtime, monkeypatch, device="cpu"):
         lambda path, **kwargs: FakeHandle(path, kwargs.get("device")),
     )
 
-    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
     filler.device = device
     filler._handle_cache = {}
     filler._stack = ExitStack()
@@ -555,7 +555,7 @@ def test_local_block_fill_uses_no_collective_transport(runtime):
     block.register_parameter("weight", torch.nn.Parameter(torch.ones(1)))
     block.register_buffer("saved", torch.ones(1), persistent=True)
 
-    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
     filler.group = None
     filler.is_src = True
     filler.device = "cpu"
@@ -613,7 +613,7 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
         def all_reduce(tensor):
             return tensor
 
-    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
     filler.is_src = rank == 0
     filler.group = Group()
     filler.subfolder = "transformer"
@@ -634,7 +634,7 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
 def test_missing_persistent_checkpoint_key_is_reported_to_peers_before_broadcast(
     runtime,
 ):
-    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
     filler.is_src = False
     filler.subfolder = "transformer"
     filler.weight_map = {}
@@ -716,7 +716,7 @@ def test_replicated_transformer_restores_nonpersistent_buffers_before_fill(
     loader = object.__new__(runtime.meta.MemoryEfficientLoader)
     loader.model = SimpleNamespace()
     seen = []
-    loader.build_transformer_disk_loaders = lambda *args, **kwargs: (
+    loader.build_blockwise_disk_loaders = lambda *args, **kwargs: (
         lambda block, index: seen.append(block.runtime_cache.detach().clone()),
         lambda component: None,
     )
@@ -762,7 +762,7 @@ def test_local_transformer_fills_and_quantizes_each_block_before_tail(
         assert block.weight.item() == index + 1
         events.append(f"quantize:{index}")
 
-    loader.build_transformer_disk_loaders = lambda *args, **kwargs: (
+    loader.build_blockwise_disk_loaders = lambda *args, **kwargs: (
         fill,
         finalize,
     )
@@ -791,7 +791,7 @@ def test_replicated_quantize_failure_stops_all_ranks_before_next_block(
     finalized = []
     loader = object.__new__(runtime.meta.MemoryEfficientLoader)
     loader.model = SimpleNamespace()
-    loader.build_transformer_disk_loaders = lambda *args, **kwargs: (
+    loader.build_blockwise_disk_loaders = lambda *args, **kwargs: (
         lambda block, index: fills.append(index),
         lambda component: finalized.append(True),
     )

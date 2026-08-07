@@ -171,7 +171,7 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     meta_path = ROOT / "xfuser/model_executor/models/runner_models/loading/meta_load.py"
     meta_source = meta_path.read_text()
     meta_tree = ast.parse(meta_source)
-    filler = _class(meta_tree, "_TransformerDiskFiller")
+    filler = _class(meta_tree, "_BlockwiseDiskFiller")
     init_source = ast.get_source_segment(
         meta_source,
         next(
@@ -221,9 +221,9 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     # The replicated and local paths share one block loop, so the buffer
     # save/restore ordering is asserted there rather than once per caller.
     for entry_point in ("_fill_transformer_replicated", "fill_transformer_local"):
-        assert "self._fill_transformer_blocks(" in _loader_method(entry_point)
+        assert "self._fill_blocks(" in _loader_method(entry_point)
 
-    block_fill = _loader_method("_fill_transformer_blocks")
+    block_fill = _loader_method("_fill_blocks")
     assert block_fill.index("_save_nonpersistent_buffers(block, device)") < block_fill.index(
         "block.to_empty"
     )
@@ -250,9 +250,12 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     assert "finally:" in te_load
     assert "_release_rank0_source" in te_load
 
+    # Every meta construction must be collectively agreed, so a rank that fails to build fails the
+    # run rather than diverging into a different collective. te_blockwise_routes is where the FSDP
+    # path builds its text encoders, since the route decision and the construction are one step.
     for method_name in (
         "build_meta_transformer",
-        "meta_te_kwargs",
+        "te_blockwise_routes",
         "meta_te_kwargs_replicated",
     ):
         assert "_collective_build_call" in _loader_method(method_name)

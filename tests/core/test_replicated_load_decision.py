@@ -248,10 +248,10 @@ def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
 
     loader = make_loader(monkeypatch)
     built = loader.build_meta_transformer(FakeWrapper, subfolder="transformer")
-    assert len(loader._meta_transformers) == 1
+    assert len(loader._blockwise_sources) == 1
     del built
     gc.collect()
-    assert len(loader._meta_transformers) == 0
+    assert len(loader._blockwise_sources) == 0
 
 
 def test_custom_mapped_source_can_build_meta_only_for_local_fill(monkeypatch):
@@ -270,7 +270,7 @@ def test_custom_mapped_source_can_build_meta_only_for_local_fill(monkeypatch):
         weight_source=source,
     )
 
-    assert loader._meta_transformers[built] is source
+    assert loader._blockwise_sources[built] is source
 
 
 def test_disk_filler_receives_the_exact_request_used_for_meta_build(monkeypatch):
@@ -294,8 +294,8 @@ def test_disk_filler_receives_the_exact_request_used_for_meta_build(monkeypatch)
         fill_block = None
         finalize = None
 
-    monkeypatch.setattr(meta_load, "_TransformerDiskFiller", Filler)
-    loader.build_transformer_disk_loaders(built, ["blocks"], "transformer", "cpu")
+    monkeypatch.setattr(meta_load, "_BlockwiseDiskFiller", Filler)
+    loader.build_blockwise_disk_loaders(built, ["blocks"], "transformer", "cpu")
 
     assert captured == [request]
     assert captured[0] is request
@@ -324,9 +324,9 @@ def test_dual_meta_transformers_keep_distinct_checkpoint_requests(monkeypatch):
         fill_block = None
         finalize = None
 
-    monkeypatch.setattr(meta_load, "_TransformerDiskFiller", Filler)
-    loader.build_transformer_disk_loaders(first, ["blocks"], "transformer", "cpu")
-    loader.build_transformer_disk_loaders(second, ["blocks"], "transformer_2", "cpu")
+    monkeypatch.setattr(meta_load, "_BlockwiseDiskFiller", Filler)
+    loader.build_blockwise_disk_loaders(first, ["blocks"], "transformer", "cpu")
+    loader.build_blockwise_disk_loaders(second, ["blocks"], "transformer_2", "cpu")
 
     assert captured == [(first, first_request), (second, second_request)]
 
@@ -1295,6 +1295,7 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
             build_meta_component=lambda name, fp8=False: object(),
+            will_fill_blockwise=lambda name: False,
         ),
         _fp8_descriptor_components=set(),
         _fp8_streaming_targets=set(),
@@ -1341,6 +1342,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
             build_meta_component=lambda name, fp8=False: object(),
+            will_fill_blockwise=lambda name: False,
         ),
         _fp8_descriptor_components=set(),
         _fp8_streaming_targets=set(),
@@ -1370,6 +1372,60 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
     assert runner._fp8_streaming_targets == set()
 
 
+def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch):
+    """The refusal below objects to converting a layout after FSDP wraps it.
+
+    A blockwise-filled encoder is quantized per block on the way in from disk, before wrapping, so
+    the objection does not apply and TorchAO can quantize a text encoder on the FSDP meta path. This
+    is the case the blockwise fill exists for, so reaching prepare_text_encoder_fp8_load here would
+    mean the encoder had been routed back to the whole-encoder rank0 load.
+    """
+    from xfuser.model_executor.models.runner_models import base_model
+
+    adapter = SimpleNamespace(
+        backend=SimpleNamespace(value="torchao"),
+        format=SimpleNamespace(value="fp8"),
+        storage_semantics="",
+    )
+    runner = SimpleNamespace(
+        load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
+        _replicated_broadcast_load=lambda: False,
+        _memory_efficient_fsdp_load=lambda: True,
+        fp8_backend=adapter,
+        config=SimpleNamespace(use_fp4_gemms=False),
+        fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
+        settings=SimpleNamespace(
+            fp8_text_encoder_module_list=["text_encoder.encoder.block"],
+            fsdp_strategy={"text_encoder": {"wrap_attrs": ["encoder.block"]}},
+        ),
+        _loader=SimpleNamespace(
+            meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
+            build_meta_component=lambda name, fp8=False: object(),
+            will_fill_blockwise=lambda name: True,
+        ),
+        _fp8_descriptor_components=set(),
+        _fp8_streaming_targets=set(),
+        _quantization_streaming_targets=set(),
+        _quantization_descriptor_components=set(),
+    )
+
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.loading.fp8_backends."
+        "prepare_text_encoder_fp8_load",
+        lambda *a, **k: pytest.fail(
+            "a blockwise-filled encoder was routed to the whole-encoder rank0 load"
+        ),
+    )
+    monkeypatch.setattr(base_model, "log", lambda message: None)
+
+    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+
+    assert (kwargs, config) == ({"text_encoder": "meta"}, None)
+    # Recorded as already quantized, so the post-load walk leaves the filled blocks alone.
+    assert "text_encoder" in runner._fp8_descriptor_components
+    assert runner._fp8_streaming_targets
+
+
 def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
@@ -1384,6 +1440,7 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         ),
         _loader=SimpleNamespace(
             build_meta_component=lambda name, fp8=False: object(),
+            will_fill_blockwise=lambda name: False,
         ),
         _fp8_descriptor_components=set(),
         _fp8_streaming_targets=set(),

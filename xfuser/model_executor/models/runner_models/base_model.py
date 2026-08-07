@@ -1012,6 +1012,33 @@ class xFuserModel(abc.ABC):
                 targets = tuple(self.fp8.targets_for(component_name))
                 if not targets:
                     continue
+                # A blockwise-filled encoder is quantized per block on the way in from disk, before
+                # FSDP wraps that block, so it needs neither a streaming config nor a post-load walk.
+                # That is what lets TorchAO quantize a text encoder on the FSDP meta path at all: the
+                # objection below is to converting a layout after wrapping, which this never does.
+                if fsdp_meta and self._loader.will_fill_blockwise(component_name):
+                    wrap_attrs = tuple(
+                        self.settings.fsdp_strategy.get(component_name, {}).get(
+                            "wrap_attrs", ()
+                        )
+                    )
+                    descriptor = _blockwise_transformer_descriptor(
+                        adapter,
+                        component_name,
+                        targets,
+                        wrap_attrs,
+                    )
+                    # Same bookkeeping the transformer's blockwise route records, so the post-load
+                    # walk knows these targets were already quantized during the fill.
+                    _record_blockwise_ownership(
+                        self,
+                        adapter,
+                        component_name,
+                        targets,
+                        wrap_attrs,
+                        descriptor,
+                    )
+                    continue
                 # Existing meta layouts only mirror AITER's plain fp8+scale
                 # representation. Replicated TorchAO falls back after broadcast;
                 # memory-efficient FSDP rejects that layout-changing fallback.

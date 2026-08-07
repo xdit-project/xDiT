@@ -10,18 +10,26 @@ other rules it out:
   the same weights, so rank0 loads once and broadcasts, keeping host peak at 1x the model instead of
   Nx. Nothing is sharded on this path.
 
-Two fill strategies, both collective (every fs-group rank must call in identical order):
+Two fill strategies, both collective (every fs-group rank must call in identical order). Which one a
+component takes is not decided by what kind of component it is, but by whether its live tensor names
+can be mapped onto checkpoint keys:
 
-* Transformer (``_TransformerDiskFiller``): self-fill. Each block's real weights are read from disk
-  on fs-rank0 ONLY and broadcast GPU->GPU to the group. rank0-only read is required because the full
-  block must exist on every rank before block-128 fp8 quantization (a shard boundary splitting a
-  128x128 tile invalidates the tile scale, so per-rank slice reads are impossible), and if every rank
-  read the full block from disk host anon would scale with N ranks (measured +3.5GB per block, enough
-  to trip the cgroup OOM killer). Reading on rank0 then broadcasting keeps host disk-read anon at 1x.
+* Self-fill (``_BlockwiseDiskFiller``), the cheaper path. Each block's real weights are read from disk
+  on fs-rank0 ONLY and broadcast GPU->GPU to the group, so no rank ever holds more than a block.
+  rank0-only read is required because the full block must exist on every rank before block-128 fp8
+  quantization (a shard boundary splitting a 128x128 tile invalidates the tile scale, so per-rank slice
+  reads are impossible), and if every rank read the full block from disk host anon would scale with N
+  ranks (measured +3.5GB per block, enough to trip the cgroup OOM killer). Reading on rank0 then
+  broadcasting keeps host disk-read anon at 1x.
 
-* Text encoders (``MemoryEfficientLoader.broadcast_load``): rank0 loads once via from_pretrained
-  (resolves tied weights), then scatters one wrapped block at a time via broadcast_from_rank0, so
-  peers never receive the whole model at once. fp8-targeted TEs stream rank0 straight to fp8.
+  Transformers always qualify: they are built from their own config, so their live names already are
+  checkpoint keys. Text encoders qualify when Transformers' renaming rules can be reproduced and
+  proven exactly (``text_encoder_adapter.resolve_transformers_manifest``).
+
+* Broadcast fill (``MemoryEfficientLoader.broadcast_load``), the fallback for text encoders whose keys
+  could not be mapped. rank0 loads the whole component via from_pretrained (resolving tied weights),
+  then scatters one wrapped block at a time via broadcast_from_rank0, so peers never receive the whole
+  model at once even though rank0 held it. fp8-targeted components stream rank0 straight to fp8.
 
 ``MemoryEfficientLoader`` holds the ``xFuserModel`` so it can reuse the run's FP8 plan
 (``model.fp8``, see ``fp8_plan``) and settings without duplicating them.
@@ -315,14 +323,19 @@ class MemoryEfficientLoader:
 
     def __init__(self, model) -> None:
         self.model = model
-        # The meta transformers this loader built, so the shard step can recognize them by identity
-        # rather than by guessing from the component's name. Weak so a component the pipeline
-        # replaces or drops is not kept alive by the bookkeeping.
-        self._meta_transformers = weakref.WeakKeyDictionary()
+        # Meta components that can fill themselves per block, mapped to where their weights come
+        # from: a CheckpointRequest for transformers this loader built, a CheckpointManifest for text
+        # encoders whose keys had to be resolved. Keyed by identity rather than by name, so the shard
+        # step recognizes the object it was handed instead of guessing from the component's name.
+        # Weak so a component the pipeline replaces or drops is not kept alive by the bookkeeping.
+        self._blockwise_sources = weakref.WeakKeyDictionary()
         # Resolved on first use and cached: several load-time seams consult it, so this keeps the
         # decision identical everywhere and logs the reason once.
         self._replicated_decision = None
         self._local_blockwise_transformers = weakref.WeakKeyDictionary()
+        # Text-encoder fill routes, resolved once (see te_blockwise_routes): the fp8 plan and the
+        # load both read them, and must not reach different answers.
+        self._te_routes = None
 
     def _checkpoint_request(self, subfolder: str | None = None) -> CheckpointRequest:
         factory = getattr(self.model, "_checkpoint_request", None)
@@ -408,11 +421,14 @@ class MemoryEfficientLoader:
         return True
 
     def self_fills_from_disk(self, component) -> bool:
-        """Whether this component is one we built on meta via build_meta_transformer, and can
-        therefore fill per block from disk (see _TransformerDiskFiller) rather than by broadcasting
-        a rank0 from_pretrained. True only for the component object we built: the two fill paths need
-        different collectives, so this must not guess from the component's name."""
-        return component in self._meta_transformers
+        """Whether this meta component can fill per block from disk (see _BlockwiseDiskFiller) rather
+        than by broadcasting a rank0 from_pretrained.
+
+        True for transformers built by build_meta_transformer and for text encoders whose checkpoint
+        mapping was proven (register_blockwise_fill). Keyed on the component object, not its name: the
+        two fill paths need different collectives, so this must not guess.
+        """
+        return component in self._blockwise_sources
 
     def plan_eager_blockwise_fallback(self, prepared, targets, wrap_attrs):
         """Return the component-level local fallback decision."""
@@ -443,7 +459,7 @@ class MemoryEfficientLoader:
         )
 
     def mark_local_blockwise(self, component) -> None:
-        if component not in self._meta_transformers:
+        if component not in self._blockwise_sources:
             raise RuntimeError("local blockwise transformer was not built on meta")
         self._local_blockwise_transformers[component] = True
 
@@ -480,7 +496,7 @@ class MemoryEfficientLoader:
     ):
         """Build the (diffusers) transformer wrapper on meta from its config only (no weights).
 
-        Real weights are streamed per block from disk during sharding (see _TransformerDiskFiller),
+        Real weights are streamed per block from disk during sharding (see _BlockwiseDiskFiller),
         so the full model never materializes. Uses the diffusers-public from_config; fp8 quantization
         happens per block on the real weights during sharding, so no fp8 swap is done here.
 
@@ -535,7 +551,7 @@ class MemoryEfficientLoader:
         model = _collective_build_call(
             get_world_group(), build, context=f"meta transformer '{component_name}'"
         )
-        self._meta_transformers[model] = weight_source or request
+        self._blockwise_sources[model] = weight_source or request
         return model
 
     def build_meta_component(self, component_name: str, fp8: bool = True):
@@ -596,46 +612,167 @@ class MemoryEfficientLoader:
         # .to is legal on meta) so their DTensor dtype matches the broadcast source, and match
         # from_pretrained's eval().
         component = cast_preserving_fp32_modules(component, torch.bfloat16).eval()
+        if fp8:
+            self.apply_meta_te_fp8(component, component_name)
+        return component
+
+    def _meta_te_fp8_targets(self, component_name: str) -> tuple:
+        """This component's fp8-streamed target paths, component-relative."""
         streamed_targets = getattr(self.model, "_fp8_streaming_targets", ())
         prefix = f"{component_name}."
-        local_streamed_targets = tuple(
+        return tuple(
             "" if target == component_name else target[len(prefix) :]
             for target in streamed_targets
             if target == component_name or target.startswith(prefix)
         )
-        if fp8 and local_streamed_targets:
-            self._swap_meta_te_to_fp8(component, local_streamed_targets)
-        return component
 
-    def meta_te_kwargs(self):
-        """Build text-encoder(s) on meta for the pipeline's from_pretrained (meta FSDP load path).
+    def apply_meta_te_fp8(self, component, component_name: str) -> bool:
+        """Swap this component's targeted meta Linears to fp8, reporting whether anything changed.
 
-        Returns (pipe_component_kwargs, None): the kwargs carry meta modules so the pipeline skips
-        loading those components, and te_quant is None (the meta module is filled by broadcast_load,
-        not streamed by the pipe). Returns None when there are no TE components or any one of them
-        cannot be meta-built, leaving the caller to take its normal load.
+        Separate from build_meta_component so the swap can be deferred: the blockwise fill needs a
+        bf16 layout to match the checkpoint, and only falls back to this fp8 layout if the checkpoint
+        mapping is refused (see meta_te_kwargs).
         """
-        te_components = [
+        targets = self._meta_te_fp8_targets(component_name)
+        if not targets:
+            return False
+        self._swap_meta_te_to_fp8(component, targets)
+        return True
+
+    def _te_component_names(self) -> list[str]:
+        """The pipeline's non-transformer sharded components, i.e. its text encoders."""
+        return [
             name
             for name in self.model.settings.fsdp_strategy
             if name != "transformer"
             and not name.startswith("transformer_")
             and self.model.load_capability.exclusion_for(name) is None
         ]
-        if not te_components:
+
+    def meta_te_kwargs(self):
+        """Build text-encoder(s) on meta for the pipeline's from_pretrained (meta FSDP load path).
+
+        Each is built bf16 and offered to the blockwise disk fill, which is the path worth being on:
+        one block of the encoder is real at a time, on the rank that reads it, and fp8 quantization
+        happens per block on the way through. The alternative below it costs rank 0 a full host copy
+        of the encoder before any of it is scattered.
+
+        Taking that path needs the encoder's live tensor names mapped onto its checkpoint keys, which
+        is only sometimes provable (see resolve_transformers_manifest). So the layout follows the
+        mapping rather than the reverse: bf16 while the mapping holds, and if it is refused, the fp8
+        swap is applied after the fact and the component falls back to broadcast_load. Building bf16
+        first costs nothing to undo, since meta parameters have no storage.
+
+        The fp8 swap has to be the fallback and not the default. It replaces each targeted Linear's
+        weight with weight_fp8 + weight_scale, names no bf16 checkpoint has, so a component built fp8
+        can never be mapped -- which would have left the blockwise fill reachable only on bf16 runs,
+        and unreachable on the small-GPU fp8 runs that need it most.
+
+        Returns (pipe_component_kwargs, None): the kwargs carry meta modules so the pipeline skips
+        loading those components, and te_quant is None (the pipe streams nothing; the meta module is
+        filled by whichever path was chosen). Returns None when there are no TE components or any one
+        of them cannot be meta-built, leaving the caller to take its normal load.
+        """
+        if not self._te_component_names():
             return None
+        routes = self.te_blockwise_routes()
+        if any(component is None for component, _, _ in routes.values()):
+            return None
+        kwargs = {}
+        for name, (component, manifest, refusal) in routes.items():
+            kwargs[name] = component
+            if refusal is None:
+                self._blockwise_sources[component] = manifest
+                log(f"Text encoder '{name}' will be filled blockwise from disk.")
+                continue
+            # Only now, after the fp8 plan has run and recorded its streaming targets, can the
+            # fallback layout be built: the swap needs to know what rank 0 will send.
+            self.apply_meta_te_fp8(component, name)
+            log(
+                f"Text encoder '{name}' cannot be filled blockwise from disk ({refusal}); "
+                f"rank 0 will load it whole and broadcast."
+            )
+        return kwargs, None
 
-        def build():
-            kwargs = {}
-            for name in te_components:
-                meta = self.build_meta_component(name)
-                if meta is None:
-                    raise RuntimeError(f"could not meta-build text encoder '{name}'")
-                kwargs[name] = meta
-            return kwargs, None
+    def te_blockwise_routes(self) -> dict:
+        """Per text encoder: its meta component, its checkpoint mapping, and why it was refused.
 
-        return _collective_build_call(
-            get_world_group(), build, context="FSDP text-encoder meta construction"
+        Computed once and cached, because two decisions depend on this answer and must not disagree.
+        The fp8 plan needs it to know how the component gets quantized (per block during the fill, or
+        by a config the pipeline streams), and the load needs it to know which collective fills the
+        component. Deciding twice would risk planning for one path and loading down the other.
+
+        Each component is built bf16 on meta here and handed back for use, rather than rebuilt later:
+        the mapping is resolved against this object's tensor names, so the object that was judged has
+        to be the object that gets filled.
+
+        Refusals are unanimous across the world group (see _agreed_refusal).
+        """
+        if self._te_routes is not None:
+            return self._te_routes
+        from .text_encoder_adapter import resolve_transformers_manifest
+
+        routes = {}
+        for name in self._te_component_names():
+            component = _collective_build_call(
+                get_world_group(),
+                lambda name=name: self.build_meta_component(name, fp8=False),
+                context=f"text-encoder meta construction '{name}'",
+            )
+            if component is None:
+                # Not rebuildable from config at all; the caller falls back to a normal load, and
+                # agreed_is_meta catches any rank that disagreed.
+                routes[name] = (None, None, "component is not rebuildable from config")
+                continue
+            strategy = self.model.settings.fsdp_strategy.get(name) or {}
+            if not strategy.get("wrap_attrs"):
+                manifest = None
+                refusal = "no wrap_attrs declared, so it has no blocks to fill one at a time"
+            else:
+                manifest, refusal = resolve_transformers_manifest(
+                    component, self._checkpoint_request(name)
+                )
+            routes[name] = (
+                component,
+                manifest,
+                self._agreed_refusal(refusal, name),
+            )
+        self._te_routes = routes
+        return routes
+
+    def will_fill_blockwise(self, component_name: str) -> bool:
+        """Whether this text encoder's weights will be read per block from disk.
+
+        Asked by the fp8 plan before the component is loaded: a blockwise-filled component is
+        quantized per block on the way through, so it needs neither a streaming config nor a
+        post-load conversion walk.
+        """
+        route = self.te_blockwise_routes().get(component_name)
+        return route is not None and route[2] is None
+
+    def _agreed_refusal(self, refusal: str | None, component_name: str) -> str | None:
+        """The refusal every rank will act on: any rank refusing makes all of them refuse.
+
+        Unanimity is the only safe resolution, since the two paths run different collectives. Falling
+        back together is always available, while proceeding together is not, so one rank's refusal
+        becomes everyone's.
+        """
+        world = get_world_group()
+        if world is None or world.world_size <= 1:
+            return refusal
+        local = 0 if refusal is None else 1
+        n_refused = int(
+            world.all_reduce(
+                torch.tensor([local], device=f"cuda:{world.local_rank}")
+            ).item()
+        )
+        if n_refused == 0:
+            return None
+        if refusal is not None:
+            return refusal
+        return (
+            f"{n_refused} of {world.world_size} ranks could not map '{component_name}' onto its "
+            f"checkpoint (this rank could); falling back together to stay collective-safe"
         )
 
     def meta_te_kwargs_replicated(self, te_quant_config=None):
@@ -685,7 +822,7 @@ class MemoryEfficientLoader:
         the same bf16 yields the same fp8) before the next block. Peak = accumulating fp8 model + one
         transient bf16 block, so it fits a single GPU where the full bf16 model would not (~24 vs
         ~12 GB). No fully_shard: replicated keeps the full quantized block on every rank. Reuses the
-        FSDP disk filler (_TransformerDiskFiller) and per-block quantize_fn (``shard`` module).
+        FSDP disk filler (_BlockwiseDiskFiller) and per-block quantize_fn (``shard`` module).
 
         Text encoders: rank0 loaded them real via the pipeline and peers built a matching-layout
         meta component. Materialize peer meta to real-empty on device, then broadcast every
@@ -784,7 +921,7 @@ class MemoryEfficientLoader:
             world.local_rank,
             component=component,
         )
-        self._fill_transformer_blocks(
+        self._fill_blocks(
             component,
             name,
             strategy,
@@ -814,7 +951,7 @@ class MemoryEfficientLoader:
                 get_world_group().local_rank,
                 component=component,
             )
-        self._fill_transformer_blocks(
+        self._fill_blocks(
             component,
             name,
             strategy,
@@ -823,7 +960,7 @@ class MemoryEfficientLoader:
             quantize_fn=quantize_fn,
         )
 
-    def _fill_transformer_blocks(
+    def _fill_blocks(
         self,
         component,
         name,
@@ -836,7 +973,7 @@ class MemoryEfficientLoader:
         """Materialize, fill, and quantize blocks through one transport."""
 
         wrap_attrs = strategy.get("wrap_attrs", [])
-        fill_block, finalize = self.build_transformer_disk_loaders(
+        fill_block, finalize = self.build_blockwise_disk_loaders(
             component,
             wrap_attrs,
             name,
@@ -894,7 +1031,7 @@ class MemoryEfficientLoader:
            structural divergence before rank0 enters a data broadcast.
 
         Capture the name lists ONCE and drive the materialize pass off them (via rgetattr), mirroring
-        _TransformerDiskFiller.finalize. Re-enumerating named_parameters() for the broadcast is unsafe:
+        _BlockwiseDiskFiller.finalize. Re-enumerating named_parameters() for the broadcast is unsafe:
         set_module_tensor_to_device replaces param objects, so a re-enumeration can hand back a
         different (still-CPU) object than the one the materialize pass moved, and world.broadcast on a
         CPU tensor aborts the NCCL group.
@@ -984,7 +1121,7 @@ class MemoryEfficientLoader:
                 tensor = tensor.contiguous()
             world.broadcast(tensor, src=0)
 
-    def build_transformer_disk_loaders(
+    def build_blockwise_disk_loaders(
         self,
         component,
         wrap_attrs,
@@ -994,19 +1131,22 @@ class MemoryEfficientLoader:
         *,
         collective=True,
     ):
-        """(load_block_fn, load_epilogue_fn) filling a meta transformer from disk (rank0-read + bcast).
+        """(load_block_fn, load_epilogue_fn) filling a meta component from disk (rank0-read + bcast).
+
+        Works for any component registered as self-filling, transformer or text encoder; the recorded
+        source is what tells the filler how live names reach checkpoint keys.
 
         group: broadcast group (default get_fs_group() for the FSDP path). The replicated path passes
         get_world_group() — get_fs_group() has world_size 1 when fully_shard_degree==1, so its
         broadcast would be a no-op and peers would receive garbage."""
-        source = self._meta_transformers.get(component)
+        source = self._blockwise_sources.get(component)
         if source is None:
             raise UnsupportedLoadContract(
-                f"no CheckpointRequest recorded for meta transformer '{subfolder}'; "
+                f"no checkpoint source recorded for meta component '{subfolder}'; "
                 "refusing to reconstruct checkpoint identity before disk fill"
             )
         filler_kwargs = {} if collective else {"collective": False}
-        filler = _TransformerDiskFiller(
+        filler = _BlockwiseDiskFiller(
             self.model,
             component,
             wrap_attrs,
@@ -1178,12 +1318,19 @@ class MemoryEfficientLoader:
             torch.cuda.empty_cache()
 
 
-class _TransformerDiskFiller:
-    """Fills a meta transformer's blocks with real weights, reading on fs-rank0 and broadcasting
+class _BlockwiseDiskFiller:
+    """Fills a meta component's blocks with real weights, reading on fs-rank0 and broadcasting
     each tensor GPU->GPU to the fs group. Holds the checkpoint weight_map and fs group across the
     per-block fill and the epilogue; at most one shard stays mapped, since an open handle retains
     every tensor read through it (see _handle). See module docstring for why the read is rank0-only
-    (block-128 fp8 tile constraint + host-anon N-scaling)."""
+    (block-128 fp8 tile constraint + host-anon N-scaling).
+
+    Nothing here is specific to a transformer. It needs a component whose repeated blocks are named
+    by wrap_attrs and a source that maps live tensor names to checkpoint keys, which is why the same
+    class fills diffusers transformers (whose live names are already checkpoint keys, via a
+    CheckpointRequest) and transformers text encoders (whose names need the renaming a
+    CheckpointManifest carries; see text_encoder_adapter.resolve_transformers_manifest).
+    """
 
     def __init__(
         self,
@@ -1477,6 +1624,24 @@ class _TransformerDiskFiller:
                     f"unexpected checkpoint tensors in {self.subfolder}: "
                     f"{preview}{suffix}"
                 )
+        self._retie_weights(comp)
         self._release_handles()
         if self.is_src:
             drop_file_page_cache(self.shard_paths)
+
+    def _retie_weights(self, comp) -> None:
+        """Restore tied weights, which the fill unpicked.
+
+        set_module_tensor_to_device rebinds each name to a new Parameter, so names that shared one
+        tensor before the fill no longer do afterwards. Both copies hold the right values (a tie maps
+        to the same checkpoint key, so each alias is filled from it), which is why this is a memory
+        and identity fix rather than a correctness one: an embedding-sized tensor per tie, and a
+        model whose declared ties no longer hold.
+
+        Runs after the tail is filled and broadcast, so both aliases already agree; re-tying earlier
+        would alias a filled tensor to an unfilled one. Only ever affects the tail, since block
+        Linears are what quantization touches and ties live in embeddings and heads.
+        """
+        tie = getattr(comp, "tie_weights", None)
+        if callable(tie) and getattr(comp, "_tied_weights_keys", None):
+            tie()

@@ -52,6 +52,16 @@ BACKENDS = {
     "cuda_hopper_torchao",
     "cuda_blackwell_torchao",
 }
+ROCM_ACCELERATORS = {
+    "gfx1200_or_gfx1201",
+    "non_rdna4_rocm",
+    "gfx942_or_gfx950",
+    "gfx942",
+    "gfx950",
+}
+# Unknown tokens have to be rejected here: a token nothing recognises matches no device,
+# so a typo would silently skip every case that carries it instead of failing.
+ACCELERATORS = ROCM_ACCELERATORS | {"sm89", "sm90", "sm100_or_newer"}
 PLACEMENTS = {"eager", "replicated", "fsdp_blockwise"}
 QUANTIZATION = {"none", "fp8", "fp4", "int8", "hybrid_fp8_fp4"}
 OFFLOADS = {"none", "model", "sequential", "group", "group_low_cpu_mem"}
@@ -154,7 +164,7 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
         if (
             not isinstance(hardware, dict)
             or hardware.get("backend") not in BACKENDS
-            or not hardware.get("accelerator")
+            or hardware.get("accelerator") not in ACCELERATORS
         ):
             raise ValueError(f"{case_id}: invalid hardware declaration")
         if case["placement"] not in PLACEMENTS:
@@ -646,6 +656,7 @@ def probe_environment(
 
 
 _ROCM_RDNA4 = {"gfx1200", "gfx1201"}
+_ROCM_MI3XX = {"gfx942", "gfx950"}
 
 
 def _rocm_accelerator_matches(token: str, accelerator: str) -> bool:
@@ -655,11 +666,18 @@ def _rocm_accelerator_matches(token: str, accelerator: str) -> bool:
     case was written for lives solely in this field and has to be honoured. FP4 is why:
     AITER builds no FP4 kernels for gfx942 but does for gfx950, so a case pinned to
     gfx942 asserts a rejection that simply does not happen on gfx950.
+
+    gfx942_or_gfx950 is the CDNA3-and-newer datacentre pair that envs._on_mi3xx treats as
+    one class. It exists so a case whose behaviour is the same on both is not pinned to
+    whichever of them it was first run on, while still excluding older ROCm parts like
+    gfx90a that lack the FP8 support such cases assume.
     """
     if token == "non_rdna4_rocm":
         return accelerator not in _ROCM_RDNA4
     if token == "gfx1200_or_gfx1201":
         return accelerator in _ROCM_RDNA4
+    if token == "gfx942_or_gfx950":
+        return accelerator in _ROCM_MI3XX
     return accelerator == token
 
 

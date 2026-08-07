@@ -635,6 +635,48 @@ def test_non_rdna4_token_still_admits_any_non_rdna4_arch(runner, matrix):
     )
 
 
+def test_mi3xx_token_admits_both_datacentre_archs_but_not_older_rocm(runner, matrix):
+    """The pair token exists so behaviour shared by gfx942 and gfx950 is not pinned to one.
+
+    It must stay narrower than non_rdna4_rocm: cases carrying it assume the FP8 support
+    that envs._on_mi3xx gates on, which gfx90a does not have.
+    """
+    case = next(
+        case
+        for case in matrix["cases"]
+        if case["hardware"]["accelerator"] == "gfx942_or_gfx950"
+        and case["world_size"] == 1
+    )
+    observed = {
+        "platform": "rocm",
+        "transformers_major": 5,
+        "aiter_available": True,
+        "torchao_available": True,
+    }
+
+    for accelerator in ("gfx942", "gfx950"):
+        assert runner.environment_mismatches(
+            case, {**observed, "accelerators": [accelerator]}
+        ) == [], accelerator
+    for accelerator in ("gfx90a", "gfx1201"):
+        assert any(
+            "gfx942_or_gfx950" in mismatch
+            for mismatch in runner.environment_mismatches(
+                case, {**observed, "accelerators": [accelerator]}
+            )
+        ), accelerator
+
+
+def test_an_unknown_accelerator_token_is_rejected_not_silently_skipped(runner, matrix):
+    """A token nothing recognises matches no device, so it must fail loudly."""
+    case = dict(matrix["cases"][0])
+    case["hardware"] = {**case["hardware"], "accelerator": "gfx9999"}
+    broken = {**matrix, "cases": [case]}
+
+    with pytest.raises(ValueError, match="invalid hardware declaration"):
+        runner.validate_matrix(broken)
+
+
 def test_environment_validation_rejects_insufficient_matching_devices(runner, matrix):
     case = next(
         case

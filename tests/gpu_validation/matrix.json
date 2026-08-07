@@ -1154,7 +1154,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "none",
@@ -1190,7 +1190,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "fp8",
@@ -1226,7 +1226,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "fp8",
@@ -1263,7 +1263,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
@@ -1299,7 +1299,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "replicated",
       "quantization": "fp8",
@@ -1335,7 +1335,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "replicated",
       "quantization": "fp8",
@@ -1371,7 +1371,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "fp8",
@@ -1406,7 +1406,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "none",
@@ -1441,7 +1441,7 @@
       "model_family": "wan",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "replicated",
       "quantization": "none",
@@ -1552,7 +1552,7 @@
       "model_family": "flux2",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "none",
@@ -1585,7 +1585,7 @@
       "model_family": "flux2",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
@@ -1617,7 +1617,7 @@
       "model_family": "flux2",
       "hardware": {
         "backend": "rocm_torchao",
-        "accelerator": "gfx942"
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "replicated",
       "quantization": "fp8",

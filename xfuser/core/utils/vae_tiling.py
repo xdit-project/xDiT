@@ -354,7 +354,13 @@ def _overlap_lands(latent: int, pixel: int, factor: float) -> bool:
     if stride < 1:
         return False
     ratio, remainder = divmod(pixel, latent)
-    return remainder == 0 and pixel - int(pixel * factor) == stride * ratio
+    if remainder:
+        # The two windows have no whole ratio between them, so the latent step has no pixel
+        # width to be compared against and the crop says nothing about it. Every VAE that walks
+        # this loop compresses both axes by the same whole ratio; where one does not, what is
+        # still worth asking is that the step the loop truncates to is the one the fraction names.
+        return _is_whole(latent * (1.0 - factor))
+    return pixel - int(pixel * factor) == stride * ratio
 
 
 def tile_overlap_plan(vae, overlap: float) -> Optional[dict]:

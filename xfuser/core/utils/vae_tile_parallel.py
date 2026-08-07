@@ -256,7 +256,7 @@ def assemble_in_runs(
     # Exchanged before anything is blended, both because the edges are raw at that point and
     # because a rank waiting on a neighbour's blending would serialise what this is dividing.
     edges = _share_edges(
-        order, mine, owner, rank, _wanted(owner, columns), group, world_size, blend
+        order, mine, owner, rank, _wanted(owner, columns, blend), group, world_size, blend
     )
 
     blended: Dict[Where, torch.Tensor] = {}
@@ -265,7 +265,10 @@ def assemble_in_runs(
         if owner[n] != rank:
             continue
         tile = mine[(i, j)]
-        if i > 0:
+        # A blend no rows deep is one the tiles do not overlap enough to need, which a wide
+        # enough stride leaves. Skipped rather than called with a zero depth, because a depth of
+        # zero reads as "the whole tile" everywhere an edge is sliced off the end of one.
+        if i > 0 and blend.deep_down:
             # The neighbour itself where this rank blended it, and its edge rebuilt from the raw
             # ones otherwise. Both carry the same values; only the cost differs.
             above = blended.get((i - 1, j))
@@ -274,7 +277,7 @@ def assemble_in_runs(
                 tile,
                 blend.deep_down,
             )
-        if j > 0:
+        if j > 0 and blend.deep_across:
             left = blended.get((i, j - 1))
             tile = blend.across(
                 left if left is not None else _edge_left(edges, i, j, blend),
@@ -316,7 +319,7 @@ def assemble_here(rows: int, columns: int, decode: Decode, blend: Blend) -> torc
     return torch.cat(made, dim=DOWN)
 
 
-def _wanted(owner: Sequence[int], columns: int) -> Set[int]:
+def _wanted(owner: Sequence[int], columns: int, blend: Blend) -> Set[int]:
     """The tiles whose raw edges a rank other than their own will read
 
     Read off what the blending below asks for, tile by tile, rather than reasoned about from the
@@ -324,17 +327,20 @@ def _wanted(owner: Sequence[int], columns: int) -> Set[int]:
     left, and only where one of those is somewhere else does anything have to travel. Where the
     shares are runs that is about a row of tiles per rank however large the grid, and where a
     tile has been moved across to level the load it is that tile's neighbours as well.
+
+    A blend no rows deep asks for nothing, so a stride wide enough to leave the tiles touching
+    rather than overlapping sends no edges at all on that axis.
     """
     wanted: Set[int] = set()
     for n, rank in enumerate(owner):
         row, column = divmod(n, columns)
-        if row > 0 and owner[n - columns] != rank:
+        if blend.deep_down and row > 0 and owner[n - columns] != rank:
             wanted.add(n - columns)
-            if column > 0:
+            if blend.deep_across and column > 0:
                 wanted.add(n - columns - 1)
-        if column > 0 and owner[n - 1] != rank:
+        if blend.deep_across and column > 0 and owner[n - 1] != rank:
             wanted.add(n - 1)
-            if row > 0:
+            if blend.deep_down and row > 0:
                 wanted.add(n - columns - 1)
     return wanted
 
@@ -360,9 +366,13 @@ def _share_edges(
             continue
         tile = mine[order[n]]
         # Cloned because the blending below writes into the tiles these came from, and an edge is
-        # only the edge a neighbour needs while it is still raw.
-        sending[2 * n] = tile[..., -blend.deep_down :, :].clone()
-        sending[2 * n + 1] = tile[..., -blend.deep_across :].clone()
+        # only the edge a neighbour needs while it is still raw. Guarded on the depth because a
+        # slice from -0 is the whole tile rather than none of it, which would send the grid
+        # itself round in place of its seams.
+        if blend.deep_down:
+            sending[2 * n] = tile[..., -blend.deep_down :, :].clone()
+        if blend.deep_across:
+            sending[2 * n + 1] = tile[..., -blend.deep_across :].clone()
     shared = _share(sending, group, world_size, next(iter(mine.values())))
     return {at: (shared[2 * n], shared[2 * n + 1]) for n, at in enumerate(order)}
 
@@ -374,7 +384,7 @@ def _edge_above(edges, i: int, j: int, blend: Blend) -> torch.Tensor:
     neighbour's last columns, which nothing writes. One blend of two raw edges rebuilds it.
     """
     below, _ = edges[(i - 1, j)]
-    if j == 0:
+    if j == 0 or not blend.deep_across:
         return below
     left, _ = edges[(i - 1, j - 1)]
     return blend.across(left, below.clone(), blend.deep_across)
@@ -387,7 +397,7 @@ def _edge_left(edges, i: int, j: int, blend: Blend) -> torch.Tensor:
     tile above it meets the tile above and to its left - raw on both counts.
     """
     _, beside = edges[(i, j - 1)]
-    if i == 0:
+    if i == 0 or not blend.deep_down:
         return beside
     above, _ = edges[(i - 1, j - 1)]
     return blend.down(above[..., -blend.deep_across :], beside.clone(), blend.deep_down)

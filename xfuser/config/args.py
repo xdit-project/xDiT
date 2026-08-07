@@ -26,6 +26,18 @@ from xfuser.config.config import (
 
 logger = init_logger(__name__)
 
+# Written once and passed to both parsers below, which otherwise carry a copy of every help
+# string each and no way to notice when the two stop agreeing.
+VAE_TILE_OVERLAP_HELP = (
+    "Fraction of each VAE tile that repeats its neighbour, between 0 and 1. Turns tiling on by "
+    "itself. This is the other half of --vae_tile_size: the size says how much memory one tile "
+    "costs, this says how much of the decode is spent twice, since tiles overlapping by a "
+    "fraction f decode 1/(1-f)^2 times the latent they were cut from. Lowering it below the "
+    "VAE's own overlap is the way to buy that time back, and it is paid for in seams rather "
+    "than in memory - the opposite trade to a smaller tile. An overlap the VAE cannot step to "
+    "exactly is rounded up to the next one that works."
+)
+
 
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
@@ -123,6 +135,7 @@ class xFuserArgs:
     enable_tiling: bool = False
     enable_slicing: bool = False
     vae_tile_size: Optional[int] = None
+    vae_tile_overlap: Optional[float] = None
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8
@@ -411,6 +424,12 @@ class xFuserArgs:
                  "degrade the image, each one being normalized over less context than the last.",
         )
         runtime_group.add_argument(
+            "--vae_tile_overlap",
+            type=float,
+            default=None,
+            help=VAE_TILE_OVERLAP_HELP,
+        )
+        runtime_group.add_argument(
             "--use_fp8_t5_encoder",
             action="store_true",
             help="Quantize the T5 text encoder.",
@@ -637,6 +656,12 @@ class xFuserArgs:
                  "VAE's own window is ignored. Step down one size at a time and watch peak VRAM: "
                  "the saving stops once the VAE is no longer what peaks, while small tiles visibly "
                  "degrade the image, each one being normalized over less context than the last.",
+        )
+        parser.add_argument(
+            "--vae_tile_overlap",
+            type=float,
+            default=None,
+            help=VAE_TILE_OVERLAP_HELP,
         )
         parser.add_argument(
             "--use_int8_gemms",

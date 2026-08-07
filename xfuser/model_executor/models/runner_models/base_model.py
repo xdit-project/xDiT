@@ -328,11 +328,7 @@ class xFuserModel(abc.ABC):
         if getattr(self.config, "use_spargeattn_head_balance", False):
             log("Enabling Sparge block-sparse head balancing...")
 
-        # A tile size is a request to tile, so it turns tiling on by itself. LTX 2.3 tiles its
-        # stage-2 VAE at load, and without this the only way to size that window would be
-        # --enable_tiling, which tiles every stage to reach the one that ran out of memory.
-        tiling = self.config.enable_tiling or self.config.vae_tile_size is not None
-        tiling_flag = "--enable_tiling" if self.config.enable_tiling else "--vae_tile_size"
+        tiling_flag = self._tiling_flag()
 
         for vae in self._decoding_vaes():
             if self.config.enable_slicing:
@@ -341,11 +337,14 @@ class xFuserModel(abc.ABC):
                 vae.enable_slicing()
 
             tile_window = None
-            if tiling:
+            if tiling_flag is not None:
                 vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                 log(f"Enabling VAE tiling on {type(vae).__name__}...")
                 vae.enable_tiling()
                 tile_window = self._apply_vae_tile_size(vae)
+                # After the window, never before: the overlap is a fraction of the window, and
+                # sizing the window rescales the stride to keep whatever overlap the VAE had.
+                self._apply_vae_tile_overlap(vae)
                 self._install_vae_tiled_decode(vae)
             # Installed either way, so a decode that OOMs with tiling off still says so.
             self._install_vae_decode_guard(vae, tile_window)
@@ -357,6 +356,25 @@ class xFuserModel(abc.ABC):
             log("Enabling model CPU offload...")
             self.pipe.enable_model_cpu_offload()
 
+
+    def _tiling_flag(self) -> Optional[str]:
+        """ The flag asking this run to tile its VAE decode, None where nothing asks """
+        # Either knob is a request to tile, so either turns tiling on by itself. LTX 2.3 tiles
+        # its stage-2 VAE at load, and without this the only way to size that window would be
+        # --enable_tiling, which tiles every stage to reach the one that ran out of memory.
+        #
+        # Asked in two places that have to agree - here, and where the parallel VAE chooses
+        # between dealing whole tiles out and sharding the rows inside each one - so it is worked
+        # out once. A VAE marked for tiles it never cuts would leave its group waiting on an
+        # exchange that never comes.
+        for asked, flag in (
+            (self.config.enable_tiling, "--enable_tiling"),
+            (self.config.vae_tile_size is not None, "--vae_tile_size"),
+            (self.config.vae_tile_overlap is not None, "--vae_tile_overlap"),
+        ):
+            if asked:
+                return flag
+        return None
 
     def _decoding_vaes(self) -> List:
         """ Every VAE a run decodes through, staged models included """
@@ -383,7 +401,7 @@ class xFuserModel(abc.ABC):
         # xFuser owns, whole tiles go out to the ranks instead and the decoder is left alone,
         # each rank decoding a tile the way one GPU would. _enable_options installs that, once
         # the window whose tiles are being dealt out has been settled.
-        tiling = self.config.enable_tiling or self.config.vae_tile_size is not None
+        tiling = self._tiling_flag() is not None
         for vae in self._decoding_vaes():
             if tiling and vae_tiling.supports_tile_parallel(vae):
                 vae_tile_parallel.mark(vae, vae_group)
@@ -503,6 +521,19 @@ class xFuserModel(abc.ABC):
             if not self.capabilities.enable_tiling:
                 raise ValueError(f"--vae_tile_size decodes the VAE in tiles, which model "
                                  f"{self.settings.model_name} does not support.")
+
+        if config.vae_tile_overlap is not None:
+            # A fraction of the window, so one and above is a step of nothing: the grid would
+            # never advance and the loop would walk the same tile until it ran out of memory.
+            if not 0.0 <= config.vae_tile_overlap < 1.0:
+                raise ValueError(
+                    f"--vae_tile_overlap is the fraction of each tile that repeats its "
+                    f"neighbour, so it must be at least 0 and below 1, got "
+                    f"{config.vae_tile_overlap}."
+                )
+            if not self.capabilities.enable_tiling:
+                raise ValueError(f"--vae_tile_overlap steps the tiles of a tiled VAE decode, "
+                                 f"which model {self.settings.model_name} does not support.")
 
 
     def _get_compile_mode(self) -> str:
@@ -1144,6 +1175,55 @@ class xFuserModel(abc.ABC):
         log(f"VAE tile window set to {pixels}px "
             f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})")
         return pixels
+
+    def _apply_vae_tile_overlap(self, vae) -> None:
+        """ Step this VAE's tile grid at the requested overlap, where one was requested """
+        # The window and the overlap divide different things. The window decides what one tile
+        # costs to hold; the overlap decides how much of the decode is spent twice, since tiles
+        # overlapping by f cover 1/(1-f)^2 times the latent they were cut from. A VAE ships the
+        # overlap its own training resolution wanted, and at a large decode that redundancy is
+        # what tiling costs in time - so this is the knob that gives it back.
+        requested = self.config.vae_tile_overlap
+        if requested is None:
+            return
+        if vae_tiling.tile_overlap(vae) is None:
+            raise ValueError(
+                f"Model {self.settings.model_name} does not support --vae_tile_overlap: its VAE "
+                f"({type(vae).__name__}) does not say how far apart it steps its tiles, so there "
+                f"is nothing here to set."
+            )
+        plan = vae_tiling.tile_overlap_plan(vae, requested)
+        if plan is None:
+            widest = vae_tiling.widest_tile_overlap(vae)
+            raise ValueError(
+                f"--vae_tile_overlap {requested} is not a step this VAE "
+                f"({type(vae).__name__}) can take" +
+                (f"; the most overlap it can step by is {widest:g}."
+                 if widest is not None else
+                 ", and neither is any overlap: this VAE's tiling loop is not one xFuser knows "
+                 "how to step.")
+            )
+        vae_tiling.apply_tile_plan(vae, plan)
+        # Read back off the VAE rather than off the plan: the two families store different things
+        # - one the fraction, one the stride it implies - and only what the VAE ends up holding
+        # says what the decode will actually do.
+        landed = vae_tiling.tile_overlap(vae)
+        shown = self._vae_tile_overlap_shown(landed)
+        if landed is not None and any(abs(f - requested) > 1e-9 for f in landed):
+            log(f"--vae_tile_overlap {requested:g} is not a step this VAE can take exactly; "
+                f"using the next one up at {shown}.")
+        log(f"VAE tile overlap set to {shown} "
+            f"({', '.join(f'{a}={v:g}' for a, v in sorted(plan.items()))})")
+
+    @staticmethod
+    def _vae_tile_overlap_shown(overlap: Optional[Tuple[float, float]]) -> str:
+        """ An overlap as one number, or as two where the VAE steps its axes differently """
+        if overlap is None:
+            return "unknown"
+        down, across = overlap
+        if abs(down - across) < 1e-9:
+            return f"{down:g}"
+        return f"{down:g} down, {across:g} across"
 
     def _check_vae_tile_size_against_parallel_vae(
         self, vae, pixels: int, plan: dict, window: int

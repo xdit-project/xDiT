@@ -7,6 +7,7 @@ the policy around these numbers lives with the runner instead.
 
 import functools
 import inspect
+import math
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import diffusers
@@ -270,6 +271,138 @@ def tiles_by_overlap_factor(vae) -> bool:
         and callable(getattr(vae, "blend_v", None))
         and callable(getattr(vae, "blend_h", None))
     )
+
+
+WINDOW_ATTRS_FOR_STRIDE = ("tile_sample_min_height", "tile_sample_min_width")
+"""The window each stride in STRIDE_ATTRS steps across, in the same order"""
+
+
+def tile_overlap(vae) -> Optional[Tuple[float, float]]:
+    """How much of each tile repeats its neighbour, as (down, across) fractions of the window
+
+    The two families spell the step between tiles differently: one stores the overlap as a
+    fraction and derives the stride, the other stores the stride in pixels and derives the
+    overlap. This reads whichever the VAE carries and answers in fractions either way, so a
+    caller can ask what a VAE is set to without knowing which family it belongs to. None where
+    it carries neither.
+    """
+    strides = [getattr(vae, attr, None) for attr in STRIDE_ATTRS]
+    windows = [getattr(vae, attr, None) for attr in WINDOW_ATTRS_FOR_STRIDE]
+    if all(isinstance(value, int) and value > 0 for value in strides + windows):
+        down, across = (
+            1.0 - stride / window for stride, window in zip(strides, windows)
+        )
+        return (down, across)
+    factor = getattr(vae, "tile_overlap_factor", None)
+    if isinstance(factor, float):
+        return (factor, factor)
+    return None
+
+
+def _stride_granularity(vae) -> Optional[int]:
+    """The multiple a pixel stride must land on for the stride-walked loop to stay self-consistent
+
+    That loop divides the stride it stores twice: by the compression ratio, to step the latent
+    grid, and - where the family decodes into a pixel unshuffle - by the patch size, to place the
+    crop. Both are integer divisions, so a stride that is not a multiple of each truncates in one
+    of them and the grid and the crop stop describing the same region.
+    """
+    ratio = spatial_ratio(vae)
+    if ratio is None:
+        return None
+    loop = _STRIDE_LOOPS.get(type(vae).__name__)
+    patch = getattr(vae.config, "patch_size", None) if loop and loop.patches else None
+    if isinstance(patch, int) and patch > 1:
+        return math.lcm(ratio, patch)
+    return ratio
+
+
+def _overlap_lands(latent: int, pixel: int, factor: float) -> bool:
+    """Whether the overlap-fraction loop's own arithmetic agrees with itself on this axis
+
+    The loop derives the latent step by truncating `latent x (1 - factor)`, and crops each
+    decoded tile to `pixel - int(pixel x factor)`. Unless the second is the first in pixels, the
+    tiles step by one amount and are cropped by another, and the assembled image comes out a
+    different size than the decode was asked for - with nothing downstream to catch it.
+
+    Checked by recomputing what the loop will compute, rather than by reasoning about the
+    algebra, because the factor is a float and the two truncations do not have to fall the same
+    way on both sides of it.
+    """
+    stride = int(latent * (1.0 - factor))
+    if stride < 1:
+        return False
+    ratio, remainder = divmod(pixel, latent)
+    return remainder == 0 and pixel - int(pixel * factor) == stride * ratio
+
+
+def tile_overlap_plan(vae, overlap: float) -> Optional[dict]:
+    """Every attribute setting the step between tiles, at `overlap`, or None if it cannot land
+
+    The window says how large a tile is; this says how far apart their origins sit. They are two
+    levers and not one. At a fixed window a tiled decode covers (window/stride)^2 times the
+    latent it was cut from, so the stride is what decides how much of the decode is redundant,
+    while the window is what decides how much memory one tile costs. Widening the stride is
+    therefore the lever that buys back the time tiling spends, and it costs seams rather than
+    memory - the opposite trade to narrowing the window.
+
+    Never steps wider than asked. Where the exact stride would leave one of the loop's integer
+    divisions truncating, the step narrows until it lands whole, so what results overlaps by at
+    least what was requested.
+
+    Returns attributes rather than setting them, so `apply_tile_plan` stays the one place a
+    window or a stride is written, and so a caller can find out whether an overlap is reachable
+    without half-applying it.
+    """
+    if tiles_by_stored_stride(vae):
+        step = _stride_granularity(vae)
+        if step is None:
+            return None
+        plan = {}
+        for stride_attr, window_attr in zip(STRIDE_ATTRS, WINDOW_ATTRS_FOR_STRIDE):
+            window = getattr(vae, window_attr)
+            stride = int(window * (1.0 - overlap)) // step * step
+            if stride < step:
+                return None
+            plan[stride_attr] = min(stride, window)
+        return plan
+
+    if not tiles_by_overlap_factor(vae):
+        return None
+    windows = overlap_windows(vae)
+    if windows is None:
+        return None
+    (latent_down, latent_across), (pixel_down, pixel_across) = windows
+    axes = ((latent_down, pixel_down), (latent_across, pixel_across))
+    # One fraction governs both axes, so a step that lands whole down the rows still has to land
+    # whole across the columns; a VAE windowing the two differently rules out fractions that
+    # either axis alone would accept. Walked from the requested step downward, which narrows the
+    # step and so widens the overlap - the direction that keeps a wrong guess conservative.
+    for stride in range(min(int(latent_down * (1.0 - overlap)), latent_down), 0, -1):
+        factor = 1.0 - stride / latent_down
+        if not 0.0 <= factor < 1.0:
+            continue
+        if all(_overlap_lands(latent, pixel, factor) for latent, pixel in axes):
+            return {
+                attr: factor
+                for attr in OVERLAP_ATTRS
+                if isinstance(getattr(vae, attr, None), float)
+            }
+    return None
+
+
+def widest_tile_overlap(vae) -> Optional[float]:
+    """The most overlap this VAE can step by, so a refusal can name one that would be accepted
+
+    Reachability is one-sided: less overlap is a wider step, and a wider step is never the one
+    that fails, so walking down from a refused overlap finds where it turns. To a hundredth,
+    which is finer than this is set by hand.
+    """
+    for hundredths in range(99, -1, -1):
+        overlap = hundredths / 100
+        if tile_overlap_plan(vae, overlap) is not None:
+            return overlap
+    return None
 
 
 def _returns_decoder_output(vae) -> bool:

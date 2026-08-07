@@ -191,7 +191,20 @@ RUN_VAES = {
 WINDOWS_DOWN, WINDOWS_ACROSS = 2, 3
 
 
-def _tiled_vae(name: str, device=None):
+def _blend(deep_down: int, deep_across: int):
+    """A Blend carrying nothing but its depths, which is all `_wanted` reads"""
+    return vae_tile_parallel.Blend(
+        down=None,
+        across=None,
+        deep_down=deep_down,
+        deep_across=deep_across,
+        crop=None,
+        tile_down=64,
+        tile_across=64,
+    )
+
+
+def _tiled_vae(name: str, device=None, overlap: Optional[float] = None):
     """The same small VAE and latents on every rank, at a window several tiles across"""
     import diffusers
 
@@ -208,6 +221,10 @@ def _tiled_vae(name: str, device=None):
     vae.enable_tiling()
     _, plan = vae_tiling.snap_tile_window(vae, vae_tiling.tile_window(vae) // 4)
     vae_tiling.apply_tile_plan(vae, plan)
+    if overlap is not None:
+        step = vae_tiling.tile_overlap_plan(vae, overlap)
+        assert step is not None, f"{name} cannot step its tiles at {overlap}"
+        vae_tiling.apply_tile_plan(vae, step)
 
     window = vae_tiling.latent_rows(vae, plan)
     down, across = window * WINDOWS_DOWN, window * WINDOWS_ACROSS
@@ -219,7 +236,9 @@ def _tiled_vae(name: str, device=None):
     return vae, latents
 
 
-def _runs_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
+def _runs_in_a_group(
+    rank: int, world_size: int, port: int, name: str, overlap: Optional[float] = None
+) -> None:
     """One rank blending its own run, checked against the whole grid blended by one rank"""
     from xfuser.core.utils import vae_tile_parallel, vae_tiling
 
@@ -236,7 +255,7 @@ def _runs_in_a_group(rank: int, world_size: int, port: int, name: str) -> None:
         timeout=timedelta(seconds=300),
     )
     try:
-        vae, latents = _tiled_vae(name, device)
+        vae, latents = _tiled_vae(name, device, overlap)
         with torch.no_grad():
             expected = vae.tiled_decode(latents).sample
 
@@ -332,7 +351,8 @@ class TestRuns(unittest.TestCase):
                 for world_size in range(2, min(rows * columns, 5) + 1):
                     weights = [random.randint(1, 9) for _ in range(rows * columns)]
                     owner = vae_tile_parallel.shares(weights, world_size)
-                    wanted = vae_tile_parallel._wanted(owner, columns)
+                    blend = _blend(1, 1)
+                    wanted = vae_tile_parallel._wanted(owner, columns, blend)
                     for n in range(rows * columns):
                         row, column = divmod(n, columns)
                         reaches = []
@@ -342,6 +362,24 @@ class TestRuns(unittest.TestCase):
                             reaches += [n - 1] + ([n - columns - 1] if row else [])
                         for at in reaches:
                             self.assertIn(at, wanted, f"{rows}x{columns}/{world_size} at {n}")
+
+    def test_a_blend_no_rows_deep_asks_for_no_edges_on_that_axis(self):
+        # A wide enough stride leaves the tiles touching rather than overlapping, and then there
+        # is nothing to blend and nothing to send. Worth its own case because a depth of zero is
+        # not inert where the edges are sliced: `tile[..., -0:, :]` is the whole tile, so a loop
+        # that only skipped the blending would still put the entire grid on the wire.
+        weights = [1] * 12
+        owner = vae_tile_parallel.shares(weights, 4)
+        self.assertEqual(vae_tile_parallel._wanted(owner, 4, _blend(0, 0)), set())
+        # One axis at a time, since the strides are set per axis and only one of them can run
+        # out. Each asks for less than both do - the corner tile a blended edge is rebuilt from
+        # is only reached when both blends happen - and neither asks for anything the pair does
+        # not.
+        both = vae_tile_parallel._wanted(owner, 4, _blend(1, 1))
+        for depths in ((1, 0), (0, 1)):
+            wanted = vae_tile_parallel._wanted(owner, 4, _blend(*depths))
+            self.assertTrue(wanted, depths)
+            self.assertTrue(wanted < both, depths)
 
     def test_every_rank_holds_a_tile_and_every_tile_is_held_once(self):
         random.seed(11)
@@ -360,10 +398,24 @@ class TestRuns(unittest.TestCase):
                 with self.subTest(vae=name, world_size=world_size):
                     mp.spawn(
                         _runs_in_a_group,
-                        args=(world_size, _free_port(), name),
+                        args=(world_size, _free_port(), name, None),
                         nprocs=world_size,
                         join=True,
                     )
+
+    def test_tiles_that_do_not_overlap_at_all_still_assemble(self):
+        # --vae_tile_overlap can widen the stride until the tiles touch rather than overlap, and
+        # then the blends are no rows deep. Checked against the same VAE's own loop at the same
+        # stride, so what this proves is that dividing the work changes nothing: a depth of zero
+        # has to mean no blending and no edges, and not the whole tile taken as its own edge.
+        for name in RUN_VAES:
+            with self.subTest(vae=name):
+                mp.spawn(
+                    _runs_in_a_group,
+                    args=(4, _free_port(), name, 0.0),
+                    nprocs=4,
+                    join=True,
+                )
 
 
 if __name__ == "__main__":

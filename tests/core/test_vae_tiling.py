@@ -422,6 +422,90 @@ class TestTheNarrowestUsefulWindow(unittest.TestCase):
         self.assertEqual(vae_tiling.narrowest_useful_window(overlap_factor_vae(sample=1)), 1)
 
 
+class TestTileOverlap(unittest.TestCase):
+    """The step between tiles, which is the other lever the window is not
+
+    The window decides what one tile costs to hold. The overlap decides how much of the decode is
+    spent twice, since tiles overlapping by f cover 1/(1-f)^2 times the latent they were cut
+    from. Two knobs on two different costs, and a VAE ships whichever pair its own training
+    resolution wanted.
+    """
+
+    ASKED = (0.0, 0.0625, 0.125, 0.25, 0.4)
+
+    def test_both_spellings_read_as_a_fraction(self):
+        # One family stores the fraction and derives the stride, the other stores the stride and
+        # implies the fraction. Whoever sets it should not have to know which.
+        self.assertEqual(vae_tiling.tile_overlap(legacy_pair_vae()), (0.25, 0.25))
+        self.assertEqual(vae_tiling.tile_overlap(stride_vae()), (0.25, 0.25))
+        self.assertIsNone(vae_tiling.tile_overlap(StubVAE(tile_sample_min_size=256)))
+
+    def test_reporting_a_step_is_not_knowing_what_moving_it_does(self):
+        # `stride_vae` carries the stride spelling exactly as the video VAEs do and is still not
+        # one of the families whose loop xFuser walks; CogVideoX keys its fraction by axis. Both
+        # can say what they step by, and neither can be asked to step differently, because what
+        # a stride has to divide into is a property of the loop reading it.
+        self.assertIsNotNone(vae_tiling.tile_overlap(stride_vae()))
+        self.assertIsNone(vae_tiling.tile_overlap_plan(stride_vae(), 0.125))
+        self.assertIsNone(vae_tiling.tile_overlap_plan(overlap_hw_vae(), 0.125))
+        self.assertIsNone(vae_tiling.widest_tile_overlap(stride_vae()))
+
+    def test_the_fraction_keeps_the_loop_s_two_truncations_agreeing(self):
+        # The loop steps the latent grid by int(latent x (1 - f)) and crops each decoded tile to
+        # pixel - int(pixel x f). Unless those are the same distance, the tiles step by one amount
+        # and are kept by another, and the image assembles to a size nobody asked for - which
+        # nothing downstream checks. f is a float and the two truncations need not fall the same
+        # way, so this is checked by recomputing them rather than by trusting the algebra.
+        for build in (overlap_factor_vae, overlap_keyed_vae):
+            for asked in self.ASKED:
+                with self.subTest(vae=build.__name__, asked=asked):
+                    vae = build()
+                    plan = vae_tiling.tile_overlap_plan(vae, asked)
+                    self.assertIsNotNone(plan)
+                    vae_tiling.apply_tile_plan(vae, plan)
+                    factor = vae.tile_overlap_factor
+                    (down, across), (deep, wide) = vae_tiling.overlap_windows(vae)
+                    for latent, pixel in ((down, deep), (across, wide)):
+                        stride = int(latent * (1.0 - factor))
+                        self.assertGreaterEqual(stride, 1)
+                        self.assertEqual(
+                            pixel - int(pixel * factor), stride * (pixel // latent)
+                        )
+
+    def test_it_never_steps_wider_than_asked(self):
+        # Where an overlap cannot be taken exactly the step narrows until it lands, never widens,
+        # so a wrong guess errs towards the seams the VAE already had rather than past them.
+        for build in (overlap_factor_vae, overlap_keyed_vae):
+            for asked in self.ASKED:
+                with self.subTest(vae=build.__name__, asked=asked):
+                    vae = build()
+                    vae_tiling.apply_tile_plan(
+                        vae, vae_tiling.tile_overlap_plan(vae, asked)
+                    )
+                    for landed in vae_tiling.tile_overlap(vae):
+                        self.assertGreaterEqual(landed + 1e-9, asked)
+
+    def test_an_overlap_of_nothing_is_a_step_of_the_whole_window(self):
+        # The end of the range, where the tiles touch rather than overlap and there is no blend
+        # left. Allowed, because the seams it costs are the caller's to weigh, and worth a case
+        # of its own because a blend no rows deep is a zero that several slices read as "all".
+        vae = overlap_factor_vae()
+        vae_tiling.apply_tile_plan(vae, vae_tiling.tile_overlap_plan(vae, 0.0))
+        self.assertEqual(vae.tile_overlap_factor, 0.0)
+        self.assertEqual(vae_tiling.tile_overlap(vae), (0.0, 0.0))
+
+    def test_an_overlap_leaving_no_step_at_all_is_refused_by_name(self):
+        # A fraction close enough to one leaves under a latent pixel to step by, which diffusers
+        # walks with a range() of nothing. Refused rather than clamped, and the refusal names the
+        # most this VAE could take, so it can say something the next attempt can use.
+        vae = overlap_factor_vae()
+        self.assertIsNone(vae_tiling.tile_overlap_plan(vae, 0.99))
+        widest = vae_tiling.widest_tile_overlap(vae)
+        self.assertIsNotNone(widest)
+        self.assertIsNotNone(vae_tiling.tile_overlap_plan(vae, widest))
+        self.assertIsNone(vae_tiling.tile_overlap_plan(vae, widest + 0.01))
+
+
 class TestTiledDecode(unittest.TestCase):
     """The overlap-fraction loop reimplemented, which has to leave the image exactly as it was"""
 
@@ -535,6 +619,38 @@ class TestTiledDecode(unittest.TestCase):
                 self.assertEqual(got.shape, expected.shape)
                 torch.testing.assert_close(got, expected, rtol=0, atol=0)
                 self.assertEqual(set(counted.rows), {1})
+
+    def test_a_wider_step_decodes_fewer_tiles_to_the_same_image_size(self):
+        import torch
+
+        # What --vae_tile_overlap is for: the same window, stepped further apart, so the decode
+        # covers the latent once instead of 1/(1-f)^2 times. Checked against the VAE's own loop
+        # at the same setting rather than against this one alone, since the failure a bad step
+        # causes is an image of the wrong size that upstream would assemble just as wrongly.
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                counted = self._counted(vae)
+                with torch.no_grad():
+                    before = self._sample(vae.tiled_decode(latents))
+                at_own = len(counted.shapes)
+
+                plan = vae_tiling.tile_overlap_plan(vae, 0.0)
+                self.assertIsNotNone(plan, f"{name} refused a step of its whole window")
+                vae_tiling.apply_tile_plan(vae, plan)
+                counted.shapes.clear()
+                with torch.no_grad():
+                    expected = self._sample(vae.tiled_decode(latents))
+                at_zero = len(counted.shapes)
+                counted.shapes.clear()
+                with torch.no_grad():
+                    got = self._sample(vae_tiling.overlap_tiled_decode(vae)(latents))
+
+                self.assertGreater(at_own, 0, f"{name} decoded nothing through its decoder")
+                self.assertLess(at_zero, at_own)
+                self.assertEqual(len(counted.shapes), at_zero)
+                self.assertEqual(got.shape, before.shape)
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_the_replacement_hands_back_what_it_replaced(self):
         import torch
@@ -744,6 +860,40 @@ class TestStrideTiledDecode(unittest.TestCase):
                 across = len(range(0, latents.shape[-1], stride))
                 self.assertEqual(seen, [across * across])
                 torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_a_wider_step_decodes_fewer_tiles_to_the_same_image_size(self):
+        import torch
+
+        # This family stores the stride outright and divides it twice on the way to using it -
+        # by the compression ratio to step the latent grid, and, where it decodes into a pixel
+        # unshuffle, by the patch size to place the crop. A stride that truncates in either would
+        # leave the grid and the crop describing different regions, so the step is checked
+        # against the VAE's own loop reading the same number.
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                args = self._conditioning(vae)
+                with torch.no_grad():
+                    before = vae.tiled_decode(latents, *args).sample
+                at_own = self._tiles_across(vae, latents)
+
+                plan = vae_tiling.tile_overlap_plan(vae, 0.0)
+                self.assertIsNotNone(plan, f"{name} refused a step of its whole window")
+                vae_tiling.apply_tile_plan(vae, plan)
+                self.assertLess(self._tiles_across(vae, latents), at_own)
+
+                with torch.no_grad():
+                    expected = vae.tiled_decode(latents, *args).sample
+                    got = vae_tiling.strided_tiled_decode(vae)(latents, *args).sample
+                self.assertEqual(got.shape, before.shape)
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def _tiles_across(self, vae, latents):
+        """How many tiles the grid is wide, off the stride the VAE is currently set to"""
+        # Counted from the grid rather than from the decoder, because the families keeping a
+        # feature cache decode a tile frame by frame and so make many calls for one tile.
+        stride = vae.tile_sample_stride_width // vae.spatial_compression_ratio
+        return len(range(0, latents.shape[-1], stride))
 
     def test_the_frames_tiled_above_this_loop_still_reach_it(self):
         import torch

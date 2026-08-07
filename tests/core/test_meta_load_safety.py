@@ -457,32 +457,55 @@ def test_block_fill_requires_and_broadcasts_only_persistent_buffers(runtime):
     assert broadcasts[1].data_ptr() == block.saved.data_ptr()
 
 
-def _handle_counting_filler(runtime, monkeypatch):
+def _handle_counting_filler(runtime, monkeypatch, device="cpu"):
     """A filler wired to a fake safe_open, reporting the open/close order it drives."""
     import safetensors
 
     opened, closed = [], []
 
     class FakeHandle:
-        def __init__(self, path):
+        def __init__(self, path, device):
             self.path = path
+            self.device = device
 
         def __enter__(self):
-            opened.append(self.path)
+            opened.append((self.path, self.device))
             return self
 
         def __exit__(self, *exc):
-            closed.append(self.path)
+            closed.append((self.path, self.device))
             return False
 
     monkeypatch.setattr(
-        safetensors, "safe_open", lambda path, **kwargs: FakeHandle(path)
+        safetensors,
+        "safe_open",
+        lambda path, **kwargs: FakeHandle(path, kwargs.get("device")),
     )
 
     filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler.device = device
     filler._handle_cache = {}
     filler._stack = ExitStack()
     return filler, opened, closed
+
+
+def test_shards_are_read_onto_the_device_being_filled(runtime, monkeypatch):
+    """A handle opened on host retains a copy of every tensor read through it; one opened on the
+    accelerator retains nothing and skips the host staging copy, so the read follows the fill."""
+    filler, opened, _ = _handle_counting_filler(runtime, monkeypatch, device="cuda:1")
+
+    filler._handle("shard-0.safetensors")
+
+    assert opened == [("shard-0.safetensors", "cuda:1")]
+
+
+def test_a_cpu_fill_still_reads_onto_the_host(runtime, monkeypatch):
+    """Offload fills target CPU, where there is no device to read onto."""
+    filler, opened, _ = _handle_counting_filler(runtime, monkeypatch, device="cpu")
+
+    filler._handle("shard-0.safetensors")
+
+    assert opened == [("shard-0.safetensors", "cpu")]
 
 
 def test_only_one_shard_stays_mapped_during_a_fill(runtime, monkeypatch):
@@ -494,8 +517,11 @@ def test_only_one_shard_stays_mapped_during_a_fill(runtime, monkeypatch):
     filler._handle("shard-0.safetensors")
     filler._handle("shard-1.safetensors")
 
-    assert opened == ["shard-0.safetensors", "shard-1.safetensors"]
-    assert closed == ["shard-0.safetensors"]
+    assert [path for path, _ in opened] == [
+        "shard-0.safetensors",
+        "shard-1.safetensors",
+    ]
+    assert [path for path, _ in closed] == ["shard-0.safetensors"]
     assert list(filler._handle_cache) == ["shard-1.safetensors"]
 
 
@@ -506,7 +532,7 @@ def test_reads_within_one_shard_reuse_its_handle(runtime, monkeypatch):
     for _ in range(4):
         filler._handle("shard-0.safetensors")
 
-    assert opened == ["shard-0.safetensors"]
+    assert [path for path, _ in opened] == ["shard-0.safetensors"]
     assert closed == []
 
 
@@ -519,8 +545,8 @@ def test_releasing_handles_lets_a_later_read_reopen(runtime, monkeypatch):
     filler._release_handles()
     filler._handle("shard-0.safetensors")
 
-    assert opened == ["shard-0.safetensors"] * 2
-    assert closed == ["shard-0.safetensors"]
+    assert [path for path, _ in opened] == ["shard-0.safetensors"] * 2
+    assert [path for path, _ in closed] == ["shard-0.safetensors"]
 
 
 def test_local_block_fill_uses_no_collective_transport(runtime):

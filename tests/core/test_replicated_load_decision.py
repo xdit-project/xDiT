@@ -1170,6 +1170,16 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
     assert runner._quantization_streaming_targets == {"transformer.blocks.0.keep"}
 
 
+
+def _attach_backends(runner):
+    """Give a fake runner the quantization selector the loader reads adapters through."""
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        QuantizationBackends,
+    )
+
+    runner.backends = QuantizationBackends(runner)
+    return runner
+
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
@@ -1242,6 +1252,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
     )
     monkeypatch.setattr(base_model, "log", logs.append)
 
+    _attach_backends(runner)
     kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
 
     assert kwargs == {}
@@ -1319,6 +1330,7 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
     )
     monkeypatch.setattr(base_model, "log", lambda message: None)
 
+    _attach_backends(runner)
     kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
@@ -1365,6 +1377,7 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
     )
     monkeypatch.setattr(base_model, "log", lambda message: None)
 
+    _attach_backends(runner)
     kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
@@ -1418,6 +1431,7 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
     )
     monkeypatch.setattr(base_model, "log", lambda message: None)
 
+    _attach_backends(runner)
     kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
@@ -1456,5 +1470,6 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         prepare,
     )
 
+    _attach_backends(runner)
     with pytest.raises(RuntimeError, match="before allocation"):
         base_model.xFuserModel._meta_te_kwargs(runner)

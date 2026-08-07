@@ -51,125 +51,15 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     select_load_contract,
     select_runtime_quantization,
 )
+from xfuser.model_executor.models.runner_models.loading.blockwise_ownership import (
+    blockwise_transformer_descriptor,
+    record_blockwise_ownership,
+    record_streaming_targets,
+)
 from xfuser.model_executor.models.runner_models.loading.format_backends import (
     module_path_is_covered,
     module_paths_overlap,
 )
-
-
-def _component_target_paths(component_name, targets):
-    return {
-        component_name if not target else f"{component_name}.{target}"
-        for target in targets
-    }
-
-
-def _record_streaming_targets(model, attribute, component_name, targets):
-    tracked = getattr(model, attribute, None)
-    if tracked is not None:
-        tracked.update(_component_target_paths(component_name, targets))
-
-
-def _blockwise_owned_targets(targets, wrap_attrs):
-    owned = []
-    for target in targets:
-        for wrap_attr in wrap_attrs:
-            if module_path_is_covered(target, wrap_attr):
-                owned.append(target)
-            elif module_path_is_covered(wrap_attr, target):
-                owned.append(wrap_attr)
-    minimal = []
-    for target in sorted(set(owned), key=lambda path: (path.count("."), path)):
-        if not any(
-            module_path_is_covered(target, owner)
-            for owner in minimal
-        ):
-            minimal.append(target)
-    return tuple(minimal)
-
-
-def _record_blockwise_ownership(
-    model,
-    adapter,
-    component_name,
-    targets,
-    wrap_attrs,
-    descriptor,
-):
-    log(descriptor.log_message())
-    if adapter.format.value == "fp8" and hasattr(
-        model, "_fp8_descriptor_components"
-    ):
-        model._fp8_descriptor_components.add(component_name)
-    if hasattr(model, "_quantization_descriptor_components"):
-        model._quantization_descriptor_components.add(component_name)
-    if descriptor.materialization_mode not in {"streaming", "blockwise"}:
-        return
-    owned_targets = _blockwise_owned_targets(targets, wrap_attrs)
-    _record_streaming_targets(
-        model,
-        "_quantization_streaming_targets",
-        component_name,
-        owned_targets,
-    )
-    if descriptor.materialization_mode == "blockwise" and getattr(
-        model.config, "use_fp4_gemms", False
-    ):
-        fp8_targets = tuple(model.fp8.targets_for(component_name))
-        owned_fp8_targets = _blockwise_owned_targets(fp8_targets, wrap_attrs)
-        _record_streaming_targets(
-            model,
-            "_quantization_streaming_targets",
-            component_name,
-            owned_fp8_targets,
-        )
-        _record_streaming_targets(
-            model,
-            "_fp8_streaming_targets",
-            component_name,
-            owned_fp8_targets,
-        )
-    if adapter.format.value == "fp8":
-        _record_streaming_targets(
-            model,
-            "_fp8_streaming_targets",
-            component_name,
-            owned_targets,
-        )
-
-
-def _blockwise_transformer_descriptor(
-    adapter,
-    component_name,
-    targets,
-    wrap_attrs,
-    *,
-    local=False,
-):
-    if adapter.format.value == "fp8":
-        from .loading.fp8_backends import (
-            plan_blockwise_transformer_fp8_load,
-        )
-
-        descriptor = plan_blockwise_transformer_fp8_load(
-            adapter,
-            component_name=component_name,
-            targets=targets,
-            wrap_attrs=wrap_attrs,
-        )
-        return (
-            replace(descriptor, materialization_mode="blockwise")
-            if local and descriptor.materialization_mode == "streaming"
-            else descriptor
-        )
-    from .loading.format_backends import describe_blockwise_format_load
-
-    return describe_blockwise_format_load(
-        adapter,
-        component_name=component_name,
-        targets=targets,
-        wrap_attrs=wrap_attrs,
-    )
 
 
 def _conversion_filter(module_path, excluded_paths):
@@ -199,19 +89,6 @@ def _conversion_filter(module_path, excluded_paths):
         )
 
     return True, filter_fn
-
-
-def _fp8_adapter_for_contract(model):
-    """Return the backend that owns FP8 storage for the active contract."""
-
-    if model.load_contract is None:
-        return None
-    format_value = model.load_contract.requested_format.value
-    if format_value == "fp8":
-        return model.fp8_backend
-    if format_value in {"fp4", "fp8_fp4"}:
-        return model.blockwise_fp8_backend
-    return None
 
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
@@ -489,7 +366,7 @@ class xFuserModel(abc.ABC):
         # transformer weights.
         _ = self.fp8_backend
         _ = self.format_backend
-        if self._uses_blockwise_fp8_backend():
+        if self.backends.uses_blockwise_fp8():
             _ = self.blockwise_fp8_backend
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
@@ -515,219 +392,41 @@ class xFuserModel(abc.ABC):
         from xfuser.model_executor.models.runner_models.loading.fp8_plan import Fp8Plan
         return Fp8Plan(self)
 
+    def _transformer_quantization_adapter(self, component_name: str):
+        """The adapter and component-relative targets owning one transformer.
+
+        Kept as a method rather than read off ``backends`` directly because runners override it to
+        route a component elsewhere (see wan's distilled path), and ``_build_transformer`` looks it
+        up by name to find those overrides.
+        """
+        return self.backends.transformer_adapter(component_name)
+
     @functools.cached_property
+    def backends(self):
+        """The quantization implementations this run uses (see backend_selection).
+
+        Cached because selecting an adapter probes the environment, and every consumer has to get
+        the same answer. The three adapters below are exposed directly because they read as
+        properties of the model at every call site; the rest of the surface stays behind this.
+        """
+        from .loading.backend_selection import QuantizationBackends
+
+        return QuantizationBackends(self)
+
+    @property
     def fp8_backend(self):
-        """The task-3-selected FP8 implementation, validated before allocation."""
-        if (
-            self.load_contract is None
-            or self.load_contract.requested_format.value != "fp8"
-        ):
-            return None
-        from .loading.fp8_backends import (
-            probe_fp8_backend_capabilities,
-            select_fp8_backend,
-        )
+        """The selected FP8 implementation, validated before allocation."""
+        return self.backends.fp8
 
-        return select_fp8_backend(
-            self.load_contract,
-            capabilities=probe_fp8_backend_capabilities(),
-        )
-
-    @functools.cached_property
+    @property
     def format_backend(self):
         """Primary FP4/INT8 implementation, validated before allocation."""
+        return self.backends.format
 
-        if (
-            self.load_contract is None
-            or self.load_contract.requested_format.value
-            not in {"fp4", "fp8_fp4", "int8"}
-        ):
-            return None
-        from .loading.format_backends import (
-            probe_format_backend_capabilities,
-            select_format_backend,
-            validate_format_fsdp_placement,
-        )
-
-        capabilities = probe_format_backend_capabilities()
-        adapter = select_format_backend(
-            self.load_contract,
-            capabilities=capabilities,
-            hybrid=self.config.use_hybrid_gemm_schedule,
-        )
-        validate_format_fsdp_placement(
-            self.load_contract,
-            adapter,
-            capabilities=capabilities,
-            required=self._places_format_backend_under_fsdp2(),
-        )
-        return adapter
-
-    @functools.cached_property
+    @property
     def blockwise_fp8_backend(self):
         """FP8 converter for pure FP8 and FP8-only portions of hybrid loads."""
-
-        if self.load_contract is None:
-            return None
-        from .loading.fp8_backends import (
-            probe_fp8_backend_capabilities,
-            select_blockwise_fp8_backend,
-            validate_torchao_fsdp2_patches,
-        )
-
-        capabilities = probe_fp8_backend_capabilities()
-        adapter = select_blockwise_fp8_backend(
-            self.load_contract,
-            capabilities=capabilities,
-        )
-        validate_torchao_fsdp2_patches(
-            self.load_contract,
-            capabilities=capabilities,
-            required=self._places_torchao_tensor_subclass_under_fsdp2(
-                adapter
-            ),
-        )
-        return adapter
-
-    def _places_torchao_tensor_subclass_under_fsdp2(
-        self,
-        fp8_adapter,
-        *,
-        assume_torchao_fp8: bool = False,
-    ) -> bool:
-        """Whether configured FSDP2 blocks will contain TorchAO Float8Tensor."""
-
-        if self.config.fully_shard_degree <= 1:
-            return False
-        fsdp_target_paths = {
-            f"{component_name}.{wrap_attr}"
-            for component_name, strategy in (
-                self.settings.fsdp_strategy or {}
-            ).items()
-            for wrap_attr in strategy.get("wrap_attrs", ())
-        }
-        if not fsdp_target_paths:
-            return False
-
-        fp4_targets = set(self.settings.fp4_gemm_module_list or ())
-        fp8_only_targets = {
-            target
-            for target in self.fp8.module_list()
-            if not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
-        }
-        if (
-            (
-                assume_torchao_fp8
-                or (
-                    fp8_adapter is not None
-                    and fp8_adapter.backend.value == "torchao"
-                )
-            )
-            and any(
-                module_paths_overlap(target, fsdp_path)
-                for target in fp8_only_targets
-                for fsdp_path in fsdp_target_paths
-            )
-        ):
-            return True
-
-        fp4_can_emit_fp8 = bool(
-            self.settings.fp8_precision_overrides
-            or self.settings.fp8_precision_override_suffixes
-            or self.config.use_hybrid_gemm_schedule
-        )
-        return bool(
-            self.config.use_fp4_gemms
-            and fp4_can_emit_fp8
-            and any(
-                module_paths_overlap(target, fsdp_path)
-                for target in fp4_targets
-                for fsdp_path in fsdp_target_paths
-            )
-        )
-
-    def _requires_blockwise_fp8_backend(self) -> bool:
-        """Whether FP4 mode declares whole components owned only by FP8."""
-
-        if not self.config.use_fp4_gemms:
-            return False
-        fp4_targets = set(self.settings.fp4_gemm_module_list or ())
-        return any(
-            not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
-            for target in self.fp8.module_list()
-        )
-
-    def _places_format_backend_under_fsdp2(self) -> bool:
-        if self.config.fully_shard_degree <= 1:
-            return False
-        fsdp_target_paths = {
-            f"{component_name}.{wrap_attr}"
-            for component_name, strategy in (
-                self.settings.fsdp_strategy or {}
-            ).items()
-            for wrap_attr in strategy.get("wrap_attrs", ())
-        }
-        if self.load_contract.requested_format.value in {"fp4", "fp8_fp4"}:
-            targets = set(self.settings.fp4_gemm_module_list or ())
-        elif self.load_contract.requested_format.value == "int8":
-            targets = set(self.settings.int8_gemm_module_list or ())
-        else:
-            return False
-        return any(
-            module_paths_overlap(target, fsdp_path)
-            for target in targets
-            for fsdp_path in fsdp_target_paths
-        )
-
-    def _format_targets_for(self, component_name: str) -> tuple[str, ...]:
-        if self.load_contract.requested_format.value in {"fp4", "fp8_fp4"}:
-            entries = self.settings.fp4_gemm_module_list or ()
-        elif self.load_contract.requested_format.value == "int8":
-            entries = self.settings.int8_gemm_module_list or ()
-        else:
-            return ()
-        prefix = f"{component_name}."
-        return tuple(
-            ""
-            if entry == component_name
-            else entry[len(prefix):]
-            for entry in entries
-            if entry == component_name or entry.startswith(prefix)
-        )
-
-    def _transformer_quantization_adapter(self, component_name: str):
-        """Return the adapter and relative targets owning one transformer."""
-
-        format_targets = self._format_targets_for(component_name)
-        if format_targets:
-            return self.format_backend, format_targets
-        fp8_targets = tuple(self.fp8.targets_for(component_name))
-        if not fp8_targets:
-            return None, ()
-        return _fp8_adapter_for_contract(self), fp8_targets
-
-    def _uses_blockwise_fp8_backend(self) -> bool:
-        if self._requires_blockwise_fp8_backend():
-            return True
-        if self._places_torchao_tensor_subclass_under_fsdp2(None):
-            return True
-        if (
-            self.load_contract.requested_format.value == "fp8"
-            and self._places_torchao_tensor_subclass_under_fsdp2(
-                None, assume_torchao_fp8=True
-            )
-        ):
-            return True
-        return (
-            self.load_contract.materialization_mode.value != "eager"
-            and self.load_contract.requested_format.value == "fp8"
-        )
+        return self.backends.blockwise_fp8
 
     def _memory_efficient_fsdp_load(self) -> bool:
         """True when the memory-efficient sharded (meta-init + rank0-broadcast) load path is on."""
@@ -830,13 +529,13 @@ class xFuserModel(abc.ABC):
         )
         if fsdp_meta or replicated_meta:
             if adapter is not None:
-                descriptor = _blockwise_transformer_descriptor(
+                descriptor = blockwise_transformer_descriptor(
                     adapter,
                     component_name,
                     targets,
                     wrap_attrs,
                 )
-                _record_blockwise_ownership(
+                record_blockwise_ownership(
                     self,
                     adapter,
                     component_name,
@@ -899,14 +598,14 @@ class xFuserModel(abc.ABC):
                 else None
             )
             if local_plan is not None and local_plan.enabled:
-                descriptor = _blockwise_transformer_descriptor(
+                descriptor = blockwise_transformer_descriptor(
                     adapter,
                     component_name,
                     targets,
                     wrap_attrs,
                     local=True,
                 )
-                _record_blockwise_ownership(
+                record_blockwise_ownership(
                     self,
                     adapter,
                     component_name,
@@ -949,14 +648,14 @@ class xFuserModel(abc.ABC):
                 streamed_targets = (
                     getattr(prepared, "streamed_targets", ()) or targets
                 )
-                _record_streaming_targets(
+                record_streaming_targets(
                     self,
                     "_quantization_streaming_targets",
                     component_name,
                     streamed_targets,
                 )
                 if adapter.format.value == "fp8":
-                    _record_streaming_targets(
+                    record_streaming_targets(
                         self,
                         "_fp8_streaming_targets",
                         component_name,
@@ -993,7 +692,7 @@ class xFuserModel(abc.ABC):
         fsdp_meta = (
             False if replicated_meta else self._memory_efficient_fsdp_load()
         )
-        adapter = _fp8_adapter_for_contract(self)
+        adapter = self.backends.fp8_adapter_for_contract()
         component_configs = {}
         entries = self.settings.fp8_text_encoder_module_list or ()
         component_names = tuple(
@@ -1022,7 +721,7 @@ class xFuserModel(abc.ABC):
                             "wrap_attrs", ()
                         )
                     )
-                    descriptor = _blockwise_transformer_descriptor(
+                    descriptor = blockwise_transformer_descriptor(
                         adapter,
                         component_name,
                         targets,
@@ -1030,7 +729,7 @@ class xFuserModel(abc.ABC):
                     )
                     # Same bookkeeping the transformer's blockwise route records, so the post-load
                     # walk knows these targets were already quantized during the fill.
-                    _record_blockwise_ownership(
+                    record_blockwise_ownership(
                         self,
                         adapter,
                         component_name,
@@ -1058,7 +757,7 @@ class xFuserModel(abc.ABC):
                 log(prepared.descriptor.log_message())
                 self._fp8_descriptor_components.add(component_name)
                 if prepared.descriptor.materialization_mode == "streaming":
-                    _record_streaming_targets(
+                    record_streaming_targets(
                         self,
                         "_fp8_streaming_targets",
                         component_name,
@@ -1643,7 +1342,7 @@ class xFuserModel(abc.ABC):
                         descriptor = prepare_native_transformer_format_load(
                             adapter,
                             component_name=component_name,
-                            targets=self._format_targets_for(component_name),
+                            targets=self.backends.format_targets_for(component_name),
                             stream_quant=False,
                         ).descriptor
                         log(descriptor.log_message())
@@ -1703,7 +1402,7 @@ class xFuserModel(abc.ABC):
                 descriptor = prepare_native_transformer_format_load(
                     adapter,
                     component_name=component_name,
-                    targets=self._format_targets_for(component_name),
+                    targets=self.backends.format_targets_for(component_name),
                     stream_quant=True,
                     precision_prefixes=(
                         self.settings.fp8_precision_overrides or ()
@@ -1786,7 +1485,7 @@ class xFuserModel(abc.ABC):
                 descriptor = prepare_native_transformer_format_load(
                     adapter,
                     component_name=component_name,
-                    targets=self._format_targets_for(component_name),
+                    targets=self.backends.format_targets_for(component_name),
                     stream_quant=False,
                     precision_prefixes=(
                         self.settings.fp8_precision_overrides or ()

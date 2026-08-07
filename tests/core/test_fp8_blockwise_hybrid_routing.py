@@ -19,6 +19,14 @@ from xfuser.model_executor.models.runner_models.loading.fp8_backends import (
 )
 
 
+def backends(model):
+    """The quantization backend selector under test, bound to a fake model."""
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        QuantizationBackends,
+    )
+
+    return QuantizationBackends(model)
+
 class RecordingAdapter:
     def __init__(self):
         self.calls = []
@@ -336,17 +344,14 @@ def test_exact_component_target_maps_to_transformer_root():
         format_backend=adapter,
         fp8=SimpleNamespace(targets_for=lambda component: ()),
     )
-    model._format_targets_for = lambda component: (
-        xFuserModel._format_targets_for(model, component)
-    )
 
-    assert xFuserModel._format_targets_for(model, "transformer") == ("",)
-    assert xFuserModel._format_targets_for(model, "transformer_2") == ("blocks",)
-    assert xFuserModel._transformer_quantization_adapter(model, "transformer") == (
+    assert backends(model).format_targets_for("transformer") == ("",)
+    assert backends(model).format_targets_for("transformer_2") == ("blocks",)
+    assert backends(model).transformer_adapter("transformer") == (
         adapter,
         ("",),
     )
-    assert xFuserModel._transformer_quantization_adapter(model, "transformer_2") == (
+    assert backends(model).transformer_adapter("transformer_2") == (
         adapter,
         ("blocks",),
     )
@@ -377,13 +382,13 @@ def test_format_fsdp_preflight_uses_boundary_safe_path_containment(
         ),
     )
 
-    assert xFuserModel._places_format_backend_under_fsdp2(model) is expected
+    assert backends(model).places_format_backend_under_fsdp2() is expected
 
 
 def test_pure_fp4_wan_targets_require_backend_preflight():
     model = _hybrid_model(adapter=RecordingAdapter())
 
-    assert xFuserModel._requires_blockwise_fp8_backend(model)
+    assert backends(model).requires_blockwise_fp8()
 
 
 def test_narrow_fp4_target_preserves_broad_fp8_remainder():
@@ -417,7 +422,7 @@ def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
     model.settings.fp4_gemm_module_list = ["transformer.blocks.0.attn"]
     model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
 
-    assert xFuserModel._requires_blockwise_fp8_backend(model)
+    assert backends(model).requires_blockwise_fp8()
 
 
 def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
@@ -453,11 +458,8 @@ def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
         requested_format=QuantizationFormat.FP4,
         materialization_mode=MaterializationMode.EAGER,
     )
-    model._requires_blockwise_fp8_backend = (
-        lambda: xFuserModel._requires_blockwise_fp8_backend(model)
-    )
 
-    assert xFuserModel._uses_blockwise_fp8_backend(model)
+    assert backends(model).uses_blockwise_fp8()
 
 
 def _fsdp_patch_model(
@@ -484,11 +486,6 @@ def _fsdp_patch_model(
         ),
         fp8=SimpleNamespace(module_list=lambda: list(fp8_targets)),
     )
-    model._places_torchao_tensor_subclass_under_fsdp2 = lambda adapter, **kwargs: (
-        xFuserModel._places_torchao_tensor_subclass_under_fsdp2(
-            model, adapter, **kwargs
-        )
-    )
     return model
 
 
@@ -498,7 +495,7 @@ def test_fp8_only_target_outside_fsdp_strategy_needs_no_torchao_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
+    assert not backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
 
 
 def test_fsdp_sharded_fp8_only_torchao_target_needs_patches():
@@ -507,7 +504,7 @@ def test_fsdp_sharded_fp8_only_torchao_target_needs_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
-    assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
+    assert backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
 
 
 @pytest.mark.parametrize(
@@ -532,7 +529,7 @@ def test_fp8_fsdp_preflight_uses_boundary_safe_path_containment(
     adapter = SimpleNamespace(backend=QuantizationBackend.TORCHAO)
 
     assert (
-        xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
+        backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
         is expected
     )
 
@@ -543,7 +540,7 @@ def test_fsdp_sharded_fp8_only_aiter_target_needs_no_torchao_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
+    assert not backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
 
 
 @pytest.mark.parametrize(
@@ -567,7 +564,7 @@ def test_fsdp_sharded_fp4_torchao_fp8_paths_need_patches(
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
+    assert backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
 
 
 def test_fp4_torchao_fp8_paths_outside_fsdp_strategy_need_no_patches():
@@ -577,7 +574,7 @@ def test_fp4_torchao_fp8_paths_outside_fsdp_strategy_need_no_patches():
     )
     adapter = SimpleNamespace(backend=QuantizationBackend.AITER)
 
-    assert not xFuserModel._places_torchao_tensor_subclass_under_fsdp2(model, adapter)
+    assert not backends(model).places_torchao_tensor_subclass_under_fsdp2(adapter)
 
 
 def test_fsdp_fp4_override_triggers_startup_backend_preflight():
@@ -590,11 +587,8 @@ def test_fsdp_fp4_override_triggers_startup_backend_preflight():
         requested_format=QuantizationFormat.FP4,
         materialization_mode=MaterializationMode.FSDP_META,
     )
-    model._requires_blockwise_fp8_backend = (
-        lambda: xFuserModel._requires_blockwise_fp8_backend(model)
-    )
 
-    assert xFuserModel._uses_blockwise_fp8_backend(model)
+    assert backends(model).uses_blockwise_fp8()
 
 
 def test_eager_fsdp_fp8_triggers_startup_backend_preflight():
@@ -608,11 +602,8 @@ def test_eager_fsdp_fp8_triggers_startup_backend_preflight():
         requested_format=QuantizationFormat.FP8,
         materialization_mode=MaterializationMode.EAGER,
     )
-    model._requires_blockwise_fp8_backend = (
-        lambda: xFuserModel._requires_blockwise_fp8_backend(model)
-    )
 
-    assert xFuserModel._uses_blockwise_fp8_backend(model)
+    assert backends(model).uses_blockwise_fp8()
 
 
 def test_fp4_override_outside_strategy_skips_startup_backend_preflight():
@@ -625,11 +616,8 @@ def test_fp4_override_outside_strategy_skips_startup_backend_preflight():
         requested_format=QuantizationFormat.FP4,
         materialization_mode=MaterializationMode.FSDP_META,
     )
-    model._requires_blockwise_fp8_backend = (
-        lambda: xFuserModel._requires_blockwise_fp8_backend(model)
-    )
 
-    assert not xFuserModel._uses_blockwise_fp8_backend(model)
+    assert not backends(model).uses_blockwise_fp8()
 
 
 def test_backend_preflight_uses_component_target_requirement(monkeypatch):
@@ -663,7 +651,7 @@ def test_backend_preflight_uses_component_target_requirement(monkeypatch):
         materialization_mode=MaterializationMode.FSDP_META,
     )
 
-    selected = xFuserModel.blockwise_fp8_backend.func(model)
+    selected = backends(model).blockwise_fp8
 
     assert selected is adapter
     assert observed == [True]
@@ -687,7 +675,7 @@ def test_component_outside_fsdp_strategy_does_not_block_startup(monkeypatch):
         selected_backend=QuantizationBackend.TORCHAO,
     )
 
-    adapter = xFuserModel.blockwise_fp8_backend.func(model)
+    adapter = backends(model).blockwise_fp8
 
     assert adapter.backend is QuantizationBackend.TORCHAO
 
@@ -739,7 +727,7 @@ def test_fp4_override_under_fsdp_requires_patches_with_aiter_fp8_backend(
     )
 
     with pytest.raises(ValueError, match=r"FSDP.*fsdp_post_all_gather"):
-        xFuserModel.blockwise_fp8_backend.func(model)
+        backends(model).blockwise_fp8
 
 
 @pytest.mark.parametrize(

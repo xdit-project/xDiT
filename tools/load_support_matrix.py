@@ -106,10 +106,12 @@ def build_report(
     matrix_path: Path,
     results_path: Path | None,
     *,
+    backend: str | None = None,
     capability_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Join declared capability, planned matrix cases, and recorded runs.
 
+    backend narrows coverage to cases one machine could actually run.
     capability_rows is injectable so the join can be exercised without importing the runners.
     """
     if capability_rows is None:
@@ -129,6 +131,13 @@ def build_report(
         cases = [case for name in names for case in by_model.get(name, ())]
         row["placements"] = sorted({case["placement"] for case in cases})
         row["case_ids"] = sorted(case["id"] for case in cases)
+        # Most cases target hardware a given machine does not have, so "never run" is only
+        # actionable once it is separated from "not runnable here".
+        local = [c for c in cases if backend is None or c["hardware"]["backend"] == backend]
+        row["backend_case_ids"] = sorted(case["id"] for case in local)
+        row["backend_executed"] = sorted(
+            case_id for case_id in row["backend_case_ids"] if case_id in statuses
+        )
         row["executed"] = sorted(
             case_id for case_id in row["case_ids"] if case_id in statuses
         )
@@ -146,7 +155,11 @@ def build_report(
         for model in by_model
         if not any(model in row["aliases"] for row in rows)
     )
-    return {"models": rows, "matrix_models_not_registered": unregistered}
+    return {
+        "models": rows,
+        "matrix_models_not_registered": unregistered,
+        "backend": backend,
+    }
 
 
 def _memory_efficient(row) -> bool:
@@ -192,20 +205,31 @@ def render_markdown(report: dict[str, Any]) -> str:
 def render_gaps(report: dict[str, Any]) -> str:
     rows = report["models"]
     capable = [row for row in rows if _memory_efficient(row)]
+    backend = report.get("backend")
     uncovered = [row for row in capable if not row["case_ids"]]
     eager_only = [
         row
         for row in capable
         if row["case_ids"] and row["placements"] == ["eager"]
     ]
-    unrun = [row for row in capable if row["case_ids"] and not row["executed"]]
+    unrun = [
+        row
+        for row in capable
+        if row["backend_case_ids"] and not row["backend_executed"]
+    ]
+    elsewhere = [
+        row
+        for row in capable
+        if row["case_ids"] and not row["backend_case_ids"]
+    ]
     unasserted = [
         row for row in rows if not _memory_efficient(row) and not row["case_ids"]
     ]
     failed = [row for row in rows if row["failed"]]
 
+    scope = f" Coverage counted against backend {backend}." if backend else ""
     lines = [
-        f"{len(rows)} runner models, {len(capable)} declaring a memory-efficient load.",
+        f"{len(rows)} runner models, {len(capable)} declaring a memory-efficient load.{scope}",
         "",
     ]
 
@@ -226,10 +250,16 @@ def render_gaps(report: dict[str, Any]) -> str:
         lambda row: ", ".join(row["case_ids"]),
     )
     section(
-        "capable models whose cases have never been run:",
+        f"capable models with a runnable case never run{f' on {backend}' if backend else ''}:",
         unrun,
-        lambda row: ", ".join(row["case_ids"]),
+        lambda row: ", ".join(row["backend_case_ids"]),
     )
+    if backend:
+        section(
+            f"capable models covered only on other hardware than {backend}:",
+            elsewhere,
+            lambda row: ", ".join(row["case_ids"]),
+        )
     section(
         "withheld models with no case asserting the rejection:",
         unasserted,
@@ -255,6 +285,14 @@ def _parser() -> argparse.ArgumentParser:
         help="JSONL written by tools/gpu_validation.py, to mark cases as actually run",
     )
     parser.add_argument(
+        "--backend",
+        default=None,
+        help=(
+            "hardware backend to count coverage against (e.g. rocm_torchao), so cases needing "
+            "hardware this machine lacks are not reported as untested work"
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=("markdown", "json", "gaps"),
         default="gaps",
@@ -266,7 +304,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    report = build_report(args.matrix, args.results)
+    report = build_report(args.matrix, args.results, backend=args.backend)
     if args.format == "json":
         text = json.dumps(report, indent=2) + "\n"
     elif args.format == "markdown":

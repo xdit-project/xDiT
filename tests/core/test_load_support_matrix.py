@@ -49,8 +49,13 @@ def write(tmp_path, cases, results=None):
     return matrix, path
 
 
-def case(case_id, model, placement="fsdp_blockwise"):
-    return {"id": case_id, "model": model, "placement": placement}
+def case(case_id, model, placement="fsdp_blockwise", backend="rocm_torchao"):
+    return {
+        "id": case_id,
+        "model": model,
+        "placement": placement,
+        "hardware": {"backend": backend, "accelerator": "any"},
+    }
 
 
 def test_a_case_refused_on_purpose_counts_as_run_not_failed(tool, tmp_path):
@@ -137,8 +142,38 @@ def test_gaps_separate_the_uncovered_from_the_merely_unrun(tool, tmp_path):
 
     assert "1 capable models with no matrix case at all:" in gaps
     assert "Absent" in gaps.split("no matrix case at all:")[1].split("\n\n")[0]
-    assert "Planned" in gaps.split("never been run:")[1].split("\n\n")[0]
-    assert "Ran" not in gaps.split("never been run:")[1].split("\n\n")[0]
+    unrun = gaps.split("never run:")[1].split("\n\n")[0]
+    assert "Planned" in unrun
+    assert "Ran" not in unrun
+
+
+def test_a_case_for_hardware_we_lack_is_not_reported_as_untested_work(tool, tmp_path):
+    """Most cases target other accelerators; counting them as gaps sends people chasing nothing."""
+    matrix, _ = write(
+        tmp_path,
+        [case("elsewhere", "Demo", backend="cuda_blackwell_torchao")],
+    )
+
+    report = tool.build_report(
+        matrix, None, backend="rocm_torchao", capability_rows=[capability("Demo")]
+    )
+    gaps = tool.render_gaps(report)
+
+    assert "0 capable models with a runnable case never run on rocm_torchao:" in gaps
+    section = gaps.split("covered only on other hardware than rocm_torchao:")[1]
+    assert "Demo" in section.split("\n\n")[0]
+
+
+def test_a_runnable_case_left_unrun_is_reported_for_this_backend(tool, tmp_path):
+    matrix, _ = write(tmp_path, [case("here", "Demo", backend="rocm_torchao")])
+
+    report = tool.build_report(
+        matrix, None, backend="rocm_torchao", capability_rows=[capability("Demo")]
+    )
+    gaps = tool.render_gaps(report)
+
+    section = gaps.split("never run on rocm_torchao:")[1].split("\n\n")[0]
+    assert "Demo" in section
 
 
 def test_a_model_tested_only_in_eager_is_called_out(tool, tmp_path):

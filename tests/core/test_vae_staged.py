@@ -1,9 +1,13 @@
-"""Every VAE a run decodes through, not only the one hanging off the first pipeline
+"""Structural guards against the VAE setup mistakes that fail quietly.
 
-A model that decodes in stages loads a second pipeline with its own VAE, and the later stage is
-the one at full resolution - so a setup step that reaches for `self.pipe.vae` touches the small
-decode and leaves the decode it was written for alone. The failure is quiet: nothing raises, the
-flag simply misses the largest decode.
+Both of the regressions guarded here produce no error and no warning: a run simply does less than
+it was asked to. The first reaches for `self.pipe.vae` and so misses the full-resolution decode of
+a staged model. The second calls `_setup_parallel_vae()` somewhere other than
+`_post_load_and_state_initialization`, and so marks a VAE for tile dealing after the decode that
+reads that mark has already been installed.
+
+Neither is the kind of thing a behavioural test catches, because a single-stage model on one GPU
+does the right thing either way.
 """
 
 import ast
@@ -14,6 +18,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from xfuser.model_executor.models import runner_models
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 
@@ -142,6 +147,58 @@ class TestNothingReachesPastTheList(unittest.TestCase):
         names = {method.name for method in self._vae_methods()}
         self.assertIn("_convert_vae_to_channels_last", names)
         self.assertIn("_decoding_vaes", names)
+
+
+class TestTheParallelVAEIsSetUpBeforeTheOptions(unittest.TestCase):
+    """Marking a VAE for tile dealing has to happen before the tiled decode is installed
+
+    `initialize()` runs `_post_load_and_state_initialization()` and then `_enable_options()`.
+    The first is where every runner calls `_setup_parallel_vae()`, which marks a VAE whose tiles
+    will be dealt out to the group; the second is where `vae_setup.configure()` reads that mark
+    and installs the decode that does the dealing.
+
+    Called the other way round, `configure()` sees no mark and leaves upstream's own tiling loop
+    in place, while `_setup_parallel_vae()` goes on to take the marking branch and so never shards
+    the decoder either. Every rank then decodes every tile, identically. The output is correct and
+    the run is silent; --use_parallel_vae has simply bought nothing.
+    """
+
+    HOME = "_post_load_and_state_initialization"
+
+    def _call_sites(self):
+        """Every `self._setup_parallel_vae()` in the runner models, and the method it sits in"""
+        folder = Path(inspect.getfile(runner_models)).parent
+        for path in sorted(folder.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for inner in ast.walk(node):
+                    if (
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "_setup_parallel_vae"
+                    ):
+                        yield path.name, node.name, inner.lineno
+
+    def test_every_runner_sets_the_parallel_vae_up_from_the_one_place(self):
+        strays = [
+            f"{name}:{line} in {method}()"
+            for name, method, line in self._call_sites()
+            if method != self.HOME
+        ]
+        self.assertEqual(
+            strays,
+            [],
+            f"these call _setup_parallel_vae() outside {self.HOME}(), so the VAE may be marked "
+            f"for tile dealing after the decode that reads the mark was installed: {strays}",
+        )
+
+    def test_the_walk_finds_the_call_sites_it_is_meant_to(self):
+        # A guard that has stopped matching anything passes for the wrong reason.
+        found = list(self._call_sites())
+        self.assertGreater(len(found), 10, f"only found {len(found)} call sites; the walk broke")
+        self.assertIn("wan.py", {name for name, _, _ in found})
 
 
 if __name__ == "__main__":

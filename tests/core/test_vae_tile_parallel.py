@@ -54,6 +54,29 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _spawn_group(target, world_size: int, *rest, attempts: int = 5) -> None:
+    """Run `target` across `world_size` processes, on a port the rendezvous can actually have
+
+    A port is picked by binding one and immediately letting it go, so between picking it and the
+    rendezvous binding it for real there is a window where anything else on the machine can take
+    it - and on a busy box something occasionally does. That fails the run with EADDRINUSE, which
+    says nothing about what was being tested and makes the suite intermittently red. Retried on
+    that one error only: when the rendezvous is what failed, nothing under test has run yet.
+    """
+    for attempt in range(attempts):
+        try:
+            mp.spawn(
+                target,
+                args=(world_size, _free_port(), *rest),
+                nprocs=world_size,
+                join=True,
+            )
+            return
+        except Exception as error:
+            if attempt == attempts - 1 or "EADDRINUSE" not in str(error):
+                raise
+
+
 def _cores_allowed() -> int:
     """The cores this process may actually use, which is not the number it can see
 
@@ -140,12 +163,7 @@ class TestDispatchOverAGroup(unittest.TestCase):
     """A rank makes its share of the calls and comes away with what every other rank made"""
 
     def _spawn(self, world_size: int, calls: int) -> None:
-        mp.spawn(
-            _dispatch_in_a_group,
-            args=(world_size, _free_port(), calls),
-            nprocs=world_size,
-            join=True,
-        )
+        _spawn_group(_dispatch_in_a_group, world_size, calls)
 
     def test_the_calls_are_divided_and_the_results_shared(self):
         # Six calls over two ranks divides evenly, over four it does not, and the odd rank out
@@ -268,12 +286,14 @@ def _runs_in_a_group(
         # Bit-exact, not close: a run replays the blending its neighbour would have done on the
         # same values, so there is no reordering to excuse a difference.
         #
-        # That holds on gloo, which is what -TestGpus 1 runs and where this is checked. On four
-        # devices over RCCL it has been seen to miss by 2.1e-06 on AutoencoderKL at two ranks
-        # while passing at four and passing on Wan and Qwen-Image at both, which is the shape of
-        # an accelerator picking its convolution differently rather than of the assembly putting
-        # a tile in the wrong place - but it has not been run down, so read a failure here on a
-        # device as unexplained rather than as this code.
+        # That holds on gloo, which is what -TestGpus 1 runs, and it holds on four devices over
+        # RCCL. It was for a while thought not to: AutoencoderKL at two ranks missed by 2.1e-06
+        # on a device while passing at four and passing on Wan and Qwen-Image at both, and that
+        # was written up here as an accelerator picking its convolution differently. It was not.
+        # Every one of those runs installed a branch xDiT over the DistVAE the image happened to
+        # ship, and DistVAE is what swaps GroupNorm; with both repos pinned to matching commits
+        # the whole family is bit-exact on four devices. So read a failure here as this code, or
+        # as a mismatched pair - not as the hardware.
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
     finally:
         dist.destroy_process_group()
@@ -403,12 +423,7 @@ class TestRuns(unittest.TestCase):
         for name in RUN_VAES:
             for world_size in (2, 4):
                 with self.subTest(vae=name, world_size=world_size):
-                    mp.spawn(
-                        _runs_in_a_group,
-                        args=(world_size, _free_port(), name, None),
-                        nprocs=world_size,
-                        join=True,
-                    )
+                    _spawn_group(_runs_in_a_group, world_size, name, None)
 
     def test_tiles_that_do_not_overlap_at_all_still_assemble(self):
         # --vae_tile_overlap can widen the stride until the tiles touch rather than overlap, and
@@ -417,12 +432,7 @@ class TestRuns(unittest.TestCase):
         # has to mean no blending and no edges, and not the whole tile taken as its own edge.
         for name in RUN_VAES:
             with self.subTest(vae=name):
-                mp.spawn(
-                    _runs_in_a_group,
-                    args=(4, _free_port(), name, 0.0),
-                    nprocs=4,
-                    join=True,
-                )
+                _spawn_group(_runs_in_a_group, 4, name, 0.0)
 
 
 if __name__ == "__main__":

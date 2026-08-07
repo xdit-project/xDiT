@@ -14,6 +14,7 @@ from xfuser.core.utils.vae_setup import TilingRequest
 
 from tests.core.test_vae_tiling import (
     StubVAE,
+    TestEveryVAEARunnerLoads,
     legacy_pair_vae,
     overlap_factor_vae,
     stride_vae,
@@ -22,6 +23,37 @@ from tests.core.test_vae_tiling import (
 
 def request(**kwargs) -> TilingRequest:
     return TilingRequest(model_name="test-model", **kwargs)
+
+
+def tileable(vae):
+    """A stub the tiling path will accept: diffusers proves support by the state flag, not the
+    method, so a stub has to carry the flag before configure() will tile it"""
+    vae.use_tiling = False
+    vae.use_slicing = False
+    vae.enable_tiling = lambda: setattr(vae, "use_tiling", True)
+    vae.enable_slicing = lambda: setattr(vae, "use_slicing", True)
+    vae.decode = lambda z: z
+    return vae
+
+
+def wan_vae(test):
+    """A real Wan VAE
+
+    The stride-walking family is keyed by class name, not by the attributes a VAE carries, because
+    the loop body differs per class - `stride_vae()` carries exactly Wan's stride spelling and is
+    still deliberately not recognised. So the one family where the window and the overlap actually
+    interact cannot be tested with a stub.
+    """
+    import diffusers
+
+    cls = getattr(diffusers, "AutoencoderKLWan", None)
+    if cls is None:
+        test.skipTest(f"AutoencoderKLWan is not in diffusers {diffusers.__version__}")
+    kwargs, _, _ = TestEveryVAEARunnerLoads.VAES["AutoencoderKLWan"]
+    vae = cls(**kwargs).eval()
+    if not hasattr(vae, "use_tiling"):
+        test.skipTest(f"diffusers {diffusers.__version__} cannot tile AutoencoderKLWan")
+    return vae
 
 
 class TestWhichFlagAsked(unittest.TestCase):
@@ -92,7 +124,7 @@ class TestWindow(unittest.TestCase):
 class TestOverlap(unittest.TestCase):
 
     def test_an_overlap_is_applied(self):
-        vae = legacy_pair_vae()
+        vae = overlap_factor_vae()
         vae_setup.apply_overlap(vae, request(tile_overlap=0.125))
         self.assertAlmostEqual(vae.tile_overlap_factor, 0.125)
 
@@ -102,10 +134,20 @@ class TestOverlap(unittest.TestCase):
         self.assertIn("--vae_tile_overlap", str(caught.exception))
 
     def test_an_overlap_the_vae_cannot_take_names_the_widest_it_can(self):
-        vae = stride_vae()
+        # 0.99 leaves a step of nothing, so it is refused; the refusal has to name a step that
+        # would have been accepted rather than leaving the caller to guess.
+        vae = overlap_factor_vae()
         with self.assertRaises(ValueError) as caught:
             vae_setup.apply_overlap(vae, request(tile_overlap=0.99))
         self.assertIn("the most overlap it can step by", str(caught.exception))
+
+    def test_a_vae_whose_loop_is_not_one_we_step_says_that_instead(self):
+        # `stride_vae` carries Wan's exact stride spelling but is not a class whose loop body
+        # xFuser reimplements, so the honest answer is that the loop is unknown, not that some
+        # narrower overlap would work.
+        with self.assertRaises(ValueError) as caught:
+            vae_setup.apply_overlap(stride_vae(), request(tile_overlap=0.125))
+        self.assertIn("not one xFuser knows how to step", str(caught.exception))
 
 
 class TestTheOrderBetweenThem(unittest.TestCase):
@@ -118,19 +160,23 @@ class TestTheOrderBetweenThem(unittest.TestCase):
     """
 
     def test_both_knobs_land_when_given_together(self):
-        vae = stride_vae()
-        vae_setup.configure(vae, request(tile_size=128, tile_overlap=0.125))
-        self.assertEqual(vae.tile_sample_min_height, 128)
+        vae = wan_vae(self)
+        window = vae_tiling.tile_window(vae)
+        vae_setup.configure(vae, request(tile_size=window // 2, tile_overlap=0.125))
+        self.assertEqual(vae.tile_sample_min_height, window // 2)
         down, across = vae_tiling.tile_overlap(vae)
-        self.assertAlmostEqual(down, 0.125)
-        self.assertAlmostEqual(across, 0.125)
+        # Never steps wider than asked, so the overlap that lands is at least the one requested.
+        self.assertGreaterEqual(down, 0.125 - 1e-9)
+        self.assertGreaterEqual(across, 0.125 - 1e-9)
 
     def test_the_window_lands_the_same_whether_or_not_an_overlap_was_asked_for(self):
-        # The invariant the fixed order buys. Reversed, the overlap's new stride decides which
-        # sizes the window search will accept, and --vae_tile_size quietly lands somewhere else.
-        for size in (96, 120, 124, 128, 160, 192):
+        # The invariant the fixed order buys. Reversed, the stride the overlap just set decides
+        # which sizes the window search will accept, and --vae_tile_size lands somewhere else
+        # without saying so.
+        window = vae_tiling.tile_window(wan_vae(self))
+        for size in (window // 4, window // 3, window // 2, window - 8):
             with self.subTest(size=size):
-                alone, both = stride_vae(), stride_vae()
+                alone, both = wan_vae(self), wan_vae(self)
                 vae_setup.configure(alone, request(tile_size=size))
                 vae_setup.configure(both, request(tile_size=size, tile_overlap=0.125))
                 self.assertEqual(
@@ -252,25 +298,40 @@ class TestOomHint(unittest.TestCase):
 class TestConfigureEndToEnd(unittest.TestCase):
 
     def test_slicing_is_enabled_when_asked(self):
-        enabled = []
-        vae = StubVAE(use_slicing=False, use_tiling=False,
-                      enable_slicing=lambda: enabled.append(True),
-                      decode=lambda z: z)
+        vae = tileable(StubVAE())
         vae_setup.configure(vae, request(slicing=True))
-        self.assertEqual(enabled, [True])
+        self.assertTrue(vae.use_slicing)
+
+    def test_tiling_is_enabled_when_asked(self):
+        vae = tileable(legacy_pair_vae())
+        vae_setup.configure(vae, request(tiling=True))
+        self.assertTrue(vae.use_tiling)
+
+    def test_a_size_turns_tiling_on_by_itself(self):
+        # Otherwise sizing the window means passing --enable_tiling too, which tiles every stage
+        # to reach the one that ran out of memory.
+        vae = tileable(legacy_pair_vae())
+        vae_setup.configure(vae, request(tile_size=128))
+        self.assertTrue(vae.use_tiling)
+        self.assertEqual(vae.tile_sample_min_size, 128)
+
+    def test_a_vae_that_cannot_tile_is_refused_by_the_flag_that_asked(self):
+        # No `use_tiling`, which is how diffusers says it does not implement tiling for a class.
+        with self.assertRaises(ValueError) as caught:
+            vae_setup.configure(StubVAE(decode=lambda z: z), request(tile_size=128))
+        self.assertIn("--vae_tile_size", str(caught.exception))
 
     def test_the_guard_is_installed_even_with_tiling_off(self):
         # A decode that runs out of memory with tiling off still needs to say what to turn on.
-        vae = StubVAE(use_tiling=False, decode=lambda z: z)
+        vae = tileable(StubVAE())
         vae_setup.configure(vae, request())
         self.assertTrue(getattr(vae, "_xfuser_decode_guarded", False))
 
     def test_a_vae_that_is_not_asked_to_tile_keeps_its_window(self):
-        vae = legacy_pair_vae()
-        vae.use_tiling = False
-        vae.decode = lambda z: z
+        vae = tileable(legacy_pair_vae())
         vae_setup.configure(vae, request())
         self.assertEqual(vae.tile_sample_min_size, 256)
+        self.assertFalse(vae.use_tiling)
 
 
 if __name__ == "__main__":

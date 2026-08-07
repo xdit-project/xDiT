@@ -48,6 +48,7 @@ from xfuser.model_executor.models.runner_models.loading.checkpoint import (
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadCapability,
+    LoadContract,
     UnsupportedLoadContract,
     select_effective_materialization_mode,
     select_load_contract,
@@ -289,6 +290,9 @@ class xFuserModel(abc.ABC):
     settings: ModelSettings = ModelSettings()
     model_output_type: str = ""
     fps: int = 0
+    # Backend selection reads this before a contract is chosen, so it has to exist on
+    # the class rather than only after __init__ assigns it.
+    load_contract: Optional[LoadContract] = None
 
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the

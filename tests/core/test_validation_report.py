@@ -1,0 +1,154 @@
+"""The results dashboard has to stay honest about what ran and what merely passed."""
+
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+REPORT_PATH = ROOT / "tools/validation_report.py"
+MATRIX_PATH = ROOT / "tests/gpu_validation/matrix.json"
+
+
+@pytest.fixture(scope="module")
+def report_tool():
+    spec = importlib.util.spec_from_file_location("validation_report", REPORT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def matrix():
+    return json.loads(MATRIX_PATH.read_text())
+
+
+def _record(case, status, **metrics):
+    base = {
+        "wall_duration_seconds": None,
+        "load_duration_seconds": None,
+        "first_forward": "not_reached",
+        "peak_host_rss_bytes": None,
+        "peak_cgroup_memory_bytes": None,
+        "peak_gpu_memory_bytes": None,
+        "gpu_memory_scope": None,
+    }
+    base.update(metrics)
+    return {
+        "schema_version": 2,
+        "recorded_at": "2026-01-01T00:00:00+00:00",
+        "case_id": case["id"],
+        "case": case,
+        "status": status,
+        "execution": "NOT RUN" if status == "environment_mismatch" else "RAN",
+        "expected": case["expected"],
+        "command": ["torchrun"],
+        "environment": {
+            "platform": "rocm",
+            "accelerators": ["gfx950"],
+            "versions": {"torch": "2.9.1"},
+        },
+        "exit_status": 0 if status == "passed" else 1,
+        "metrics": base,
+        "output": {"files": [{"bytes": 8, "sha256": "ab"}]},
+        "quality": {"matrix_notes": case.get("quality_notes", "")},
+    }
+
+
+def _cases_for(matrix, accelerator):
+    return [c for c in matrix["cases"] if c["hardware"]["accelerator"] == accelerator]
+
+
+def _write(tmp_path, records):
+    path = tmp_path / "results.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+def test_a_rerun_supersedes_the_earlier_attempt(report_tool, matrix, tmp_path):
+    case = _cases_for(matrix, "gfx950")[0]
+    first = _record(case, "failed_inference")
+    second = _record(case, "passed", wall_duration_seconds=10.0)
+    second["recorded_at"] = "2026-02-01T00:00:00+00:00"
+    records = report_tool.load_records([_write(tmp_path, [first, second])])
+    assert [r["status"] for r in records] == ["passed"]
+
+
+def test_an_expected_rejection_is_not_shown_as_a_working_combination(
+    report_tool, matrix, tmp_path
+):
+    """A guard firing on purpose is a pass, but the combination still does not work."""
+    case = next(
+        c
+        for c in _cases_for(matrix, "gfx950")
+        if c["expected"]["outcome"] != "inference_success"
+    )
+    path = _write(tmp_path, [_record(case, "passed_expected_rejection")])
+    text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
+    combination = f"{case['placement']}/{case['quantization']}"
+    assert f"{combination} rej" in text
+    assert f"{combination} ok" not in text
+    assert "GREEN" in text and "NOT GREEN" not in text
+
+
+def test_the_denominator_counts_only_cases_this_hardware_can_run(
+    report_tool, matrix, tmp_path
+):
+    case = _cases_for(matrix, "gfx950")[0]
+    path = _write(tmp_path, [_record(case, "passed", wall_duration_seconds=1.0)])
+    report = report_tool.build_report([path], MATRIX_PATH)
+    relevant = {c["id"] for c in report["relevant"]}
+    assert case["id"] in relevant
+    for other in _cases_for(matrix, "gfx1200_or_gfx1201"):
+        assert other["id"] not in relevant
+    assert len(relevant) < len(matrix["cases"])
+
+
+def test_a_failure_makes_the_whole_report_not_green(report_tool, matrix, tmp_path):
+    passing, failing = _cases_for(matrix, "gfx950")[:2]
+    path = _write(
+        tmp_path,
+        [
+            _record(passing, "passed", wall_duration_seconds=1.0),
+            _record(failing, "failed_inference"),
+        ],
+    )
+    text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
+    assert "NOT GREEN" in text
+    assert failing["id"] in text.split("Failures", 1)[1]
+
+
+def test_globally_sampled_vram_is_flagged_as_an_upper_bound(
+    report_tool, matrix, tmp_path
+):
+    """On ROCm the sampler reads whole-device usage, so a shared node inflates it."""
+    case = _cases_for(matrix, "gfx950")[0]
+    path = _write(
+        tmp_path,
+        [
+            _record(
+                case,
+                "passed",
+                wall_duration_seconds=1.0,
+                peak_gpu_memory_bytes=4 * 1024**3,
+                gpu_memory_scope="global",
+            )
+        ],
+    )
+    text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
+    assert "upper bound" in text
+
+
+def test_post_load_time_is_never_negative(report_tool, matrix, tmp_path):
+    case = _cases_for(matrix, "gfx950")[0]
+    metrics = {"wall_duration_seconds": 5.0, "load_duration_seconds": 9.0}
+    assert report_tool._post_load(metrics) == 0.0
+
+
+def test_missing_results_file_reports_nothing_ran(report_tool, tmp_path):
+    report = report_tool.build_report([tmp_path / "absent.jsonl"], MATRIX_PATH)
+    text = report_tool.render(report)
+    assert "No case has been run" in text

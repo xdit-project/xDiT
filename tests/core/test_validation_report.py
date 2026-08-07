@@ -313,6 +313,69 @@ def test_a_failed_comparison_is_marked_and_not_just_printed(report_tool, matrix,
     assert "FAIL" in text.split("0.412")[0], "the row itself has to read as failed"
 
 
+def test_a_scoring_run_does_not_replace_the_timings_of_a_real_one(report_tool, matrix, tmp_path):
+    """Scoring runs disable compile, so their timings are not the case as declared.
+
+    Letting one supersede put compile-free numbers in the same column as compiled ones with nothing
+    saying so, which is exactly the silent mixing the columns exist to prevent.
+    """
+    case = _cases_for(matrix, "gfx950")[0]
+    real = _record(case, "passed", wall_duration_seconds=80.0, load_duration_seconds=50.0,
+                   compile_duration_seconds=17.6)
+    scoring = _record(case, "passed", wall_duration_seconds=66.0, load_duration_seconds=34.4)
+    scoring["recorded_at"] = "2026-03-01T00:00:00+00:00"
+    scoring["quality"] = {
+        "matrix_notes": "",
+        "scoring_run": True,
+        "reference": {
+            "case_id": "ref",
+            "verdict": "pass",
+            "scores": {"comparable": True, "ssim": 0.923, "psnr": 24.9, "mse": 3e-3},
+        },
+    }
+
+    text = report_tool.render(
+        report_tool.build_report([_write(tmp_path, [real, scoring])], MATRIX_PATH)
+    )
+
+    assert "50.0" in text and "17.6" in text, "the compiled run's timings have to survive"
+    assert "34.4" not in text, "the scoring run's load time must not take over the column"
+    assert "0.923" in text, "its verdict still has to reach the row"
+
+
+def test_a_scoring_run_recorded_before_the_marker_existed_is_still_recognised(
+    report_tool, matrix, tmp_path
+):
+    """Records already on disk have no marker, and would otherwise keep polluting the columns.
+
+    A run missing compile that its own case asks for is not that case's performance, marker or not.
+    """
+    case = {**_cases_for(matrix, "gfx950")[0], "args": ["--use_torch_compile"]}
+    real = _record(case, "passed", load_duration_seconds=50.0, compile_duration_seconds=17.6)
+    real["command"] = ["torchrun", "--use_torch_compile"]
+    scoring = _record(case, "passed", load_duration_seconds=34.4)
+    scoring["recorded_at"] = "2026-03-01T00:00:00+00:00"
+    scoring["command"] = ["torchrun"]
+    scoring["quality"] = {"matrix_notes": ""}
+
+    text = report_tool.render(
+        report_tool.build_report([_write(tmp_path, [real, scoring])], MATRIX_PATH)
+    )
+
+    assert "50.0" in text and "34.4" not in text
+
+
+def test_a_case_only_ever_scored_still_reports(report_tool, matrix, tmp_path):
+    """Reporting nothing for it would be worse than reporting a run whose compile column is empty."""
+    case = _cases_for(matrix, "gfx950")[0]
+    scoring = _record(case, "passed", wall_duration_seconds=66.0, load_duration_seconds=34.4)
+    scoring["quality"] = {"matrix_notes": "", "scoring_run": True, "reference": None}
+
+    text = report_tool.render(report_tool.build_report([_write(tmp_path, [scoring])], MATRIX_PATH))
+
+    assert "34.4" in text
+
+
 def test_an_unscored_run_leaves_the_column_empty_rather_than_implying_a_pass(
     report_tool, matrix, tmp_path
 ):

@@ -469,6 +469,7 @@ def make_result_record(
     log: str,
     quality_notes: str,
     reference: str | None,
+    scoring_run: bool = False,
 ) -> dict[str, Any]:
     status = classify_outcome(
         exit_status,
@@ -494,6 +495,10 @@ def make_result_record(
             "matrix_notes": case["quality_notes"],
             "operator_notes": quality_notes,
             "reference": reference,
+            # Marks a run whose command was altered to make the comparison deterministic, so its
+            # timings are not the case as declared. The reference case's own run carries this too:
+            # it produces no score, but it ran without compile just the same.
+            "scoring_run": scoring_run,
         },
     }
 
@@ -1348,6 +1353,7 @@ def execute_case(
     reference_id: str | None = None,
     reference_output: dict[str, Any] | None = None,
     thresholds: dict[str, float] | None = None,
+    scoring_run: bool = False,
 ) -> dict[str, Any]:
     expanded = expand_command(command)
     redactions = _redactions(command)
@@ -1475,6 +1481,7 @@ def execute_case(
         log="".join(log_lines),
         quality_notes=quality_notes,
         reference=comparison if comparison is not None else reference,
+        scoring_run=scoring_run,
     )
     record["timed_out"] = timed_out
     record["timeout_seconds"] = timeout_seconds
@@ -1612,6 +1619,7 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 thresholds=thresholds,
+                scoring_run=args.score_quality,
             )
             outputs[case["id"]] = record.get("output") or {}
             statuses.append(record["status"])

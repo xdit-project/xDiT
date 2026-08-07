@@ -27,9 +27,33 @@ NOT_RUN_STATUSES = {"environment_mismatch"}
 CURRENT_METRICS_VERSION = 4
 
 
+def _is_scoring_run(record: dict) -> bool:
+    """Whether this run measured something other than the case as the matrix declares it.
+
+    Trusts the marker when it is there, and otherwise compares the command against the case's own
+    arguments: a run missing compile that the case asks for is not that case's performance, whoever
+    stripped it. That covers records written before the marker existed, which would otherwise keep
+    reporting compile-free timings in a column of compiled ones.
+    """
+    quality = record.get("quality") or {}
+    if "scoring_run" in quality:
+        return bool(quality["scoring_run"])
+    declared = (record.get("case") or {}).get("args") or []
+    command = record.get("command") or []
+    return "--use_torch_compile" in declared and "--use_torch_compile" not in command
+
+
 def load_records(paths: list[Path]) -> list[dict]:
-    """Latest record per case id, so a re-run supersedes an earlier attempt."""
-    by_case: dict[str, dict] = {}
+    """Latest record per case id, so a re-run supersedes an earlier attempt.
+
+    Quality scoring runs are kept apart from that. They disable torch.compile to make the comparison
+    deterministic, so their timings are not the case as declared, and letting one supersede a
+    performance run put compile-free numbers in the same column as compiled ones with nothing saying
+    so. A case therefore reports its newest real run, carrying the verdict from its newest scored
+    run; a case that has only ever been scored still reports, since that beats reporting nothing.
+    """
+    performance: dict[str, dict] = {}
+    scored: dict[str, dict] = {}
     for path in paths:
         if not path.exists():
             continue
@@ -44,12 +68,23 @@ def load_records(paths: list[Path]) -> list[dict]:
             case_id = record.get("case_id")
             if not case_id:
                 continue
-            previous = by_case.get(case_id)
+            latest = scored if _is_scoring_run(record) else performance
+            previous = latest.get(case_id)
             if previous is None or record.get("recorded_at", "") >= previous.get(
                 "recorded_at", ""
             ):
-                by_case[case_id] = record
-    return list(by_case.values())
+                latest[case_id] = record
+    records = []
+    for case_id in performance.keys() | scored.keys():
+        record = performance.get(case_id) or scored[case_id]
+        verdict = ((scored.get(case_id) or {}).get("quality") or {}).get("reference")
+        if verdict is not None and record is not scored.get(case_id):
+            record = {
+                **record,
+                "quality": {**(record.get("quality") or {}), "reference": verdict},
+            }
+        records.append(record)
+    return records
 
 
 def _seconds(value) -> str:
@@ -304,10 +339,11 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "the load and there are no timings to report."
     )
     lines.append(
-        "vs ref is SSIM against the same model's eager bf16 case, and only appears for runs scored "
-        "with --score-quality, which disables torch.compile so the comparison is deterministic. It "
-        "is a gross-correctness check: quantization moves an image about as much as compile picking "
-        "a different kernel does, so a passing score means the model still drew the picture rather "
+        "vs ref is SSIM against the same model's eager bf16 case. It comes from a separate run made "
+        "with --score-quality, which disables torch.compile so the comparison is deterministic, and "
+        "so it does not describe the run the timings on this row came from. It is a "
+        "gross-correctness check: quantization moves an image about as much as compile picking a "
+        "different kernel does, so a passing score means the model still drew the picture rather "
         "than that quality is unchanged."
     )
     lines.append(

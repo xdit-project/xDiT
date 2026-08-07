@@ -209,7 +209,7 @@ class TestTilePlan(unittest.TestCase):
         self.assertIsNone(vae_tiling.tile_plan(stride_vae(), 8))
 
     def test_a_window_above_the_default_still_plans(self):
-        # _apply_vae_tile_size declines these itself, having the config to say why.
+        # vae_setup.apply_window declines these itself, having the request to say why.
         plan = vae_tiling.tile_plan(stride_vae(), 512)
         self.assertEqual(plan["tile_sample_stride_height"], 384)
 

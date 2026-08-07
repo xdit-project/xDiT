@@ -53,6 +53,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # honest breakdown has to synchronise at each phase boundary, and that serialises a fill which
     # otherwise overlaps its reads, broadcasts and sharding: measured 2.3x slower with it on.
     "XDIT_FILL_PHASE_TIMING": lambda: os.environ.get("XDIT_FILL_PHASE_TIMING", "0"),
+    # How many checkpoint shards a memory-efficient fill may hold in page cache, which is the read
+    # speed against host cache trade. Streaming a shard in before mmap-reading it makes the read
+    # bandwidth-bound rather than fault-bound (measured 0.62 -> 3.21 GB/s on local NVMe).
+    #   0 - never stream; the read faults its way through mmap as it used to.
+    #   1 - stream the shard about to be read, then consume it.
+    #   2 - also stream the next shard while consuming this one, hiding that stream under the
+    #       quantise and broadcast work, at the cost of a second shard resident.
+    # These are reclaimable file-backed pages that the fill drops as it finishes each shard.
+    "XDIT_WARM_SHARDS": lambda: os.environ.get("XDIT_WARM_SHARDS", "2"),
 }
 
 

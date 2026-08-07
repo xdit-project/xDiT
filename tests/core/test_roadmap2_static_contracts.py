@@ -196,10 +196,21 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
             if isinstance(node, ast.FunctionDef) and node.name == "_read_tensors"
         ),
     )
+    share_source = ast.get_source_segment(
+        meta_source,
+        next(
+            node
+            for node in filler.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_share_from_source"
+        ),
+    )
     # Source reads may call _collective_source_call directly or go through the
     # _source_call wrapper; both names end in _source_call. The wrapper is only
     # equivalent if it still delegates, which is asserted below.
-    assert "_source_call" in init_source
+    # __init__ resolves the checkpoint map through _share_from_source, which broadcasts the result so
+    # every rank can read a block, and which is only guarded if it still delegates to _source_call.
+    assert "_share_from_source" in init_source
+    assert "_source_call" in share_source
     # fill_block batches a block's reads into _read_tensors so they share one status exchange
     # instead of paying a pickled collective each, so the guard lives one level down.
     assert "_read_tensors" in fill_source

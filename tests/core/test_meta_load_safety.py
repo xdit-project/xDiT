@@ -1,6 +1,7 @@
 """CPU-only regression tests for collective/meta-load safety helpers."""
 
-from contextlib import ExitStack
+import inspect
+from contextlib import ExitStack, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -634,6 +635,301 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
     # covers the key surviving that batching.
     assert object_broadcasts == 3
     assert not tensor_broadcasts
+
+
+def test_one_rank_does_the_reading_however_wide_the_group_is(runtime):
+    """Spreading the read across ranks was measured slower, not faster, and is deliberately not done.
+
+    Rotating by block cost 37.2s cold against 32.7s for a single reader, because it puts every rank
+    at a different offset in the same shard and defeats readahead, and it took resident page cache
+    from ~10GB to 35.6GB as each rank mapped each shard. Pinning this keeps the next reader of the
+    code from re-deriving it the expensive way.
+    """
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler.group = SimpleNamespace(world_size=8, rank_in_group=3)
+
+    readers = [filler._reader_for_block(i) for i in range(9)]
+
+    assert readers == [0] * 9
+
+
+def test_a_single_rank_fill_still_reads_on_itself(runtime):
+    """The reader choice must never name a rank that does not exist."""
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler.group = None
+
+    assert filler._reader_for_block(5) == 0
+
+
+def test_every_rank_gets_the_checkpoint_map_so_any_of_them_can_read(runtime):
+    """Resolving stays on rank0 to avoid redundant hub HEADs, but the result has to reach everyone.
+
+    A peer with an empty weight map would report every key missing the moment it was asked to read.
+    """
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    calls = []
+
+    class Group:
+        world_size = 2
+        rank_in_group = 1
+
+        @staticmethod
+        def broadcast_object_list(box, src=0):
+            calls.append(src)
+            # First the read's failure status, then the map itself.
+            box[0] = None if len(calls) == 1 else {"blocks.0.weight": "shard-0.safetensors"}
+
+    filler.group = Group()
+    filler.is_src = False
+
+    shared = filler._share_from_source(
+        lambda: pytest.fail("a peer must not resolve the map itself"),
+        context="resolving",
+    )
+
+    assert shared == {"blocks.0.weight": "shard-0.safetensors"}
+    assert calls == [0, 0]
+
+
+def test_a_shard_is_dropped_only_once_nothing_still_needs_it(runtime, monkeypatch):
+    """A handle closing does not mean a shard is finished, so it is the wrong moment to drop.
+
+    The tail fill reaches back for keys in shards the block walk already closed, and dropping on
+    close evicted pages that were about to be read again. The shard's last key being consumed is the
+    condition that actually means finished.
+    """
+    dropped = []
+    monkeypatch.setattr(runtime.meta, "drop_file_page_cache", lambda paths: dropped.extend(paths))
+
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler.weight_map = {
+        "blocks.0.weight": "shard-a",
+        "blocks.1.weight": "shard-a",
+        "blocks.2.weight": "shard-b",
+    }
+    filler._unread_by_shard = {
+        "shard-a": {"blocks.0.weight", "blocks.1.weight"},
+        "shard-b": {"blocks.2.weight"},
+    }
+
+    filler._retire_keys(["blocks.0.weight"])
+    assert dropped == []
+
+    filler._retire_keys(["blocks.1.weight"])
+    assert dropped == ["shard-a"]
+
+    filler._retire_keys(["blocks.2.weight"])
+    assert dropped == ["shard-a", "shard-b"]
+
+
+def test_a_shard_is_streamed_in_before_it_is_mapped(runtime, monkeypatch):
+    """mmap faults are what bounded the read, so the shard is streamed first to make them cache hits.
+
+    Measured 0.62 GB/s faulting through mmap against 3.21 GB/s streaming the same file with pread,
+    and 9.05s -> 4.39s reading a real 10GB shard to device. Warming has to happen once per shard and
+    before the handle exists, or it is either repeated per tensor or too late to help.
+    """
+    warmed = []
+    monkeypatch.setenv("XDIT_WARM_SHARDS", "1")
+    monkeypatch.setattr(runtime.meta, "warm_file_page_cache", lambda path: warmed.append(path))
+    # _handle imports safe_open at call time, so the module it imports from is what has to be patched.
+    import safetensors
+
+    monkeypatch.setattr(safetensors, "safe_open", lambda *a, **k: nullcontext("handle"))
+
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler.device = "cpu"
+    filler._handle_cache = {}
+    filler._stack = ExitStack()
+
+    filler._handle("shard-a")
+    filler._handle("shard-a")
+
+    assert warmed == ["shard-a"], "a shard must be streamed once, not once per tensor read"
+
+    filler._handle("shard-b")
+
+    assert warmed == ["shard-a", "shard-b"]
+
+
+def _prefetch_filler(runtime, monkeypatch, warmed, order, unread=None):
+    """A filler wired to record warms instead of touching disk."""
+    import safetensors
+
+    monkeypatch.setenv("XDIT_WARM_SHARDS", "2")
+    monkeypatch.setattr(runtime.meta, "warm_file_page_cache", lambda path: warmed.append(path))
+    monkeypatch.setattr(runtime.meta, "drop_file_page_cache", lambda paths: None)
+    monkeypatch.setattr(safetensors, "safe_open", lambda *a, **k: nullcontext("handle"))
+
+    filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler.device = "cpu"
+    filler._handle_cache = {}
+    filler._stack = ExitStack()
+    filler._next_shard = dict(zip(order, order[1:]))
+    filler.weight_map = {f"k{i}": p for i, p in enumerate(order)}
+    # Each shard owes exactly its own key, so retiring that key retires the shard.
+    filler._unread_by_shard = {
+        p: {k for k, q in filler.weight_map.items() if q == p} for p in order
+    }
+    if unread is not None:
+        filler._unread_by_shard = {p: set(unread.get(p, ())) for p in order}
+    filler._streamed = set()
+    filler._prefetch_thread = None
+    return filler
+
+
+def test_the_next_shard_is_streamed_while_this_one_is_consumed(runtime, monkeypatch):
+    """Warming is the part of the read still serialised against it, so it overlaps the compute.
+
+    The work after a read -- quantise, broadcast, shard -- needs no disk, which is what the next
+    shard's stream hides under. Opening a shard has to leave the following one already in flight.
+    """
+    warmed = []
+    filler = _prefetch_filler(runtime, monkeypatch, warmed, ["a", "b", "c"])
+
+    filler._handle("a")
+    filler._join_prefetch()
+
+    assert warmed == ["a", "b"], "opening 'a' must stream 'a' and then run ahead to 'b'"
+
+    filler._handle("b")
+    filler._join_prefetch()
+
+    assert warmed == ["a", "b", "c"], "'b' was already streamed, so it must not be streamed twice"
+
+
+def test_only_one_shard_is_ever_in_flight(runtime, monkeypatch):
+    """Two shards resident is the deliberate cost; an unbounded run-ahead would be the whole file.
+
+    That is the failure that sank rotation, so the depth is pinned rather than left to chance.
+    """
+    warmed = []
+    filler = _prefetch_filler(runtime, monkeypatch, warmed, ["a", "b", "c", "d", "e"])
+
+    filler._handle("a")
+    filler._join_prefetch()
+
+    assert warmed == ["a", "b"], "run-ahead must stop at one shard, not stream the rest"
+
+
+def test_a_retired_shard_is_not_streamed_back_in(runtime, monkeypatch):
+    """Re-reading a finished shard would restore the cache that dropping it exists to release.
+
+    Nothing left unread is exactly the condition _retire_keys drops on, so it is the condition that
+    has to suppress the run-ahead too.
+    """
+    warmed = []
+    filler = _prefetch_filler(
+        runtime, monkeypatch, warmed, ["a", "b"], unread={"a": {"k0"}, "b": set()}
+    )
+
+    filler._handle("a")
+    filler._join_prefetch()
+
+    assert warmed == ["a"], "'b' is already retired, so streaming it back in undoes the drop"
+
+
+def test_a_stream_never_outlives_the_fill_that_wanted_it(runtime, monkeypatch):
+    """finalize drops the page cache, and a prefetch still running would put it straight back."""
+    warmed = []
+    filler = _prefetch_filler(runtime, monkeypatch, warmed, ["a", "b"])
+
+    filler._handle("a")
+    filler._join_prefetch()
+
+    assert filler._prefetch_thread is None
+
+
+def test_a_reopened_shard_is_not_streamed_twice(runtime, monkeypatch):
+    """The tail fill reaches back for keys in shards the block walk already closed.
+
+    Those pages are still cached, so restreaming one would pay for the whole shard again to learn
+    nothing. Only retiring it, which actually drops the pages, makes a restream the right call.
+    """
+    warmed = []
+    filler = _prefetch_filler(runtime, monkeypatch, warmed, ["a", "b"])
+
+    filler._handle("a")
+    filler._join_prefetch()
+    filler._release_handles()
+    filler._handle("a")
+
+    assert warmed == ["a", "b"], "'a' is still cached, so reopening it must not restream it"
+
+    filler._retire_keys(["k0"])
+    filler._release_handles()
+    filler._handle("a")
+
+    assert warmed == ["a", "b", "a"], "once retired its pages are gone, so it must be restreamed"
+
+
+def test_finalize_stops_the_stream_before_dropping_the_cache(runtime):
+    """Order matters: joining after the drop would leave the restored pages behind."""
+    source = inspect.getsource(runtime.meta._BlockwiseDiskFiller.finalize)
+    join, drop = source.index("_join_prefetch"), source.index("drop_file_page_cache(self.shard_paths)")
+
+    assert join < drop, "the stream has to be stopped before the cache is dropped, not after"
+
+
+@pytest.mark.parametrize(
+    "raw, depth",
+    [
+        ("0", 0),
+        ("no", 0),
+        ("1", 1),
+        ("2", 2),
+        ("true", 2),
+        # A typo in a performance knob must not quietly hand back the slow path.
+        ("yes-please", 2),
+    ],
+)
+def test_how_many_shards_may_be_held_warm_is_configurable(runtime, monkeypatch, raw, depth):
+    """The depth is the read-speed against host-cache trade, so it is stated rather than implied."""
+    monkeypatch.setenv("XDIT_WARM_SHARDS", raw)
+
+    assert runtime.meta._warm_shard_depth() == depth
+
+
+def test_nothing_is_streamed_when_the_depth_is_zero(runtime, monkeypatch):
+    """The escape hatch has to actually reach the read, not just the run-ahead.
+
+    Storage where a sequential pre-read is not free, such as a network mount that would pay for the
+    bytes twice, needs the whole thing off.
+    """
+    warmed = []
+    filler = _prefetch_filler(runtime, monkeypatch, warmed, ["a", "b"])
+    monkeypatch.setenv("XDIT_WARM_SHARDS", "0")
+
+    filler._handle("a")
+    filler._join_prefetch()
+
+    assert warmed == []
+
+
+def test_the_run_ahead_can_be_dropped_without_losing_the_warm(runtime, monkeypatch):
+    """Depth 1 is the middle setting: fast reads, one shard resident instead of two."""
+    warmed = []
+    filler = _prefetch_filler(runtime, monkeypatch, warmed, ["a", "b"])
+    monkeypatch.setenv("XDIT_WARM_SHARDS", "1")
+
+    filler._handle("a")
+    filler._join_prefetch()
+
+    assert warmed == ["a"]
+
+
+def test_only_the_reading_rank_streams_a_shard(runtime):
+    """Warming on every rank is the cache balloon that sank rotation, so it must sit behind the read.
+
+    Every rank warming every shard would take resident page cache from ~10GB to the whole checkpoint
+    while reading no faster, since the bytes still arrive over one stream to one reader.
+    """
+    source = inspect.getsource(runtime.meta._BlockwiseDiskFiller._fill)
+
+    assert "self._handle(" in source, "warming must stay behind _fill, which only the reader runs"
+    assert "warm_file_page_cache" not in inspect.getsource(
+        runtime.meta._BlockwiseDiskFiller._read_tensors
+    ), "warming above the source call would run it on every rank"
 
 
 def test_phase_timing_stays_off_unless_asked_for(runtime, monkeypatch):

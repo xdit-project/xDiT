@@ -37,6 +37,7 @@ can be mapped onto checkpoint keys:
 
 import collections
 import gc
+import threading
 import time
 import weakref
 from contextlib import contextmanager
@@ -47,6 +48,7 @@ from xfuser.core.distributed.parallel_state import get_fs_group, get_world_group
 from xfuser.core.utils.checkpoint_io import (
     host_mem_gb,
     drop_file_page_cache,
+    warm_file_page_cache,
     resolve_checkpoint_weight_map,
     component_shard_paths,
 )
@@ -161,8 +163,8 @@ def _collective_assert_same_layout(
         )
 
 
-def _collective_source_call(group, is_src, operation, context):
-    """Run a rank0 operation and broadcast its failure status before any rank continues."""
+def _collective_source_call(group, is_src, operation, context, src: int = 0):
+    """Run the reading rank's operation and broadcast its failure status before any rank continues."""
     result = None
     source_error = None
     status = None
@@ -173,12 +175,12 @@ def _collective_source_call(group, is_src, operation, context):
             source_error = error
             status = (type(error).__name__, str(error))
     box = [status]
-    group.broadcast_object_list(box, src=0)
+    group.broadcast_object_list(box, src=src)
     status = box[0]
     if status is not None:
         error_type, message = status
         raise RuntimeError(
-            f"{context} failed on rank0: {error_type}: {message}"
+            f"{context} failed on rank{src}: {error_type}: {message}"
         ) from source_error
     return result
 
@@ -192,6 +194,25 @@ def _fill_phase_timing_enabled() -> bool:
         "false",
         "no",
     )
+
+
+def _warm_shard_depth() -> int:
+    """How many shards may be held warm: 0 off, 1 the one being read, 2 also the next one.
+
+    Unparseable means the default rather than off, since a typo in a performance knob should not
+    quietly hand back the slow path.
+    """
+    from xfuser import envs
+
+    raw = str(envs.environment_variables["XDIT_WARM_SHARDS"]()).strip().lower()
+    if raw in ("", "false", "no"):
+        return 0
+    if raw == "true":
+        return 2
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 2
 
 
 def _collective_build_call(group, operation, context):
@@ -233,21 +254,21 @@ def _collective_build_call(group, operation, context):
     return result
 
 
-def _collective_reconcile_tensor_specs(module, names, group, device):
-    """Make peer tensor storage match rank0 shape/dtype before positional data broadcasts."""
+def _collective_reconcile_tensor_specs(module, names, group, device, src: int = 0):
+    """Make peer tensor storage match the reading rank's shape/dtype before positional broadcasts."""
     spec = (
         [
             (name, tuple(rgetattr(module, name).shape), rgetattr(module, name).dtype)
             for name in names
         ]
-        if group.rank_in_group == 0
+        if group.rank_in_group == src
         else None
     )
     box = [spec]
-    group.broadcast_object_list(box, src=0)
+    group.broadcast_object_list(box, src=src)
 
     def reconcile():
-        if group.rank_in_group != 0:
+        if group.rank_in_group != src:
             for name, shape, dtype in box[0]:
                 tensor = rgetattr(module, name)
                 if tuple(tensor.shape) != shape or tensor.dtype != dtype:
@@ -1380,13 +1401,14 @@ class _BlockwiseDiskFiller:
         self.device = device
         self.group = (group or get_fs_group()) if collective else None
         self.is_src = self.group is None or _is_bcast_src(self.group)
-        # Only rank0 reads the checkpoint; peers receive via broadcast and never open a file
-        # (no per-peer mmap page cache, no redundant hub revalidation HEADs).
+        # rank0 resolves the checkpoint map and hands it to every rank, rather than each rank
+        # resolving its own: the point of resolving once was to avoid redundant hub revalidation
+        # HEADs, and broadcasting the result keeps that while letting any rank read a block.
         manifest = (
             source
             if isinstance(source, CheckpointManifest)
             else CheckpointManifest(
-                self._source_call(
+                self._share_from_source(
                     lambda: resolve_checkpoint_weight_map(source),
                     context=f"resolving checkpoint map for {self.subfolder}",
                 )
@@ -1398,6 +1420,20 @@ class _BlockwiseDiskFiller:
         self.strict = manifest.strict
         self._used_keys = set()
         self.shard_paths = set(self.weight_map.values())
+        # Which keys each shard still owes, so a shard's page cache is dropped when the fill is
+        # globally done with it rather than when one rank happens to move on. Every rank sees every
+        # block's key list, so all of them reach zero for a shard at the same point without talking.
+        self._unread_by_shard: dict[str, set[str]] = collections.defaultdict(set)
+        for key, path in self.weight_map.items():
+            self._unread_by_shard[path].add(key)
+        # Which shard follows which, so one can be streamed in while the previous one is consumed.
+        # The checkpoint index lists keys in shard order, so first appearance is consumption order;
+        # being wrong here costs a wasted prefetch and not a wrong answer, since _handle still warms
+        # whatever it is actually handed.
+        order = list(dict.fromkeys(self.weight_map.values()))
+        self._next_shard = dict(zip(order, order[1:]))
+        self._streamed: set[str] = set()
+        self._prefetch_thread = None
         # Wall seconds per fill phase, reported once in finalize. Without a split, a slow fill gives
         # no clue whether to attack the reading, the transport or the collective bookkeeping.
         self._phase_seconds: dict[str, float] = collections.defaultdict(float)
@@ -1437,15 +1473,56 @@ class _BlockwiseDiskFiller:
                 phases = self._phase_seconds = collections.defaultdict(float)
             phases[phase] += time.monotonic() - started
 
-    def _source_call(self, fn, *, context):
+    def _is_reader(self, src: int) -> bool:
+        """Whether this rank is the one reading for `src`.
+
+        Falls back to the fixed is_src for a group that exposes no rank, which keeps a caller that
+        only ever reads on rank0 working without having to describe a rank it does not have.
+        """
+        if self.group is None:
+            return True
+        rank = getattr(self.group, "rank_in_group", None)
+        if rank is None:
+            return getattr(self, "is_src", True)
+        return rank == src
+
+    def _source_call(self, fn, *, context, src: int = 0):
         if self.group is None:
             return fn()
         return _collective_source_call(
             self.group,
-            self.is_src,
+            self._is_reader(src),
             fn,
             context=context,
+            src=src,
         )
+
+    def _share_from_source(self, fn, *, context):
+        """Run fn on rank0 and give every rank the result.
+
+        Distinct from _source_call, which discards the peers' None: the checkpoint map has to exist on
+        every rank now that any rank may be the one to read a block.
+        """
+        result = self._source_call(fn, context=context)
+        if self.group is None:
+            return result
+        box = [result if self._is_reader(0) else None]
+        self.group.broadcast_object_list(box, src=0)
+        return box[0]
+
+    def _reader_for_block(self, index: int) -> int:
+        """Which rank reads block `index`. Always rank 0; the hook exists to keep that decision named.
+
+        Rotating this across ranks looks like free parallelism and is not. Measured cold on 8 ranks it
+        cost 37.2s against 32.7s for a single reader: block-strided rotation puts every rank at a
+        different offset in the same shard, which defeats readahead, and it grew resident page cache
+        from ~10GB to 35.6GB because every rank ends up mapping every shard.
+
+        The fill is bounded by mmap fault latency rather than by having one reader. A single reader
+        sees ~0.6 GB/s through mmap where the same file streams at ~3.2 GB/s via pread and the device
+        tops out near 6 GB/s, so the headroom is in how the bytes are fetched, not in who fetches them.
+        """
+        return 0
 
     def _assert_same_layout(self, module):
         if self.group is not None:
@@ -1455,13 +1532,14 @@ class _BlockwiseDiskFiller:
                 getattr(self, "device", "cpu"),
             )
 
-    def _reconcile_tensor_specs(self, module, names):
+    def _reconcile_tensor_specs(self, module, names, src: int = 0):
         if self.group is not None:
             _collective_reconcile_tensor_specs(
                 module,
                 names,
                 self.group,
                 getattr(self, "device", "cpu"),
+                src=src,
             )
 
     def _read_device(self) -> str:
@@ -1485,17 +1563,91 @@ class _BlockwiseDiskFiller:
         Only the host-read fallback actually accumulates (see _read_device), but one shard is the
         right bound either way, and releasing on shard change rather than per block keeps the
         teardown count at one per shard: blocks are laid out in key order.
+
+        Streaming the shard before mapping it is what makes the read fast rather than fault-bound
+        (see warm_file_page_cache). It belongs here because this is the one place that knows a shard
+        is about to be read in full, and being per-shard is what bounds it: the previous shard's
+        handle is already closed and its pages already retired.
         """
         from safetensors import safe_open
 
         h = self._handle_cache.get(path)
         if h is None:
             self._release_handles()
+            depth = _warm_shard_depth()
+            if depth:
+                # Charged as its own phase, but it happens inside a "read" span and so is counted in
+                # that total too: it is a component of the read, not a sibling of it.
+                with self._timed("warm"):
+                    self._await_or_warm(path)
             h = self._stack.enter_context(
                 safe_open(path, framework="pt", device=self._read_device())
             )
             self._handle_cache[path] = h
+            if depth > 1:
+                self._prefetch_after(path)
         return h
+
+    def _await_or_warm(self, path) -> None:
+        """Make `path` warm, unless it already is because the previous shard streamed it ahead.
+
+        A prefetch in flight is deliberately not waited on. Its pread stays ahead of the mmap that
+        follows it, so letting the read start immediately costs nothing, where stalling for the tail
+        of a stream we are about to consume anyway only adds latency.
+
+        Tracked as a set rather than "which shard is in flight" because a shard outlives its
+        prefetch: the tail fill reopens shards the block walk already closed, and asking whether a
+        stream is running would restream those in full.
+        """
+        streamed = self._streamed_shards()
+        if path in streamed:
+            return
+        warm_file_page_cache(path)
+        streamed.add(path)
+
+    def _prefetch_after(self, path) -> None:
+        """Stream the next shard while this one is being consumed.
+
+        Warming is the one part of the read still serialised against it: the shard has to be in cache
+        before the mmap walks it, so the fill pays that stream up front with the device idle. The work
+        after it -- quantise, broadcast, shard -- needs no disk, which is what the next shard's stream
+        can hide under.
+
+        Exactly one shard is ever in flight, so this holds two shards in page cache rather than the
+        whole checkpoint. Shards with nothing left unread are skipped: they have already been retired
+        by _retire_keys and re-reading one would put back the cache that drop exists to release.
+        """
+        nxt = getattr(self, "_next_shard", {}).get(path)
+        streamed = self._streamed_shards()
+        if nxt is None or nxt in streamed or not self._unread_by_shard.get(nxt):
+            return
+        self._join_prefetch()
+        streamed.add(nxt)
+        self._prefetch_thread = threading.Thread(
+            target=warm_file_page_cache, args=(nxt,), daemon=True
+        )
+        self._prefetch_thread.start()
+
+    def _streamed_shards(self) -> set:
+        """Shards believed to be in page cache.
+
+        Lazily, for the same reason the phase tally is: this class gets built attribute-by-attribute
+        in places and a prefetch is never worth an AttributeError.
+        """
+        streamed = getattr(self, "_streamed", None)
+        if streamed is None:
+            streamed = self._streamed = set()
+        return streamed
+
+    def _join_prefetch(self) -> None:
+        """Wait for any in-flight prefetch, so a stream never outlives the fill that wanted it.
+
+        A thread left running past teardown would repopulate cache that finalize just dropped.
+        """
+        thread = getattr(self, "_prefetch_thread", None)
+        self._prefetch_thread = None
+        if thread is not None:
+            thread.join()
 
     def _release_handles(self):
         """Close any open shard handle, freeing the tensor copies it retains.
@@ -1508,11 +1660,8 @@ class _BlockwiseDiskFiller:
         order with one shard open at a time, so a shard being closed means the fill is done with it.
         If a later block did reopen it, the cost is a re-read and not a wrong answer.
         """
-        closed = list(self._handle_cache)
         self._handle_cache.clear()
         self._stack.close()
-        if closed and getattr(self, "is_src", False):
-            drop_file_page_cache(closed)
 
     def _ckpt_key(self, root, name):
         """Map a live (possibly wrapped) param/buffer name to its checkpoint key.
@@ -1552,14 +1701,16 @@ class _BlockwiseDiskFiller:
         )
         self._used_keys.add(key)
 
-    def _require_checkpoint_keys(self, keys):
+    def _require_checkpoint_keys(self, keys, src: int = 0):
         """Collectively reject missing persistent tensors before any rank enters data broadcast."""
         missing = (
-            [key for key in keys if key not in self.weight_map] if self.is_src else None
+            [key for key in keys if key not in self.weight_map]
+            if self._is_reader(src)
+            else None
         )
         if self.group is not None:
             box = [missing]
-            self.group.broadcast_object_list(box, src=0)
+            self.group.broadcast_object_list(box, src=src)
             missing = box[0]
         if missing:
             preview = ", ".join(missing[:3])
@@ -1568,7 +1719,7 @@ class _BlockwiseDiskFiller:
                 f"missing checkpoint tensors in {self.subfolder}: {preview}{suffix}"
             )
 
-    def _broadcast(self, module):
+    def _broadcast(self, module, src: int = 0):
         if self.group is None:
             return
         # Collective: all group ranks must call in the same order. Module structure is identical
@@ -1581,10 +1732,11 @@ class _BlockwiseDiskFiller:
                     recurse=True, remove_duplicate=False
                 )
             ]
-            + [b.data for _, b in _persistent_named_buffers(module)]
+            + [b.data for _, b in _persistent_named_buffers(module)],
+            src=src,
         )
 
-    def _broadcast_tensors(self, tensors) -> None:
+    def _broadcast_tensors(self, tensors, src: int = 0) -> None:
         """Broadcast a module's tensors from rank0 as one batch of collectives.
 
         One broadcast per tensor is fifteen launches per block on Z-Image, each paying its own
@@ -1602,14 +1754,38 @@ class _BlockwiseDiskFiller:
         manager = getattr(torch.distributed, "_coalescing_manager", None)
         if manager is None or device_group is None:
             for tensor in tensors:
-                self.group.broadcast(tensor, src=0)
+                self.group.broadcast(tensor, src=src)
             return
-        src = torch.distributed.get_global_rank(device_group, 0)
+        global_src = torch.distributed.get_global_rank(device_group, src)
         with manager(group=device_group, device=torch.device(self.device)):
             for tensor in tensors:
-                torch.distributed.broadcast(tensor, src=src, group=device_group)
+                torch.distributed.broadcast(tensor, src=global_src, group=device_group)
 
-    def _read_tensors(self, module, required) -> None:
+    def _retire_keys(self, keys) -> None:
+        """Drop a shard's page cache once nothing still needs it.
+
+        Tied to the keys rather than to a handle closing, because a shard's keys outlive any one
+        handle: the tail fill reaches back for keys in shards the block walk already closed, and
+        dropping on close evicted pages that were about to be read again. Keying on "every key in
+        this shard has been consumed" is the condition that actually means finished.
+        """
+        by_shard = getattr(self, "_unread_by_shard", None)
+        if by_shard is None:
+            return
+        for key in keys:
+            path = self.weight_map.get(key)
+            remaining = by_shard.get(path) if path else None
+            if remaining is None:
+                continue
+            remaining.discard(key)
+            if not remaining:
+                del by_shard[path]
+                # Forget that it was streamed: its pages are going away, so a reopen has to pay for
+                # them again rather than trusting a warm that no longer holds.
+                self._streamed_shards().discard(path)
+                drop_file_page_cache([path])
+
+    def _read_tensors(self, module, required, src: int = 0) -> None:
         """Read every tensor a module needs under one collective status exchange.
 
         A _source_call per tensor meant a pickled broadcast_object_list per tensor: fifteen of them
@@ -1630,7 +1806,11 @@ class _BlockwiseDiskFiller:
                         f"reading checkpoint tensor {key}: {type(error).__name__}: {error}"
                     ) from error
 
-        self._source_call(read_all, context=f"loading {self.subfolder} checkpoint tensors")
+        self._source_call(
+            read_all,
+            context=f"loading {self.subfolder} checkpoint tensors",
+            src=src,
+        )
 
     def fill_block(self, block, i):
         """Fill + broadcast one wrapped block, excluding only non-persistent buffers."""
@@ -1639,6 +1819,7 @@ class _BlockwiseDiskFiller:
         if fqn is None:
             raise RuntimeError(f"block {i} not found in wrap_attrs index (id mismatch)")
         layout = _tensor_layout(block)
+        src = self._reader_for_block(i)
         with self._timed("agree"):
             self._assert_same_layout(block)
         prefix = fqn + "."
@@ -1650,16 +1831,17 @@ class _BlockwiseDiskFiller:
             for local_name, _ in _persistent_named_buffers(block)
         ]
         with self._timed("agree"):
-            self._require_checkpoint_keys([key for _, key in required])
+            self._require_checkpoint_keys([key for _, key in required], src=src)
         with self._timed("read"):
-            self._read_tensors(block, required)
+            self._read_tensors(block, required, src=src)
         broadcast_names = [name for kind, name in layout if kind == "parameter"] + [
             name for name, _ in _persistent_named_buffers(block)
         ]
         with self._timed("agree"):
-            self._reconcile_tensor_specs(block, broadcast_names)
+            self._reconcile_tensor_specs(block, broadcast_names, src=src)
         with self._timed("broadcast"):
-            self._broadcast(block)
+            self._broadcast(block, src=src)
+        self._retire_keys([key for _, key in required])
         if i % 8 == 0:
             log(
                 f"  self-fill {self.subfolder} block {i}: host cur/anon/file "
@@ -1733,6 +1915,7 @@ class _BlockwiseDiskFiller:
                 self._broadcast_tensors(
                     [rgetattr(comp, name).data for name in tail + tail_bufs]
                 )
+        self._retire_keys([self._ckpt_key(comp, name) for name in tail + tail_bufs])
         if self.strict:
             unused = sorted(set(self.weight_map) - self._used_keys)
             if unused:
@@ -1744,10 +1927,13 @@ class _BlockwiseDiskFiller:
                 )
         self._retie_weights(comp)
         self._release_handles()
-        if self.is_src:
-            # Backstop: _release_handles drops each shard as the fill leaves it, but a shard that was
-            # never the open one (a tail-only shard, say) would otherwise keep its cache.
-            drop_file_page_cache(self.shard_paths)
+        # Before the drop, not after: a prefetch still streaming would put back the cache this is
+        # about to release. Joining here rather than in _release_handles is what keeps the prefetch
+        # overlapped, since that runs on every shard change.
+        self._join_prefetch()
+        # Backstop: _retire_keys drops each shard as its last key is consumed, but a shard holding
+        # keys this fill never asks for would otherwise keep its cache to the end.
+        drop_file_page_cache(self.shard_paths)
         self._log_phase_breakdown()
 
     def _log_phase_breakdown(self) -> None:

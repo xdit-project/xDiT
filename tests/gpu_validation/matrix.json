@@ -4,13 +4,64 @@
   "description": "External GPU end-to-end validation matrix for loading and quantization roadmap task 8. Entries are plans, not results.",
   "generated_by": "tools/generate_validation_matrix.py",
   "defaults": {
-    "prompt": "A red origami fox on a slate table, studio light",
-    "seed": 1234,
-    "num_inference_steps": 4,
-    "height": 512,
-    "width": 512,
     "output_root": "gpu-validation-output",
     "timeout_seconds": 3600
+  },
+  "sampling": {
+    "Z-Image": {
+      "prompt": "A crowded beach",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 1088,
+      "width": 1920,
+      "guidance_scale": 4.0,
+      "source": ".ci/benchmark_configs/z_image.yaml, entry z_image.default, whose tags include gfx950"
+    },
+    "Z-Image-Turbo": {
+      "prompt": "A small cat",
+      "seed": 42,
+      "num_inference_steps": 4,
+      "height": 512,
+      "width": 320,
+      "guidance_scale": 0.0,
+      "source": ".ci/benchmark_configs/z_image_turbo.yaml, entry z_image_turbo.1gpu.rdna4, the only entries this model has. Steps, guidance and resolution describe the model rather than the accelerator, so they carry over to gfx950; guidance is 0.0 because the model is distilled and does not use classifier-free guidance."
+    },
+    "FLUX.1-dev": {
+      "prompt": "A small cat",
+      "seed": 42,
+      "num_inference_steps": 25,
+      "height": 1024,
+      "width": 1024,
+      "guidance_scale": 0.0,
+      "source": ".ci/benchmark_configs/flux.yaml, entry flux.usp, whose tags include gfx950"
+    },
+    "FLUX.2-dev": {
+      "prompt": "Cat astronaut raising a cat flag on the surface of moon",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 1024,
+      "width": 1024,
+      "guidance_scale": 4.0,
+      "source": ".ci/benchmark_configs/flux2.yaml, entry flux2.t2i_1k, whose tags include gfx950. Text-to-image rather than the image-to-image entries, since these cases pass no input image. The rdna4 entries run the same model at 4 steps, which is a throughput setting rather than this model's operating point."
+    },
+    "FLUX.2-klein-9B": {
+      "prompt": "A spectacular sunset over the ocean",
+      "seed": 42,
+      "num_inference_steps": 4,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": 1.0,
+      "source": ".ci/benchmark_configs/flux2_klein.yaml, entry flux2_klein.default, whose tags include gfx950"
+    },
+    "Qwen-Image": {
+      "prompt": "A cat holding a sign that says hello world",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": 0.0,
+      "source": ".ci/benchmark_configs/qwen_image.yaml, entry qwen_image.default"
+    }
   },
   "cases": [
     {

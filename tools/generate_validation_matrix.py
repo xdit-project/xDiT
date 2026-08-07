@@ -350,6 +350,7 @@ def build_matrix(profiles_path: Path, curated_path: Path) -> tuple[dict, dict]:
         "description": curated_doc["description"],
         "generated_by": "tools/generate_validation_matrix.py",
         "defaults": curated_doc["defaults"],
+        "sampling": curated_doc["sampling"],
         "cases": curated_doc["cases"] + kept,
     }
     sys.path.insert(0, str(ROOT / "tools"))

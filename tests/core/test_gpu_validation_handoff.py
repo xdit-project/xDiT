@@ -16,6 +16,17 @@ MATRIX_PATH = ROOT / "tests/gpu_validation/matrix.json"
 RUNNER_PATH = ROOT / "tools/gpu_validation.py"
 GUIDE_PATH = ROOT / "docs/runner/gpu_validation_handoff.md"
 
+# Stands in for a model's own settings in tests about command shape, where which model is being
+# sampled does not matter. Tests about sampling itself read the matrix instead of using this.
+SAMPLING = {
+    "prompt": "A crowded beach",
+    "seed": 42,
+    "num_inference_steps": 50,
+    "height": 1088,
+    "width": 1920,
+    "guidance_scale": 4.0,
+}
+
 
 @pytest.fixture(scope="module")
 def runner():
@@ -129,9 +140,11 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
         case for case in matrix["cases"] if case["placement"] == "fsdp_blockwise"
     )
 
-    eager_command = runner.build_command(eager, matrix["defaults"], run_id="test-run")
+    eager_command = runner.build_command(
+        eager, matrix["defaults"], run_id="test-run", sampling=SAMPLING
+    )
     distributed_command = runner.build_command(
-        distributed, matrix["defaults"], run_id="test-run"
+        distributed, matrix["defaults"], run_id="test-run", sampling=SAMPLING
     )
 
     assert eager_command[0] == "xdit"
@@ -148,6 +161,56 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
     assert eager_command[output_index + 1].endswith(f"{eager['id']}/test-run")
 
 
+def test_a_model_is_sampled_the_way_that_model_is_meant_to_be_sampled(runner, matrix):
+    """One default for every model produced images that were not the models' output.
+
+    Base Z-Image is a fifty-step CFG model and Z-Image-Turbo is distilled to four steps with no
+    guidance at all. The matrix applied Turbo's four steps to both, so Z-Image returned an
+    unconverged blob, and it never passed guidance at all, so Turbo silently got the runner's 3.5.
+    """
+    z_image = next(case for case in matrix["cases"] if case["model"] == "Z-Image")
+    turbo = next(case for case in matrix["cases"] if case["model"] == "Z-Image-Turbo")
+
+    base = runner.build_command(
+        z_image, matrix["defaults"], sampling=runner.sampling_for(z_image, matrix)
+    )
+    distilled = runner.build_command(
+        turbo, matrix["defaults"], sampling=runner.sampling_for(turbo, matrix)
+    )
+
+    assert base[base.index("--num_inference_steps") + 1] == "50"
+    assert base[base.index("--guidance_scale") + 1] == "4.0"
+    assert distilled[distilled.index("--num_inference_steps") + 1] == "4"
+    assert distilled[distilled.index("--guidance_scale") + 1] == "0.0"
+
+
+def test_a_model_with_no_settings_is_refused_rather_than_given_another_model_s(runner, matrix):
+    """Guessing here is what produced an afternoon of conclusions about unconverged images."""
+    unspecified = next(
+        case for case in matrix["cases"] if case["model"] not in (matrix["sampling"] or {})
+    )
+
+    with pytest.raises(runner.UnknownSampling) as raised:
+        runner.sampling_for(unspecified, matrix)
+
+    assert unspecified["model"] in str(raised.value)
+    assert "curated_cases.json" in str(raised.value), "the message has to say where to fix it"
+
+
+def test_sampling_settings_record_where_they_came_from(runner, matrix):
+    """A step count with no provenance is indistinguishable from one somebody made up."""
+    for model, settings in (matrix["sampling"] or {}).items():
+        assert settings.get("source"), f"{model} does not say where its settings came from"
+        assert "benchmark_configs" in settings["source"]
+
+
+def test_no_matrix_wide_sampling_default_remains(runner, matrix):
+    """While one exists, a model with no entry can quietly inherit settings that do not fit it."""
+    leaked = set(runner.SAMPLING_KEYS) & set(matrix["defaults"])
+
+    assert not leaked, f"defaults still carry sampling settings: {sorted(leaked)}"
+
+
 def test_the_control_shards_the_same_way_without_the_memory_efficient_fill(runner, matrix):
     """The control's whole purpose is to differ from its blockwise case in exactly one flag.
 
@@ -158,7 +221,9 @@ def test_the_control_shards_the_same_way_without_the_memory_efficient_fill(runne
         case for case in matrix["cases"] if case["placement"] == "fsdp_eager_fill"
     )
 
-    command = runner.build_command(control, matrix["defaults"], run_id="test-run")
+    command = runner.build_command(
+        control, matrix["defaults"], run_id="test-run", sampling=SAMPLING
+    )
 
     assert "--fully_shard_degree" in command
     assert "--memory_efficient_sharding" not in command
@@ -182,7 +247,9 @@ def test_distributed_commands_declare_a_parallel_degree(runner, matrix):
     for case in matrix["cases"]:
         if case["world_size"] < 2:
             continue
-        command = runner.build_command(case, matrix["defaults"], run_id="test-run")
+        command = runner.build_command(
+            case, matrix["defaults"], run_id="test-run", sampling=SAMPLING
+        )
         declared = [flag for flag in degree_flags if flag in command]
         assert declared, (
             f"{case['id']}: multi-rank command declares no parallel degree; "
@@ -208,7 +275,9 @@ def test_every_placement_declares_a_parallel_degree_when_distributed(
     )
 
     runner.validate_matrix({**matrix, "cases": [case]})
-    command = runner.build_command(case, matrix["defaults"], run_id="test-run")
+    command = runner.build_command(
+            case, matrix["defaults"], run_id="test-run", sampling=SAMPLING
+        )
 
     assert command[command.index("--ulysses_degree") + 1] == "4"
     memory_efficient = ("--memory_efficient_replicated_load", "--fully_shard_degree")
@@ -221,7 +290,9 @@ def test_local_checkpoint_command_keeps_env_placeholder(runner, matrix):
         case for case in matrix["cases"] if case["checkpoint"]["source"] == "local"
     )
 
-    command = runner.build_command(case, matrix["defaults"], run_id="test-run")
+    command = runner.build_command(
+            case, matrix["defaults"], run_id="test-run", sampling=SAMPLING
+        )
 
     placeholder = f"${{{case['checkpoint']['env']}}}"
     assert any(placeholder in argument for argument in command)
@@ -431,8 +502,8 @@ def test_fresh_run_directory_is_unique_and_reuse_fails(runner, tmp_path):
         "offload": "none",
         "args": [],
     }
-    first = runner.build_command(case, defaults, run_id="run-a")
-    second = runner.build_command(case, defaults, run_id="run-b")
+    first = runner.build_command(case, defaults, run_id="run-a", sampling=SAMPLING)
+    second = runner.build_command(case, defaults, run_id="run-b", sampling=SAMPLING)
     first_dir = Path(first[first.index("--output_directory") + 1])
     second_dir = Path(second[second.index("--output_directory") + 1])
 
@@ -452,7 +523,7 @@ def test_output_directory_is_absolute_from_non_repo_cwd(
         "output_root": "relative-output",
     }
 
-    command = runner.build_command(case, defaults, run_id="outside-cwd")
+    command = runner.build_command(case, defaults, run_id="outside-cwd", sampling=SAMPLING)
     output_dir = Path(command[command.index("--output_directory") + 1])
 
     assert output_dir.is_absolute()
@@ -760,6 +831,7 @@ def test_continue_on_error_runs_remaining_cases_but_returns_failure(
             **matrix["defaults"],
             "output_root": str(tmp_path / "outputs"),
         },
+        "sampling": matrix["sampling"],
         "cases": cases,
     }
     observed = {
@@ -1175,6 +1247,7 @@ def test_environment_mismatch_does_not_execute_case(
         "schema_version": 2,
         "validation_status": "NOT RUN",
         "defaults": matrix["defaults"],
+        "sampling": matrix["sampling"],
         "cases": [matrix["cases"][0]],
     }
     observed = {
@@ -1222,6 +1295,7 @@ def test_missing_placeholder_continues_batch_without_logging_value(
             **matrix["defaults"],
             "output_root": str(tmp_path / "outputs"),
         },
+        "sampling": matrix["sampling"],
         "cases": cases,
     }
     observed = {

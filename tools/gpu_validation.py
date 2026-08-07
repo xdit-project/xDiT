@@ -255,11 +255,43 @@ def select_cases(
     ]
 
 
+class UnknownSampling(LookupError):
+    """Raised when a model has no sampling settings, so there is no honest way to run it."""
+
+
+SAMPLING_KEYS = ("prompt", "seed", "num_inference_steps", "height", "width", "guidance_scale")
+
+
+def sampling_for(case: dict[str, Any], matrix: dict[str, Any]) -> dict[str, Any]:
+    """The model's own sampling settings, or a refusal to guess.
+
+    There is deliberately no fallback. Sampling one model the way another one wants to be sampled
+    produces an image that is not the model's output, and a matrix-wide default did exactly that:
+    base Z-Image ran at Z-Image-Turbo's four steps and returned an unconverged blob. Erroring out
+    costs a line in the matrix; a wrong default costs a whole afternoon of conclusions drawn from
+    images that were never going to be right.
+    """
+    settings = (matrix.get("sampling") or {}).get(case["model"])
+    if not settings:
+        raise UnknownSampling(
+            f"no sampling settings for {case['model']}: add them to the sampling block in "
+            "tests/gpu_validation/curated_cases.json, taking the model's own operating point from "
+            "its .ci/benchmark_configs entry, and regenerate the matrix"
+        )
+    missing = [key for key in SAMPLING_KEYS if key not in settings]
+    if missing:
+        raise UnknownSampling(
+            f"sampling settings for {case['model']} are missing {', '.join(missing)}"
+        )
+    return settings
+
+
 def build_command(
     case: dict[str, Any],
     defaults: dict[str, Any],
     *,
     run_id: str | None = None,
+    sampling: dict[str, Any],
 ) -> list[str]:
     command: list[str] = []
     checkpoint = case["checkpoint"]
@@ -292,20 +324,26 @@ def build_command(
     if run_id is None:
         timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"{timestamp}-{uuid.uuid4().hex[:12]}"
+    # Sampling comes from the model's own entry, with no default to fall back to. Guidance is passed
+    # explicitly because leaving it to the runner silently gave a distilled model classifier-free
+    # guidance it does not use.
+    settings = sampling
     command.extend(
         [
             "--model",
             case["model"],
             "--prompt",
-            str(defaults["prompt"]),
+            str(settings["prompt"]),
             "--seed",
-            str(defaults["seed"]),
+            str(settings["seed"]),
             "--num_inference_steps",
-            str(defaults["num_inference_steps"]),
+            str(settings["num_inference_steps"]),
             "--height",
-            str(defaults["height"]),
+            str(settings["height"]),
             "--width",
-            str(defaults["width"]),
+            str(settings["width"]),
+            "--guidance_scale",
+            str(settings["guidance_scale"]),
             "--output_directory",
             str(output_root / case["id"] / run_id),
         ]
@@ -1604,10 +1642,21 @@ def main(argv: list[str] | None = None) -> int:
     statuses: list[str] = []
     outputs: dict[str, dict[str, Any]] = {}
     for case in selected:
-        command = build_command(case, defaults)
+        expected = case["expected"]["outcome"]
+        try:
+            command = build_command(case, defaults, sampling=sampling_for(case, matrix))
+        except UnknownSampling as error:
+            # Reported per case rather than raised, so one unspecified model does not hide the
+            # commands for every other case in the selection.
+            print(f"{case['id']} [{expected}]")
+            print(f"  cannot run: {error}")
+            # Only a real attempt to run counts as a failure; listing or dry-running the matrix is
+            # how you find out which models still need settings, and that should not exit nonzero.
+            if args.execute:
+                statuses.append("preflight_failure")
+            continue
         if args.score_quality:
             command = without_compile(command)
-        expected = case["expected"]["outcome"]
         print(f"{case['id']} [{expected}]")
         print(f"  {format_command(command)}")
         if args.list:

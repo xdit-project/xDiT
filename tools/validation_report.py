@@ -62,6 +62,25 @@ def _gib(value) -> str:
     return f"{value / (1024 ** 3):.1f}G"
 
 
+def _combination(case: dict) -> str:
+    """Label carrying every dimension that distinguishes cases for the same model.
+
+    Placement, quantization and world size are not enough on their own: Wan2.2-I2V has
+    three eager/fp8 cases separated only by rank count and whether the text encoder is
+    quantized too, and two RDNA4 FLUX.2-dev cases differ only in offload and transformers
+    major. Anything that varies has to appear, or a row silently stands in for another.
+    """
+    label = f"{case['placement']}/{case['quantization']}/w{case['world_size']}"
+    extras = []
+    if case.get("te_fp8"):
+        extras.append("te")
+    if case.get("offload", "none") != "none":
+        extras.append(f"offload={case['offload']}")
+    if case.get("transformers") != "5.x":
+        extras.append(f"tf{case['transformers']}")
+    return "+".join([label, *extras])
+
+
 def _post_load(metrics: dict):
     wall = metrics.get("wall_duration_seconds")
     load = metrics.get("load_duration_seconds")
@@ -204,7 +223,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 mark,
                 record["case_id"],
                 case["model"],
-                f"{case['placement']}/{case['quantization']}/w{case['world_size']}",
+                _combination(case),
                 _seconds(metrics.get("load_duration_seconds")),
                 _seconds(_post_load(metrics)),
                 _seconds(metrics.get("wall_duration_seconds")),
@@ -244,10 +263,12 @@ def render(report: dict, *, markdown: bool = False) -> str:
         for r in ran
         if r.get("metrics", {}).get("peak_gpu_memory_bytes")
     }
-    if "global" in scopes:
+    # Anything that is not explicitly process-local is treated as contaminated, so a
+    # renamed scope errs towards warning rather than silently dropping the caveat.
+    if any(scope != "process_tree" for scope in scopes if scope):
         lines.append(
-            "peak vram was sampled globally on this platform, so on a shared node it "
-            "includes other tenants' allocations and is an upper bound, not this run's usage."
+            "peak vram was sampled device-globally on this platform, so on a shared node "
+            "it includes other tenants and is an upper bound, not this run's usage."
         )
     lines.append("")
 
@@ -273,29 +294,30 @@ def render(report: dict, *, markdown: bool = False) -> str:
     for case in report["relevant"]:
         by_model[case["model"]].append(case)
     status_by_id = {r["case_id"]: r["status"] for r in ran}
+    rows = []
+    for model in sorted(by_model):
+        shown = model
+        for case in sorted(by_model[model], key=_combination):
+            status = status_by_id.get(case["id"])
+            if status is None:
+                outcome = "not run"
+            elif status == "passed":
+                outcome = "ok"
+            elif status == "passed_expected_rejection":
+                outcome = "rej"
+            else:
+                outcome = "FAIL"
+            rows.append([shown, _combination(case), outcome])
+            shown = ""
     if fence:
         lines.append(fence)
-    for model in sorted(by_model):
-        combos = []
-        for case in sorted(by_model[model], key=lambda c: c["id"]):
-            label = f"{case['placement']}/{case['quantization']}"
-            status = status_by_id.get(case["id"])
-            if status == "passed":
-                combos.append(f"{label} ok")
-            elif status == "passed_expected_rejection":
-                combos.append(f"{label} rej")
-            elif status is not None:
-                combos.append(f"{label} FAIL")
-            else:
-                combos.append(f"{label} -")
-        lines.append(f"  {model}: {', '.join(combos)}")
+    lines.extend(_table(rows, ["model", "placement/quant/world", "outcome"]))
     if fence:
         lines.append(fence)
     lines.append("")
     lines.append(
-        "A dash means the case is planned for this hardware but has not run. "
         "rej is a combination this hardware and torch build are expected to refuse, "
-        "so it is covered but not usable."
+        "so it is covered but is not usable."
     )
     return "\n".join(lines) + "\n"
 
@@ -310,6 +332,8 @@ def _case_targets(case: dict, accelerators: set[str]) -> bool:
         return all(a.startswith("gfx") and a not in rdna4 for a in accelerators)
     if token == "gfx1200_or_gfx1201":
         return all(a in rdna4 for a in accelerators)
+    if token == "gfx942_or_gfx950":
+        return all(a in {"gfx942", "gfx950"} for a in accelerators)
     if token.startswith("gfx"):
         return all(a == token for a in accelerators)
     return False

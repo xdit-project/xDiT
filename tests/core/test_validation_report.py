@@ -88,9 +88,13 @@ def test_an_expected_rejection_is_not_shown_as_a_working_combination(
     )
     path = _write(tmp_path, [_record(case, "passed_expected_rejection")])
     text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
-    combination = f"{case['placement']}/{case['quantization']}"
-    assert f"{combination} rej" in text
-    assert f"{combination} ok" not in text
+    combination = report_tool._combination(case)
+    coverage_row = next(
+        line
+        for line in text.splitlines()
+        if combination in line and line.split()[-1] in {"ok", "rej", "FAIL", "run"}
+    )
+    assert coverage_row.endswith("rej")
     assert "GREEN" in text and "NOT GREEN" not in text
 
 
@@ -121,10 +125,18 @@ def test_a_failure_makes_the_whole_report_not_green(report_tool, matrix, tmp_pat
     assert failing["id"] in text.split("Failures", 1)[1]
 
 
-def test_globally_sampled_vram_is_flagged_as_an_upper_bound(
-    report_tool, matrix, tmp_path
+@pytest.mark.parametrize(
+    "scope, flagged",
+    [("device_global", True), ("process_tree", False)],
+)
+def test_device_global_vram_is_flagged_as_an_upper_bound(
+    report_tool, matrix, tmp_path, scope, flagged
 ):
-    """On ROCm the sampler reads whole-device usage, so a shared node inflates it."""
+    """On ROCm the sampler reads whole-device usage, so a shared node inflates it.
+
+    The scope strings have to be the ones the runner actually writes; a caveat keyed to a
+    value it never emits would silently stop warning.
+    """
     case = _cases_for(matrix, "gfx950")[0]
     path = _write(
         tmp_path,
@@ -134,18 +146,32 @@ def test_globally_sampled_vram_is_flagged_as_an_upper_bound(
                 "passed",
                 wall_duration_seconds=1.0,
                 peak_gpu_memory_bytes=4 * 1024**3,
-                gpu_memory_scope="global",
+                gpu_memory_scope=scope,
             )
         ],
     )
     text = report_tool.render(report_tool.build_report([path], MATRIX_PATH))
-    assert "upper bound" in text
+    assert ("upper bound" in text) is flagged
 
 
 def test_post_load_time_is_never_negative(report_tool, matrix, tmp_path):
     case = _cases_for(matrix, "gfx950")[0]
     metrics = {"wall_duration_seconds": 5.0, "load_duration_seconds": 9.0}
     assert report_tool._post_load(metrics) == 0.0
+
+
+def test_every_case_for_one_model_on_one_arch_gets_a_distinct_label(
+    report_tool, matrix
+):
+    """Coverage rows are keyed by this label, so a collision hides an untested case."""
+    seen = {}
+    for case in matrix["cases"]:
+        key = (case["model"], case["hardware"]["accelerator"])
+        label = report_tool._combination(case)
+        collision = seen.setdefault((key, label), case["id"])
+        assert collision == case["id"], (
+            f"{case['id']} and {collision} both render as {label} for {key}"
+        )
 
 
 def test_missing_results_file_reports_nothing_ran(report_tool, tmp_path):

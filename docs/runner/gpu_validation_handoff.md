@@ -50,6 +50,22 @@ selection where the platform tooling exposes an ordered device list. The
 selected variable and value are recorded under `validation_probe.visibility`.
 There is no bypass flag: select the matching environment or matrix case.
 
+A case's `hardware.accelerator` is enforced, not documentation, and an
+unrecognised token is a validation error rather than a case that silently never
+matches. On ROCm the accepted tokens are:
+
+| Token | Matches | Use it when |
+| --- | --- | --- |
+| `gfx942`, `gfx950` | that arch alone | behaviour is specific to it, as with the FP4 rejections that hold only where AITER ships no FP4 kernels |
+| `gfx942_or_gfx950` | either datacentre arch | behaviour is the same on both, which `envs._on_mi3xx` already treats as one class |
+| `non_rdna4_rocm` | any ROCm that is not RDNA4 | the gate is RDNA4-versus-rest and older parts such as gfx90a are acceptable |
+| `gfx1200_or_gfx1201` | RDNA4 | the case needs the AITER block-scale path |
+
+Pin a case to a single arch only when its behaviour genuinely differs there.
+Where a case merely happened to run on one machine first, record that under
+`observed_on_<arch>` and leave the accelerator token as wide as the behaviour
+allows, so the case stays eligible on the other hardware.
+
 ## Selecting and executing cases
 
 Filters compose. Repeated tags are ANDed; repeated models are ORed.
@@ -146,6 +162,30 @@ does not require an output artifact; it passes only when the process exits
 nonzero before `Running model...` and its log matches the declared
 `error_pattern`. A late failure, wrong rejection, missing rejection, or missing
 output is a failed validation.
+
+## Reading the results
+
+`tools/validation_report.py` turns those records into a report meant for people
+rather than for parsing:
+
+```bash
+python tools/validation_report.py \
+  --results gpu-validation-results/results.jsonl
+```
+
+It states whether the run is green, gives the outcome, load time, wall time and
+peak device and host memory per case, and then lists which combinations for each
+model on this hardware have still not run. The denominator counts only cases
+this machine's accelerator can run, so cases needing other hardware are not
+reported as outstanding work. Pass `--format markdown` for a version to paste
+into a report, and pass several `--results` files to combine runs; the latest
+record for a case ID wins, so a re-run supersedes an earlier attempt.
+
+Two readings the report deliberately keeps apart. A case the matrix expects to
+be refused shows as `rej` rather than `ok`: the guard firing is a pass, but the
+combination still does not work on that hardware. And the post-load column is
+wall minus load, so it covers VAE decode, saving and teardown as well as
+inference; the runner does not time inference on its own.
 
 Generated artifacts use a central allowlist,
 `GENERATED_ARTIFACT_EXTENSIONS` in `tools/gpu_validation.py`. The current

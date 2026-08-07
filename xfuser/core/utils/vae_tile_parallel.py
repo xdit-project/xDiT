@@ -334,13 +334,17 @@ def _wanted(owner: Sequence[int], columns: int, blend: Blend) -> Set[int]:
     wanted: Set[int] = set()
     for n, rank in enumerate(owner):
         row, column = divmod(n, columns)
-        if blend.deep_down and row > 0 and owner[n - columns] != rank:
+        above = blend.deep_down and row > 0 and owner[n - columns] != rank
+        left = blend.deep_across and column > 0 and owner[n - 1] != rank
+        if above:
             wanted.add(n - columns)
-            if blend.deep_across and column > 0:
-                wanted.add(n - columns - 1)
-        if blend.deep_across and column > 0 and owner[n - 1] != rank:
+        if left:
             wanted.add(n - 1)
-            if blend.deep_down and row > 0:
+        # The tile up and to the left is read for either of them, since blending down and then
+        # across reaches diagonally through the two, and it is asked for once rather than from
+        # inside each branch.
+        if (above or left) and blend.deep_down and blend.deep_across:
+            if row > 0 and column > 0:
                 wanted.add(n - columns - 1)
     return wanted
 

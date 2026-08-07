@@ -152,16 +152,14 @@ def tile_plan(vae, pixels: int) -> Optional[dict]:
     # to the requested size hides it, which is why this has to be refused here rather than caught
     # later: --vae_tile_size 132 on a 256px, 192-stride, ratio-8 VAE scales to a whole 99 and
     # passes every other check, then steps 96 pixels while cropping 99.
+    steps = [pixels] + [plan[attr] for attr in STRIDE_ATTRS if attr in plan]
     step = _stride_granularity(vae) if tiles_by_stored_stride(vae) else None
-    if step is not None:
-        strides = [plan[attr] for attr in STRIDE_ATTRS if attr in plan]
-        if any(value % step for value in [pixels] + strides):
-            return None
+    if step is not None and any(value % step for value in steps):
+        return None
     # A stride below one latent pixel divides down to a zero step, which raises out of range()
     # inside diffusers rather than producing anything.
     ratio = spatial_ratio(vae)
-    strides = [plan[attr] for attr in STRIDE_ATTRS if attr in plan]
-    if ratio is not None and min([pixels] + strides) < ratio:
+    if ratio is not None and min(steps) < ratio:
         return None
     return plan
 
@@ -576,6 +574,25 @@ def _latent_areas(down, across, window, bounds) -> List[int]:
     ]
 
 
+def _assembled(rows, columns, decode_with, blend, areas, dispatch, assemble):
+    """The grid decoded and stitched, by runs where a run was taken and tile by tile otherwise
+
+    Both loops end the same way and differ only in what a tile costs to build, so the choice
+    between the two ways of dividing the work is made once here. `assemble` is asked first and
+    may decline - too few tiles to give every rank one, or tiles too small to blend against a
+    neighbour's edge alone - which leaves `dispatch` dividing the decoder calls and every rank
+    blending the whole grid.
+    """
+    from xfuser.core.utils import vae_tile_parallel
+
+    if assemble is not None:
+        dec = assemble(rows, columns, decode_with(vae_tile_parallel.in_order), blend, areas)
+        if dec is not None:
+            return dec
+    share = dispatch if dispatch is not None else vae_tile_parallel.in_order
+    return vae_tile_parallel.assemble_here(rows, columns, decode_with(share), blend)
+
+
 def overlap_tiled_decode(
     vae,
     dispatch: Optional[Callable] = None,
@@ -660,22 +677,14 @@ def overlap_tiled_decode(
             tile_down=pixel_down,
             tile_across=pixel_across,
         )
-        if assemble is not None:
-            # A run decodes its own tiles, so the calls stay here rather than going round again.
-            dec = assemble(
-                len(down),
-                len(across),
-                decode_with(vae_tile_parallel.in_order),
-                blend,
-                _latent_areas(
-                    down, across, (latent_down, latent_across), z.shape[-2:]
-                ),
-            )
-            if dec is not None:
-                return dec
-        share = dispatch if dispatch is not None else vae_tile_parallel.in_order
-        return vae_tile_parallel.assemble_here(
-            len(down), len(across), decode_with(share), blend
+        return _assembled(
+            len(down),
+            len(across),
+            decode_with,
+            blend,
+            _latent_areas(down, across, (latent_down, latent_across), z.shape[-2:]),
+            dispatch,
+            assemble,
         )
 
     def tiled_decode(z, return_dict: bool = True):
@@ -720,24 +729,22 @@ def strided_tiled_decode(
     def tiled_decode(z, temb=None, causal=None, return_dict: bool = True):
         _, _, num_frames, height, width = z.shape
         ratio = vae.spatial_compression_ratio
-        sample_height = height * ratio
-        sample_width = width * ratio
         latent_min_height = vae.tile_sample_min_height // ratio
         latent_min_width = vae.tile_sample_min_width // ratio
         latent_stride_height = vae.tile_sample_stride_height // ratio
         latent_stride_width = vae.tile_sample_stride_width // ratio
-        sample_stride_height = vae.tile_sample_stride_height
-        sample_stride_width = vae.tile_sample_stride_width
-        if patch_size is not None:
-            sample_height //= patch_size
-            sample_width //= patch_size
-            sample_stride_height //= patch_size
-            sample_stride_width //= patch_size
-            blend_height = vae.tile_sample_min_height // patch_size - sample_stride_height
-            blend_width = vae.tile_sample_min_width // patch_size - sample_stride_width
-        else:
-            blend_height = vae.tile_sample_min_height - sample_stride_height
-            blend_width = vae.tile_sample_min_width - sample_stride_width
+        # A family decoding into a pixel unshuffle assembles the patch grid here and folds it out
+        # at the end, so every pixel-space number is that many times smaller in between. One
+        # divisor of 1 for the families that do not, rather than the same arithmetic written twice.
+        fold = patch_size if patch_size is not None else 1
+        sample_height = height * ratio // fold
+        sample_width = width * ratio // fold
+        sample_stride_height = vae.tile_sample_stride_height // fold
+        sample_stride_width = vae.tile_sample_stride_width // fold
+        tile_down = vae.tile_sample_min_height // fold
+        tile_across = vae.tile_sample_min_width // fold
+        blend_height = tile_down - sample_stride_height
+        blend_width = tile_across - sample_stride_width
 
         down = range(0, height, latent_stride_height)
         across = range(0, width, latent_stride_width)
@@ -791,36 +798,20 @@ def strided_tiled_decode(
             deep_down=blend_height,
             deep_across=blend_width,
             crop=lambda tile: tile[:, :, :, :sample_stride_height, :sample_stride_width],
-            tile_down=(
-                vae.tile_sample_min_height // patch_size
-                if patch_size is not None
-                else vae.tile_sample_min_height
-            ),
-            tile_across=(
-                vae.tile_sample_min_width // patch_size
-                if patch_size is not None
-                else vae.tile_sample_min_width
-            ),
+            tile_down=tile_down,
+            tile_across=tile_across,
         )
-        dec = None
-        if assemble is not None:
-            dec = assemble(
-                len(down),
-                len(across),
-                decode_with(vae_tile_parallel.in_order),
-                blend,
-                _latent_areas(
-                    down,
-                    across,
-                    (latent_min_height, latent_min_width),
-                    (height, width),
-                ),
-            )
-        if dec is None:
-            share = dispatch if dispatch is not None else vae_tile_parallel.in_order
-            dec = vae_tile_parallel.assemble_here(
-                len(down), len(across), decode_with(share), blend
-            )
+        dec = _assembled(
+            len(down),
+            len(across),
+            decode_with,
+            blend,
+            _latent_areas(
+                down, across, (latent_min_height, latent_min_width), (height, width)
+            ),
+            dispatch,
+            assemble,
+        )
         dec = dec[:, :, :, :sample_height, :sample_width]
 
         if patch_size is not None:

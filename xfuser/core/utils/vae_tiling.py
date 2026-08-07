@@ -160,8 +160,15 @@ def apply_tile_plan(vae, plan: dict) -> None:
         setattr(vae, attr, value)
 
 
-def latent_rows(vae, plan: dict) -> Optional[int]:
-    """How many latent rows a planned tile holds, None where the VAE does not say"""
+def latent_rows(vae, plan: Optional[dict] = None) -> Optional[int]:
+    """How many latent rows a tile holds, under `plan` or as the VAE stands, None where it
+    does not say
+    """
+    # Without a plan the VAE's own attributes are the plan, which is how a caller asks about a
+    # window that no flag set - a VAE tiling at its own default, or one a model turned on at
+    # load.
+    if plan is None:
+        plan = _tile_defaults(vae)
     latents = [plan[attr] for attr in LATENT_ATTRS if attr in plan]
     if latents:
         return min(latents)

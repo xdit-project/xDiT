@@ -233,6 +233,22 @@ class TestLatentRows(unittest.TestCase):
         vae = StubVAE(tile_sample_min_height=256, tile_sample_min_width=256)
         self.assertIsNone(vae_tiling.latent_rows(vae, vae_tiling.tile_plan(vae, 128)))
 
+    def test_with_no_plan_the_vae_s_own_window_is_the_plan(self):
+        # How the runner asks about a window no flag set: a VAE tiling at its own default, or one
+        # a model turned tiling on for at load. That composition is the dangerous one - DistVAE
+        # splits the rows of every tile it is handed - and it used to go unchecked because there
+        # was no plan to check.
+        self.assertEqual(vae_tiling.latent_rows(legacy_pair_vae()), 32)
+        self.assertEqual(vae_tiling.latent_rows(stride_vae()), 32)
+        self.assertIsNone(vae_tiling.latent_rows(StubVAE(tile_overlap_factor=0.25)))
+
+    def test_a_plan_is_read_ahead_of_what_the_vae_still_holds(self):
+        # The plan describes what is about to be set, so a caller weighing one against the ranks
+        # has to be answered about the plan and not about the window it is replacing.
+        vae = legacy_pair_vae()
+        self.assertEqual(vae_tiling.latent_rows(vae, vae_tiling.tile_plan(vae, 128)), 16)
+        self.assertEqual(vae_tiling.latent_rows(vae), 32)
+
     def test_the_smallest_window_can_be_asked_to_hold_a_row_per_rank(self):
         vae = legacy_pair_vae()
         # This VAE tiles at multiples of 32px, so 32 is the smallest that works at all, but eight

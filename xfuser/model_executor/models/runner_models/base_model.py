@@ -338,6 +338,9 @@ class xFuserModel(abc.ABC):
 
             tile_window = None
             if self._tiles(vae):
+                # Before anything narrows it, since a refusal below has to be able to say what
+                # this VAE's own window was and search the sizes between the two.
+                own_window = vae_tiling.tile_window(vae)
                 if tiling_flag is not None:
                     vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                     log(f"Enabling VAE tiling on {type(vae).__name__}...")
@@ -346,6 +349,7 @@ class xFuserModel(abc.ABC):
                 # After the window, never before: the overlap is a fraction of the window, and
                 # sizing the window rescales the stride to keep whatever overlap the VAE had.
                 self._apply_vae_tile_overlap(vae)
+                self._check_tiles_against_parallel_vae(vae, own_window)
                 self._install_vae_tiled_decode(vae)
             # Installed either way, so a decode that OOMs with tiling off still says so.
             self._install_vae_decode_guard(vae, tile_window)
@@ -1122,6 +1126,11 @@ class xFuserModel(abc.ABC):
 
     def _convert_vae_to_channels_last(self) -> None:
         """ Convert the VAE to channels last """
+        # Once only. The convolutions can be converted again harmlessly, but the wrapper below
+        # replaces decode, and installing it over itself would put a second copy of the same
+        # conversion in front of every decode for the rest of the process.
+        if getattr(self.pipe.vae, "_xfuser_decode_channels_last", False):
+            return
         convert_model_convs_to_channels_last(self.pipe.vae)
 
         original_decode = self.pipe.vae.decode
@@ -1139,6 +1148,7 @@ class xFuserModel(abc.ABC):
             return output
 
         self.pipe.vae.decode = decode_wrapper
+        self.pipe.vae._xfuser_decode_channels_last = True
 
     def _apply_vae_tile_size(self, vae) -> Optional[int]:
         """ The window set on this VAE, None where the VAE keeps its own """
@@ -1178,7 +1188,6 @@ class xFuserModel(abc.ABC):
         if pixels != requested:
             log(f"--vae_tile_size {requested} is not a window this VAE can tile with exactly; "
                 f"using the next one down at {pixels}px.")
-        self._check_vae_tile_size_against_parallel_vae(vae, pixels, plan, window)
         vae_tiling.apply_tile_plan(vae, plan)
         log(f"VAE tile window set to {pixels}px "
             f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})")
@@ -1233,13 +1242,17 @@ class xFuserModel(abc.ABC):
             return f"{down:g}"
         return f"{down:g} down, {across:g} across"
 
-    def _check_vae_tile_size_against_parallel_vae(
-        self, vae, pixels: int, plan: dict, window: int
-    ) -> None:
-        # The two knobs divide the same axis: diffusers hands the decoder one tile, and DistVAE
-        # then splits that tile's latent rows across the VAE group. Under a row per rank it splits
-        # into fewer patches than there are ranks, and the surplus ranks index off the end of the
-        # split rather than reporting anything.
+    def _check_tiles_against_parallel_vae(self, vae, own_window: Optional[int]) -> None:
+        """ Refuse a tile holding fewer latent rows than the ranks that will split them """
+        # Tiling and sharding divide the same axis: diffusers hands the decoder one tile, and
+        # DistVAE then splits that tile's latent rows across the VAE group. Under a row per rank
+        # it splits into fewer patches than there are ranks, and the surplus ranks index off the
+        # end of the split rather than reporting anything - so this hangs the group rather than
+        # failing it, and is worth refusing up front.
+        #
+        # Read off the VAE once the window and the stride are settled, rather than off the plan
+        # a flag applied, because what is dangerous is the composition and not the flag: a VAE
+        # tiling at its own default window reaches it with no plan to check.
         if not (self.config.use_parallel_vae and self.capabilities.use_parallel_vae):
             return
         # Unless the tiles are what the ranks divide, in which case nothing divides a tile and a
@@ -1247,16 +1260,22 @@ class xFuserModel(abc.ABC):
         if vae_tile_parallel.group_of(vae) is not None:
             return
         ranks = get_vae_parallel_world_size()
-        rows = vae_tiling.latent_rows(vae, plan)
+        rows = vae_tiling.latent_rows(vae)
         if ranks < 2 or rows is None or rows >= ranks:
             return
-        smallest = vae_tiling.smallest_tile_window(vae, pixels, window, min_latent_rows=ranks)
+        window = vae_tiling.tile_window(vae)
+        smallest = (
+            vae_tiling.smallest_tile_window(vae, window, own_window, min_latent_rows=ranks)
+            if window is not None and own_window is not None
+            else None
+        )
         raise ValueError(
-            f"--vae_tile_size {pixels} leaves {rows} latent rows for the {ranks} ranks "
+            f"A {window}px VAE tile window leaves {rows} latent rows for the {ranks} ranks "
             f"--use_parallel_vae splits each tile across" +
-            (f"; the smallest window with a row per rank is {smallest}px."
+            (f"; the smallest window with a row per rank is --vae_tile_size {smallest}."
              if smallest else
-             f", and no size up to this VAE's own {window}px window gives them one each.")
+             f", and no window up to this VAE's own {own_window}px gives them one each. Decode "
+             f"without tiling, or across fewer VAE ranks.")
         )
 
     def _install_vae_tiled_decode(self, vae) -> None:
@@ -1279,6 +1298,14 @@ class xFuserModel(abc.ABC):
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
         # Point a failed VAE decode at the knob that fixes it. Success path untouched.
+        #
+        # The window is recorded on the VAE rather than closed over, so that installing again
+        # over an already-guarded decode is a matter of updating what the guard reports rather
+        # than nesting a second guard holding the older window. initialize() can run more than
+        # once in a process, and a stack of guards would name whichever window was set first.
+        vae._xfuser_guarded_tile_window = tile_window
+        if getattr(vae, "_xfuser_decode_guarded", False):
+            return
         original_decode = vae.decode
 
         @functools.wraps(original_decode)
@@ -1291,13 +1318,14 @@ class xFuserModel(abc.ABC):
                 # Two things have to hold before the window gets the blame: this run narrowed it,
                 # and the decoder failed the way a narrow window makes it fail. A dtype or device
                 # error is failing for reasons of its own, as is a VAE still at its own window.
-                if tile_window is None or not vae_tiling.is_tile_padding_error(e):
+                window = getattr(vae, "_xfuser_guarded_tile_window", None)
+                if window is None or not vae_tiling.is_tile_padding_error(e):
                     raise
                 # Whether a window leaves a tile the decoder cannot pad depends on the output size,
                 # so this cannot be caught when the window is set; name the window, being the part
                 # the caller can change, and keep the decoder's own words underneath.
                 raise RuntimeError(
-                    f"VAE tiled decode failed at the {tile_window}px tile window set by "
+                    f"VAE tiled decode failed at the {window}px tile window set by "
                     f"--vae_tile_size: at this output size the window leaves a tile too thin for "
                     f"the decoder to pad. A larger window can fail where a smaller one works, so "
                     f"try another --vae_tile_size, or drop it to decode at this VAE's own "
@@ -1305,6 +1333,7 @@ class xFuserModel(abc.ABC):
                 ) from e
 
         vae.decode = decode_guard
+        vae._xfuser_decode_guarded = True
 
     def _vae_decode_oom_hint(self, vae) -> str:
         # Read from the VAE, since a model can arrive with tiling on and no flag set.

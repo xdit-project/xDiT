@@ -12,13 +12,17 @@ REPORT_PATH = ROOT / "tools/validation_report.py"
 MATRIX_PATH = ROOT / "tests/gpu_validation/matrix.json"
 
 
-@pytest.fixture(scope="module")
-def report_tool():
-    spec = importlib.util.spec_from_file_location("validation_report", REPORT_PATH)
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def report_tool():
+    return _load("validation_report", REPORT_PATH)
 
 
 @pytest.fixture(scope="module")
@@ -46,10 +50,12 @@ def _record(case, status, **metrics):
         "execution": "NOT RUN" if status == "environment_mismatch" else "RAN",
         "expected": case["expected"],
         "command": ["torchrun"],
+        # Mirrors gpu_validation.collect_environment: the top-level platform is the OS
+        # string and the arch the case was matched against lives under validation_probe.
         "environment": {
-            "platform": "rocm",
-            "accelerators": ["gfx950"],
-            "versions": {"torch": "2.9.1"},
+            "platform": "Linux-5.15.0-x86_64",
+            "packages": {"torch": "2.9.1"},
+            "validation_probe": {"platform": "rocm", "accelerators": ["gfx950"]},
         },
         "exit_status": 0 if status == "passed" else 1,
         "metrics": base,
@@ -172,6 +178,25 @@ def test_every_case_for_one_model_on_one_arch_gets_a_distinct_label(
         assert collision == case["id"], (
             f"{case['id']} and {collision} both render as {label} for {key}"
         )
+
+
+def test_the_report_reads_the_keys_the_runner_actually_writes(report_tool):
+    """Guards against reading a shape the runner never produces.
+
+    Looking for accelerators at the top level found nothing, which showed the environment
+    as unknown and, worse, silently narrowed the planned set to whatever had already run.
+    """
+    runner = _load("gpu_validation_runner_env", ROOT / "tools/gpu_validation.py")
+    environment = runner.collect_environment(
+        {"platform": "rocm", "accelerators": ["gfx950"]}
+    )
+    record = {"environment": environment}
+
+    assert report_tool.accelerators_of(record) == ["gfx950"]
+    facts = report_tool._environment_facts(record)
+    assert facts["platform"] == "rocm"
+    assert facts["versions"], "package versions should be found"
+    assert "torch" in facts["versions"]
 
 
 def test_missing_results_file_reports_nothing_ran(report_tool, tmp_path):

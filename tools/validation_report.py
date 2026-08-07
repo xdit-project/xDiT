@@ -107,20 +107,30 @@ def _table(rows: list[list[str]], headers: list[str]) -> list[str]:
     return lines
 
 
+def accelerators_of(record: dict) -> list[str]:
+    """The archs a record ran on.
+
+    Read through validation_probe because the environment's own ``platform`` is the OS
+    string; the probe holds what the case was matched against.
+    """
+    probe = record.get("environment", {}).get("validation_probe", {})
+    return probe.get("accelerators") or []
+
+
+def _environment_facts(record: dict) -> dict:
+    environment = record.get("environment", {})
+    probe = environment.get("validation_probe", {})
+    return {
+        "platform": probe.get("platform"),
+        "accelerators": sorted(set(accelerators_of(record))),
+        "versions": environment.get("packages"),
+    }
+
+
 def describe_environment(records: list[dict]) -> list[str]:
     lines = []
     environments = {
-        json.dumps(
-            {
-                "platform": r.get("environment", {}).get("platform"),
-                "accelerators": sorted(
-                    set(r.get("environment", {}).get("accelerators") or [])
-                ),
-                "versions": r.get("environment", {}).get("versions"),
-            },
-            sort_keys=True,
-        )
-        for r in records
+        json.dumps(_environment_facts(r), sort_keys=True) for r in records
     }
     for blob in sorted(environments):
         env = json.loads(blob)
@@ -149,11 +159,7 @@ def build_report(results: list[Path], matrix_path: Path) -> dict:
     failed = [r for r in ran if r["status"] not in GREEN_STATUSES]
 
     accelerators = sorted(
-        {
-            accelerator
-            for r in records
-            for accelerator in (r.get("environment", {}).get("accelerators") or [])
-        }
+        {accelerator for r in records for accelerator in accelerators_of(r)}
     )
     executed = {r["case_id"] for r in ran}
     relevant = [

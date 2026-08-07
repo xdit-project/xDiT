@@ -1,12 +1,7 @@
 import torch
 import copy
 from diffusers import FlowMatchEulerDiscreteScheduler
-from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline, LTX2LatentUpsamplePipeline
-from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
-from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.ltx2.export_utils import encode_video
-from xfuser.model_executor.models.transformers.transformer_ltx2 import xFuserLTX2VideoTransformer3DWrapper
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -21,6 +16,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import LoadCap
 from xfuser.core.utils.runner_utils import (
     log,
 )
+from xfuser.core.utils.video_utils import encode_video_with_audio
 
 DEFAULT_NEGATIVE_PROMPT = "" \
 "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, " \
@@ -45,6 +41,9 @@ DEFAULT_NEGATIVE_PROMPT = "" \
     )
 )
 class xFuserLTX23VideoModel(xFuserModel):
+
+    min_diffusers_version = "0.37.0"
+
     default_input_values = DefaultInputValues(
         height=1024,
         width=1536,
@@ -86,6 +85,12 @@ class xFuserLTX23VideoModel(xFuserModel):
     _AUDIO_GUIDANCE_RESCALE = 0.7
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+        from xfuser.model_executor.models.transformers.transformer_ltx2 import (
+            xFuserLTX2VideoTransformer3DWrapper,
+        )
+
         transformer = self._build_transformer(
             xFuserLTX2VideoTransformer3DWrapper
         )
@@ -130,6 +135,8 @@ class xFuserLTX23VideoModel(xFuserModel):
             self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
+
         generator = self._make_generator(input_args["seed"])
 
         # self.pipe and self.second_pipe share the same transformer object, so the
@@ -216,7 +223,13 @@ class xFuserLTX23VideoModel(xFuserModel):
             video = torch.from_numpy(video)
             output_name = self.get_output_name(pipe_args[i])
             output_path = f"{self.config.output_directory}/{output_name}_{i}.mp4"
-            encode_video(video[0], audio=audio[0].float().cpu(), audio_sample_rate=audio_sample_rate, fps=self.settings.fps, output_path=output_path)
+            encode_video_with_audio(
+                video[0],
+                audio=audio[0].float().cpu(),
+                audio_sample_rate=audio_sample_rate,
+                fps=self.settings.fps,
+                output_path=output_path,
+            )
             log(f"Output video saved to {output_path}")
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -235,6 +248,8 @@ class xFuserLTX23VideoModel(xFuserModel):
     )
 )
 class xFuserLTX2VideoModel(xFuserModel):
+
+    min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
         height=1024,
@@ -268,6 +283,12 @@ class xFuserLTX2VideoModel(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+        from xfuser.model_executor.models.transformers.transformer_ltx2 import (
+            xFuserLTX2VideoTransformer3DWrapper,
+        )
+
         transformer = self._build_transformer(
             xFuserLTX2VideoTransformer3DWrapper
         )
@@ -307,6 +328,7 @@ class xFuserLTX2VideoModel(xFuserModel):
             self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
+        from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
         video_latent, audio_latent = self.pipe(
             prompt=input_args["prompt"],
             negative_prompt=input_args["negative_prompt"],
@@ -361,7 +383,13 @@ class xFuserLTX2VideoModel(xFuserModel):
             video = torch.from_numpy(video)
             output_name = self.get_output_name(pipe_args[i])
             output_path = f"{self.config.output_directory}/{output_name}_{i}.mp4"
-            encode_video(video[0], audio=audio[0].float().cpu(), audio_sample_rate=24000, fps=self.settings.fps, output_path=output_path)
+            encode_video_with_audio(
+                video[0],
+                audio=audio[0].float().cpu(),
+                audio_sample_rate=24000,
+                fps=self.settings.fps,
+                output_path=output_path,
+            )
             log(f"Output video saved to {output_path}")
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:

@@ -9,6 +9,7 @@ try:
 except ModuleNotFoundError:
     pass
 
+from xfuser.compat import declared_floor, version_at_least
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -259,8 +260,9 @@ class PackagesEnvChecker:
                 from flash_attn import flash_attn_func
                 from flash_attn import __version__
 
-                if version.parse(__version__) < version.parse("2.6.0"):
-                    raise ImportError(f"install flash_attn >= 2.6.0")
+                floor = declared_floor("flash-attn")
+                if floor is not None and not version_at_least(__version__, floor):
+                    raise ImportError(f"install flash_attn >= {floor}")
                 return True
         except ImportError:
             return False

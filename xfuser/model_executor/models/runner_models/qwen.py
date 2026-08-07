@@ -1,5 +1,4 @@
 import torch
-from diffusers import QwenImageEditPipeline, QwenImagePipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
@@ -9,7 +8,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.model_executor.models.transformers.transformer_qwen import xFuserQwenImageTransformerWrapper
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
 
@@ -21,6 +19,8 @@ from xfuser.model_executor.models.runner_models.loading.contracts import LoadCap
 @register_model("Qwen-Image-Edit")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserQwenImageEditModel(xFuserModel):
+
+    min_diffusers_version = "0.37.0"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -61,6 +61,11 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.output_name = "qwen_image_edit_2509"
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import QwenImageEditPipeline
+        from xfuser.model_executor.models.transformers.transformer_qwen import (
+            xFuserQwenImageTransformerWrapper,
+        )
+
         transformer = self._build_transformer(xFuserQwenImageTransformerWrapper)
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = QwenImageEditPipeline.from_pretrained(
@@ -102,6 +107,8 @@ class xFuserQwenImageEditModel(xFuserModel):
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserQwenImageModel(xFuserModel):
 
+    min_diffusers_version = "0.37.0"
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -137,6 +144,11 @@ class xFuserQwenImageModel(xFuserModel):
             self.settings.output_name = "qwen_image_2512"
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import QwenImagePipeline
+        from xfuser.model_executor.models.transformers.transformer_qwen import (
+            xFuserQwenImageTransformerWrapper,
+        )
+
         transformer = self._build_transformer(xFuserQwenImageTransformerWrapper)
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = QwenImagePipeline.from_pretrained(

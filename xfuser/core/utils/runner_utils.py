@@ -5,7 +5,7 @@ import torch
 import functools
 import numpy as np
 from PIL.Image import Image
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from xfuser.envs import _is_cuda, _is_hip, PACKAGES_CHECKER
 
 logger = logging.getLogger(__name__)
@@ -364,6 +364,7 @@ def quantize_linear_layers_to_int8(
 
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    include_suffixes: Optional[Tuple[str, ...]] = None,
     device: Optional[torch.device] = None) -> None:
     """Quantize all linear layers in the given module or module list to FP8."""
     from torchao.quantization.granularity import PerTensor
@@ -372,9 +373,11 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
     requested_filter = filter_fn
 
     def filter_fn(mod, fqn):
-        return _is_linear(mod, fqn) and (
-            requested_filter is None or requested_filter(mod, fqn)
-        )
+        if not _is_linear(mod, fqn):
+            return False
+        if requested_filter is not None:
+            return requested_filter(mod, fqn)
+        return not include_suffixes or fqn.endswith(include_suffixes)
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
@@ -393,10 +396,11 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
 
 def quantize_linear_layers_to_fp8_blockscale(
     model: torch.nn.Module,
+    parent_name: str = "",
+    include_suffixes: Optional[Tuple[str, ...]] = None,
     device: Optional[torch.device] = None,
     offload_to_cpu: bool = False,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
-    parent_name: str = "",
 ) -> int:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
 
@@ -411,7 +415,10 @@ def quantize_linear_layers_to_fp8_blockscale(
     for name, module in list(model.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
         if isinstance(module, torch.nn.Linear):
-            if filter_fn is not None and not filter_fn(module, full_name):
+            if filter_fn is not None:
+                if not filter_fn(module, full_name):
+                    continue
+            elif include_suffixes and not full_name.endswith(include_suffixes):
                 continue
             weight = module.weight.data
             bias = module.bias.data if module.bias is not None else None
@@ -438,10 +445,11 @@ def quantize_linear_layers_to_fp8_blockscale(
         elif next(module.children(), None) is not None:
             replaced += quantize_linear_layers_to_fp8_blockscale(
                 module,
+                parent_name=full_name,
+                include_suffixes=include_suffixes,
                 device=device,
                 offload_to_cpu=offload_to_cpu,
                 filter_fn=filter_fn,
-                parent_name=full_name,
             )
     return replaced
 
@@ -665,8 +673,8 @@ def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretra
     See https://github.com/huggingface/transformers/pull/45345
     """
     import transformers
-    from packaging.version import Version
-    if Version(transformers.__version__) < Version("5.0.0"):
+    from xfuser.compat import version_at_least
+    if not version_at_least(transformers.__version__, "5.0.0"):
         return
 
     from transformers import PreTrainedTokenizerFast

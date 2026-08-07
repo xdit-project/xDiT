@@ -35,9 +35,8 @@ if __name__ == "__main__":
             "yunchang>=0.6.0",
             "einops",
             "diffusers>=0.33.0",
-            "av", # For LTX-2 model
+            "av", # For video encoding with audio
             "peft", # For LTX-2 LoRA
-            "numba",
             "numpy",
         ],
         extras_require={

@@ -8,9 +8,11 @@ from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
+import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
+from xfuser.compat import is_diffusers_import_error
 from xfuser.config import args, xFuserArgs
 from xfuser.envs import (
     PACKAGES_CHECKER,
@@ -62,7 +64,7 @@ from xfuser.model_executor.models.runner_models.loading.format_backends import (
 )
 
 
-def _conversion_filter(module_path, excluded_paths):
+def _conversion_filter(module_path, excluded_paths, include_suffixes=None):
     overlapping = tuple(
         path
         for path in excluded_paths
@@ -78,11 +80,13 @@ def _conversion_filter(module_path, excluded_paths):
         for path in overlapping
         if module_path_is_covered(path, module_path)
     )
-    if not descendants:
+    if not descendants and not include_suffixes:
         return True, None
 
     def filter_fn(_module, fqn):
         full_path = module_path if not fqn else f"{module_path}.{fqn}"
+        if include_suffixes and not full_path.endswith(tuple(include_suffixes)):
+            return False
         return not any(
             module_path_is_covered(full_path, path)
             for path in descendants
@@ -94,6 +98,12 @@ def _conversion_filter(module_path, excluded_paths):
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
 MODEL_REGISTRY = {}
+
+# Value for min_diffusers_version when a model needs diffusers symbols that no release
+# ships yet, so the only way to run it is a source install of diffusers. Distinct from
+# None, which means no particular floor is known.
+DIFFUSERS_FROM_SOURCE = "source"
+
 
 def register_model(name: str) -> Callable:
     """ Decorator to register a model in the registry. """
@@ -111,6 +121,7 @@ _SPARSE_ATTENTION_BACKENDS = frozenset({
 _SPARGE_ATTENTION_BACKENDS = frozenset({
     AttentionBackendType.AITER_SPARGE,
     AttentionBackendType.AITER_SPARGE_V2,
+    AttentionBackendType.AITER_VSA,
     AttentionBackendType.FLEX_BLOCK_SPARGE,
 })
 
@@ -152,6 +163,7 @@ class ModelCapabilities:
     pipefusion_parallel_degree: bool = False
     data_parallel_degree: bool = True
     tensor_parallel_degree: bool = False
+    text_encoder_tp_degree: bool = False
     use_cfg_parallel: bool = False
     use_parallel_vae: bool = False
     use_parallel_vae_encoder: bool = False
@@ -199,6 +211,7 @@ class ModelSettings:
     int8_gemm_module_list: List[str] = None
     fp8_gemm_module_list: List[str] = None
     fp8_text_encoder_module_list: List[str] = None
+    fp8_gemm_include_suffixes: Optional[Tuple[str, ...]] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_suffixes: Tuple[str] = None
@@ -277,8 +290,16 @@ class xFuserModel(abc.ABC):
     model_output_type: str = ""
     fps: int = 0
 
+    # Lowest diffusers release this model is expected to run on, used only to name an
+    # upgrade target when a load fails. It never gates a load, so a value above the
+    # true minimum costs an over-stated recommendation and blocks nothing, while a
+    # value below it is a bug that tests/core/test_diffusers_floors.py catches. Use
+    # DIFFUSERS_FROM_SOURCE when the model's support has not been released yet, and
+    # leave None when no floor is known.
+    min_diffusers_version: Optional[str] = None
+
     def __init__(self, config: xFuserArgs) -> None:
-        self.settings = copy.deepcopy(self.settings)
+        self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
         self._refresh_load_capability()
         self._validate_config(config)
@@ -352,6 +373,34 @@ class xFuserModel(abc.ABC):
                 f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
                 f"to quantize them too, for less memory at some risk to text conditioning.")
 
+    def _load_model_checked(self) -> DiffusionPipeline:
+        """Load the pipeline, reporting a missing diffusers symbol as a version problem.
+
+        Runner modules import their pipelines and transformer wrappers inside
+        _load_model, so a model too new for the installed diffusers still registers,
+        and fails here instead. The error names the model and the symbol that is
+        missing; min_diffusers_version, when set, adds where to get a diffusers
+        that has it.
+        """
+        try:
+            return self._load_model()
+        except ImportError as e:
+            if not is_diffusers_import_error(e):
+                raise
+            if self.min_diffusers_version == DIFFUSERS_FROM_SOURCE:
+                remedy = (
+                    "Support for this model has not landed in a diffusers release yet; "
+                    "it needs diffusers installed from source."
+                )
+            elif self.min_diffusers_version:
+                remedy = f"Requires diffusers>={self.min_diffusers_version}."
+            else:
+                remedy = "A newer diffusers is required."
+            raise ImportError(
+                f"{self.settings.model_name} is unavailable with diffusers "
+                f"{diffusers.__version__}: {e}. {remedy}"
+            ) from e
+
     def initialize(self, input_args: dict) -> None:
         """ Load the model pipeline """
 
@@ -370,10 +419,10 @@ class xFuserModel(abc.ABC):
             _ = self.blockwise_fp8_backend
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
-        self.pipe = self._load_model()
+        self.pipe = self._load_model_checked()
 
         log("Initializing runtime state...")
-        initialize_runtime_state(self.pipe, self.engine_config)
+        initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
         self._enable_options()
@@ -843,6 +892,9 @@ class xFuserModel(abc.ABC):
             log("Enabling model CPU offload...")
             self.pipe.enable_model_cpu_offload()
 
+    def _get_runtime_state_pipeline(self):
+        return self.pipe
+
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
@@ -1174,9 +1226,13 @@ class xFuserModel(abc.ABC):
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}", log_from_all_processes=True)
 
+    def _prepare_inference_run(self, input_args: dict) -> None:
+        """Prepare model-specific state before a pipeline invocation."""
+
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
+        self._prepare_inference_run(input_args)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()
@@ -1260,6 +1316,7 @@ class xFuserModel(abc.ABC):
                     convert, filter_fn = _conversion_filter(
                         module_name,
                         getattr(self, "_fp8_streaming_targets", ()),
+                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
                     )
                     if not convert:
                         continue
@@ -1298,6 +1355,7 @@ class xFuserModel(abc.ABC):
                     convert, filter_fn = _conversion_filter(
                         module_name,
                         getattr(self, "_fp8_streaming_targets", ()),
+                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
                     )
                     if not convert:
                         continue
@@ -1452,7 +1510,9 @@ class xFuserModel(abc.ABC):
                 getattr(self, "_fp8_streaming_targets", ())
             )
             convert, filter_fn = _conversion_filter(
-                module_name, excluded_paths
+                module_name,
+                excluded_paths,
+                include_suffixes=self.settings.fp8_gemm_include_suffixes,
             )
             if not convert:
                 continue

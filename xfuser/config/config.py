@@ -6,8 +6,8 @@ from dataclasses import dataclass, fields
 
 from torch import distributed as dist
 
+from xfuser.compat import declared_floor, version_at_least
 from xfuser.logger import init_logger
-import xfuser.envs as envs
 from xfuser.envs import CUDA_VERSION, TORCH_VERSION, PACKAGES_CHECKER
 
 logger = init_logger(__name__)
@@ -22,10 +22,11 @@ HAS_FLASH_ATTN = env_info["has_flash_attn"]
 def check_packages():
     import diffusers
 
-    if not version.parse(diffusers.__version__) > version.parse("0.30.2"):
+    floor = declared_floor("diffusers")
+    if floor is not None and not version_at_least(diffusers.__version__, floor):
         raise RuntimeError(
-            "This project requires diffusers version > 0.30.2. Currently, you can not install a correct version of diffusers by pip install."
-            "Please install it from source code!"
+            f"This project requires diffusers >= {floor}, "
+            f"but {diffusers.__version__} is installed."
         )
 
 
@@ -55,6 +56,7 @@ class RuntimeConfig:
     warmup_steps: int = 1
     dtype: torch.dtype = torch.float16
     use_cuda_graph: bool = False
+    use_hybrid_attn_schedule: bool = False
     use_parallel_vae: bool = False
     use_profiler: bool = False
     use_torch_compile: bool = False
@@ -69,6 +71,15 @@ class RuntimeConfig:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    vsa_block_size: int = 128
+    vsa_top_k: int = 1
+    vsa_top_k_ratio: float = 0.0
+    vsa_drop_rates: Optional[List[float]] = None
+    vsa_prob_threshold: float = 0.9
+    vsa_reorder_sequence: bool = True
+    use_vsa_static_block_mask: bool = True
+    use_vsa_first_frame_mask: bool = True
+    vsa_collect_density: bool = False
 
     def __post_init__(self):
         check_packages()

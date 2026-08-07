@@ -3,15 +3,12 @@ import re
 import torch
 from typing import List, Optional
 from PIL import Image
-from diffusers import FlowMatchEulerDiscreteScheduler, WanPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers import AutoencoderKLWan, WanVACEPipeline
 from diffusers.utils import load_image
 from safetensors.torch import load_file
 
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_wan import xFuserWanTransformer3DWrapper
-from xfuser.model_executor.models.transformers.transformer_wan_vace import xFuserWanVACETransformer3DWrapper
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
     xFuserWanImageToVideoPipeline,
 )
@@ -24,6 +21,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
     log,
@@ -54,16 +52,42 @@ COMMON_FSDP_STRATEGY = {
     }
 }
 
+WAN_VSA_ACCURACY_FIRST_DROP_RATES = (0.25, 0.40)
+
 
 def _build_attention_kwargs(config: "xFuserArgs") -> dict:
-    """Build the per-model attention_kwargs dict used by the AITER Sparge backends. """
+    """Build shared layout and sparse-attention options for Wan."""
+    drop_rates = config.vsa_drop_rates
+    backend = config.attention_backend
+    if isinstance(backend, str):
+        backend = AttentionBackendType[backend.upper()]
+    if backend == AttentionBackendType.AITER_VSA and not drop_rates:
+        drop_rates = list(WAN_VSA_ACCURACY_FIRST_DROP_RATES)
     return {
         "thw": None,
         "spargeattn_simthreshold": config.spargeattn_simthreshold,
         "spargeattn_cdfthreshold": config.spargeattn_cdfthreshold,
         "spargeattn_reorder_sequence": config.spargeattn_reorder_sequence,
         "use_spargeattn_static_block_mask": config.use_spargeattn_static_block_mask,
+        "vsa_block_size": config.vsa_block_size,
+        "vsa_top_k": config.vsa_top_k,
+        "vsa_top_k_ratio": config.vsa_top_k_ratio,
+        "vsa_drop_rates": drop_rates,
+        "vsa_prob_threshold": config.vsa_prob_threshold,
+        "vsa_reorder_sequence": config.vsa_reorder_sequence,
+        "use_vsa_static_block_mask": config.use_vsa_static_block_mask,
+        "use_vsa_first_frame_mask": config.use_vsa_first_frame_mask,
+        "vsa_collect_density": config.vsa_collect_density,
     }
+
+
+class xFuserWanModel(xFuserModel):
+    """Common lifecycle hooks for Wan runners."""
+
+    def _prepare_inference_run(self, input_args: dict) -> None:
+        get_runtime_state().reset_vsa_schedule_state(
+            int(input_args["num_inference_steps"])
+        )
 
 
 def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
@@ -173,7 +197,9 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
 @LoadCapability.declare("transformer", replicated=True)
-class xFuserWan21I2VModel(xFuserModel):
+class xFuserWan21I2VModel(xFuserWanModel):
+
+    min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
@@ -230,6 +256,10 @@ class xFuserWan21I2VModel(xFuserModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
+
         transformer = self._build_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
@@ -306,6 +336,10 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
+
         attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
         transformer = self._build_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
         transformer_2 = self._build_transformer(
@@ -387,6 +421,10 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 
 
     def _build_distilled_transformer(self, component_name: str, path: str):
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
+
         adapter, _ = self._transformer_quantization_adapter(component_name)
         init_kwargs = {
             "attention_kwargs": _build_attention_kwargs(self.config)
@@ -475,7 +513,9 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
 @LoadCapability.declare("transformer", replicated=True)
-class xFuserWan21T2VModel(xFuserModel):
+class xFuserWan21T2VModel(xFuserWanModel):
+
+    min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
@@ -530,6 +570,11 @@ class xFuserWan21T2VModel(xFuserModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import WanPipeline
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
+
         transformer = self._build_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
@@ -582,6 +627,11 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import WanPipeline
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
+
         attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
         transformer = self._build_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
         transformer_2 = self._build_transformer(
@@ -652,11 +702,15 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
         torch.set_float32_matmul_precision('high')
         transformer = self._build_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
+        from diffusers import WanPipeline
         pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = pipe_class.from_pretrained(
@@ -722,7 +776,9 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
 @LoadCapability.declare("transformer", replicated=True)
-class xFuserWan21VACEModel(xFuserModel):
+class xFuserWan21VACEModel(xFuserWanModel):
+
+    min_diffusers_version = "0.35.2"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -769,6 +825,11 @@ class xFuserWan21VACEModel(xFuserModel):
             self.settings.output_name = "wan.2.1_vace_1.3b"
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import WanVACEPipeline
+        from xfuser.model_executor.models.transformers.transformer_wan_vace import (
+            xFuserWanVACETransformer3DWrapper,
+        )
+
         transformer = self._build_transformer(xFuserWanVACETransformer3DWrapper)
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = WanVACEPipeline.from_pretrained(

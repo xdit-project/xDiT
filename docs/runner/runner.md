@@ -106,8 +106,8 @@ Individual model classes that inherit from `xFuserModel`:
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
 | Krea2-Raw | `krea/krea-2-raw`, `krea/Krea-2-Raw`, `Krea-2-Raw` |
 | Krea2-Turbo | `krea/krea-2-turbo`, `krea/Krea-2-Turbo`, `Krea-2-Turbo` |
-
-
+| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-nf4`, `ideogram-ai/ideogram-4-fp8` |
+| MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
 
 ## CLI Arguments
 

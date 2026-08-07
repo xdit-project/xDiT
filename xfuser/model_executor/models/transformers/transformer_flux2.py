@@ -8,6 +8,19 @@ from diffusers.models.transformers.transformer_flux2 import (
     Flux2ParallelSelfAttnProcessor,
     _get_qkv_projections,
 )
+
+try:
+    from diffusers.models.transformers.transformer_flux2 import (
+        Flux2Transformer2DModelOutput,
+    )
+except ImportError:
+    # diffusers gained a FLUX.2-specific output class in 0.38; before that this
+    # transformer returned the generic one. Follow the installed version instead of
+    # requiring 0.38, since the PipeFusion path asks the backbone for a tuple and never
+    # constructs either.
+    from diffusers.models.modeling_outputs import (
+        Transformer2DModelOutput as Flux2Transformer2DModelOutput,
+    )
 from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.model_executor.layers.attention_processor import (
@@ -603,8 +616,5 @@ class xFuserFlux2Transformer2DModelWrapper(xFuserTransformerBaseWrapper):
 
         if not return_dict:
             return (output,)
-        from diffusers.models.transformers.transformer_flux2 import (
-            Flux2Transformer2DModelOutput,
-        )
 
         return Flux2Transformer2DModelOutput(sample=output)

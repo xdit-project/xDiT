@@ -1,7 +1,5 @@
 import torch
-from diffusers import ZImagePipeline
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.model_executor.models.transformers.transformer_z_image import xFuserZImageTransformer2DWrapper
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -47,6 +45,8 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 @register_model("Z-Image")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserZImageModel(xFuserModel):
+
+    min_diffusers_version = "0.36.0"
 
     default_input_values = DefaultInputValues(
         height=1024,
@@ -99,9 +99,13 @@ class xFuserZImageModel(xFuserModel):
             ]
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import ZImagePipeline
+        from xfuser.model_executor.models.transformers.transformer_z_image import (
+            xFuserZImageTransformer2DWrapper,
+        )
+
         transformer = self._build_transformer(xFuserZImageTransformer2DWrapper)
         _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
-        from diffusers import ZImagePipeline
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
@@ -129,6 +133,8 @@ class xFuserZImageModel(xFuserModel):
 @register_model("Z-Image-Turbo")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserZImageTurboModel(xFuserModel):
+
+    min_diffusers_version = "0.36.0"
 
     capabilities = ModelCapabilities(
         use_fp8_gemms=True,
@@ -174,9 +180,13 @@ class xFuserZImageTurboModel(xFuserModel):
             ]
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import ZImagePipeline
+        from xfuser.model_executor.models.transformers.transformer_z_image import (
+            xFuserZImageTransformer2DWrapper,
+        )
+
         transformer = self._build_transformer(xFuserZImageTransformer2DWrapper)
         _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
-        from diffusers import ZImagePipeline
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,

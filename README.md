@@ -129,6 +129,8 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟢 Qwen Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Krea2-Raw](https://huggingface.co/krea/Krea-2-Raw) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Krea2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🟢 Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
 | [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
 | [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/sd3.md) |
@@ -280,12 +282,13 @@ Several different attention backends are supported:
 | [AITER Sparse Sage V2](https://github.com/rocm/aiter) | aiter_sparse_sage_v2 |
 | [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
 | [AITER FlyDSL](https://github.com/rocm/aiter) | aiter_flydsl |
+| [AITER FlyDSL FP8](https://github.com/rocm/aiter) | aiter_flydsl_fp8 |
 
 xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
 
-`aiter_flydsl` uses a FlyDSL kernel (MLIR-compiled), validated on gfx1200+ (RDNA4). It only supports causal self-attention; non-causal and cross-attention calls automatically fall back to `sdpa_flash`.
+`aiter_flydsl` uses a FlyDSL kernel (MLIR-compiled), validated on gfx1200+ (RDNA4), and runs bf16. It handles self-attention and non-causal cross-attention. Causal cross-attention, GQA, and out-of-range head dims (mismatched between Q and K, or not at least 64 and a multiple of 32) fall back to `sdpa_flash`. Cross-attention needs the kernel from [ROCm/aiter#4188](https://github.com/ROCm/aiter/pull/4188) or later; on earlier `AITER` builds it falls back as well, as does non-causal self-attention padded by more than 0.5% to reach a 128 multiple. `aiter_flydsl_fp8` adds an fp8 self-attention fast path: it quantizes Q/K/V to fp8 for long self-attention (above a head-shape-dependent sequence-length crossover, ~2560-3584 tokens on gfx1201) and stays bf16 below that and for cross-attention. The fp8 pre-pass is unfused, so it raises peak VRAM; pick `aiter_flydsl` on memory-tight configs. fp8 self-attention needs a newer `AITER` build than the bf16 kernel.
 
 Pure FP8 attention can introduce visual artifacts in the output video. To mitigate this, xDiT supports hybrid attention, which runs the first and last N diffusion steps with a high-precision backend and the remaining steps with a low-precision one. Enable it with the following flags:
 
@@ -312,6 +315,7 @@ Below is a list of validated diffusers version requirements. If the model is not
 | [HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | >= 0.36.0 |
 | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | >= 0.36.0 |
 | [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
+| [Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | >= 0.39.0 |
 | [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
 | [Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | >= 0.35.2 |
 | [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |

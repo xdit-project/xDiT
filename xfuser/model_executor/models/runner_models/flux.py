@@ -1,18 +1,6 @@
 import torch
 from typing import Optional
-from diffusers import (
-    FluxPipeline,
-    FluxKontextPipeline,
-    Flux2Pipeline,
-    Flux2KleinPipeline,
-)
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser.model_executor.models.transformers.transformer_flux import (
-    xFuserFlux1Transformer2DWrapper,
-)
-from xfuser.model_executor.models.transformers.transformer_flux2 import (
-    xFuserFlux2Transformer2DWrapper,
-)
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -56,6 +44,8 @@ def _setup_parallel_vae(vae) -> None:
 @register_model("FLUX.1-dev")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserFluxModel(xFuserModel):
+
+    min_diffusers_version = "0.35.2"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -113,6 +103,11 @@ class xFuserFluxModel(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
+            from diffusers import FluxPipeline
+            from xfuser.model_executor.models.transformers.transformer_flux import (
+                xFuserFlux1Transformer2DWrapper,
+            )
+
             transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
             te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = FluxPipeline.from_pretrained(
@@ -150,6 +145,8 @@ class xFuserFluxModel(xFuserModel):
 @register_model("FLUX.1-Kontext-dev")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserFluxKontextModel(xFuserModel):
+
+    min_diffusers_version = "0.35.2"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -195,6 +192,11 @@ class xFuserFluxKontextModel(xFuserModel):
             _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import FluxKontextPipeline
+        from xfuser.model_executor.models.transformers.transformer_flux import (
+            xFuserFlux1Transformer2DWrapper,
+        )
+
         transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
         te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = FluxKontextPipeline.from_pretrained(
@@ -258,6 +260,11 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("FLUX.2-dev")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserFlux2Model(xFuserModel):
+
+    # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
+    # PipeFusion additionally needs 0.37, because xfuser's FLUX.2 pipeline module also
+    # binds Flux2KleinPipeline.
+    min_diffusers_version = "0.36.0"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -356,6 +363,11 @@ class xFuserFlux2Model(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
+            from xfuser.model_executor.models.transformers.transformer_flux2 import (
+                xFuserFlux2Transformer2DWrapper,
+            )
+            from diffusers import Flux2Pipeline
+
             transformer = self._build_transformer(xFuserFlux2Transformer2DWrapper)
             te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = Flux2Pipeline.from_pretrained(
@@ -405,6 +417,9 @@ class xFuserFlux2Model(xFuserModel):
 @register_model("FLUX.2-klein-9B")
 @LoadCapability.declare("transformer", replicated=True)
 class xFuserFlux2Klein9BModel(xFuserModel):
+
+    # Flux2KleinPipeline landed in 0.37, one release after Flux2Pipeline.
+    min_diffusers_version = "0.37.0"
 
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -472,6 +487,11 @@ class xFuserFlux2Klein9BModel(xFuserModel):
                 engine_config=self.engine_config,
             )
         else:
+            from xfuser.model_executor.models.transformers.transformer_flux2 import (
+                xFuserFlux2Transformer2DWrapper,
+            )
+            from diffusers import Flux2KleinPipeline
+
             transformer = self._build_transformer(xFuserFlux2Transformer2DWrapper)
             te_kwargs, te_quant = self._meta_te_kwargs()
             pipe = Flux2KleinPipeline.from_pretrained(

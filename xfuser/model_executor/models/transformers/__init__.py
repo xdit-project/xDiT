@@ -1,4 +1,11 @@
-from xfuser.config.diffusers import has_valid_diffusers_version
+"""Wrappers whose registration has to happen before any pipeline is built.
+
+Importing a wrapper module registers it against the diffusers class it wraps, and the
+pipelines below look their backbone up in that registry, so the import has to have
+happened by then. Newer wrappers are absent from this list on purpose: their runners and
+pipelines import them by module path at the point of use.
+"""
+
 from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 from .pixart_transformer_2d import xFuserPixArtTransformer2DWrapper
@@ -20,21 +27,3 @@ __all__ = [
     "xFuserConsisIDTransformer3DWrapper",
     "xFuserSanaTransformer2DWrapper",
 ]
-
-# Gating some imports based on diffusers version, as they import part of diffusers
-if has_valid_diffusers_version("flux"):
-    from .transformer_flux import xFuserFluxTransformer2DWrapper  # noqa: F401
-
-    __all__.append("xFuserFluxTransformer2DWrapper")
-
-
-if has_valid_diffusers_version("zimage"):
-    from .transformer_z_image import xFuserZImageTransformer2DWrapper  # noqa: F401
-
-    __all__.append("xFuserZImageTransformer2DWrapper")
-
-
-if has_valid_diffusers_version("krea2"):
-    from .transformer_krea2 import xFuserKrea2Transformer2DWrapper  # noqa: F401
-
-    __all__.append("xFuserKrea2Transformer2DWrapper")

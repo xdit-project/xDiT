@@ -380,15 +380,25 @@ class TestRuns(unittest.TestCase):
                     owner = vae_tile_parallel.shares(weights, world_size)
                     blend = _blend(1, 1)
                     wanted = vae_tile_parallel._wanted(owner, columns, blend)
+                    reaches = set()
                     for n in range(rows * columns):
                         row, column = divmod(n, columns)
-                        reaches = []
                         if row > 0 and owner[n - columns] != owner[n]:
-                            reaches += [n - columns] + ([n - columns - 1] if column else [])
+                            reaches.add(n - columns)
+                            if column:
+                                reaches.add(n - columns - 1)
                         if column > 0 and owner[n - 1] != owner[n]:
-                            reaches += [n - 1] + ([n - columns - 1] if row else [])
-                        for at in reaches:
-                            self.assertIn(at, wanted, f"{rows}x{columns}/{world_size} at {n}")
+                            reaches.add(n - 1)
+                            if row:
+                                reaches.add(n - columns - 1)
+                    # Equal, not merely a superset. Asked only to contain what the blending
+                    # reads, this passed for a _wanted that returned the whole grid - which
+                    # changes no arithmetic and so passes the decode tests too, while putting
+                    # every tile on the wire. Over-fetching is the failure this can see and
+                    # nothing else can.
+                    self.assertEqual(
+                        wanted, reaches, f"{rows}x{columns} over {world_size}"
+                    )
 
     def test_a_blend_no_rows_deep_asks_for_no_edges_on_that_axis(self):
         # A wide enough stride leaves the tiles touching rather than overlapping, and then there

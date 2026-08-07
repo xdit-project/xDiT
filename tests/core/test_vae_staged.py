@@ -87,8 +87,24 @@ class TestStagedVAEsAreAllReached(unittest.TestCase):
     def test_the_conversion_does_not_change_what_decode_returns(self):
         vae = TinyVAE()
         Staged(vae, None)._convert_vae_to_channels_last()
-        z = torch.zeros(1, 4, 8, 8)
+        # Random rather than zeros. A wrapper that returned zeros, or doubled what it was given,
+        # or dropped the sign, all agree with the input when the input is zero, so the assertion
+        # held for every way of getting this wrong as well as for getting it right.
+        torch.manual_seed(0)
+        z = torch.randn(1, 4, 8, 8)
         self.assertTrue(torch.equal(vae.decode(z), z))
+
+    def test_the_decode_is_handed_a_channels_last_tensor(self):
+        # The point of the pass, and the one thing none of the above asked about: they check the
+        # marker attribute and the identity of the wrapper, so a conversion that set the flag,
+        # wrapped the decode and then forgot to convert would satisfy all of them.
+        vae = TinyVAE()
+        Staged(vae, None)._convert_vae_to_channels_last()
+        vae.decode(torch.randn(1, 4, 8, 8))
+        self.assertTrue(
+            vae.decoded[-1].is_contiguous(memory_format=torch.channels_last),
+            "decode was given a tensor in the memory format the conversion exists to change",
+        )
 
 
 class TestNothingReachesPastTheList(unittest.TestCase):

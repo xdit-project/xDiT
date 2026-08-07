@@ -174,6 +174,7 @@ class TestTheOrderBetweenThem(unittest.TestCase):
         # which sizes the window search will accept, and --vae_tile_size lands somewhere else
         # without saying so.
         window = vae_tiling.tile_window(wan_vae(self))
+        moved = []
         for size in (window // 4, window // 3, window // 2, window - 8):
             with self.subTest(size=size):
                 alone, both = wan_vae(self), wan_vae(self)
@@ -184,6 +185,12 @@ class TestTheOrderBetweenThem(unittest.TestCase):
                     alone.tile_sample_min_height,
                     "--vae_tile_size landed differently because --vae_tile_overlap was also given",
                 )
+                moved.append(vae_tiling.tile_overlap(both) != vae_tiling.tile_overlap(alone))
+        # An apply_overlap that did nothing at all leaves the windows agreeing too, and is the
+        # one way of breaking this pair the assertion above cannot see. Asked of the run as a
+        # whole rather than each size, because a stride the VAE cannot land on is a refusal
+        # this test has no business failing over.
+        self.assertTrue(any(moved), "--vae_tile_overlap was given and changed nothing, at any size")
 
 
 class TestRefusingATileThinnerThanTheGroup(unittest.TestCase):
@@ -204,6 +211,24 @@ class TestRefusingATileThinnerThanTheGroup(unittest.TestCase):
         vae_setup.check_against_split(
             vae, request(splits_tiles=True, ranks=4), own_window=256
         )
+
+    def test_the_line_is_drawn_at_a_row_each(self):
+        """Exactly as many rows as ranks is workable; one rank more is not
+
+        16 against 32 and 16 against 4 are both several rows clear of the edge, so they hold
+        whichever side of it the comparison falls on. What this refusal exists to prevent is a
+        hang, so being one out in the permissive direction is the expensive way to be wrong.
+        """
+        for ranks, refused in ((16, False), (17, True)):
+            with self.subTest(ranks=ranks):
+                vae = legacy_pair_vae()
+                vae_setup.apply_window(vae, request(tile_size=128))  # 16 latent rows
+                asked = request(splits_tiles=True, ranks=ranks)
+                if refused:
+                    with self.assertRaises(ValueError):
+                        vae_setup.check_against_split(vae, asked, own_window=256)
+                else:
+                    vae_setup.check_against_split(vae, asked, own_window=256)
 
     def test_nothing_is_checked_when_the_run_is_not_splitting_tiles(self):
         vae = legacy_pair_vae()
@@ -287,12 +312,19 @@ class TestOomHint(unittest.TestCase):
     def test_a_tiling_vae_is_given_a_window_it_would_accept(self):
         vae = overlap_factor_vae()
         vae.use_tiling = True
+        # Worked out the way the hint works it out, rather than parsed back out of the prose.
+        # Cutting the number out of the message meant rewording it raised out of the parse
+        # instead of failing an assertion, and two other branches of oom_hint carry the same
+        # flag name - including one saying it does not apply - so a fixture that stopped
+        # reaching this branch would have produced a number rather than a clear failure.
+        window = vae_tiling.tile_window(vae)
+        expected, _ = vae_tiling.snap_tile_window(vae, max(window // 2, 1))
         hint = vae_setup.oom_hint(vae, request())
-        target = int(hint.split("--vae_tile_size ")[1].split(",")[0])
-        # The hint must never name a size the next run would turn around and refuse.
-        pixels, plan = vae_tiling.snap_tile_window(overlap_factor_vae(), target)
+        self.assertIn(f"--vae_tile_size {expected}", hint)
+        # And it must never name a size the next run would turn around and refuse.
+        pixels, plan = vae_tiling.snap_tile_window(overlap_factor_vae(), expected)
         self.assertIsNotNone(plan)
-        self.assertEqual(pixels, target)
+        self.assertEqual(pixels, expected)
 
 
 class TestConfigureEndToEnd(unittest.TestCase):

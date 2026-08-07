@@ -16,7 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 from xfuser.model_executor.pipelines.pipeline_ideogram4 import (
     get_ideogram4_pipeline_class,
 )
@@ -188,7 +188,7 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 @register_model("ideogram-ai/ideogram-4-fp8")
 @register_model("CalamitousFelicitousness/Ideogram-4-bf16-Diffusers")
 @register_model("Ideogram-4")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "the fp8 checkpoint path builds each transformer with from_config and then "
         "applies a single-file state dict outside _build_transformer, and the "

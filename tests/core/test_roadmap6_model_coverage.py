@@ -53,7 +53,7 @@ def _load_contracts():
 def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
     source = _source("hunyuan.py", "xFuserHunyuanvideoModel")
 
-    assert '@LoadCapability.declare("transformer", replicated=True)' in source
+    assert '@LoadDeclaration.declare("transformer", replicated=True)' in source
     assert "fully_shard_degree=True" in source
     assert '"transformer_blocks", "single_transformer_blocks"' in source
     assert 'revision="refs/pr/18"' in source
@@ -86,7 +86,7 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
     assert "stage 2 distilled LoRA" in reason
 
     contracts = _load_contracts()
-    capability = contracts.LoadCapability.for_runner(
+    capability = contracts.LoadDeclaration.for_runner(
         type(
             "LTXCapabilities",
             (),
@@ -126,7 +126,7 @@ def test_named_custom_adapters_reject_standard_collective_modes():
     )
 
     for adapter in custom:
-        capability = contracts.LoadCapability.for_runner(
+        capability = contracts.LoadDeclaration.for_runner(
             type(
                 "Capabilities",
                 (),
@@ -146,7 +146,7 @@ def test_named_custom_adapters_reject_standard_collective_modes():
 
         assert capability.meta_transformers == ()
         assert capability.construction_seam is None
-        malformed = contracts.LoadCapability(
+        malformed = contracts.LoadDeclaration(
             fsdp_meta_transformers=("transformer",),
             materialization_modes=frozenset(
                 {
@@ -173,7 +173,7 @@ def test_named_custom_adapters_reject_standard_collective_modes():
 def test_distilled_wan_declares_local_meta_without_collective_support():
     contracts = _load_contracts()
     adapter = contracts.LoaderAdapter.DISTILLED_WAN
-    capability = contracts.LoadCapability.for_runner(
+    capability = contracts.LoadDeclaration.for_runner(
         type(
             "Capabilities",
             (),
@@ -240,7 +240,7 @@ def test_krea2_text_encoder_is_declaratively_excluded():
 
 def test_component_exclusions_are_queryable_by_loading_adapters():
     contracts = _load_contracts()
-    capability = contracts.LoadCapability(
+    capability = contracts.LoadDeclaration(
         component_exclusions=(contracts.KREA2_TEXT_ENCODER_EXCLUSION,)
     )
 

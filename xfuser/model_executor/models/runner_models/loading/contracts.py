@@ -80,8 +80,40 @@ class CheckpointTensorReader(Protocol):
 
 
 @dataclass(frozen=True)
-class LoadCapability:
-    """What one runner can construct before weights are allocated."""
+class LoadDeclaration:
+    """What one runner has declared it can construct before weights are allocated.
+
+    Part of this is a derived view over the two objects a runner already carries:
+    ``quantization_contracts`` comes from ``ModelCapabilities`` (its fp8/fp4/int8 flags)
+    and ``materialization_modes`` from ``ModelSettings.fsdp_strategy``. The rest —
+    ``meta_transformers``, ``loader_adapter``, ``component_exclusions`` and
+    ``unsupported_reason`` — is per-runner information that lives in neither.
+
+    It is worth knowing why that residue is not simply folded into one of them, because
+    it looks redundant at first glance.
+
+    ``ModelCapabilities`` cannot hold it because it is not a general description of a
+    model but a permission table keyed by CLI flag name: ``_validate_config`` iterates its
+    annotations and matches each field against ``xFuserArgs``. Nothing here is a flag a
+    user can pass, so these fields would be inert in the only code that reads that
+    dataclass generically.
+
+    ``ModelSettings`` could hold it semantically, and does hold comparable per-runner data,
+    but it is not reliably readable per class. The load support report and the runner
+    declaration tests introspect runners without instantiating them, which no config or
+    device allows. ``cls.load_declaration`` is exact for every runner because ``declare``
+    writes it onto each class, whereas ``cls.settings`` is not: the LingBot dense runner
+    builds its settings in ``__init__``, and the Wan2.2 family declares none at class level
+    and only mutates a deep copy in ``_customize_settings``, so statically it reports
+    Wan2.1's values. Folding these fields into settings would first require normalising
+    every runner to declare settings at class level.
+
+    The default is deliberately unsupported. Memory-efficient loading is opt-in twice over:
+    the user passes a flag that defaults to false, and the runner must have declared support.
+    A permissive inherited default would opt a model into the new path behind a flag set for
+    a different model, so ``unsupported_reason`` records verification status rather than a
+    proven incapability.
+    """
 
     fsdp_meta_transformers: tuple[str, ...] = ()
     replicated_meta_transformers: tuple[str, ...] = ()
@@ -134,7 +166,7 @@ class LoadCapability:
         replicated: bool = False,
         quantization_formats=(),
         quantization_backends=(),
-    ) -> "LoadCapability":
+    ) -> "LoadDeclaration":
         modes = {MaterializationMode.EAGER, MaterializationMode.FSDP_META}
         if replicated:
             modes.add(MaterializationMode.REPLICATED_META)
@@ -161,7 +193,7 @@ class LoadCapability:
         )
 
     @classmethod
-    def unsupported(cls, reason: str) -> "LoadCapability":
+    def unsupported(cls, reason: str) -> "LoadDeclaration":
         return cls(unsupported_reason=reason)
 
     @classmethod
@@ -175,7 +207,7 @@ class LoadCapability:
         loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER,
         component_exclusions: tuple[ComponentLoadExclusion, ...] = (),
         unsupported_reason: str | None = None,
-    ) -> "LoadCapability":
+    ) -> "LoadDeclaration":
         """Derive quantization support while keeping meta loading opt-in."""
 
         contracts = {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
@@ -271,7 +303,7 @@ class LoadCapability:
         """Class decorator deriving quantization support after class creation."""
 
         def decorate(runner_cls):
-            runner_cls.load_capability = cls.for_runner(
+            runner_cls.load_declaration = cls.for_runner(
                 runner_cls.capabilities,
                 meta_transformers=tuple(meta_transformers),
                 replicated=replicated,
@@ -316,16 +348,16 @@ def select_effective_materialization_mode(
 
 
 def validate_materialization_contract(
-    capability: LoadCapability,
+    declaration: LoadDeclaration,
     mode: MaterializationMode,
     fsdp_strategy: Mapping[str, Mapping],
     *,
     runner_name: str,
 ) -> None:
-    if mode not in capability.materialization_modes:
+    if mode not in declaration.materialization_modes:
         reason = (
-            f": {capability.unsupported_reason}"
-            if capability.unsupported_reason
+            f": {declaration.unsupported_reason}"
+            if declaration.unsupported_reason
             else ""
         )
         raise UnsupportedLoadContract(
@@ -333,22 +365,22 @@ def validate_materialization_contract(
         )
     if mode is MaterializationMode.EAGER:
         return
-    if not capability.loader_adapter.supports_standard_collectives:
+    if not declaration.loader_adapter.supports_standard_collectives:
         reason = (
-            capability.unsupported_reason
-            or f"{capability.loader_adapter.value} is not collective-safe"
+            declaration.unsupported_reason
+            or f"{declaration.loader_adapter.value} is not collective-safe"
         )
         raise UnsupportedLoadContract(
             f"{runner_name} does not support {mode.value} materialization: " f"{reason}"
         )
-    if capability.construction_seam is None:
+    if declaration.construction_seam is None:
         raise UnsupportedLoadContract(
             f"{runner_name} declares {mode.value} but no meta construction seam"
         )
     components = (
-        capability.fsdp_meta_transformers
+        declaration.fsdp_meta_transformers
         if mode is MaterializationMode.FSDP_META
-        else capability.replicated_meta_transformers
+        else declaration.replicated_meta_transformers
     )
     if not components:
         raise UnsupportedLoadContract(
@@ -373,7 +405,7 @@ def select_load_contract(
     requested_format: QuantizationFormat,
     selected_backend: QuantizationBackend,
     materialization_mode: MaterializationMode,
-    capability: LoadCapability,
+    declaration: LoadDeclaration,
     fsdp_strategy: Mapping[str, Mapping],
     runner_name: str,
 ) -> LoadContract:
@@ -382,7 +414,7 @@ def select_load_contract(
     if (
         requested_format,
         selected_backend,
-    ) not in capability.quantization_contracts:
+    ) not in declaration.quantization_contracts:
         raise UnsupportedLoadContract(
             f"{selected_backend.name} backend for {requested_format.name} is not "
             f"declared by {runner_name}"
@@ -395,7 +427,7 @@ def select_load_contract(
             f"{selected_backend.name}"
         )
     validate_materialization_contract(
-        capability,
+        declaration,
         materialization_mode,
         fsdp_strategy,
         runner_name=runner_name,

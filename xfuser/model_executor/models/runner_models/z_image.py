@@ -8,7 +8,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelSettings,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 
 
 def _normalize_prompt(prompt_input):
@@ -43,7 +43,7 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserZImageModel(xFuserModel):
 
     min_diffusers_version = "0.36.0"
@@ -131,7 +131,7 @@ class xFuserZImageModel(xFuserModel):
 
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserZImageTurboModel(xFuserModel):
 
     min_diffusers_version = "0.36.0"

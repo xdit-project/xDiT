@@ -24,13 +24,13 @@ from xfuser.core.utils.runner_utils import (
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadCapability,
+    LoadDeclaration,
     LoaderAdapter,
 )
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserHunyuanvideoModel(xFuserModel):
 
     # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
@@ -128,7 +128,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
     unsupported_reason=(
         "HunyuanVideo 1.5 uses a separate wrapper whose config-only "
@@ -244,7 +244,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("Hunyuanvideo-1.5-Distilled")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
     unsupported_reason=(
         "the HunyuanVideo 1.5 distilled checkpoint uses the separate 1.5 "
@@ -299,7 +299,7 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("tencent/HunyuanVideo-1.5-Sparse")
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
     unsupported_reason=(
         "the sparse HunyuanVideo 1.5 loader composes base non-block weights "

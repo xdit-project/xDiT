@@ -113,8 +113,8 @@ def _assigned_names(class_node):
     }
 
 
-def _declares_load_capability(class_node):
-    if "load_capability" in _assigned_names(class_node):
+def _has_own_load_declaration(class_node):
+    if "load_declaration" in _assigned_names(class_node):
         return True
     return any(
         isinstance(decorator, ast.Call)
@@ -128,7 +128,7 @@ def test_base_runner_defaults_to_an_explicit_unsupported_declaration():
     classes = _classes(RUNNERS / "base_model.py")
     base = classes["xFuserModel"]
 
-    assert "load_capability" in _assigned_names(base)
+    assert "load_declaration" in _assigned_names(base)
     methods = {node.name for node in base.body if isinstance(node, ast.FunctionDef)}
     assert "_supports_replicated_meta_load" not in methods
 
@@ -160,10 +160,10 @@ def test_supported_runner_families_declare_the_meta_construction_seam():
     for filename, names in expected.items():
         classes = _classes(RUNNERS / filename)
         for name in names:
-            if not _declares_load_capability(classes[name]):
+            if not _has_own_load_declaration(classes[name]):
                 missing.append(f"{filename}:{name}")
 
-    assert not missing, "missing load_capability declaration: " + ", ".join(missing)
+    assert not missing, "missing load declaration: " + ", ".join(missing)
 
 
 def test_custom_runner_exclusions_remain_explicit():
@@ -183,7 +183,7 @@ def test_custom_runner_exclusions_remain_explicit():
     for filename, names in expected.items():
         classes = _classes(RUNNERS / filename)
         for name in names:
-            if not _declares_load_capability(classes[name]):
+            if not _has_own_load_declaration(classes[name]):
                 missing.append(f"{filename}:{name}")
 
     assert not missing, "missing explicit exclusion: " + ", ".join(missing)
@@ -199,7 +199,7 @@ def test_every_registered_runner_has_its_own_load_declaration():
                 and decorator.func.id == "register_model"
                 for decorator in class_node.decorator_list
             )
-            if registered and not _declares_load_capability(class_node):
+            if registered and not _has_own_load_declaration(class_node):
                 missing.append(f"{path.name}:{name}")
 
     assert (

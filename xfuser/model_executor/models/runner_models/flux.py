@@ -18,7 +18,7 @@ from xfuser.core.utils.runner_utils import (
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser import xFuserFluxPipeline, xFuserArgs
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 
 
 def _setup_parallel_vae(vae) -> None:
@@ -42,7 +42,7 @@ def _setup_parallel_vae(vae) -> None:
 
 @register_model("black-forest-labs/FLUX.1-dev")
 @register_model("FLUX.1-dev")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserFluxModel(xFuserModel):
 
     min_diffusers_version = "0.35.2"
@@ -143,7 +143,7 @@ class xFuserFluxModel(xFuserModel):
 
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
 @register_model("FLUX.1-Kontext-dev")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserFluxKontextModel(xFuserModel):
 
     min_diffusers_version = "0.35.2"
@@ -258,7 +258,7 @@ class xFuserFluxKontextModel(xFuserModel):
 
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserFlux2Model(xFuserModel):
 
     # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
@@ -415,7 +415,7 @@ class xFuserFlux2Model(xFuserModel):
 
 @register_model("black-forest-labs/FLUX.2-klein-9B")
 @register_model("FLUX.2-klein-9B")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserFlux2Klein9BModel(xFuserModel):
 
     # Flux2KleinPipeline landed in 0.37, one release after Flux2Pipeline.
@@ -538,7 +538,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 
 @register_model("black-forest-labs/FLUX.2-klein-4B")
 @register_model("FLUX.2-klein-4B")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
 
     settings = ModelSettings(

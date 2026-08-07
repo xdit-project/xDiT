@@ -20,7 +20,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     KREA2_TEXT_ENCODER_EXCLUSION,
-    LoadCapability,
+    LoadDeclaration,
 )
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
@@ -71,7 +71,7 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
     )
 
 
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     "transformer",
     replicated=True,
     component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
@@ -188,7 +188,7 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("krea/krea-2-raw")
 @register_model("krea/Krea-2-Raw")
 @register_model("Krea-2-Raw")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     "transformer",
     replicated=True,
     component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
@@ -227,7 +227,7 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("krea/krea-2-turbo")
 @register_model("krea/Krea-2-Turbo")
 @register_model("Krea-2-Turbo")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     "transformer",
     replicated=True,
     component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),

@@ -23,20 +23,20 @@ def contracts():
     return _load_module(CONTRACTS_PATH, "roadmap3_loading_contracts")
 
 
-def test_capability_defaults_are_explicitly_unsupported(contracts):
-    capability = contracts.LoadCapability()
+def test_declaration_defaults_are_explicitly_unsupported(contracts):
+    declaration = contracts.LoadDeclaration()
 
-    assert capability.meta_transformers == ()
-    assert capability.materialization_modes == frozenset(
+    assert declaration.meta_transformers == ()
+    assert declaration.materialization_modes == frozenset(
         {contracts.MaterializationMode.EAGER}
     )
-    assert capability.quantization_backends == frozenset(
+    assert declaration.quantization_backends == frozenset(
         {contracts.QuantizationBackend.NONE}
     )
 
 
 def test_declared_meta_mode_requires_every_transformer_in_strategy(contracts):
-    capability = contracts.LoadCapability.meta(
+    declaration = contracts.LoadDeclaration.meta(
         "transformer", "transformer_2", replicated=True
     )
 
@@ -45,7 +45,7 @@ def test_declared_meta_mode_requires_every_transformer_in_strategy(contracts):
         match=r"transformer_2.*fsdp_strategy",
     ):
         contracts.validate_materialization_contract(
-            capability,
+            declaration,
             contracts.MaterializationMode.FSDP_META,
             {"transformer": {"wrap_attrs": ["blocks"]}},
             runner_name="ExampleRunner",
@@ -53,7 +53,7 @@ def test_declared_meta_mode_requires_every_transformer_in_strategy(contracts):
 
 
 def test_declared_meta_mode_requires_a_construction_seam(contracts):
-    capability = contracts.LoadCapability(
+    declaration = contracts.LoadDeclaration(
         fsdp_meta_transformers=("transformer",),
         materialization_modes=frozenset(
             {
@@ -68,7 +68,7 @@ def test_declared_meta_mode_requires_a_construction_seam(contracts):
         match=r"ExampleRunner.*construction seam",
     ):
         contracts.validate_materialization_contract(
-            capability,
+            declaration,
             contracts.MaterializationMode.FSDP_META,
             {"transformer": {"wrap_attrs": ["blocks"]}},
             runner_name="ExampleRunner",
@@ -76,7 +76,7 @@ def test_declared_meta_mode_requires_a_construction_seam(contracts):
 
 
 def test_contract_selection_accepts_only_declared_backend_and_mode(contracts):
-    capability = contracts.LoadCapability.meta(
+    declaration = contracts.LoadDeclaration.meta(
         "transformer",
         replicated=True,
         quantization_backends={
@@ -93,7 +93,7 @@ def test_contract_selection_accepts_only_declared_backend_and_mode(contracts):
         requested_format=contracts.QuantizationFormat.FP8,
         selected_backend=contracts.QuantizationBackend.AITER,
         materialization_mode=contracts.MaterializationMode.REPLICATED_META,
-        capability=capability,
+        declaration=declaration,
         fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
         runner_name="ExampleRunner",
     )
@@ -106,7 +106,7 @@ def test_contract_selection_accepts_only_declared_backend_and_mode(contracts):
 
 
 def test_contract_selection_rejects_unsupported_pair_before_runtime(contracts):
-    capability = contracts.LoadCapability.meta("transformer")
+    declaration = contracts.LoadDeclaration.meta("transformer")
 
     with pytest.raises(
         contracts.UnsupportedLoadContract,
@@ -116,13 +116,13 @@ def test_contract_selection_rejects_unsupported_pair_before_runtime(contracts):
             requested_format=contracts.QuantizationFormat.FP8,
             selected_backend=contracts.QuantizationBackend.TORCHAO,
             materialization_mode=contracts.MaterializationMode.FSDP_META,
-            capability=capability,
+            declaration=declaration,
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
             runner_name="ExampleRunner",
         )
 
 
-def test_runner_capability_derives_quantization_contracts(contracts):
+def test_runner_declaration_derives_quantization_contracts(contracts):
     model_capabilities = type(
         "ModelCapabilities",
         (),
@@ -133,14 +133,14 @@ def test_runner_capability_derives_quantization_contracts(contracts):
         },
     )()
 
-    capability = contracts.LoadCapability.for_runner(
+    declaration = contracts.LoadDeclaration.for_runner(
         model_capabilities,
         meta_transformers=("transformer",),
         replicated=True,
         fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
     )
 
-    assert capability.quantization_contracts == frozenset(
+    assert declaration.quantization_contracts == frozenset(
         {
             (
                 contracts.QuantizationFormat.NONE,
@@ -162,7 +162,7 @@ def test_runner_capability_derives_quantization_contracts(contracts):
     )
 
 
-def test_runner_capability_does_not_allow_cross_product_backend_pairs(contracts):
+def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts):
     model_capabilities = type(
         "ModelCapabilities",
         (),
@@ -172,7 +172,7 @@ def test_runner_capability_does_not_allow_cross_product_backend_pairs(contracts)
             "use_int8_gemms": True,
         },
     )()
-    capability = contracts.LoadCapability.for_runner(model_capabilities)
+    declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
 
     with pytest.raises(
         contracts.UnsupportedLoadContract,
@@ -182,7 +182,7 @@ def test_runner_capability_does_not_allow_cross_product_backend_pairs(contracts)
             requested_format=contracts.QuantizationFormat.INT8,
             selected_backend=contracts.QuantizationBackend.AITER,
             materialization_mode=contracts.MaterializationMode.EAGER,
-            capability=capability,
+            declaration=declaration,
             fsdp_strategy={},
             runner_name="ExampleRunner",
         )
@@ -199,16 +199,16 @@ def test_fp8_fp4_hybrid_is_an_explicit_valid_contract(contracts):
             "fully_shard_degree": False,
         },
     )()
-    capability = contracts.LoadCapability.for_runner(model_capabilities)
+    declaration = contracts.LoadDeclaration.for_runner(model_capabilities)
 
     assert (
         contracts.QuantizationFormat.FP8_FP4,
         contracts.QuantizationBackend.AITER,
-    ) in capability.quantization_contracts
+    ) in declaration.quantization_contracts
     assert (
         contracts.QuantizationFormat.FP8_FP4,
         contracts.QuantizationBackend.TORCHAO,
-    ) in capability.quantization_contracts
+    ) in declaration.quantization_contracts
 
 
 def test_int8_still_conflicts_with_hybrid_quantization(contracts):
@@ -254,13 +254,13 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
     )()
     strategy = {"transformer": {"wrap_attrs": ["blocks"]}}
 
-    both = contracts.LoadCapability.for_runner(
+    both = contracts.LoadDeclaration.for_runner(
         capable,
         meta_transformers=("transformer",),
         replicated=True,
         fsdp_strategy=strategy,
     )
-    only_replicated = contracts.LoadCapability.for_runner(
+    only_replicated = contracts.LoadDeclaration.for_runner(
         replicated_only,
         meta_transformers=("transformer",),
         replicated=True,

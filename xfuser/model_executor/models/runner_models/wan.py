@@ -30,7 +30,7 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadCapability,
+    LoadDeclaration,
     LoaderAdapter,
 )
 from xfuser.model_executor.models.runner_models.loading.checkpoint import (
@@ -196,7 +196,7 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan21I2VModel(xFuserWanModel):
 
     min_diffusers_version = "0.35.2"
@@ -319,7 +319,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan2.2-I2V")
-@LoadCapability.declare("transformer", "transformer_2", replicated=True)
+@LoadDeclaration.declare("transformer", "transformer_2", replicated=True)
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -364,7 +364,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 
 @register_model("Wan2.2-Distilled-I2V")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     "transformer",
     "transformer_2",
     loader_adapter=LoaderAdapter.DISTILLED_WAN,
@@ -512,7 +512,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan21T2VModel(xFuserWanModel):
 
     min_diffusers_version = "0.35.2"
@@ -611,7 +611,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
-@LoadCapability.declare("transformer", "transformer_2", replicated=True)
+@LoadDeclaration.declare("transformer", "transformer_2", replicated=True)
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -657,7 +657,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 @register_model("Wan2.2-TI2V")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 
     capabilities = ModelCapabilities(
@@ -775,7 +775,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
-@LoadCapability.declare("transformer", replicated=True)
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan21VACEModel(xFuserWanModel):
 
     min_diffusers_version = "0.35.2"

@@ -11,7 +11,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
     ModelCapabilities,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 
 from xfuser.core.utils.runner_utils import (
     log,
@@ -33,7 +33,7 @@ DEFAULT_NEGATIVE_PROMPT = "" \
 
 @register_model("dg845/LTX-2.3-Diffusers")
 @register_model("LTX-2.3")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "stage 2 distilled LoRA is applied before a meta transformer would "
         "receive its base checkpoint; collective meta loading is withheld "
@@ -240,7 +240,7 @@ class xFuserLTX23VideoModel(xFuserModel):
 
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "stage 2 distilled LoRA is applied before a meta transformer would "
         "receive its base checkpoint; collective meta loading is withheld "

@@ -16,7 +16,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadCapability,
+    LoadDeclaration,
     LoaderAdapter,
 )
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 @register_model("CausalWan")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     loader_adapter=LoaderAdapter.CAUSAL_WAN,
     unsupported_reason=(
         "the checkpoint may require a manual single-file fallback after its "

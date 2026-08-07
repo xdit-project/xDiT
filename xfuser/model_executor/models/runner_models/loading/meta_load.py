@@ -345,7 +345,7 @@ class MemoryEfficientLoader:
 
     def _validate_mode(self, mode: MaterializationMode) -> None:
         validate_materialization_contract(
-            self.model.load_capability,
+            self.model.load_declaration,
             mode,
             self.model.settings.fsdp_strategy,
             runner_name=type(self.model).__name__,
@@ -381,7 +381,7 @@ class MemoryEfficientLoader:
         it cannot apply: weight-splitting parallelism (FSDP, PipeFusion, tensor parallel), where
         ranks legitimately hold different weights and a broadcast would overwrite them; a single
         rank, where there is no peer to broadcast to; and runners not wired for the path (the
-        model's explicit load_capability declaration).
+        model's explicit load declaration).
         """
         if self._replicated_decision is None:
             self._replicated_decision = self._resolve_replicated_broadcast_load()
@@ -445,7 +445,7 @@ class MemoryEfficientLoader:
             )
         )
         component_name = prepared.descriptor.component_name
-        capability = self.model.load_capability
+        capability = self.model.load_declaration
         return plan_eager_blockwise_fallback(
             prepared=prepared,
             targets=targets,
@@ -507,7 +507,7 @@ class MemoryEfficientLoader:
             request = self._checkpoint_request(subfolder or request)
         elif subfolder is not None and request.subfolder != subfolder:
             request = request.with_subfolder(subfolder)
-        capability = self.model.load_capability
+        capability = self.model.load_declaration
         adapter = capability.loader_adapter
         local_custom_load = (
             weight_source is not None
@@ -525,7 +525,7 @@ class MemoryEfficientLoader:
         if component_name not in capability.all_meta_transformers:
             raise UnsupportedLoadContract(
                 f"{type(self.model).__name__} attempted meta construction of "
-                f"'{component_name}' without declaring it in load_capability"
+                f"'{component_name}' without declaring it in load_declaration"
             )
         strategy = self.model.settings.fsdp_strategy.get(component_name)
         if strategy is None or not strategy.get("wrap_attrs"):
@@ -573,7 +573,7 @@ class MemoryEfficientLoader:
         Note the fallback is rank-local, so a rank that takes it while its peers build meta
         diverges; ``agreed_is_meta`` catches that downstream and fails every rank.
         """
-        exclusion = self.model.load_capability.exclusion_for(component_name)
+        exclusion = self.model.load_declaration.exclusion_for(component_name)
         if exclusion is not None:
             raise UnsupportedLoadContract(
                 f"{type(self.model).__name__} excludes meta construction of "
@@ -646,7 +646,7 @@ class MemoryEfficientLoader:
             for name in self.model.settings.fsdp_strategy
             if name != "transformer"
             and not name.startswith("transformer_")
-            and self.model.load_capability.exclusion_for(name) is None
+            and self.model.load_declaration.exclusion_for(name) is None
         ]
 
     def meta_te_kwargs(self):
@@ -796,7 +796,7 @@ class MemoryEfficientLoader:
                 for name in self.model.settings.fsdp_strategy
                 if name != "transformer"
                 and not name.startswith("transformer_")
-                and self.model.load_capability.exclusion_for(name) is None
+                and self.model.load_declaration.exclusion_for(name) is None
             ]
             kwargs = {}
             for name in te_components:

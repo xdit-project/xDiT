@@ -20,7 +20,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 
 
 _SUPPORTED_ATTN_BACKENDS = frozenset({
@@ -115,7 +115,7 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
 
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "the pipeline is built by ModularPipeline.from_pretrained for a task workflow "
         "and its components are loaded afterwards, and fuse_qkv_projections rewrites "
@@ -455,7 +455,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
 
 
 @register_model("MiniMax-H3-Ref2VA")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "shares the base MiniMax-H3 modular construction and qkv fusion, and loads "
         "its denoiser as transformer_ref, so config-only collective loading is "

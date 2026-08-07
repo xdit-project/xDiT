@@ -10,14 +10,14 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadCapability,
+    LoadDeclaration,
     LoaderAdapter,
 )
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     loader_adapter=LoaderAdapter.SD35_COMPOSITION,
     unsupported_reason=(
         "xFuserStableDiffusion3Pipeline is a composition wrapper around a "

@@ -93,10 +93,17 @@ declarations, and because they subclass `xFuserModel` they inherited its declara
 reporting as withheld. That is what `test_every_registered_runner_has_its_own_load_declaration`
 forbids, and the inherited declaration was derived from the base's empty `ModelCapabilities`, so it
 also contradicted the fp8/fp4 support these runners enable — the failure
-`test_runner_load_capabilities_match_model_quantization_capabilities` reported. All five registered
-classes now carry an explicit `@LoadCapability.declare(unsupported_reason=...)`, which withholds meta
+`test_runner_load_declarations_match_model_quantization_capabilities` reported. All five registered
+classes now carry an explicit `@LoadDeclaration.declare(unsupported_reason=...)`, which withholds meta
 load while re-deriving the quantization contracts from each runner's own `ModelCapabilities`. The gap
 report covers 33 runner models, 13 of them withheld.
+
+That type was called `LoadCapability` until now, which invited the reasonable question of why it is
+not just `ModelCapabilities`. It is a derived view over `ModelCapabilities` and `ModelSettings` plus
+a few fields that live in neither, so `LoadDeclaration` names it for what it is and no longer collides
+with the capability table. The `LoadDeclaration` docstring carries the full argument for keeping it
+separate, including why `ModelSettings` cannot hold it today; that is the answer to give a reviewer
+who asks.
 
 ## Measurements that do not hold up
 

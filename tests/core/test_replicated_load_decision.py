@@ -22,7 +22,7 @@ from xfuser.model_executor.models.runner_models.loading.meta_load import (
     MemoryEfficientLoader,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadCapability,
+    LoadDeclaration,
     LoaderAdapter,
     UnsupportedLoadContract,
 )
@@ -62,10 +62,10 @@ def make_loader(
             pipefusion_parallel_degree=pipefusion_parallel_degree,
             tensor_parallel_degree=tensor_parallel_degree,
         ),
-        load_capability=(
-            LoadCapability.meta("transformer", replicated=True)
+        load_declaration=(
+            LoadDeclaration.meta("transformer", replicated=True)
             if supported
-            else LoadCapability.unsupported("test runner bypasses the seam")
+            else LoadDeclaration.unsupported("test runner bypasses the seam")
         ),
     )
     model.settings.fsdp_strategy = {"transformer": {"wrap_attrs": ["blocks"]}}
@@ -256,7 +256,7 @@ def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
 
 def test_custom_mapped_source_can_build_meta_only_for_local_fill(monkeypatch):
     loader = make_loader(monkeypatch, world_size=1)
-    loader.model.load_capability = LoadCapability(
+    loader.model.load_declaration = LoadDeclaration(
         local_meta_transformers=("transformer",),
         loader_adapter=LoaderAdapter.DISTILLED_WAN,
     )
@@ -303,7 +303,7 @@ def test_disk_filler_receives_the_exact_request_used_for_meta_build(monkeypatch)
 
 def test_dual_meta_transformers_keep_distinct_checkpoint_requests(monkeypatch):
     loader = make_loader(monkeypatch)
-    loader.model.load_capability = LoadCapability.meta(
+    loader.model.load_declaration = LoadDeclaration.meta(
         "transformer", "transformer_2", replicated=True
     )
     loader.model.settings.fsdp_strategy["transformer_2"] = {"wrap_attrs": ["blocks"]}
@@ -346,7 +346,7 @@ def test_runners_that_bypass_the_meta_seam_declare_it():
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
         # _load_model may be inherited; read the source of whichever class actually defines it.
         goes_through_seam = "_build_transformer" in inspect.getsource(cls._load_model)
-        declares_support = bool(cls.load_capability.meta_transformers)
+        declares_support = bool(cls.load_declaration.meta_transformers)
         if declares_support and not goes_through_seam:
             mismatched.append(f"{cls.__name__} (from {cls._load_model.__qualname__})")
 
@@ -356,17 +356,17 @@ def test_runners_that_bypass_the_meta_seam_declare_it():
     )
 
 
-def test_runner_load_capabilities_match_model_quantization_capabilities():
+def test_runner_load_declarations_match_model_quantization_capabilities():
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
-        expected = LoadCapability.for_runner(cls.capabilities).quantization_contracts
-        if cls.load_capability.quantization_contracts != expected:
+        expected = LoadDeclaration.for_runner(cls.capabilities).quantization_contracts
+        if cls.load_declaration.quantization_contracts != expected:
             mismatched.append(cls.__name__)
 
     assert not mismatched, (
-        "load_capability quantization contracts disagree with ModelCapabilities: "
+        "load_declaration quantization contracts disagree with ModelCapabilities: "
         + ", ".join(sorted(mismatched))
     )
 
@@ -376,7 +376,7 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
-        declaration = cls.load_capability
+        declaration = cls.load_declaration
         candidates = declaration.replicated_meta_transformers
         expected = (
             tuple(
@@ -419,7 +419,7 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
         ),
-        load_capability=LoadCapability.for_runner(
+        load_declaration=LoadDeclaration.for_runner(
             model_capabilities,
             meta_transformers=("transformer",),
             replicated=True,
@@ -451,7 +451,7 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
             use_int8_gemms=False,
         ),
         settings=SimpleNamespace(fsdp_strategy={}),
-        load_capability=LoadCapability.for_runner(
+        load_declaration=LoadDeclaration.for_runner(
             base_model.ModelCapabilities(),
             unsupported_reason="custom loader bypasses the seam",
         ),
@@ -480,7 +480,7 @@ def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
             use_int8_gemms=False,
         ),
         settings=SimpleNamespace(fsdp_strategy={}),
-        load_capability=LoadCapability.for_runner(
+        load_declaration=LoadDeclaration.for_runner(
             base_model.ModelCapabilities(),
             unsupported_reason="custom loader bypasses the seam",
         ),
@@ -515,14 +515,14 @@ def test_wan22_instance_settings_refresh_both_transformers(monkeypatch):
     monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: True)
     monkeypatch.setattr(base_model, "_is_cuda", lambda: False)
 
-    runner._refresh_load_capability()
+    runner._refresh_load_declaration()
     fsdp_selected = runner._select_preload_contract(world_size=2)
 
-    assert runner.load_capability.fsdp_meta_transformers == (
+    assert runner.load_declaration.fsdp_meta_transformers == (
         "transformer",
         "transformer_2",
     )
-    assert runner.load_capability.replicated_meta_transformers == (
+    assert runner.load_declaration.replicated_meta_transformers == (
         "transformer",
         "transformer_2",
     )

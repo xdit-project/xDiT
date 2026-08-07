@@ -47,7 +47,7 @@ from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     CheckpointRequest,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadCapability,
+    LoadDeclaration,
     LoadContract,
     UnsupportedLoadContract,
     select_effective_materialization_mode,
@@ -280,7 +280,7 @@ class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     capabilities: ModelCapabilities = ModelCapabilities()
-    load_capability: LoadCapability = LoadCapability.for_runner(
+    load_declaration: LoadDeclaration = LoadDeclaration.for_runner(
         capabilities,
         unsupported_reason=(
             "runner has not declared a compatible meta construction seam"
@@ -305,7 +305,7 @@ class xFuserModel(abc.ABC):
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
-        self._refresh_load_capability()
+        self._refresh_load_declaration()
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -316,10 +316,10 @@ class xFuserModel(abc.ABC):
         self._quantization_descriptor_components = set()
         self._quantization_streaming_targets = set()
 
-    def _refresh_load_capability(self) -> None:
+    def _refresh_load_declaration(self) -> None:
         """Re-derive FSDP support from instance-customized settings."""
-        declaration = type(self).load_capability
-        self.load_capability = LoadCapability.for_runner(
+        declaration = type(self).load_declaration
+        self.load_declaration = LoadDeclaration.for_runner(
             self.capabilities,
             meta_transformers=declaration.meta_transformers,
             replicated=bool(
@@ -347,7 +347,7 @@ class xFuserModel(abc.ABC):
             requested_format=requested_format,
             selected_backend=backend,
             materialization_mode=mode,
-            capability=self.load_capability,
+            declaration=self.load_declaration,
             fsdp_strategy=self.settings.fsdp_strategy,
             runner_name=type(self).__name__,
         )

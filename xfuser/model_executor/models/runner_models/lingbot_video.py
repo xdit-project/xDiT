@@ -19,7 +19,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadCapability
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import log
@@ -104,7 +104,7 @@ def _setup_parallel_vae(vae, use_encoder=False):
 
 @register_model("robbyant/lingbot-video-moe-30b-a3b")
 @register_model("LingBot-Video-MoE")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "the pipeline is composed from separately loaded components in _build_pipe "
         "rather than through a config-only transformer seam, and the runner shards "
@@ -491,7 +491,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
 @register_model("robbyant/lingbot-video-dense-1.3b")
 @register_model("LingBot-Video-Dense")
-@LoadCapability.declare(
+@LoadDeclaration.declare(
     unsupported_reason=(
         "shares the MoE runner's composed _build_pipe construction and its own "
         "per-block FSDP wrapping, so the same config-only collective load remains "

@@ -63,7 +63,7 @@ def make_loader(meta_load, *, wrap_attrs=("model.layers",)):
                 "text_encoder": {"wrap_attrs": list(wrap_attrs)},
             },
         ),
-        load_capability=SimpleNamespace(exclusion_for=lambda name: None),
+        load_declaration=SimpleNamespace(exclusion_for=lambda name: None),
         _fp8_streaming_targets=("text_encoder.model.layers",),
     )
     loader = object.__new__(meta_load.MemoryEfficientLoader)

@@ -64,6 +64,23 @@ def overlap_factor_vae(sample=256):
     )
 
 
+def overlap_keyed_vae():
+    """HunyuanVideo 1.5-style: windows keyed by axis, but ONE overlap fraction, and blending
+
+    The spelling that separates it from CogVideoX above, which keys the fraction by axis too and
+    walks its frames inside the loop rather than above it.
+    """
+    return StubVAE(
+        tile_sample_min_height=256,
+        tile_sample_min_width=256,
+        tile_latent_min_height=16,
+        tile_latent_min_width=16,
+        tile_overlap_factor=0.25,
+        blend_v=lambda above, tile, extent: tile,
+        blend_h=lambda left, tile, extent: tile,
+    )
+
+
 def per_axis_overlap_vae():
     """A square window whose two axes carry their own overlap fractions"""
     return StubVAE(
@@ -408,20 +425,41 @@ class TestTheNarrowestUsefulWindow(unittest.TestCase):
 class TestTiledDecode(unittest.TestCase):
     """The overlap-fraction loop reimplemented, which has to leave the image exactly as it was"""
 
-    # The two VAE classes that tile by overlap fraction, reusing the stand-ins above.
-    FAMILY = ("AutoencoderKL", "AutoencoderKLFlux2")
+    # The VAE classes that tile by overlap fraction, reusing the stand-ins above. HunyuanVideo 1.5
+    # is one of them despite looking like a video VAE: it keys its window by axis and carries a
+    # frame axis, but it walks an overlap fraction rather than a stride it stores.
+    FAMILY = ("AutoencoderKL", "AutoencoderKLFlux2", "AutoencoderKLHunyuanVideo15")
     # Three windows of latents across, so a run holds several tiles of the full shape alongside
     # the clipped ones at the right and bottom edges.
     WINDOWS_ACROSS = 3
+    # Deep enough that a frame axis is not a singleton pretending to be one.
+    FRAMES = 2
 
     def test_only_the_overlap_factor_family_has_this_loop(self):
-        # The others walk a stride they store outright, over a loop with its own blending and,
-        # for the video VAEs, a frame axis this knows nothing about.
+        # The stride family walks a stride it stores outright, over a loop with its own blending.
+        # CogVideoX keys its overlap fraction by axis as well as its window, and tiles its frames
+        # inside this loop rather than above it, so the keyed window alone does not admit it.
         self.assertTrue(vae_tiling.tiles_by_overlap_factor(overlap_factor_vae()))
+        self.assertTrue(vae_tiling.tiles_by_overlap_factor(overlap_keyed_vae()))
         self.assertFalse(vae_tiling.tiles_by_overlap_factor(stride_vae()))
         self.assertFalse(vae_tiling.tiles_by_overlap_factor(overlap_hw_vae()))
         self.assertIsNone(vae_tiling.overlap_tiled_decode(stride_vae()))
         self.assertIsNotNone(vae_tiling.overlap_tiled_decode(overlap_factor_vae()))
+        self.assertIsNotNone(vae_tiling.overlap_tiled_decode(overlap_keyed_vae()))
+
+    def test_both_window_spellings_read_as_one_pair(self):
+        # A square edge is the same number on both axes, which is what lets one loop walk either.
+        self.assertEqual(
+            vae_tiling.overlap_windows(overlap_factor_vae()), ((32, 32), (256, 256))
+        )
+        self.assertEqual(
+            vae_tiling.overlap_windows(overlap_keyed_vae()), ((16, 16), (256, 256))
+        )
+        self.assertIsNone(vae_tiling.overlap_windows(stride_vae()))
+
+    def _sample(self, decoded):
+        """The tensor, whichever of the two shapes this family's tiled_decode hands back"""
+        return getattr(decoded, "sample", decoded)
 
     def _tiled_vae(self, name, batch=1):
         """A small VAE of class `name` at a narrowed window, and latents several tiles across"""
@@ -431,7 +469,7 @@ class TestTiledDecode(unittest.TestCase):
         cls = getattr(diffusers, name, None)
         if cls is None:
             self.skipTest(f"{name} is not in diffusers {diffusers.__version__}")
-        kwargs, _, channels = TestEveryVAEARunnerLoads.VAES[name]
+        kwargs, video, channels = TestEveryVAEARunnerLoads.VAES[name]
         vae = cls(**kwargs).eval()
         if not hasattr(vae, "use_tiling"):
             self.skipTest(f"diffusers {diffusers.__version__} cannot tile {name}")
@@ -446,9 +484,15 @@ class TestTiledDecode(unittest.TestCase):
             f"{name} was expected to tile by overlap fraction",
         )
 
-        grid = vae.tile_latent_min_size * self.WINDOWS_ACROSS
+        (latent_down, _), _ = vae_tiling.overlap_windows(vae)
+        grid = latent_down * self.WINDOWS_ACROSS
         torch.manual_seed(0)
-        return vae, torch.randn(batch, channels, grid, grid)
+        shape = (
+            (batch, channels, self.FRAMES, grid, grid)
+            if video
+            else (batch, channels, grid, grid)
+        )
+        return vae, torch.randn(*shape)
 
     def _counted(self, vae):
         """Replace the decoder with one that records the shape of every call"""
@@ -485,12 +529,29 @@ class TestTiledDecode(unittest.TestCase):
             with self.subTest(vae=name):
                 vae, latents = self._tiled_vae(name)
                 with torch.no_grad():
-                    expected = vae.tiled_decode(latents).sample
+                    expected = self._sample(vae.tiled_decode(latents))
                     counted = self._counted(vae)
-                    got = vae_tiling.overlap_tiled_decode(vae)(latents).sample
+                    got = self._sample(vae_tiling.overlap_tiled_decode(vae)(latents))
                 self.assertEqual(got.shape, expected.shape)
                 torch.testing.assert_close(got, expected, rtol=0, atol=0)
                 self.assertEqual(set(counted.rows), {1})
+
+    def test_the_replacement_hands_back_what_it_replaced(self):
+        import torch
+
+        # The loop is installed over tiled_decode and called by the VAE's own _decode, so it has
+        # to return what that caller expects. Most classes take a return_dict and wrap; HunyuanVideo
+        # 1.5 takes none and returns the tensor, and its _decode passes that straight to decode,
+        # which would otherwise end up wrapping a DecoderOutput inside another one.
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                wraps = vae_tiling._returns_decoder_output(vae)
+                with torch.no_grad():
+                    upstream = vae.tiled_decode(latents)
+                    ours = vae_tiling.overlap_tiled_decode(vae)(latents)
+                self.assertEqual(wraps, not isinstance(upstream, torch.Tensor))
+                self.assertIs(type(ours), type(upstream))
 
     def test_a_latent_batch_is_decoded_as_it_stands(self):
         import torch
@@ -508,27 +569,33 @@ class TestTiledDecode(unittest.TestCase):
     def test_only_a_reimplemented_loop_can_have_its_tiles_dealt_out(self):
         # Choosing which rank makes which decoder call means owning the loop that makes them.
         self.assertTrue(vae_tiling.supports_tile_parallel(overlap_factor_vae()))
+        self.assertTrue(vae_tiling.supports_tile_parallel(overlap_keyed_vae()))
         self.assertFalse(vae_tiling.supports_tile_parallel(stride_vae()))
         self.assertFalse(vae_tiling.supports_tile_parallel(overlap_hw_vae()))
 
     def test_the_dispatcher_is_given_every_call_and_the_image_is_unchanged(self):
         import torch
 
-        vae, latents = self._tiled_vae("AutoencoderKL")
-        seen = []
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                seen = []
 
-        def dispatch(calls):
-            seen.append(len(calls))
-            return [call() for call in calls]
+                def dispatch(calls):
+                    seen.append(len(calls))
+                    return [call() for call in calls]
 
-        with torch.no_grad():
-            expected = vae.tiled_decode(latents).sample
-            counted = self._counted(vae)
-            got = vae_tiling.overlap_tiled_decode(vae, dispatch)(latents).sample
-        # One dispatch for the decode, holding every call it would have made itself, which is
-        # what lets a group divide them and pay for one exchange rather than one per tile.
-        self.assertEqual(seen, [len(counted.shapes)])
-        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+                with torch.no_grad():
+                    expected = self._sample(vae.tiled_decode(latents))
+                    counted = self._counted(vae)
+                    got = self._sample(
+                        vae_tiling.overlap_tiled_decode(vae, dispatch)(latents)
+                    )
+                # One dispatch for the decode, holding every call it would have made itself,
+                # which is what lets a group divide them and pay for one exchange rather than
+                # one per tile.
+                self.assertEqual(seen, [len(counted.shapes)])
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_the_calls_can_be_made_in_any_order(self):
         import torch
@@ -536,15 +603,18 @@ class TestTiledDecode(unittest.TestCase):
         # What a rank split rests on: the tiles are independent, so which order the decoder sees
         # them in cannot matter. Only the assembly afterwards has an order, and it works off the
         # results rather than the calls.
-        vae, latents = self._tiled_vae("AutoencoderKL")
-
         def backwards(calls):
             return list(reversed([call() for call in reversed(calls)]))
 
-        with torch.no_grad():
-            expected = vae.tiled_decode(latents).sample
-            got = vae_tiling.overlap_tiled_decode(vae, backwards)(latents).sample
-        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+        for name in self.FAMILY:
+            with self.subTest(vae=name):
+                vae, latents = self._tiled_vae(name)
+                with torch.no_grad():
+                    expected = self._sample(vae.tiled_decode(latents))
+                    got = self._sample(
+                        vae_tiling.overlap_tiled_decode(vae, backwards)(latents)
+                    )
+                torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_a_tiled_decode_that_fits_in_one_tile_still_works(self):
         import torch
@@ -610,10 +680,13 @@ class TestStrideTiledDecode(unittest.TestCase):
         return (None,) if type(vae).__name__ in self.CONDITIONED else ()
 
     def test_only_the_families_whose_loop_this_is(self):
-        # HunyuanVideo 1.5 and CogVideoX carry stride attributes too and walk them into loops of
-        # other shapes, so nothing about a VAE's attributes settles this on its own.
+        # A VAE's attributes do not settle this: `stride_vae` carries exactly the stride spelling
+        # these four use and is still not one of them, because the loop body is the class.
         self.assertFalse(vae_tiling.tiles_by_stored_stride(stride_vae()))
         self.assertFalse(vae_tiling.tiles_by_stored_stride(overlap_factor_vae()))
+        # HunyuanVideo 1.5 looks like a video VAE but belongs to the other family, walking an
+        # overlap fraction rather than a stride; `overlap_keyed_vae` is how it is spelled.
+        self.assertFalse(vae_tiling.tiles_by_stored_stride(overlap_keyed_vae()))
 
     def test_it_decodes_what_the_vae_decodes_for_itself(self):
         import torch

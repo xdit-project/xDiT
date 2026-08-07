@@ -121,15 +121,35 @@ class TestEncoderScaleFactor(unittest.TestCase):
 
     def test_patching_is_divided_out(self):
         # Cosmos 3's 16 is 8 from the encoder's convolutions and 2 from patching, and the adapter
-        # shards the convolutions.
+        # shards the convolutions. Asked at 32 over 2 rather than 16 over 2, so the answer is not
+        # also the number this would give by dividing nothing.
         vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
-        vae.register_to_config(scale_factor_spatial=16, patch_size=2)
-        self.assertEqual(vae_parallel.encoder_scale_factor(vae), 8)
+        vae.register_to_config(scale_factor_spatial=32, patch_size=2)
+        self.assertEqual(vae_parallel.encoder_scale_factor(vae), 16)
 
-    def test_a_vae_with_no_spatial_ratio_falls_back(self):
+    def test_a_vae_that_states_its_ratio_the_other_way_is_still_read(self):
+        """HunyuanVideo 1.5 narrows by 16 and never says scale_factor_spatial
+
+        Taking it for 8 is the expensive kind of wrong: the encoder adapter cuts bands in
+        multiples of what it is told, so a stack that halves four times is handed bands that
+        divide three times and then meet an odd row. Nothing raises where the number was
+        guessed - it surfaces several stages down, on whichever ranks drew an odd band.
+        """
         vae = diffusers.AutoencoderKLWan(**CONFIGS["AutoencoderKLWan"])
-        vae.register_to_config(scale_factor_spatial=None)
-        self.assertEqual(vae_parallel.encoder_scale_factor(vae), 8)
+        vae.register_to_config(scale_factor_spatial=None, spatial_compression_ratio=16)
+        self.assertEqual(vae_parallel.encoder_scale_factor(vae), 16)
+
+    def test_a_vae_that_states_no_ratio_at_all_is_refused_rather_than_guessed(self):
+        # There is no safe number to assume here, and the one that used to be assumed was right
+        # for the classes that state scale_factor_spatial and wrong for the ones that state the
+        # ratio under the other name. A stub rather than a real class, because every VAE a runner
+        # loads states it one way or the other and this is the case where none does.
+        class Silent:
+            config = SimpleNamespace()
+
+        with self.assertRaises(ValueError) as caught:
+            vae_parallel.encoder_scale_factor(Silent())
+        self.assertIn("narrows", str(caught.exception))
 
     def test_flux2s_pair_of_patch_sizes_is_not_mistaken_for_a_ratio(self):
         # Flux.2 names patch_size for how its latents are packed for the transformer, which its

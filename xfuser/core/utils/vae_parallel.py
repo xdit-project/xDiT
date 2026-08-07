@@ -12,6 +12,8 @@ from typing import NamedTuple, Optional, Tuple
 
 import torch.nn as nn
 
+from xfuser.core.utils import vae_tiling
+
 DECODER_MODULE = "distvae.modules.adapters.vae.decoder_adapters"
 ENCODER_MODULE = "distvae.modules.adapters.vae.encoder_adapters"
 # Adapters by name rather than import, so an installed DistVAE predating one of them fails naming
@@ -117,7 +119,12 @@ def restore_torch_group_norm() -> bool:
     # anything under xfuser.core to be importable itself.
     from xfuser.envs import _TORCH_GROUPNORM
 
-    if nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
+    # Asked by identity rather than by where the class says it was defined. Naming AITER's module
+    # meant this quietly stopped reverting if that module were ever renamed or the class wrapped
+    # in a subclass declared elsewhere - and a revert that does not happen is not an error but a
+    # decode whose norms reduce over one rank's rows, which is the failure this exists to prevent.
+    # Whatever is in place that is not torch's own class has to go, whoever put it there.
+    if nn.GroupNorm is _TORCH_GROUPNORM:
         return False
     nn.GroupNorm = _TORCH_GROUPNORM
     return True
@@ -226,9 +233,22 @@ def encoder_scale_factor(vae) -> int:
     counted = _two_d_scale_factor(vae)
     if counted is not None:
         return counted
+    # Whichever of the two spellings this VAE uses, rather than a default of 8. That default was
+    # right for every class that states scale_factor_spatial and silently wrong for the ones that
+    # state the ratio the other way: HunyuanVideo 1.5 narrows by 16, and taking it for 8 cuts
+    # bands in eights for a stack that halves four times, which ends in a band an odd number of
+    # rows deep and a rank asserting alone inside a collective.
+    factor = getattr(vae.config, "scale_factor_spatial", None)
+    if not isinstance(factor, int):
+        factor = vae_tiling.spatial_ratio(vae)
+    if not isinstance(factor, int):
+        raise ValueError(
+            f"Parallel VAE encoding cannot tell how far this VAE's encoder narrows "
+            f"({type(vae).__name__}): it states neither scale_factor_spatial nor "
+            f"spatial_compression_ratio, and the encoder adapter cuts its bands by that number."
+        )
     # A VAE that patches folds that factor into its spatial ratio, and the adapter needs the conv
     # stack's share of it alone: Cosmos 3's 16 is 8 from the encoder and 2 from patching.
-    factor = getattr(vae.config, "scale_factor_spatial", None) or 8
     patch_size = _patch_size(vae)
     return factor // patch_size if patch_size else factor
 

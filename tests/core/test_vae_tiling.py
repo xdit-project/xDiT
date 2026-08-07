@@ -281,6 +281,45 @@ class TestSnapping(unittest.TestCase):
         self.assertIsNone(pixels)
         self.assertIsNone(plan)
 
+    def _wan(self):
+        """A real stride-keyed VAE, since this is about what its own loop will do with a window"""
+        import diffusers
+
+        cls = getattr(diffusers, "AutoencoderKLWan", None)
+        if cls is None:
+            self.skipTest(f"AutoencoderKLWan is not in diffusers {diffusers.__version__}")
+        kwargs, _, _ = TestEveryVAEARunnerLoads.VAES["AutoencoderKLWan"]
+        return cls(**kwargs).eval()
+
+    def test_a_window_that_would_misalign_the_stride_loop_is_not_planned(self):
+        """A stride-family window has to be a multiple of what the loop divides its stride by
+
+        That loop steps the latent grid by `stride // ratio` and crops each tile by the stride in
+        pixels. On a shipped Wan - 256px window, 192px stride, ratio 8 - a request of 132 scales
+        the stride to a whole 99 and satisfies every other check, then steps 96 pixels while
+        keeping 99, so every tile after the first lands three pixels from where it belongs. The
+        clip to the requested size at the end makes the image the right shape, which is why
+        nothing downstream notices and why the window has to be refused here.
+        """
+        vae = self._wan()
+        step = vae_tiling.spatial_ratio(vae)
+        self.assertIsNone(vae_tiling.tile_plan(vae, 132))
+        for pixels in range(step, vae_tiling.tile_window(vae) + 1):
+            plan = vae_tiling.tile_plan(vae, pixels)
+            if plan is None:
+                continue
+            strides = [plan[attr] for attr in vae_tiling.STRIDE_ATTRS if attr in plan]
+            for value in [pixels] + strides:
+                self.assertEqual(
+                    value % step, 0,
+                    f"a {pixels}px window planned a {value} the loop truncates",
+                )
+
+    def test_snapping_steps_down_to_a_window_the_stride_loop_can_walk(self):
+        # The refusal is only useful if the search then finds the next window that works.
+        pixels, _ = vae_tiling.snap_tile_window(self._wan(), 132)
+        self.assertEqual(pixels, 128)
+
     def test_the_smallest_workable_window_is_reported_for_the_error_path(self):
         self.assertEqual(vae_tiling.smallest_tile_window(stride_vae(), 8, 256), 12)
         self.assertIsNone(vae_tiling.smallest_tile_window(StubVAE(), 8, 256))

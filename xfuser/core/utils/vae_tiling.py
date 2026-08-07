@@ -135,13 +135,27 @@ def tile_plan(vae, pixels: int) -> Optional[dict]:
     # Decoders that store an overlap fraction rather than a stride derive the stride by truncating
     # latent x (1 - overlap) while cropping tiles on a separately truncated pixel width. Unless
     # that product lands whole the two disagree and the assembled image comes out the wrong size,
-    # with nothing downstream to catch it.
+    # with nothing downstream to catch it. Asked of _overlap_lands rather than tested here, so
+    # that the window path and the overlap path judge the same arithmetic by the same code: the
+    # two truncations sit either side of a float and do not have to fall the same way.
     for latent_attr, factor_attr in OVERLAP_AXES.items():
         latent = plan.get(latent_attr)
         factor = defaults.get(factor_attr, defaults.get("tile_overlap_factor"))
         if latent is None or not isinstance(factor, float) or factor >= 1.0:
             continue
-        if not _is_whole(latent * (1.0 - factor)):
+        if not _overlap_lands(latent, pixels, factor):
+            return None
+    # The stride-walked loop divides the stride it stores by the compression ratio to step the
+    # latent grid, and keeps a crop of the stride in pixels. A window or stride off that multiple
+    # truncates in the first and not the second, so the grid steps one distance while the crop
+    # keeps another and every tile after the first lands short of where it belongs. The final clip
+    # to the requested size hides it, which is why this has to be refused here rather than caught
+    # later: --vae_tile_size 132 on a 256px, 192-stride, ratio-8 VAE scales to a whole 99 and
+    # passes every other check, then steps 96 pixels while cropping 99.
+    step = _stride_granularity(vae) if tiles_by_stored_stride(vae) else None
+    if step is not None:
+        strides = [plan[attr] for attr in STRIDE_ATTRS if attr in plan]
+        if any(value % step for value in [pixels] + strides):
             return None
     # A stride below one latent pixel divides down to a zero step, which raises out of range()
     # inside diffusers rather than producing anything.

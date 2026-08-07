@@ -313,6 +313,33 @@ def test_a_failed_comparison_is_marked_and_not_just_printed(report_tool, matrix,
     assert "FAIL" in text.split("0.412")[0], "the row itself has to read as failed"
 
 
+def test_a_score_the_model_cannot_support_reads_as_an_observation(report_tool, matrix, tmp_path):
+    """Marking it FAIL would send someone chasing a defect in a run whose image is fine.
+
+    Base Z-Image renders a different sample under different numerics, so it scores 0.625 against its
+    own bf16 reference with both images clean. The number is still shown, because a collapse would be
+    visible in it, but the row must not claim the case failed.
+    """
+    case = _cases_for(matrix, "gfx950")[0]
+    record = _record(case, "passed", wall_duration_seconds=10.0)
+    record["quality"] = {
+        "matrix_notes": "",
+        "reference": {
+            "case_id": "some-eager-bf16-case",
+            "verdict": "fail",
+            "gated": False,
+            "scores": {"comparable": True, "ssim": 0.625, "psnr": 11.7, "mse": 0.07},
+        },
+    }
+
+    text = report_tool.render(report_tool.build_report([_write(tmp_path, [record])], MATRIX_PATH))
+
+    assert "0.625 info" in text
+    assert "0.625 FAIL" not in text
+    assert "FAIL" not in text.split("0.625")[0], "the row must not read as failed"
+    assert "does not reproduce its sample" in text, "the reader needs to know why it is not gated"
+
+
 def test_the_report_warns_that_load_times_depend_on_page_cache(report_tool, matrix, tmp_path):
     """The same case measured 56.7s cold and 18.2s warm, and nothing in a row says which it was.
 

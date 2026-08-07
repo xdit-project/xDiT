@@ -1569,11 +1569,11 @@ def test_references_run_before_the_cases_that_need_them(runner):
 
 
 def test_scoring_runs_drop_torch_compile(runner):
-    """Compile picks kernels by timing, and different fp8 kernels give different images.
+    """A compiled run does not reproduce its own image, so it cannot be the thing compared.
 
-    Measured 2 distinct outputs in 3 compiled runs against byte-identical output in 3 uncompiled
-    ones, a spread as large as quantization itself, so a compiled comparison mostly reports which
-    kernel won.
+    Measured 3 distinct outputs across 9 compiled runs against byte-identical output across 6
+    uncompiled ones, a spread as large as quantization itself. Pinning inductor's timing-based
+    choices does not fix it, so this is not a knob waiting to be found.
     """
     command = ["torchrun", "-m", "xfuser.runner", "--use_fp8_gemms", "--use_torch_compile"]
 
@@ -1592,6 +1592,33 @@ def test_a_divergent_image_fails_the_case_rather_than_only_annotating_it(runner)
     assert runner.quality_status("passed", failed) == "failed_quality"
     assert runner.quality_status("passed", {"verdict": "pass"}) == "passed"
     assert runner.quality_status("passed", None) == "passed"
+
+
+def test_a_model_that_redraws_the_prompt_differently_is_not_failed_for_it(runner):
+    """Two good pictures of the same prompt score low, and failing that would be a false alarm.
+
+    Base Z-Image measures 0.6254 between its eager bf16 render and its fp8 sharded one, and both are
+    clean images of the prompt: a long sampling trajectory turns any numeric difference into a
+    different sample. The score is still worth recording, since a collapse would show up in it, but
+    it cannot decide the case on a model like that.
+    """
+    diverged = {"verdict": "fail", "gated": False, "scores": {"comparable": True, "ssim": 0.62}}
+
+    assert runner.quality_status("passed", diverged) == "passed"
+
+
+def test_which_models_can_be_judged_by_image_comparison_is_measured_not_assumed(runner):
+    """Only a model shown to hold its sample under a numeric change gates on the score."""
+    assert runner.identity_comparable("Z-Image-Turbo")
+    assert not runner.identity_comparable("Z-Image")
+    assert not runner.identity_comparable("FLUX.2-klein-9B")
+
+
+def test_a_verdict_recorded_before_gating_existed_still_fails_its_case(runner):
+    """Those records were all gated, so reading a missing flag as ungated would silently forgive."""
+    old = {"verdict": "fail", "scores": {"comparable": True, "ssim": 0.1}}
+
+    assert runner.quality_status("passed", old) == "failed_quality"
 
 
 def test_a_run_that_already_failed_keeps_its_own_reason(runner):

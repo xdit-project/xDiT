@@ -113,7 +113,12 @@ def _quality(record: dict) -> str:
     scores = reference.get("scores") or {}
     if not scores.get("comparable"):
         return "n/c"
-    return f"{scores['ssim']:.3f}" + ("" if reference.get("verdict") == "pass" else " FAIL")
+    score = f"{scores['ssim']:.3f}"
+    # A model that does not reproduce its sample under a numeric change cannot be judged by this
+    # number, so the score is shown as an observation and never as a failure.
+    if not reference.get("gated", True):
+        return f"{score} info"
+    return score + ("" if reference.get("verdict") == "pass" else " FAIL")
 
 
 def _combination(case: dict) -> str:
@@ -345,6 +350,13 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "gross-correctness check: quantization moves an image about as much as compile picking a "
         "different kernel does, so a passing score means the model still drew the picture rather "
         "than that quality is unchanged."
+    )
+    lines.append(
+        "A score marked info was not allowed to fail its case, because that model does not reproduce "
+        "its sample when the numerics change. Base Z-Image scores 0.625 between two renders that are "
+        "both good pictures of the prompt, so on models like it a low score says a different sample "
+        "came out and not that the load was wrong. Only a model measured to hold its sample, so far "
+        "only Z-Image-Turbo, is gated on this number."
     )
     lines.append(
         "load s depends on how much of the checkpoint was already in page cache, and the same case "

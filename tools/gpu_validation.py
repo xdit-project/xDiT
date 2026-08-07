@@ -508,10 +508,14 @@ def quality_status(status: str, reference: Any) -> str:
 
     Only downgrades a case that otherwise passed: a run that already failed to produce an image has
     a more specific status than the score would give it, and overwriting that would lose the reason.
+    A comparison the model cannot support is recorded but does not decide anything; older records
+    predate that distinction and were all gated, so a missing flag means gated.
     """
     if not status.startswith("passed"):
         return status
-    if isinstance(reference, dict) and reference.get("verdict") == "fail":
+    if not isinstance(reference, dict) or not reference.get("gated", True):
+        return status
+    if reference.get("verdict") == "fail":
         return "failed_quality"
     return status
 
@@ -1063,6 +1067,21 @@ def _redact(text: str, redactions: dict[str, str]) -> str:
     return text
 
 
+# Models whose image survives a numeric change, which is the only condition under which comparing
+# two images says anything about correctness. Measured per model, never assumed: Z-Image-Turbo is
+# distilled to four steps and lands on the same image at 0.9227 SSIM across fp8 and eight-way
+# sharding, while base Z-Image scores 0.6254 at twenty steps between two renders that are both good
+# pictures of the prompt and simply different samples of it. A long sampling trajectory amplifies any
+# perturbation into a different mode, so on those models this metric measures which sample came out,
+# not whether the load was correct, and it must not decide a case.
+IDENTITY_STABLE_MODELS = frozenset({"Z-Image-Turbo"})
+
+
+def identity_comparable(model: str) -> bool:
+    """Whether a score on this model is evidence about correctness rather than about sampling."""
+    return model in IDENTITY_STABLE_MODELS
+
+
 def reference_case_id(case: dict[str, Any], cases: list[dict[str, Any]]) -> str | None:
     """The case whose output this one should be judged against, or None if it is that case.
 
@@ -1138,10 +1157,17 @@ def recorded_reference_output(
 def without_compile(command: list[str]) -> list[str]:
     """Drop torch.compile from a command, for runs whose output will be compared.
 
-    Compile picks kernels by measured timing, and different fp8 kernels accumulate differently, so
-    the same case can render two different images: measured 2 distinct outputs in 3 runs with it on
-    and byte-identical output in 3 runs with it off. Since that spread is as large as the difference
-    quantization makes, a score taken with compile on would mostly report which kernel won.
+    The same case renders different images run to run with compile on: 3 distinct outputs across 9
+    compiled runs, against byte-identical output across 6 uncompiled ones. That spread is as large as
+    the difference quantization makes, so a score taken with compile on would mostly report which run
+    it was.
+
+    It is not inductor's timing-based choices, which was the obvious suspect and is wrong. This build
+    has max_autotune off already, and pinning split_reductions, triton.autotune_pointwise,
+    combo_kernels_autotune and triton.autotune_cublasLt gave 3 distinct images in 3 runs, no better
+    than leaving them alone. The cause is still unidentified, and the effect needs both fp8 and FSDP:
+    bf16 with FSDP is byte-identical across runs, and fp8 without it is too. Until that is understood,
+    disabling compile is the only known way to get a comparison that means anything.
     """
     return [argument for argument in command if argument != "--use_torch_compile"]
 
@@ -1152,11 +1178,17 @@ def score_against_reference(
     *,
     reference_id: str | None,
     thresholds: dict[str, float] | None = None,
+    gated: bool = True,
 ) -> dict[str, Any] | None:
     """Compare a run's artifact against its reference's, or explain why it could not be.
 
     Returns a block rather than a bare score so a recorded verdict stays interpretable: which case
     it was compared against, which artifact, and which thresholds applied.
+
+    gated says whether the outcome is allowed to fail the case. On a model that does not reproduce
+    its sample under a numeric change the score still gets recorded, because a collapse is worth
+    seeing, but it is left as an observation instead of a verdict that would fail runs whose images
+    are fine.
     """
     if reference_id is None:
         return None
@@ -1167,6 +1199,7 @@ def score_against_reference(
         return {
             "case_id": reference_id,
             "verdict": "unscored",
+            "gated": gated,
             "reason": f"no image artifact for {missing}",
         }
     module = _image_quality()
@@ -1176,6 +1209,7 @@ def score_against_reference(
         "artifact": reference_path,
         "sha256": (reference_output or {}).get("sha256"),
         "scores": scores,
+        "gated": gated,
         **module.verdict(scores, thresholds),
     }
 
@@ -1469,7 +1503,11 @@ def execute_case(
     # A computed comparison supersedes the operator's free-text pointer, since both answer the same
     # question about what this run was judged against and only one of them was measured.
     comparison = score_against_reference(
-        output, reference_output, reference_id=reference_id, thresholds=thresholds
+        output,
+        reference_output,
+        reference_id=reference_id,
+        thresholds=thresholds,
+        gated=identity_comparable(case.get("model", "")),
     )
     record = make_result_record(
         case=case,
@@ -1632,7 +1670,11 @@ def main(argv: list[str] | None = None) -> int:
                     if scores.get("comparable")
                     else comparison.get("reason", "not scored")
                 )
-                print(f"    quality vs {comparison['case_id']}: {comparison['verdict']} ({detail})")
+                gated = "" if comparison.get("gated", True) else ", not gated on this model"
+                print(
+                    f"    quality vs {comparison['case_id']}: "
+                    f"{comparison['verdict']} ({detail}{gated})"
+                )
                 for failure in comparison.get("failures") or []:
                     print(f"      - {failure}")
             if not args.continue_on_error and not record["status"].startswith("passed"):

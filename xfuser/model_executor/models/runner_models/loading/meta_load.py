@@ -1180,9 +1180,10 @@ class MemoryEfficientLoader:
 
 class _TransformerDiskFiller:
     """Fills a meta transformer's blocks with real weights, reading on fs-rank0 and broadcasting
-    each tensor GPU->GPU to the fs group. Holds the checkpoint weight_map, fs group, and the open-
-    handle ExitStack across the per-block fill and the epilogue. See module docstring for why the
-    read is rank0-only (block-128 fp8 tile constraint + host-anon N-scaling)."""
+    each tensor GPU->GPU to the fs group. Holds the checkpoint weight_map and fs group across the
+    per-block fill and the epilogue; at most one shard stays mapped, since an open handle retains
+    every tensor read through it (see _handle). See module docstring for why the read is rank0-only
+    (block-128 fp8 tile constraint + host-anon N-scaling)."""
 
     def __init__(
         self,
@@ -1261,13 +1262,35 @@ class _TransformerDiskFiller:
             )
 
     def _handle(self, path):
+        """Open `path`, keeping at most one shard mapped at a time.
+
+        An open safe_open handle retains a host copy of every tensor read through it - measured 1:1
+        with the bytes read, and released only on close. Holding one handle per shard across the
+        whole component therefore grew host anon to the size of the entire transformer, which is the
+        cost this per-block fill exists to avoid. Closing the previous shard on the way to the next
+        bounds it at one shard instead.
+
+        Released on shard change rather than per block because the release is what costs time
+        (tearing down and re-establishing the mapping): blocks are laid out in key order, so a shard
+        change happens once per shard rather than once per block.
+        """
         from safetensors import safe_open
 
         h = self._handle_cache.get(path)
         if h is None:
+            self._release_handles()
             h = self._stack.enter_context(safe_open(path, framework="pt", device="cpu"))
             self._handle_cache[path] = h
         return h
+
+    def _release_handles(self):
+        """Close any open shard handle, freeing the tensor copies it retains.
+
+        A tensor already read stays valid: get_tensor hands back an owned copy, not a view into the
+        mapping, so weights already assigned to the module survive the close.
+        """
+        self._handle_cache.clear()
+        self._stack.close()
 
     def _ckpt_key(self, root, name):
         """Map a live (possibly wrapped) param/buffer name to its checkpoint key.
@@ -1443,6 +1466,6 @@ class _TransformerDiskFiller:
                     f"unexpected checkpoint tensors in {self.subfolder}: "
                     f"{preview}{suffix}"
                 )
-        self._stack.close()
+        self._release_handles()
         if self.is_src:
             drop_file_page_cache(self.shard_paths)

@@ -1,5 +1,6 @@
 """CPU-only regression tests for collective/meta-load safety helpers."""
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 import pytest
@@ -426,6 +427,8 @@ def test_block_fill_requires_and_broadcasts_only_persistent_buffers(runtime):
     filler.subfolder = "transformer"
     filler._id2fqn = {id(block): "blocks.0"}
     filler._ckpt_key = lambda root, name: name
+    filler._handle_cache = {}
+    filler._stack = ExitStack()
     filler.weight_map = {
         "blocks.0.weight": "weights.safetensors",
         "blocks.0.saved": "weights.safetensors",
@@ -454,6 +457,72 @@ def test_block_fill_requires_and_broadcasts_only_persistent_buffers(runtime):
     assert broadcasts[1].data_ptr() == block.saved.data_ptr()
 
 
+def _handle_counting_filler(runtime, monkeypatch):
+    """A filler wired to a fake safe_open, reporting the open/close order it drives."""
+    import safetensors
+
+    opened, closed = [], []
+
+    class FakeHandle:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            opened.append(self.path)
+            return self
+
+        def __exit__(self, *exc):
+            closed.append(self.path)
+            return False
+
+    monkeypatch.setattr(
+        safetensors, "safe_open", lambda path, **kwargs: FakeHandle(path)
+    )
+
+    filler = object.__new__(runtime.meta._TransformerDiskFiller)
+    filler._handle_cache = {}
+    filler._stack = ExitStack()
+    return filler, opened, closed
+
+
+def test_only_one_shard_stays_mapped_during_a_fill(runtime, monkeypatch):
+    """An open safe_open handle retains a host copy of every tensor read through it, so holding one
+    per shard makes host anon track the whole transformer rather than the shard being read - the
+    cost this per-block fill exists to avoid."""
+    filler, opened, closed = _handle_counting_filler(runtime, monkeypatch)
+
+    filler._handle("shard-0.safetensors")
+    filler._handle("shard-1.safetensors")
+
+    assert opened == ["shard-0.safetensors", "shard-1.safetensors"]
+    assert closed == ["shard-0.safetensors"]
+    assert list(filler._handle_cache) == ["shard-1.safetensors"]
+
+
+def test_reads_within_one_shard_reuse_its_handle(runtime, monkeypatch):
+    """Releasing is what costs time, so a shard must not be reopened per tensor or per block."""
+    filler, opened, closed = _handle_counting_filler(runtime, monkeypatch)
+
+    for _ in range(4):
+        filler._handle("shard-0.safetensors")
+
+    assert opened == ["shard-0.safetensors"]
+    assert closed == []
+
+
+def test_releasing_handles_lets_a_later_read_reopen(runtime, monkeypatch):
+    """finalize releases at the end of the component; the cache must not then hand back a closed
+    handle if anything reads again."""
+    filler, opened, closed = _handle_counting_filler(runtime, monkeypatch)
+
+    filler._handle("shard-0.safetensors")
+    filler._release_handles()
+    filler._handle("shard-0.safetensors")
+
+    assert opened == ["shard-0.safetensors"] * 2
+    assert closed == ["shard-0.safetensors"]
+
+
 def test_local_block_fill_uses_no_collective_transport(runtime):
     torch = runtime.torch
     block = torch.nn.Module()
@@ -467,6 +536,8 @@ def test_local_block_fill_uses_no_collective_transport(runtime):
     filler.subfolder = "transformer"
     filler._id2fqn = {id(block): "blocks.0"}
     filler._ckpt_key = lambda root, name: name
+    filler._handle_cache = {}
+    filler._stack = ExitStack()
     filler.weight_map = {
         "blocks.0.weight": "weights.safetensors",
         "blocks.0.saved": "weights.safetensors",

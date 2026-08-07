@@ -211,7 +211,11 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
     and on the replicated broadcast path aiter_covers() turns True while aiter_te_pipeline_config()
     stays None, so peers fp8-swap a component rank0 loads bf16 and the load hangs on mismatched
     tensor counts. Checked over the registry because the split is per-runner and easy to miss (flux
-    was missed once, in the exact configuration the feature targets)."""
+    was missed once, in the exact configuration the feature targets).
+
+    A denoiser is not always the component literally named "transformer": Ideogram 4 carries a second
+    unconditional_transformer and MiniMax-H3-Ref2VA names its own transformer_ref, so the component
+    is matched on containing "transformer" rather than starting with it."""
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
     leaks = {}
@@ -219,7 +223,7 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
         stray = [
             entry
             for entry in (cls.settings.fp8_gemm_module_list or [])
-            if not entry.startswith("transformer")
+            if "transformer" not in entry.partition(".")[0]
         ]
         if stray:
             leaks[cls.__name__] = stray

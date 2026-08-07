@@ -178,6 +178,9 @@ class TestDistilledWanScheduler:
 class TestDistilledTransformerLoading:
     def test_quantized_load_uses_mapped_local_blockwise_source(self):
         from xfuser.model_executor.models.runner_models import wan
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
 
         model = object.__new__(wan.xFuserWan22DistilledI2VModel)
         model.config = SimpleNamespace()
@@ -204,7 +207,7 @@ class TestDistilledTransformerLoading:
             live_key=wan._remap_lightx2v_to_diffusers,
         )
         model._build_transformer.assert_called_once_with(
-            wan.xFuserWanTransformer3DWrapper,
+            xFuserWanTransformer3DWrapper,
             subfolder="transformer",
             init_kwargs={"attention_kwargs": attention_kwargs},
             stream_quant=False,

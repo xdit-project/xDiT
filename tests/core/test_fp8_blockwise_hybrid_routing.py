@@ -431,7 +431,10 @@ def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
     fp8_calls = []
     broad_module = object()
     model = SimpleNamespace(
-        settings=SimpleNamespace(fp4_gemm_module_list=["transformer.blocks.0.attn"]),
+        settings=SimpleNamespace(
+            fp4_gemm_module_list=["transformer.blocks.0.attn"],
+            fp8_gemm_include_suffixes=None,
+        ),
         fp8=SimpleNamespace(module_list=lambda: ["transformer.blocks"]),
         pipe=SimpleNamespace(transformer=SimpleNamespace(blocks=broad_module)),
         blockwise_fp8_backend=SimpleNamespace(
@@ -796,6 +799,7 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
             fp4_gemm_module_list=["transformer.blocks"],
             fp8_precision_overrides=None,
             fp8_precision_override_suffixes=None,
+            fp8_gemm_include_suffixes=None,
         ),
         config=SimpleNamespace(use_hybrid_gemm_schedule=False),
         fp8=SimpleNamespace(
@@ -856,7 +860,10 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
             use_hybrid_gemm_schedule=False,
             use_vae_channels_last_format=False,
         ),
-        settings=SimpleNamespace(int8_gemm_module_list=None),
+        settings=SimpleNamespace(
+            int8_gemm_module_list=None,
+            fp8_gemm_include_suffixes=None,
+        ),
         fp8=SimpleNamespace(
             module_list=lambda: [
                 "transformer.blocks",

@@ -276,8 +276,20 @@ def _keep_causal_cache_length(vae) -> None:
     vae._distvae_cache_length_kept = True
 
 
+SHARDED_DECODER = "_xfuser_decoder_adapter"
+SHARDED_ENCODER = "_xfuser_encoder_adapter"
+
+
 def parallelize_decoder(vae, vae_group) -> str:
     """Replace this VAE's decoder with a sharded one, returning the adapter that did it"""
+    # Once only, like every other step that replaces something on a VAE. A runner's initialize()
+    # can run more than once in a process, and where it hands back the same VAE the second call
+    # would wrap the adapter in another adapter: a decoder that splits its rows across the group
+    # and then splits the split. Where the pipeline was rebuilt the VAE is a new object carrying
+    # no mark, and this shards it as normal.
+    already = getattr(vae, SHARDED_DECODER, None)
+    if already is not None:
+        return already
     name = decoder_adapter_name(vae)
     if name is None:
         raise ValueError(
@@ -293,11 +305,15 @@ def parallelize_decoder(vae, vae_group) -> str:
     if patch_size and hasattr(decoder, "patchify"):
         decoder.patchify.scale_factor = patch_size
     vae.decoder = decoder.to(vae.device)
+    setattr(vae, SHARDED_DECODER, name)
     return name
 
 
 def parallelize_encoder(vae, vae_group) -> str:
     """Replace this VAE's encoder with a sharded one, returning the adapter that did it"""
+    already = getattr(vae, SHARDED_ENCODER, None)
+    if already is not None:
+        return already
     name = encoder_adapter_name(vae)
     if name is None:
         raise ValueError(
@@ -309,4 +325,5 @@ def parallelize_encoder(vae, vae_group) -> str:
     vae.encoder = adapter(
         vae.encoder, vae_group=vae_group, vae_scale_factor=encoder_scale_factor(vae)
     ).to(vae.device)
+    setattr(vae, SHARDED_ENCODER, name)
     return name

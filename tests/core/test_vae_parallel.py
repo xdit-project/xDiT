@@ -260,6 +260,32 @@ class TestBothHalvesShardTogether(unittest.TestCase):
                 self.assertIsNot(vae.decoder, decoder)
                 self.assertIsNot(vae.encoder, encoder)
 
+    def test_sharding_the_same_vae_again_does_not_wrap_the_wrapper(self):
+        # A runner's initialize() can run more than once in a process, and where it hands back
+        # the same VAE the second pass would put an adapter around the adapter: a decoder that
+        # splits its rows across the group and then splits the split. Every other step that
+        # replaces something on a VAE already guards this; these two did not.
+        vae = diffusers.AutoencoderKL(**CONFIGS["AutoencoderKL"]).eval()
+        self.assertEqual(
+            vae_parallel.parallelize_decoder(vae, vae_group=None), EXPECTED["AutoencoderKL"]
+        )
+        self.assertEqual(
+            vae_parallel.parallelize_encoder(vae, vae_group=None),
+            EXPECTED_ENCODERS["AutoencoderKL"],
+        )
+        once_decoder, once_encoder = vae.decoder, vae.encoder
+
+        # Named the same the second time, so a caller logging what sharded it still reads true.
+        self.assertEqual(
+            vae_parallel.parallelize_decoder(vae, vae_group=None), EXPECTED["AutoencoderKL"]
+        )
+        self.assertEqual(
+            vae_parallel.parallelize_encoder(vae, vae_group=None),
+            EXPECTED_ENCODERS["AutoencoderKL"],
+        )
+        self.assertIs(vae.decoder, once_decoder, "the decoder was wrapped a second time")
+        self.assertIs(vae.encoder, once_encoder, "the encoder was wrapped a second time")
+
 
 class _ConvLosingAdapter(_StubAdapter):
     """A stand-in that keeps none of the convolutions it replaced, as the real adapters do

@@ -354,16 +354,23 @@ operator workflow are in the
 [GPU Validation Handoff](gpu_validation_handoff.md). Its checked-in status is
 **NOT RUN**; dry-runs and repository tests are not GPU end-to-end evidence.
 
+Part of the matrix has now been executed. Thirty-six cases on 8× MI355X
+(`gfx950`) cover the memory-efficient load paths in bf16 and FP8 across six image
+models, reported in
+[Memory-efficient load results](meta_load_results.md); the rows below are marked
+against that. Everything outside those paths, models and quantizations remains
+GPU-unvalidated here.
+
 | Contract area | Implementation status | Static / unit-test evidence in the repository | GPU end-to-end status |
 |---------------|-----------------------|----------------------------------------------|-----------------------|
-| FP8 target selection and explicit `--use_fp8_text_encoder` opt-in | Implemented | Unit tests directly exercise target inclusion/exclusion and component-prefix routing. CLI validation and each runner's exact target declarations are verified by static inspection; the registry test only guards against text-encoder targets leaking into the always-on transformer list. | Unvalidated across the documented GPU/model combinations |
+| FP8 target selection and explicit `--use_fp8_text_encoder` opt-in | Implemented | Unit tests directly exercise target inclusion/exclusion and component-prefix routing. CLI validation and each runner's exact target declarations are verified by static inspection; the registry test only guards against text-encoder targets leaking into the always-on transformer list. | Validated with the text encoder quantized alongside the transformer on six image models at 8 ranks on gfx950, on both the sharded and replicated placements. Unvalidated on the other documented GPU/model combinations |
 | AITER diffusers/Transformers streaming adapters and FP8 layer layout | Implemented | Unit tests directly cover quantizer registration/packaging and sentinel FP8 parameter/buffer layouts without invoking kernels. Streaming adapter execution is verified only by static inspection. | Streaming checkpoint load and AITER kernels are GPU-unvalidated here |
-| Replicated meta-load policy | Implemented | Unit tests directly exercise the pure opt-in decision and exclusions for single rank, weight-splitting parallelism, and unwired runners. Collective fill behavior is verified only by static inspection. | Multi-rank GPU broadcasts and complete inference are GPU-unvalidated here |
-| Memory-efficient FSDP policy and meta construction | Implemented | Unit tests directly exercise the FSDP gate and bf16 meta-transformer construction. Per-block fill and quantize routing are verified only by static inspection. | Multi-rank FSDP fills, offload combinations, and complete inference are GPU-unvalidated here |
+| Replicated meta-load policy | Implemented | Unit tests directly exercise the pure opt-in decision and exclusions for single rank, weight-splitting parallelism, and unwired runners. Collective fill behavior is verified only by static inspection. | Validated at 8 ranks with FP8 on six image models on gfx950: broadcast fill and complete inference, scored against an unquantized render. bf16 replicated, offload combinations, and other quantizations remain unvalidated |
+| Memory-efficient FSDP policy and meta construction | Implemented | Unit tests directly exercise the FSDP gate and bf16 meta-transformer construction. Per-block fill and quantize routing are verified only by static inspection. | Validated at 8 ranks on six image models on gfx950, bf16 and FP8, against both an eager load at the same rank count and a shard-after-materialize control: same image to four decimals, at 1.1-1.9x the load speed and 1.7-5.2x less load-time device memory. One 4-rank spot check. Offload combinations, video models and FP4/INT8 remain unvalidated |
 | FP4/INT8 adapters, hardware gates, targets, and placement | Implemented | Dependency-light tests cover injected hardware routing, exact native-config acceptance, target/minimum-size exclusions, hybrid fallback, descriptors, FSDP preflight, and MXFP4 parameter/buffer layout. Guarded integration tests require installed Diffusers/torchao and skip unsupported accelerators. | MXFP4, NVFP4, INT8, mixed FP4/FP8, and model-specific quality combinations are GPU-unvalidated here |
 | Registry/model construction declarations | Implemented | Dependency-light AST tests require every registered runner to declare its load contract, extract actual `ModelSettings.fsdp_strategy` and instance strategy assignments for meta declarations, and keep named custom adapters out of standard collective modes. Guarded model tests check the Hunyuan/LTX wrapper config APIs when Diffusers is installed. | HunyuanVideo meta loading and LTX-2/2.3 eager/native loading remain GPU-unvalidated here |
 
-These labels describe code and repository test coverage, not runtime validation performed for this documentation change. No GPU end-to-end result is claimed.
+Where a row claims no GPU result, the label describes code and repository test coverage only. Where a row names one, it points at the recorded sweep above, and its scope is exactly what that row states: another model, rank count, quantization or accelerator is not covered by it.
 
 ### Model-specific Arguments
 

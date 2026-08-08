@@ -1,12 +1,17 @@
 # External GPU Validation Handoff
 
-## Current status: NOT RUN
+## Current status: partially run
 
-No GPU results have been recorded. This repository contains a reproducible
-validation plan prepared on a system where the GPU end-to-end jobs were
-deliberately skipped. A result becomes evidence after an operator executes a
-case on the declared hardware and attaches its JSONL record, log, and generated
-output.
+The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
+has not been executed anywhere and a result is only evidence once an operator
+attaches its JSONL record, log, and generated output.
+
+What has run: thirty-six cases on 8× MI355X (`gfx950`), covering the
+memory-efficient load paths in bf16 and FP8 across six image models, all passing
+and all scored against an unquantized render.
+[Memory-efficient load results](meta_load_results.md) reports them, including two
+bugs the sweep found in combinations nothing had run before. Those records live on
+that node and are not checked in.
 
 The artifacts are:
 
@@ -33,10 +38,14 @@ python tools/gpu_validation.py --list
 python tools/gpu_validation.py --dry-run --tag smoke
 ```
 
-The checked-in cases use four-step 512×512 workloads to make first-pass
-validation practical. Increase dimensions, frames, or steps only as a separate
-follow-up; preserve the original case ID and command when reporting this
-matrix.
+Each case is sampled the way its own model is meant to be sampled, from that
+model's entry in `.ci/benchmark_configs`, which the matrix carries under
+`sampling` alongside the source it was read from. There is no global default to
+fall back on: a model with no entry raises `UnknownSampling` and reports as a
+case that cannot run, rather than being rendered at someone else's step count.
+This matters beyond fairness — four steps at 512×512 left Z-Image an
+unconverged blob, and a model's step count and resolution also decide how much a
+numeric change moves its output, which is what the quality gate below measures.
 
 The matrix treats Transformers `4.x` and `5.x` as environment requirements; the
 runner does not install them. Before execution, it probes the installed
@@ -141,12 +150,21 @@ Timeout values must be finite positive numbers.
 Omitting all three retains the safe dry-run behavior.
 
 Every command receives a new output directory:
-`<output-root>/<case-id>/<UTC timestamp>-<UUID>`. Execution reserves that
-directory atomically and fails if it already exists. A prior case directory is
-never reused, so stale artifacts cannot satisfy a later case. The output root
-is resolved once against the validation runner's caller working directory. The
-same absolute run directory is passed to xDiT, reserved, scanned, and recorded,
-even though the child process itself starts from the repository root.
+`<output-root>/<run-id>/<case-id>`, where the run id is
+`<UTC timestamp>-<UUID>` unless `--run-id` names it. Run first and case second so
+one invocation produces one directory holding every case it ran, rather than a
+sibling directory per model. A sweep runs one case per invocation, which would
+still be a directory per case, so pass the same `--run-id` to each invocation of
+a sweep and the whole sweep is one folder to review.
+
+Execution reserves that directory atomically and fails if it already exists. A
+prior case directory is never reused, so stale artifacts cannot satisfy a later
+case; reusing a `--run-id` across invocations is safe because the case name
+differs, and re-running the same case under the same run id is refused. The
+output root is resolved once against the validation runner's caller working
+directory. The same absolute run directory is passed to xDiT, reserved, scanned,
+and recorded, even though the child process itself starts from the repository
+root.
 
 Local cases mean an offline, pre-populated Hugging Face cache. They preserve
 the registered `--model` alias and add `HF_HUB_OFFLINE=1` plus `HF_HOME`:
@@ -218,8 +236,16 @@ record for a case ID wins, so a re-run supersedes an earlier attempt.
 Two readings the report deliberately keeps apart. A case the matrix expects to
 be refused shows as `rej` rather than `ok`: the guard firing is a pass, but the
 combination still does not work on that hardware. And the post-load column is
-wall minus load, so it covers VAE decode, saving and teardown as well as
-inference; the runner does not time inference on its own.
+wall minus load and compile, so it covers VAE decode, saving and teardown as well
+as inference; the runner does not time inference on its own.
+
+Two of its columns come from the quality checks. `spread` is the run's own
+artifact measurement, shown as `BLANK` when it failed, and `-` when nobody
+measured that run — the report renders records and does not read images, so a run
+recorded before the measurement existed stays blank until it is re-run. `vs ref`
+is the SSIM from the `--score-quality` pass, so it describes a different, compile-
+free run of the same case rather than the run whose timings are on that row, and
+a score marked `info` was not allowed to fail its case.
 
 Generated artifacts use a central allowlist,
 `GENERATED_ARTIFACT_EXTENSIONS` in `tools/gpu_validation.py`. The current
@@ -230,26 +256,64 @@ tests when a runner intentionally adds another generated media type.
 
 ## Quality comparison
 
-1. Run a non-quantized reference with the same checkpoint revision, prompt or
-   input image, seed, dimensions, frame count, and inference steps.
-2. Keep the reference output with the validation bundle and pass its path with
-   `--reference`.
-3. Record visible differences, NaNs/artifacts, text-conditioning regressions,
-   temporal instability, or acceptance criteria with `--quality-note`.
-4. Compare hashes only for determinism across identical configurations.
-   Quantized and reference outputs are not expected to have identical hashes.
-5. Treat visual acceptance as an operator decision; the recorder does not
-   infer image or video quality.
+Two checks run on a case's output. One needs no reference and gates everything;
+the other needs a reference and gates only where a score is evidence.
 
-Example:
+### Did it draw anything
+
+Every executed case measures the spread of its own artifact. A uniform frame is
+`failed_blank_output` regardless of exit status, model, or expected outcome. This
+exists because an FP8 Qwen-Image run wrote a pure black 2048×2048 frame and was
+reported as passed: reference comparison had nothing to say about that model, so
+nothing looked at the image at all. The measure is spread rather than mean, since
+a night scene is legitimately dark but no legitimate render is uniform, and the
+floor sits two orders of magnitude below the flattest real render measured. An
+artifact with no still-image reader, a video, records as unmeasured rather than
+being credited with having drawn something.
+
+### Does it match an unquantized render
+
+`--score-quality` compares each case against its model's `eager`, unquantized,
+single-rank case and fails the case when it diverges:
 
 ```bash
 python tools/gpu_validation.py \
-  --case blackwell-flux2-nvfp4-eager \
-  --execute \
-  --reference references/flux2-bf16-seed1234.png \
-  --quality-note "No visible composition loss; small texture change."
+  --case gen-mi3xx-flux-1-dev-fp8-te-fsdp-w8 \
+  --execute --score-quality \
+  --results gpu-validation-results/results.jsonl
 ```
+
+Four things about that path are deliberate:
+
+- **It disables `torch.compile` for every run in the pass,** because a compiled
+  run is not reproducible enough to compare: the same case has scored 0.98
+  against itself when compile picked different kernels. Those runs are marked
+  `scoring_run` and their timings stay out of the performance columns.
+- **The reference is matched on attributes, not by name** — eager placement, no
+  quantization, no offload, one rank — so a regenerated matrix cannot leave a case
+  scoring against the wrong thing. It is reused from `--results` when a
+  compile-free run of it is already recorded, so scoring one case does not re-run
+  an eight-rank reference to judge it. Within one invocation, references run
+  first.
+- **Two floors, because the gate judges two different changes.** A case that only
+  moves weights should render the same image and is held to 0.90 SSIM; a case
+  that quantizes them moves texture while keeping content and is held to 0.60.
+  One floor cannot do both: loose enough for FP8, it would pass a shard that
+  rendered a different picture. Both are calibrated on measurements recorded in
+  `tools/image_quality.py`, and a floor is only meaningful next to the sampling it
+  was measured at — the previous single floor went stale exactly that way when
+  each model started being sampled its own way.
+- **Only a model measured to reproduce its sample is gated on the score.** Others
+  record it as an observation, shown as `info`. Base Z-Image renders two good
+  pictures of its prompt that score 0.6254 against each other, so on models like
+  it a low score says a different sample came out, not that the load was wrong.
+  `IDENTITY_STABLE_MODELS` holds the list and the argument.
+
+Pass `--ssim-min` to override the floor a case would otherwise get. Treat the
+result as a gross-correctness check: it answers whether the model still drew the
+picture, not whether quantized quality is acceptable. That judgement stays with
+the operator, recorded with `--quality-note`, and comparing hashes is only
+meaningful for determinism across identical configurations.
 
 ## Attaching completed results
 

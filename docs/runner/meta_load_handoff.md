@@ -3,6 +3,11 @@
 Written when the MI300X node this work ran on was reclaimed. Everything below is either committed on
 `feat/rdna4-fp8-meta-load` or reproducible from it; the node's `/validation` scratch is gone.
 
+The load paths have since been measured end to end on MI355X:
+[Memory-efficient load results](meta_load_results.md) has the numbers, what they do not cover, and
+the two bugs the sweep found. Read that first for what is known to work; this document is the node
+and branch state around it.
+
 ## The node is now MI355X (gfx950)
 
 Work resumed on gfx950, not the gfx942 the results below were taken on, which changes what the
@@ -133,13 +138,20 @@ Run supplementary cases **serially**: the single-process eager path binds port 2
 `PET_MASTER_PORT`, which only reaches torchrun. `seed_cache.py` re-seeds the four models these
 matrices need (about 150 GB, roughly four minutes).
 
-## Open threads
+## Resolved: the 8-rank divergence was not a load bug
 
-The 8-rank divergence between eager and memory-efficient loads is unresolved and may not be real: the
-runs attributed to it failed on a port collision and on a kill during the enumerator storm. Re-run
-with `FLYDSL_GPU_ARCH` set before assuming a numerical bug. The per-tensor fingerprint hook used to
-chase it gathered full tensors on rank 0 and was too expensive to complete; hash shard-local tensors
-per rank instead.
+This was recorded as an open thread, on runs that had failed to a port collision and to a kill during
+the enumerator storm. Measured on gfx950 with `FLYDSL_GPU_ARCH` set, it is not there: across six
+models, eager, eager-fill and blockwise at eight ranks score identically to each other against the
+same single-rank eager render, to four decimals. Whatever separates an 8-rank image from a 1-rank one
+is the parallelism, and the load strategy adds nothing. The fingerprint hook is not needed for this.
+
+Two real 8-rank bugs did turn up in the same sweep, neither in the load path: a dynamic FP8 scale of
+zero turned a padding-only activation chunk into NaN and every FP8 Qwen-Image render black, and
+per-block compilation under a CUDA-graph mode failed every FLUX case that combined sharding with
+compile. Both are fixed and covered by tests; the results doc has the detail.
+
+## Open threads
 
 Enabling collective mapped-checkpoint loads for CausalWan and Wan2.2-Distilled is the most tractable
 way to widen support. Both are withheld for collective-safe key discovery, which is what

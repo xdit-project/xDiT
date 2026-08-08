@@ -101,6 +101,20 @@ def test_operator_guide_is_linked_and_marks_results_not_run():
     assert "gpu_validation_handoff.md" in runner_guide
 
 
+def test_the_recorded_results_are_reachable_from_the_docs_that_claim_them():
+    """A results document nobody links to is a document nobody reads.
+
+    Three places state what has been validated, and each is where a different reader starts: the
+    runner guide's contract table, the operator guide, and the load handoff. All three now cite
+    measurements, so all three have to reach the document those measurements live in.
+    """
+    results = ROOT / "docs/runner/meta_load_results.md"
+
+    assert results.exists()
+    for citing in ("runner.md", "gpu_validation_handoff.md", "meta_load_handoff.md"):
+        assert results.name in (ROOT / "docs/runner" / citing).read_text(), citing
+
+
 def test_matrix_covers_required_validation_dimensions(matrix):
     cases = matrix["cases"]
 

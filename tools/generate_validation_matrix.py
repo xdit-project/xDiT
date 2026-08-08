@@ -126,19 +126,29 @@ def screened_variants(plan, declaration, cls) -> list[dict]:
     declared = set(declared_variants(declaration))
     quantizes_te = quantizes_its_text_encoder(cls)
     chosen: list[dict] = []
-    seen: set[tuple[str, str, bool]] = set()
+    seen: set[tuple[str, str, bool, int | None]] = set()
     for entry in plan["cases"]:
         placement, quantization = entry["placement"], entry["quantization"]
         declares = CONTROL_FOR_PLACEMENT.get(placement, placement)
         if (declares, quantization) not in declared:
             continue
         te_fp8 = bool(entry["te_fp8"]) and quantizes_te
-        identity = (placement, quantization, te_fp8)
+        # Rank count is part of what a case tests, not just of how it is run, so a plan may ask for
+        # the same placement at two rank counts: eager at one rank is the image to compare against,
+        # while eager at the rank count the model is served on is what the sharded cases are faster
+        # and smaller than. Collapsing them would leave the sharded cases with nothing fair to beat.
+        world_size = entry.get("world_size")
+        identity = (placement, quantization, te_fp8, world_size)
         if identity in seen:
             continue
         seen.add(identity)
         chosen.append(
-            {"placement": placement, "quantization": quantization, "te_fp8": te_fp8}
+            {
+                "placement": placement,
+                "quantization": quantization,
+                "te_fp8": te_fp8,
+                "world_size": world_size,
+            }
         )
     return chosen
 
@@ -266,7 +276,7 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                 placement = variant["placement"]
                 quantization = variant["quantization"]
                 te_fp8 = variant["te_fp8"]
-                world_size = policy[placement]
+                world_size = variant.get("world_size") or policy[placement]
                 quant_slug = QUANTIZATION_SLUG.get(quantization, quantization)
                 case_id = "-".join(
                     [

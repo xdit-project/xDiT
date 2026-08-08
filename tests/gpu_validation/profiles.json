@@ -6,7 +6,7 @@
     "replicated": 4,
     "fsdp_blockwise": 4
   },
-  "world_size_rationale": "One rank for eager because it shards nothing. The multi-rank default is deliberately conservative for profiles whose machines are small; a profile whose hardware ships more devices should override it, because testing a rank count nobody deploys measures a configuration that does not exist. Profiles override this with their own world_size_policy.",
+  "world_size_rationale": "One rank for eager because it shards nothing, which a screening plan case may override when it needs eager at the rank count the model is served on. Measured on MI355X: host memory is a fixed cost per rank, 18.7G for eager and 8.5G for blockwise fill, identical at four and eight ranks. Blockwise fill's share does not fall as the shard gets smaller because what is left on the host is the process itself rather than the weights, so the gap between the two widens with every rank added. The multi-rank default is deliberately conservative for profiles whose machines are small; a profile whose hardware ships more devices should override it, because testing a rank count nobody deploys measures a configuration that does not exist. Profiles override this with their own world_size_policy.",
   "profiles": [
     {
       "id": "mi3xx",
@@ -30,6 +30,13 @@
             "quantization": "none",
             "te_fp8": false,
             "role": "reference for the image comparison, and the cheapest proof the model loads at all"
+          },
+          {
+            "placement": "eager",
+            "quantization": "none",
+            "te_fp8": false,
+            "world_size": 8,
+            "role": "the baseline the sharded cases are measured against: eight ranks, each holding a full copy, which is what you would run on this node without memory-efficient loading. Measured: at eight ranks it costs 149.3G of host memory and 23.9G of load VRAM against blockwise fill's 68.2G and 13.9G, and loads 17% slower. The one-rank eager case above is the image to compare against, not a baseline for cost, because comparing an eight-rank run to a one-rank run confounds the loader with the parallelism."
           },
           {
             "placement": "fsdp_blockwise",

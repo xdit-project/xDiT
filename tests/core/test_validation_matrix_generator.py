@@ -114,6 +114,53 @@ def test_each_control_case_matches_the_rank_count_it_controls_for(matrix):
         assert control["world_size"] == counterpart["world_size"], control["id"]
 
 
+def test_every_sharded_model_has_an_unsharded_case_at_the_same_rank_count(matrix):
+    """The sharded cases have to be measured against what you would run instead of them.
+
+    Eager at one rank is the image to compare against, but it is not a cost baseline: comparing an
+    eight-rank sharded load to a one-rank load credits the loader for the parallelism. The honest
+    comparison is eager at the same rank count, holding a full copy per rank.
+    """
+    # Curated cases are exempt: a hand-written case pins one configuration on one machine, and it
+    # carries the note saying what it is for rather than a baseline beside it.
+    sharded = [
+        case
+        for case in matrix["cases"]
+        if case["placement"] == "fsdp_blockwise" and case["id"].startswith("gen-")
+    ]
+    assert sharded, "the blockwise placement stopped being generated"
+    for case in sharded:
+        if case["world_size"] == 1:
+            continue
+        assert any(
+            baseline["placement"] == "eager"
+            and baseline["model"] == case["model"]
+            and baseline["world_size"] == case["world_size"]
+            and baseline["quantization"] == "none"
+            for baseline in matrix["cases"]
+        ), f"{case['id']} has nothing unsharded to be compared against at its own rank count"
+
+
+def test_a_baseline_at_the_served_rank_count_does_not_displace_the_reference(
+    runner, matrix
+):
+    """Adding eager at eight ranks must not change which case others are scored against."""
+    baselines = [
+        case
+        for case in matrix["cases"]
+        if case["placement"] == "eager"
+        and case["quantization"] == "none"
+        and case["world_size"] > 1
+    ]
+    assert baselines, "the same-rank-count baseline stopped being generated"
+    for baseline in baselines:
+        reference = runner.reference_case_id(baseline, matrix["cases"])
+        assert reference is not None, baseline["id"]
+        assert next(
+            case for case in matrix["cases"] if case["id"] == reference
+        )["world_size"] == 1
+
+
 def test_every_rejection_case_is_curated(matrix):
     curated = {case["id"] for case in json.loads(CURATED_PATH.read_text())["cases"]}
     for case in matrix["cases"]:

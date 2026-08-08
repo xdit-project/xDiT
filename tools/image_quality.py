@@ -21,11 +21,24 @@ from typing import Any
 import numpy as np
 
 # Calibrated against what the gate actually compares: a candidate at eight ranks against an eager
-# bf16 reference at one, so a passing case differs by parallelism and quantization together rather
-# than by quantization alone. fp8 measures 0.9227 SSIM and 24.9 PSNR that way, and gross breakage
-# measures below 0.5, so these floors clear the real result by a wide margin and still fail breakage.
-# Tightening them towards the measured value would buy no detection and start failing on noise.
-DEFAULT_THRESHOLDS = {"ssim_min": 0.80, "psnr_min": 15.0}
+# bf16 reference at one. Measured on Z-Image-Turbo at the sampling that model's own benchmark uses,
+# 4 steps at 512x320, which is what the floors have to hold for:
+#
+#   sharding only, bf16      0.9935 SSIM, 40.5 PSNR   (eager, blockwise and eager-fill all identical)
+#   fp8 weights and encoder  0.7244 SSIM, 19.0 PSNR   (same cat, same pose, fur texture differs)
+#   a collapsed render       0.0006 SSIM              (the all-black frame an FP8 NaN produced)
+#
+# So one floor cannot serve both: a floor loose enough for fp8 cannot notice a sharding regression,
+# and a floor tight enough to notice one fails every quantized case. Quantization moves the texture
+# of an image while leaving its content alone, and changing only the parallelism should not move the
+# image at all.
+#
+# A floor is only meaningful next to the sampling it was measured at. An earlier 0.80 was calibrated
+# when every model rendered 512x512 at seed 1234, where this same fp8 case measured 0.9227; sampling
+# each model the way that model is meant to be sampled moved it to 0.7244 on an image that a person
+# confirmed is the same picture, and the stale floor then failed it.
+DEFAULT_THRESHOLDS = {"ssim_min": 0.90, "psnr_min": 15.0}
+QUANTIZED_THRESHOLDS = {"ssim_min": 0.60, "psnr_min": 15.0}
 
 
 def load_image(path: str | Path) -> np.ndarray:

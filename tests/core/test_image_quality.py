@@ -1,10 +1,10 @@
 """The quality gate has to fail the images that mean a load is broken, and pass the ones that do not.
 
-Its thresholds are calibrated against measurements on Z-Image-Turbo: an fp8 case at eight ranks
-scores 0.9227 SSIM against the eager bf16 reference at one rank, while the same case scores 0.98
-against itself when compile picks different kernels. So these check the gate catches gross breakage
-without being sensitive to the band a working case lives in, which is the only claim it can honestly
-make.
+Its floors are calibrated against measurements on Z-Image-Turbo at that model's own sampling, all
+against the eager bf16 reference at one rank: sharding alone scores 0.9935 SSIM, quantizing the
+weights and the text encoder scores 0.7244 on an image a person confirmed is the same picture, and a
+collapsed render scores 0.0006. So these check the gate catches gross breakage without being
+sensitive to the band a working case lives in, which is the only claim it can honestly make.
 """
 
 import importlib.util
@@ -124,19 +124,39 @@ def test_differently_sized_images_are_not_scored_into_agreement(quality, write_p
 
 
 def test_the_thresholds_bracket_the_measured_reality(quality):
-    """Pins the calibration, so nobody tightens the floor towards the real score and starts failing.
+    """Pins the calibration, so nobody tightens a floor towards the real score and starts failing.
 
-    A working fp8 case at eight ranks measures 0.9227 SSIM and 24.9 PSNR against the eager bf16
-    reference at one rank; breakage measures below 0.5. The floors have to sit between those with
-    room on both sides, since tightening them buys no detection.
+    Measured on Z-Image-Turbo against the eager bf16 reference at one rank: sharding alone scores
+    0.9935 SSIM and 40.5 PSNR, quantization scores 0.7244 and 19.0, and a collapsed render scores
+    0.0006. Each floor has to sit between the result it judges and breakage, with room on both sides,
+    since tightening one buys no detection.
     """
-    measured = {"comparable": True, "ssim": 0.9227, "psnr": 24.911, "mse": 3.228e-3}
-    broken = {"comparable": True, "ssim": 0.49, "psnr": 9.0, "mse": 0.12}
+    sharded = {"comparable": True, "ssim": 0.9935, "psnr": 40.48, "mse": 8.96e-5}
+    quantized = {"comparable": True, "ssim": 0.7244, "psnr": 18.98, "mse": 1.264e-2}
+    collapsed = {"comparable": True, "ssim": 0.0006, "psnr": 5.0, "mse": 0.32}
 
-    assert quality.verdict(measured)["verdict"] == "pass"
-    assert quality.verdict(broken)["verdict"] == "fail"
-    assert quality.DEFAULT_THRESHOLDS["ssim_min"] < 0.9227 - 0.05, "no margin against noise"
-    assert quality.DEFAULT_THRESHOLDS["ssim_min"] > 0.5, "would not catch a wrong image"
+    assert quality.verdict(sharded)["verdict"] == "pass"
+    assert quality.verdict(quantized, quality.QUANTIZED_THRESHOLDS)["verdict"] == "pass"
+    for floors in (None, quality.QUANTIZED_THRESHOLDS):
+        assert quality.verdict(collapsed, floors)["verdict"] == "fail"
+    assert quality.DEFAULT_THRESHOLDS["ssim_min"] < 0.9935 - 0.05, "no margin against noise"
+    assert quality.QUANTIZED_THRESHOLDS["ssim_min"] < 0.7244 - 0.05, "no margin against noise"
+    assert quality.QUANTIZED_THRESHOLDS["ssim_min"] > 0.5, "would not catch a wrong image"
+
+
+def test_an_unquantized_case_is_held_to_the_tighter_floor(quality):
+    """Changing only where the weights live should not move the image, and 0.72 would say it may.
+
+    This is the branch's own claim, so the sharded cases are the ones the gate has to be strict
+    about: at the quantized floor a shard that rendered a different picture would still pass.
+    """
+    assert (
+        quality.DEFAULT_THRESHOLDS["ssim_min"]
+        > quality.QUANTIZED_THRESHOLDS["ssim_min"] + 0.2
+    )
+    quantized_result = {"comparable": True, "ssim": 0.7244, "psnr": 18.98, "mse": 1.264e-2}
+
+    assert quality.verdict(quantized_result)["verdict"] == "fail"
 
 
 def test_a_verdict_records_the_thresholds_it_used(quality, write_png):

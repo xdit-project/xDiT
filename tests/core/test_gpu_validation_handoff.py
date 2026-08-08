@@ -1758,6 +1758,32 @@ def test_which_models_can_be_judged_by_image_comparison_is_measured_not_assumed(
     assert not runner.identity_comparable("FLUX.2-klein-9B")
 
 
+def test_a_quantized_case_and_a_sharded_one_are_not_judged_by_the_same_floor(runner):
+    """Measured: sharding alone moves Z-Image-Turbo to 0.9935 SSIM and fp8 moves it to 0.7244.
+
+    One floor cannot serve both. Loose enough for fp8, it would pass a shard that rendered a
+    different picture; tight enough for sharding, it fails every quantized case, which is exactly
+    what it did once each model was sampled its own way.
+    """
+    sharded = {"quantization": "none", "te_fp8": False}
+    quantized = {"quantization": "fp8", "te_fp8": False}
+    encoder_only = {"quantization": "none", "te_fp8": True}
+
+    assert runner.thresholds_for(sharded)["ssim_min"] >= 0.9
+    assert runner.thresholds_for(quantized)["ssim_min"] < 0.7244
+    assert runner.thresholds_for(encoder_only) == runner.thresholds_for(quantized)
+
+
+def test_the_floor_can_still_be_overridden_from_the_command_line(runner):
+    """Whichever floor a case would get, an explicit one has to win, or the flag does nothing."""
+    override = {"ssim_min": 0.42}
+
+    for case in ({"quantization": "none"}, {"quantization": "fp8"}):
+        floors = runner.thresholds_for(case, override)
+        assert floors["ssim_min"] == 0.42
+        assert floors["psnr_min"] == runner._image_quality().DEFAULT_THRESHOLDS["psnr_min"]
+
+
 def test_a_run_that_saved_a_black_image_is_not_reported_as_passed(runner, tmp_path):
     """Measured: Qwen-Image FP8 wrote a pure black 2048x2048 frame and the run was called passed.
 

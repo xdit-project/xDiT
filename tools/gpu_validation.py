@@ -1274,6 +1274,24 @@ def score_against_reference(
     }
 
 
+def thresholds_for(
+    case: dict[str, Any], override: dict[str, float] | None = None
+) -> dict[str, float]:
+    """The floors this case's comparison is judged by, which are not the same for every case.
+
+    A case that only changes where the weights live should render the same image, and one that
+    quantizes them should render the same picture with different texture. Judging both by one floor
+    means either forgiving a sharding regression or failing every quantized case.
+    """
+    module = _image_quality()
+    floors = (
+        module.QUANTIZED_THRESHOLDS
+        if case.get("quantization", "none") != "none" or case.get("te_fp8")
+        else module.DEFAULT_THRESHOLDS
+    )
+    return {**floors, **(override or {})}
+
+
 def artifact_content(output: dict[str, Any] | None) -> dict[str, Any] | None:
     """What the run drew, measured on its own artifact with no reference involved."""
     path = (output or {}).get("path")
@@ -1677,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
         print("No validation cases matched the requested filters.", file=sys.stderr)
         return 2
 
-    thresholds = {"ssim_min": args.ssim_min} if args.ssim_min is not None else None
+    override = {"ssim_min": args.ssim_min} if args.ssim_min is not None else None
     if args.score_quality:
         selected = order_references_first(selected)
     validation_probe = probe_environment() if args.execute else None
@@ -1751,7 +1769,7 @@ def main(argv: list[str] | None = None) -> int:
                     if reference_id
                     else None
                 ),
-                thresholds=thresholds,
+                thresholds=thresholds_for(case, override) if reference_id else override,
                 scoring_run=args.score_quality,
             )
             outputs[case["id"]] = record.get("output") or {}

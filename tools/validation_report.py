@@ -121,6 +121,22 @@ def _quality(record: dict) -> str:
     return score + ("" if reference.get("verdict") == "pass" else " FAIL")
 
 
+def _drew_something(record: dict) -> str:
+    """Whether the artifact has a picture in it, which no reference is needed to answer.
+
+    Its own column because it is the one quality statement that holds for every model, and a run
+    that saved a flat frame otherwise reads as a pass with an unremarkable timing row.
+    """
+    content = (record.get("quality") or {}).get("content")
+    if not isinstance(content, dict):
+        return "-"
+    if not content.get("measured"):
+        return "n/m"
+    if content.get("verdict") == "fail":
+        return f"BLANK {content['std']:.3f}"
+    return f"{content['std']:.2f}"
+
+
 def _combination(case: dict) -> str:
     """Label carrying every dimension that distinguishes cases for the same model.
 
@@ -314,6 +330,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 if _memory_is_comparable(metrics)
                 else "stale",
                 _gib(metrics.get("peak_host_file_cache_bytes")),
+                _drew_something(record),
                 _quality(record),
             ]
         )
@@ -330,6 +347,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "peak vram",
         "host anon",
         "host cache",
+        "spread",
         "vs ref",
     ]
     lines.append("## Per case" if markdown else "Per case")

@@ -36,6 +36,62 @@ def load_image(path: str | Path) -> np.ndarray:
         return np.asarray(handle.convert("RGB"), dtype=np.float64) / 255.0
 
 
+# A rendered picture of anything has spread. Every artifact this matrix has produced and a human has
+# confirmed measures at least 0.15 standard deviation over [0, 1], and a collapsed render measures
+# exactly 0, so this floor sits an order of magnitude below the real results and still catches a flat
+# frame. Deliberately not a mean floor: a legitimately dark render has a low mean, while no
+# legitimate render is uniform.
+BLANK_LIMITS = {"std_min": 0.01}
+
+READABLE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+
+
+def describe_content(path: str | Path) -> dict[str, Any]:
+    """What is in one artifact, judged without a reference to compare it against.
+
+    A reference comparison can only speak about models whose sample is stable enough to compare, so
+    it cannot be asked whether an image exists at all. This can, for every model: a run that wrote a
+    black frame and exited zero is a failure no matter what the model would have drawn.
+    """
+    suffix = Path(path).suffix.casefold()
+    if suffix not in READABLE_SUFFIXES:
+        return {
+            "measured": False,
+            "reason": f"no still-image reader for {suffix or 'this artifact'}",
+        }
+    image = load_image(path)
+    return {
+        "measured": True,
+        "mean": round(float(image.mean()), 6),
+        "std": round(float(image.std()), 6),
+        "levels": int(np.unique(np.round(image * 255.0)).size),
+    }
+
+
+def blank_verdict(
+    content: dict[str, Any], limits: dict[str, float] | None = None
+) -> dict[str, Any]:
+    """Whether the artifact is flat, or a statement that it could not be measured."""
+    floors = {**BLANK_LIMITS, **(limits or {})}
+    if not content.get("measured"):
+        return {
+            "verdict": "unmeasured",
+            "failures": [],
+            "thresholds": floors,
+        }
+    failures = []
+    if content["std"] < floors["std_min"]:
+        failures.append(
+            f"uniform image: standard deviation {content['std']:.4f} below "
+            f"{floors['std_min']}, {content['levels']} distinct levels"
+        )
+    return {
+        "verdict": "fail" if failures else "pass",
+        "failures": failures,
+        "thresholds": floors,
+    }
+
+
 def _gaussian_kernel(size: int = 11, sigma: float = 1.5) -> np.ndarray:
     offsets = np.arange(size, dtype=np.float64) - (size - 1) / 2
     kernel = np.exp(-(offsets**2) / (2 * sigma**2))

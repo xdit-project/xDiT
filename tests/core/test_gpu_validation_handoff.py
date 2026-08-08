@@ -1758,6 +1758,77 @@ def test_which_models_can_be_judged_by_image_comparison_is_measured_not_assumed(
     assert not runner.identity_comparable("FLUX.2-klein-9B")
 
 
+def test_a_run_that_saved_a_black_image_is_not_reported_as_passed(runner, tmp_path):
+    """Measured: Qwen-Image FP8 wrote a pure black 2048x2048 frame and the run was called passed.
+
+    The reference comparison could not catch it, because Qwen-Image is not a model whose sample is
+    stable enough to gate on, so nothing looked at the image at all. Whether a picture exists needs
+    no reference and holds for every model.
+    """
+    from PIL import Image
+
+    black = tmp_path / "black.png"
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(black)
+
+    content = runner.artifact_content({"path": str(black)})
+
+    assert content["verdict"] == "fail"
+    assert runner.blank_output_status("passed", content) == "failed_blank_output"
+
+
+def test_a_run_that_drew_a_picture_is_left_alone(runner, tmp_path):
+    """The floor has to clear a real render by a wide margin or it fails working cases."""
+    import numpy as np
+    from PIL import Image
+
+    rendered = tmp_path / "render.png"
+    rows = np.linspace(0, 255, 64, dtype=np.uint8)
+    Image.fromarray(np.repeat(rows[:, None, None], 64, axis=1).repeat(3, axis=2)).save(
+        rendered
+    )
+
+    content = runner.artifact_content({"path": str(rendered)})
+
+    assert content["verdict"] == "pass"
+    assert runner.blank_output_status("passed", content) == "passed"
+
+
+def test_a_dark_render_is_not_mistaken_for_a_blank_one(runner, tmp_path):
+    """A night scene has a low mean and plenty of detail, so the mean cannot be what is judged."""
+    import numpy as np
+    from PIL import Image
+
+    dark = tmp_path / "dark.png"
+    rng = np.random.default_rng(0)
+    Image.fromarray(
+        rng.integers(0, 40, size=(64, 64, 3), dtype=np.uint8)
+    ).save(dark)
+
+    content = runner.artifact_content({"path": str(dark)})
+
+    assert content["mean"] < 0.1
+    assert content["verdict"] == "pass"
+
+
+def test_an_artifact_this_cannot_read_is_reported_unmeasured_not_passed(runner, tmp_path):
+    """A video artifact must not be silently credited with having drawn something."""
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not really a video")
+
+    content = runner.artifact_content({"path": str(video)})
+
+    assert content["measured"] is False
+    assert content["verdict"] == "unmeasured"
+    assert runner.blank_output_status("passed", content) == "passed"
+
+
+def test_a_blank_image_does_not_overwrite_a_more_specific_failure(runner):
+    """A run that crashed has a better reason recorded than whatever it left on disk."""
+    blank = {"measured": True, "std": 0.0, "levels": 1, "verdict": "fail"}
+
+    assert runner.blank_output_status("failed_inference", blank) == "failed_inference"
+
+
 def test_a_verdict_recorded_before_gating_existed_still_fails_its_case(runner):
     """Those records were all gated, so reading a missing flag as ungated would silently forgive."""
     old = {"verdict": "fail", "scores": {"comparable": True, "ssim": 0.1}}

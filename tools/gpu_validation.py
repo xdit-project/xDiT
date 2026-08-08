@@ -349,8 +349,10 @@ def build_command(
             str(settings["width"]),
             "--guidance_scale",
             str(settings["guidance_scale"]),
+            # Run first, then case: one directory per invocation holding every case it ran, so a
+            # sweep across models is one folder to look through rather than one per model.
             "--output_directory",
-            str(output_root / case["id"] / run_id),
+            str(output_root / run_id / case["id"]),
         ]
     )
 
@@ -544,6 +546,21 @@ def make_result_record(
             "scoring_run": scoring_run,
         },
     }
+
+
+def blank_output_status(status: str, content: Any) -> str:
+    """Fail a run that produced a uniform image, whatever the model is.
+
+    Kept separate from the reference comparison because it needs no reference and no assumption
+    about the model: identity scoring only gates the models measured to reproduce their sample, and
+    a Qwen-Image FP8 run wrote a pure black 2048x2048 frame and was reported as passed because of it.
+    Nothing about a flat frame is model-specific, so this gates every case.
+    """
+    if not status.startswith("passed"):
+        return status
+    if isinstance(content, dict) and content.get("verdict") == "fail":
+        return "failed_blank_output"
+    return status
 
 
 def quality_status(status: str, reference: Any) -> str:
@@ -1257,6 +1274,16 @@ def score_against_reference(
     }
 
 
+def artifact_content(output: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the run drew, measured on its own artifact with no reference involved."""
+    path = (output or {}).get("path")
+    if not path:
+        return None
+    module = _image_quality()
+    content = module.describe_content(path)
+    return {"artifact": path, **content, **module.blank_verdict(content)}
+
+
 def _image_quality():
     """Imported lazily so a dry run needs neither numpy nor pillow."""
     import importlib.util
@@ -1657,10 +1684,13 @@ def main(argv: list[str] | None = None) -> int:
     environment = collect_environment(validation_probe) if validation_probe else None
     statuses: list[str] = []
     outputs: dict[str, dict[str, Any]] = {}
+    run_id = args.run_id or new_run_id()
     for case in selected:
         expected = case["expected"]["outcome"]
         try:
-            command = build_command(case, defaults, sampling=sampling_for(case, matrix))
+            command = build_command(
+                case, defaults, run_id=run_id, sampling=sampling_for(case, matrix)
+            )
         except UnknownSampling as error:
             # Reported per case rather than raised, so one unspecified model does not hide the
             # commands for every other case in the selection.

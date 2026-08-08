@@ -255,6 +255,12 @@ def select_cases(
     ]
 
 
+def new_run_id() -> str:
+    """Identifies one invocation of this tool, so its cases can be grouped under it."""
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{uuid.uuid4().hex[:12]}"
+
+
 class UnknownSampling(LookupError):
     """Raised when a model has no sampling settings, so there is no honest way to run it."""
 
@@ -322,8 +328,7 @@ def build_command(
         .resolve()
     )
     if run_id is None:
-        timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        run_id = f"{timestamp}-{uuid.uuid4().hex[:12]}"
+        run_id = new_run_id()
     # Sampling comes from the model's own entry, with no default to fall back to. Guidance is passed
     # explicitly because leaving it to the runner silently gave a distilled model classifier-free
     # guidance it does not use.
@@ -1561,7 +1566,11 @@ def execute_case(
     )
     record["timed_out"] = timed_out
     record["timeout_seconds"] = timeout_seconds
-    record["status"] = quality_status(record["status"], comparison)
+    content = artifact_content(output)
+    record["quality"]["content"] = content
+    record["status"] = blank_output_status(
+        quality_status(record["status"], comparison), content
+    )
     if timed_out:
         record["status"] = "timed_out"
     record["log_path"] = str(log_path)
@@ -1590,6 +1599,13 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("gpu-validation-results/results.jsonl"),
     )
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument(
+        "--run-id",
+        help=(
+            "groups these cases under one output directory; pass the same value to every "
+            "invocation of a sweep so the sweep is one folder rather than one folder per case"
+        ),
+    )
     parser.add_argument("--quality-note", default="")
     parser.add_argument("--reference")
     parser.add_argument(

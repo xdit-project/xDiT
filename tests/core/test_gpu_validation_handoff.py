@@ -158,7 +158,7 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
     assert "--memory_efficient_sharding" in distributed_command
     assert "--fully_shard_degree" in distributed_command
     output_index = eager_command.index("--output_directory")
-    assert eager_command[output_index + 1].endswith(f"{eager['id']}/test-run")
+    assert eager_command[output_index + 1].endswith(f"test-run/{eager['id']}")
 
 
 def test_a_model_is_sampled_the_way_that_model_is_meant_to_be_sampled(runner, matrix):
@@ -513,6 +513,29 @@ def test_fresh_run_directory_is_unique_and_reuse_fails(runner, tmp_path):
         runner.reserve_output_directory(first_dir)
 
 
+def test_one_invocation_puts_every_case_it_ran_under_one_directory(runner, matrix):
+    """A sweep across models should be one folder to look through, not one folder per model."""
+    cases = [case for case in matrix["cases"] if case["model"] in matrix["sampling"]][:3]
+
+    directories = [
+        Path(
+            command[command.index("--output_directory") + 1]
+        )
+        for command in (
+            runner.build_command(
+                case,
+                matrix["defaults"],
+                run_id="one-sweep",
+                sampling=runner.sampling_for(case, matrix),
+            )
+            for case in cases
+        )
+    ]
+
+    assert {directory.parent.name for directory in directories} == {"one-sweep"}
+    assert [directory.name for directory in directories] == [case["id"] for case in cases]
+
+
 def test_output_directory_is_absolute_from_non_repo_cwd(
     runner, matrix, tmp_path, monkeypatch
 ):
@@ -527,7 +550,7 @@ def test_output_directory_is_absolute_from_non_repo_cwd(
     output_dir = Path(command[command.index("--output_directory") + 1])
 
     assert output_dir.is_absolute()
-    assert output_dir == (tmp_path / "relative-output" / case["id"] / "outside-cwd")
+    assert output_dir == (tmp_path / "relative-output" / "outside-cwd" / case["id"])
     runner.reserve_output_directory(output_dir)
     artifact = output_dir / "result.png"
     artifact.write_bytes(b"generated")
@@ -816,6 +839,53 @@ def test_environment_mismatch_record_is_not_run(runner, matrix):
 )
 def test_aggregate_exit_code_preserves_batch_failures(runner, statuses, expected):
     assert runner.aggregate_exit_code(statuses) == expected
+
+
+def test_a_sweep_of_separate_invocations_can_share_one_output_directory(
+    runner, matrix, monkeypatch, tmp_path
+):
+    """A sweep runs one case per invocation, and the whole sweep should still be one folder."""
+    cases = [dict(matrix["cases"][0]), dict(matrix["cases"][0])]
+    cases[0]["id"] = "first-case"
+    cases[1]["id"] = "second-case"
+    fake_matrix = {
+        "schema_version": 2,
+        "validation_status": "NOT RUN",
+        "defaults": {**matrix["defaults"], "output_root": str(tmp_path / "outputs")},
+        "sampling": matrix["sampling"],
+        "cases": cases,
+    }
+    monkeypatch.setattr(runner, "load_matrix", lambda path: fake_matrix)
+    directories = []
+    monkeypatch.setattr(
+        runner,
+        "execute_case",
+        lambda case, command, **kwargs: directories.append(
+            Path(command[command.index("--output_directory") + 1])
+        )
+        or {"status": "passed"},
+    )
+    monkeypatch.setattr(runner, "probe_environment", lambda: {"platform": "rocm"})
+    monkeypatch.setattr(
+        runner, "collect_environment", lambda probe: {"validation_probe": probe}
+    )
+    monkeypatch.setattr(runner, "environment_mismatches", lambda case, probe: [])
+
+    for case_id in ("first-case", "second-case"):
+        runner.main(
+            [
+                "--execute",
+                "--case",
+                case_id,
+                "--run-id",
+                "one-sweep",
+                "--results",
+                str(tmp_path / "results.jsonl"),
+            ]
+        )
+
+    assert {directory.parent.name for directory in directories} == {"one-sweep"}
+    assert [directory.name for directory in directories] == ["first-case", "second-case"]
 
 
 def test_continue_on_error_runs_remaining_cases_but_returns_failure(

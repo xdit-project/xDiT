@@ -1002,6 +1002,10 @@ class xFuserModel(abc.ABC):
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
 
 
+    # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed buffer
+    # pool and are therefore only valid until the next replay.
+    CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
+
     def _get_compile_mode(self) -> str:
         # Overrides should return "default" when PACKAGES_CHECKER._on_rdna4():
         # CUDA graphs are slow on RDNA4.
@@ -1009,6 +1013,29 @@ class xFuserModel(abc.ABC):
 
     def _get_compile_dynamic(self) -> Optional[bool]:
         return None  # torch default (auto)
+
+    def _mark_cudagraph_steps(self, component: torch.nn.Module) -> None:
+        """Tell CUDA Graphs where one inference step ends, so the next may reuse its buffers.
+
+        Compiling a component blockwise makes every block its own graph segment, and a segment
+        recorded on a later step copies its inputs from the previous block's output buffer. Without a
+        step boundary the graph system still considers the earlier step's outputs live and refuses
+        the read with "accessing tensor output of CUDAGraphs that has been overwritten by a
+        subsequent run", which is how every FLUX case in the eight-rank sharded sweep failed: the
+        FLUX runners ask for reduce-overhead off RDNA4, and sharding is what turns one compiled
+        transformer into fifty-seven compiled blocks. A pre-hook rather than a wrapper because
+        pre-hooks run before the compiled forward is entered.
+        """
+        if getattr(component, "_xfuser_marks_cudagraph_steps", False):
+            return
+        if not hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            return
+
+        def _mark(module, args, kwargs):
+            torch.compiler.cudagraph_mark_step_begin()
+
+        component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
+        component._xfuser_marks_cudagraph_steps = True
 
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
@@ -1060,6 +1087,8 @@ class xFuserModel(abc.ABC):
                         for i in range(len(block_list)):
                             block_list[i] = torch.compile(block_list[i], mode=mode, dynamic=dynamic)
                         compiled_any = True
+                if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
+                    self._mark_cudagraph_steps(component)
                 if not compiled_any:
                     setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
             else:

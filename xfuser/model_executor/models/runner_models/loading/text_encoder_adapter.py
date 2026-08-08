@@ -50,12 +50,16 @@ def _torchao_quant_type():
     from torchao.quantization.quant_api import (
         Float8DynamicActivationFloat8WeightConfig,
     )
-    from xfuser.core.utils.runner_utils import _get_fp8_kernel_preference
+    from xfuser.core.utils.runner_utils import (
+        FP8_ACTIVATION_SCALE_FLOOR,
+        _get_fp8_kernel_preference,
+    )
 
     return Float8DynamicActivationFloat8WeightConfig(
         granularity=PerTensor(),
         set_inductor_config=False,
         kernel_preference=_get_fp8_kernel_preference(),
+        activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
     )
 
 

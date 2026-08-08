@@ -98,6 +98,17 @@ def _get_fp8_kernel_preference():
     return KernelPreference.AUTO
 
 
+# Smallest value the dynamic activation scale may be derived from. Without it a tensor whose values
+# are all zero gets scale = max_abs / 448 = 0, and quantizing divides by that scale, so the layer
+# returns all NaN instead of the bias. Zeros arrive in normal use: a model that zero-pads its text
+# sequence up to a multiple of the sequence-parallel world size hands whole padding-only chunks to
+# late ranks, and Qwen-Image at eight ranks did exactly that, turning every FP8 render pure black
+# once the NaN spread through the attention all-to-all. Matches torchao's own EPS on its training
+# path, and only binds when the largest value in the tensor is below it, so nothing else moves:
+# measured bit-identical output on ordinary activations.
+FP8_ACTIVATION_SCALE_FLOOR = 1e-12
+
+
 def _float8_tensor_op_table(float8_cls: type) -> dict:
     """Return the mutable per-class op table (torchao 0.14+ naming varies)."""
     for attr in ("_ATEN_OP_TABLE", "_ATEN_OP_OR_TORCH_FN_TABLE"):
@@ -382,6 +393,7 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
                 granularity=PerTensor(),
                 set_inductor_config=False,
                 kernel_preference=_get_fp8_kernel_preference(),
+                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
         )
     if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
         module_or_module_list_to_quantize = [module_or_module_list_to_quantize]
@@ -511,6 +523,7 @@ def quantize_linear_layers_to_fp4(
                           granularity=PerTensor(),
                           set_inductor_config=False,
                           kernel_preference=_get_fp8_kernel_preference(),
+                          activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
                     ),
                     device=device,
                 )
@@ -544,6 +557,7 @@ def quantize_linear_layers_to_fp4(
                             granularity=PerTensor(),
                             set_inductor_config=False,
                             kernel_preference=_get_fp8_kernel_preference(),
+                            activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
                         ),
                         device=device,
                     )
@@ -646,6 +660,7 @@ def quantize_linear_layers_to_nvfp4(
                 granularity=PerTensor(),
                 set_inductor_config=False,
                 kernel_preference=_get_fp8_kernel_preference(),
+                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
             )
 
             def fp8_filter_fn(mod, fqn):

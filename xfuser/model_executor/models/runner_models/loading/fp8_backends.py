@@ -441,6 +441,7 @@ class TorchaoFp8BackendAdapter(Fp8BackendAdapter):
             Float8DynamicActivationFloat8WeightConfig,
         )
         from xfuser.core.utils.runner_utils import (
+            FP8_ACTIVATION_SCALE_FLOOR,
             _get_fp8_kernel_preference,
         )
         from xfuser.model_executor.quant.torchao_quantizer import (
@@ -452,6 +453,7 @@ class TorchaoFp8BackendAdapter(Fp8BackendAdapter):
             granularity=PerTensor(),
             set_inductor_config=False,
             kernel_preference=_get_fp8_kernel_preference(),
+            activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
         )
         return TorchAoConfig(
             quant_type,

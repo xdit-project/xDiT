@@ -163,8 +163,11 @@ def test_command_generation_uses_xdit_and_torchrun(runner, matrix):
 
     assert eager_command[0] == "xdit"
     assert "--model" in eager_command
-    assert distributed_command[:4] == [
+    assert distributed_command[:5] == [
         "torchrun",
+        # Its own rendezvous port, so a case does not inherit EADDRINUSE from the run before it and
+        # record a socket collision as the model failing to load.
+        "--standalone",
         f"--nproc_per_node={distributed['world_size']}",
         "-m",
         "xfuser.runner",

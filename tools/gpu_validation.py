@@ -318,6 +318,12 @@ def build_command(
         command.extend(
             [
                 "torchrun",
+                # A free rendezvous port per case rather than the default 29500. Back to back runs
+                # collided on it and reported EADDRINUSE as failed_inference, which reads as the
+                # model failing to load: four Krea-2 cases were recorded that way, and the pattern
+                # across placements looked like a nondeterministic bug in the load rather than a
+                # socket the previous run had not released yet.
+                "--standalone",
                 f"--nproc_per_node={case['world_size']}",
                 "-m",
                 "xfuser.runner",

@@ -69,6 +69,38 @@ def test_local_request_resolves_subfolder_without_hub(checkpoint, tmp_path):
     assert checkpoint.resolve_checkpoint_file(request, "missing") is None
 
 
+def test_offline_mode_makes_a_request_use_the_weights_already_on_disk(monkeypatch):
+    """Weights present and the hub unreachable has to be a load, not a failure.
+
+    Diffusers skips its "does the repo have these shards" metadata call only when local_files_only
+    is set, so exporting HF_HUB_OFFLINE alone left a fully cached sharded checkpoint failing on a
+    network call. A gated repo makes that permanent rather than slow: the request is refused whether
+    or not anything needed downloading.
+    """
+    pytest.importorskip("torch")
+    from types import SimpleNamespace
+
+    from xfuser.model_executor.models.runner_models import base_model
+
+    build = base_model.xFuserModel._checkpoint_request
+    model = SimpleNamespace(settings=SimpleNamespace(model_name="org/repo"))
+
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_OFFLINE", True, raising=False
+    )
+    assert build(model, "transformer").local_files_only is True
+
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_OFFLINE", False, raising=False
+    )
+    assert build(model, "transformer").local_files_only is False
+    # A runner that has already decided still decides: pinning a revision it fetched itself must not
+    # be turned into an offline load by an environment variable.
+    assert (
+        build(model, "transformer", local_files_only=False).local_files_only is False
+    )
+
+
 @pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
 def test_local_request_rejects_subfolder_outside_model_root(
     checkpoint, tmp_path, escape_kind

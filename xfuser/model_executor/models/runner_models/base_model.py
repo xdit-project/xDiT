@@ -506,7 +506,17 @@ class xFuserModel(abc.ABC):
         return MemoryEfficientLoader(self)
 
     def _checkpoint_request(self, subfolder: str | None = None, **kwargs) -> CheckpointRequest:
-        """Checkpoint identity shared by discovery and from_pretrained calls."""
+        """Checkpoint identity shared by discovery and from_pretrained calls.
+
+        HF_HUB_OFFLINE decides local_files_only unless a caller has already said. Without this, a
+        sharded checkpoint that is fully present on disk still fails when the hub cannot be reached:
+        Diffusers only skips its "does the repo have these shards" metadata call when
+        local_files_only is true, so setting the standard offline variable was not enough, and a
+        model whose weights are cached but whose repo refuses downloads could not be loaded at all.
+        """
+        from huggingface_hub.constants import HF_HUB_OFFLINE
+
+        kwargs.setdefault("local_files_only", HF_HUB_OFFLINE)
         return CheckpointRequest(
             self.settings.model_name, subfolder=subfolder, **kwargs
         )

@@ -7,7 +7,9 @@ test environment without Diffusers can still enforce the declarations.
 import ast
 import importlib.util
 import inspect
+import json
 from pathlib import Path
+import types
 
 import pytest
 
@@ -236,6 +238,58 @@ def test_krea2_text_encoder_is_declaratively_excluded():
     assert "component_exclusions=" in source
     assert "Qwen3VL" in source
     assert "ROCm" in source
+
+
+def test_tokenizer_reload_reads_the_tokenizer_directory_not_the_repo_root(
+    tmp_path, monkeypatch
+):
+    """HunyuanVideo's repo root config.json is not valid JSON, and it is not ours to fix.
+
+    Transformers v5 parses that file for an unrelated Mistral regex fix, for every repo once
+    HF_HUB_OFFLINE is set, so reloading the tokenizer by repo id raised JSONDecodeError and the model
+    could not load at all. The tokenizer's own directory has no config.json to trip over.
+    """
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    if not transformers.__version__.startswith("5"):
+        pytest.skip("the reload only runs on transformers v5")
+
+    from xfuser.core.utils import runner_utils
+
+    repo = tmp_path / "HunyuanVideo"
+    component = repo / "tokenizer"
+    component.mkdir(parents=True)
+    (repo / "config.json").write_text('{\n  "Name": [\n    "HunyuanVideo"\n  ],\n}')
+    tokenizers = pytest.importorskip("tokenizers")
+    backend = tokenizers.Tokenizer(
+        tokenizers.models.WordLevel({"<unk>": 0, "hello": 1}, unk_token="<unk>")
+    )
+    backend.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    backend.save(str(component / "tokenizer.json"))
+    (component / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "LlamaTokenizerFast"})
+    )
+
+    class FakeLlamaTokenizerFast:
+        pass
+
+    # The helper logs through the rank-aware logger, which reads the launcher's environment.
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    pipeline = types.SimpleNamespace(
+        components={"tokenizer": FakeLlamaTokenizerFast()}, tokenizer=None
+    )
+
+    assert runner_utils._tokenizer_directory(str(repo), "tokenizer", {}) == str(
+        component
+    )
+    runner_utils.fix_llama_tokenizer_pretokenizer(pipeline, str(repo))
+    assert pipeline.tokenizer.tokenize("hello") == ["hello"]
+
+    # No fast tokenizer file beside it: the directory cannot build one, so keep the name given.
+    (component / "tokenizer.json").unlink()
+    assert runner_utils._tokenizer_directory(str(repo), "tokenizer", {}) is None
 
 
 def test_krea2_text_encoder_shard_path_exists_on_the_encoder_it_loads():

@@ -676,6 +676,42 @@ def quantize_linear_layers_to_nvfp4(
         f"{skipped_fp8_count} overridden to FP8, {skipped_small_count} skipped (too small)")
 
 
+def _tokenizer_directory(
+    model_name_or_path, component_name, from_pretrained_kwargs
+) -> str | None:
+    """The directory holding a tokenizer, when its own fast tokenizer file is there to load.
+
+    Reloading by the model's own name makes transformers v5 parse the *root* config.json for an
+    unrelated Mistral regex fix, and it does that for every model once HF_HUB_OFFLINE is set.
+    HunyuanVideo ships a root config.json with a trailing comma, which is not JSON, so the reload
+    raised JSONDecodeError and the model could not load at all. Loading from the tokenizer's own
+    directory leaves that file unread. None means keep the name we were given: without a
+    tokenizer.json beside it the directory is not enough to build a fast tokenizer from.
+    """
+    import os
+
+    from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+        CheckpointRequest,
+        resolve_checkpoint_file,
+    )
+
+    hub_keys = {"revision", "token", "cache_dir", "local_files_only"}
+    request = CheckpointRequest(
+        model_name_or_path,
+        subfolder=component_name,
+        **{
+            key: value
+            for key, value in from_pretrained_kwargs.items()
+            if key in hub_keys
+        },
+    )
+    try:
+        resolved = resolve_checkpoint_file(request, "tokenizer.json")
+    except Exception:
+        return None
+    return None if resolved is None else os.path.dirname(resolved)
+
+
 def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretrained_kwargs) -> None:
     """
     Workaround for transformers v5 bug where LlamaTokenizer.__init__ unconditionally
@@ -704,9 +740,17 @@ def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretra
         log(f"Replacing tokenizer '{component_name}' (type={type(component).__name__}) "
             f"with PreTrainedTokenizerFast...", debug=True)
 
-        fixed = PreTrainedTokenizerFast.from_pretrained(
-            model_name_or_path, subfolder=component_name, **from_pretrained_kwargs
+        source, source_kwargs = model_name_or_path, {
+            "subfolder": component_name,
+            **from_pretrained_kwargs,
+        }
+        local_dir = _tokenizer_directory(
+            model_name_or_path, component_name, from_pretrained_kwargs
         )
+        if local_dir is not None:
+            source, source_kwargs = local_dir, {}
+
+        fixed = PreTrainedTokenizerFast.from_pretrained(source, **source_kwargs)
         setattr(pipeline, component_name, fixed)
 
         log(f"Fixed tokenizer '{component_name}': "

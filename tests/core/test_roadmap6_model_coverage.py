@@ -238,6 +238,35 @@ def test_krea2_text_encoder_is_declaratively_excluded():
     assert "ROCm" in source
 
 
+def test_krea2_text_encoder_shard_path_exists_on_the_encoder_it_loads():
+    """A wrap path is a claim about another library's module layout, so check it against that library.
+
+    Krea-2 named its decoder layers "model.layers", which is where a text-only encoder keeps them.
+    Its encoder is a Qwen3VLModel, which holds them under language_model beside the vision tower, so
+    every sharded case died with an AttributeError before reaching a load. Nothing else noticed:
+    eager and replicated cases do not walk this path.
+    """
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    accelerate = pytest.importorskip("accelerate")
+    from xfuser.core.distributed.sharding import rgetattr
+    from xfuser.model_executor.models.runner_models.krea2 import (
+        xFuserKrea2RawModel,
+        xFuserKrea2TurboModel,
+    )
+
+    config = transformers.Qwen3VLConfig()
+    config.text_config.num_hidden_layers = 2
+    config.vision_config.depth = 2
+    with accelerate.init_empty_weights():
+        encoder = transformers.Qwen3VLModel(config)
+
+    for model in (xFuserKrea2RawModel, xFuserKrea2TurboModel):
+        for attr in model.settings.fsdp_strategy["text_encoder"]["wrap_attrs"]:
+            layers = rgetattr(encoder, attr)
+            assert len(layers) == 2, f"{attr} does not reach the decoder layers"
+
+
 def test_component_exclusions_are_queryable_by_loading_adapters():
     contracts = _load_contracts()
     capability = contracts.LoadDeclaration(

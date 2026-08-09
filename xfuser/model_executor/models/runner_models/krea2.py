@@ -217,7 +217,10 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
                 "dtype": torch.bfloat16,
             },
             "text_encoder": {
-                "wrap_attrs": ["model.layers"],
+                # Qwen3VLModel holds its decoder layers under language_model, beside the vision
+                # tower. "model.layers" is where a text-only encoder keeps them, and naming it here
+                # failed every sharded case with an AttributeError before any of them ran.
+                "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },
         },
@@ -259,7 +262,7 @@ class xFuserKrea2TurboModel(_Krea2BaseModel):
                 "dtype": torch.bfloat16,
             },
             "text_encoder": {
-                "wrap_attrs": ["model.layers"],
+                "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },
         },

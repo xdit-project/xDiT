@@ -198,6 +198,78 @@ def test_a_model_is_sampled_the_way_that_model_is_meant_to_be_sampled(runner, ma
     assert distilled[distilled.index("--guidance_scale") + 1] == "0.0"
 
 
+def test_a_model_that_edits_a_picture_is_given_one(runner, matrix):
+    """An image-to-image case that passes no image fails for reasons unrelated to loading.
+
+    The path is left as a placeholder in the command so a machine without that file is reported as
+    an environment mismatch, which is not the same thing as the load being broken.
+    """
+    edit = next(case for case in matrix["cases"] if case["model"] == "FLUX.1-Kontext-dev")
+
+    command = runner.build_command(
+        edit, matrix["defaults"], sampling=runner.sampling_for(edit, matrix)
+    )
+
+    supplied = command[command.index("--input_images") + 1]
+    assert supplied.startswith("${") and supplied.endswith("}")
+    assert runner.placeholder_mismatches(command, {}), "an unset path has to be noticed"
+    assert not runner.placeholder_mismatches(
+        command, {name: "/app/data/flux_cat.png" for name in runner._placeholder_names(command)}
+    )
+
+
+def test_a_video_model_is_asked_for_the_clip_length_it_declares(runner, matrix):
+    """Frames are part of the workload: the runner's own default is not what a case ran."""
+    video = next(case for case in matrix["cases"] if case["model"] == "HunyuanVideo")
+    settings = runner.sampling_for(video, matrix)
+
+    command = runner.build_command(video, matrix["defaults"], sampling=settings)
+
+    assert command[command.index("--num_frames") + 1] == str(settings["num_frames"])
+    # Decoding 129 frames of 720p in one piece is a memory cost the model's own config declines.
+    assert "--enable_tiling" in command
+
+
+def test_a_case_of_its_own_overrides_the_model_wide_sampling_arguments(runner, matrix):
+    """A curated case shortens the Wan clips on purpose, and regenerating must not undo that.
+
+    Its arguments are appended after the sampling ones, so the last value wins and the cheap
+    seventeen-frame smoke cases stay cheap even though the model samples eighty-one.
+    """
+    curated = next(
+        case
+        for case in matrix["cases"]
+        if case["model"] == "Wan2.2-I2V" and "--num_frames" in case["args"]
+    )
+    settings = runner.sampling_for(curated, matrix)
+    assert settings["num_frames"] != int(curated["args"][curated["args"].index("--num_frames") + 1])
+
+    command = runner.build_command(curated, matrix["defaults"], sampling=settings)
+
+    last = len(command) - 1 - command[::-1].index("--num_frames")
+    assert command[last + 1] == curated["args"][curated["args"].index("--num_frames") + 1]
+
+
+def test_a_video_clip_is_left_unscored_rather_than_crashing_the_comparison(runner, tmp_path):
+    """The scorer reads stills. Handed a clip it has to say so, not take the sweep down with it.
+
+    The blank-output gate reads the clip instead, so a collapsed video is still caught; what is
+    withheld is only the reference comparison, which on a video would report which sample came out.
+    """
+    clip = tmp_path / "render.mp4"
+    clip.write_bytes(b"not really a video")
+
+    scored = runner.score_against_reference(
+        {"path": str(clip)},
+        {"path": str(clip)},
+        reference_id="the-reference",
+        gated=False,
+    )
+
+    assert scored["verdict"] == "unscored"
+    assert "render.mp4" in scored["reason"]
+
+
 def test_a_model_with_no_settings_is_refused_rather_than_given_another_model_s(runner, matrix):
     """Guessing here is what produced an afternoon of conclusions about unconverged images."""
     unspecified = next(
@@ -215,7 +287,41 @@ def test_sampling_settings_record_where_they_came_from(runner, matrix):
     """A step count with no provenance is indistinguishable from one somebody made up."""
     for model, settings in (matrix["sampling"] or {}).items():
         assert settings.get("source"), f"{model} does not say where its settings came from"
-        assert "benchmark_configs" in settings["source"]
+        assert (
+            "benchmark_configs" in settings["source"]
+            or "default_input_values" in settings["source"]
+        ), f"{model} cites neither a benchmark config nor the runner's own declaration"
+
+
+def test_settings_taken_from_a_runner_declaration_match_what_it_declares(matrix):
+    """A cited declaration is checkable, so check it.
+
+    Provenance that is only a sentence can drift from the code it names, or be written around a
+    number somebody preferred. Every model whose entry cites its runner is compared against the
+    runner, so the citation cannot decay into a claim.
+    """
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    checked = 0
+    for model, settings in (matrix["sampling"] or {}).items():
+        if "default_input_values" not in settings["source"]:
+            continue
+        declared = getattr(MODEL_REGISTRY[model], "default_input_values", None)
+        assert declared is not None, f"{model} cites a declaration it does not have"
+        for key in ("height", "width", "num_inference_steps", "guidance_scale", "num_frames"):
+            if key not in settings or getattr(declared, key, None) is None:
+                continue
+            # Guidance is the exception this allows: an entry may cite a declaration for the
+            # settings a config leaves out while still taking the rest from the config, and it says
+            # which. Everything else has to agree.
+            if key == "guidance_scale" and "benchmark_configs" in settings["source"]:
+                continue
+            assert settings[key] == getattr(declared, key), (
+                f"{model} claims {key}={settings[key]} from its runner, which declares "
+                f"{getattr(declared, key)}"
+            )
+        checked += 1
+    assert checked, "no entry cites a runner declaration, so this test proves nothing"
 
 
 def test_no_matrix_wide_sampling_default_remains(runner, matrix):

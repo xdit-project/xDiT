@@ -73,7 +73,7 @@
     }
   ],
   "requires_input_image": {
-    "reason": "These runners need a real input image or video, which the harness has no generic way to supply, so a generated case would fail for reasons unrelated to loading. Cases for them stay curated and pass the input through a placeholder.",
+    "reason": "These runners need a real input image or video, so a case that passes none would fail for reasons unrelated to loading. A model here is generated as soon as its sampling entry in curated_cases.json names an input image, which is the file its own benchmark config passes, reached through an environment placeholder so a machine without that file reports an environment mismatch instead of a failure. The models left in this list with no such entry get no generated case, and any coverage for them stays curated.",
     "models": [
       "CausalWan",
       "FLUX.1-Kontext-dev",

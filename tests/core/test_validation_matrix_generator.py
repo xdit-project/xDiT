@@ -93,6 +93,47 @@ def test_generated_cases_run_the_profile_runtime_args(matrix):
         assert case["args"] == expected[profile_id], case["id"]
 
 
+def test_a_model_needing_an_input_image_is_generated_once_its_sampling_names_one(
+    generator, matrix
+):
+    """Filling in the image is the whole of the work; the cases come from the declarations.
+
+    Before this, an image-to-image or image-to-video model was skipped outright, which left the
+    edit and animate paths with no coverage at all on a node holding their weights.
+    """
+    profiles = json.loads(PROFILES_PATH.read_text())
+    curated = json.loads(CURATED_PATH.read_text())
+    needs_input = set(profiles["requires_input_image"]["models"])
+    supplied = {
+        model
+        for model, settings in curated["sampling"].items()
+        if settings.get("input_images")
+    }
+    assert supplied & needs_input, "no image-input model has an image, so this proves nothing"
+
+    generated_models = {
+        case["model"] for case in matrix["cases"] if case["id"].startswith("gen-")
+    }
+    for model in supplied & needs_input:
+        assert model in generated_models, f"{model} has an input image but no generated case"
+
+
+def test_a_model_needing_an_input_image_with_none_supplied_is_still_skipped(generator):
+    """A case that passes no image would fail for reasons that say nothing about loading."""
+    profiles = json.loads(PROFILES_PATH.read_text())
+    registry = generator.load_registry()
+
+    _, skipped = generator.generate_cases(registry, profiles, {})
+
+    reasons = {entry["model"]: entry["reason"] for entry in skipped}
+    withheld = [
+        model
+        for model in profiles["requires_input_image"]["models"]
+        if reasons.get(model, "").startswith("needs an input image")
+    ]
+    assert withheld, "every image-input model was generated without an image being supplied"
+
+
 def test_each_control_case_matches_the_rank_count_it_controls_for(matrix):
     """A control at a different rank count would not isolate anything.
 

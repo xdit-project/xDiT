@@ -6,7 +6,7 @@
     "output_root": "gpu-validation-output",
     "timeout_seconds": 3600
   },
-  "sampling_rationale": "How a model is sampled belongs to the model, not to the matrix. A single default was applied to every model here, and it was Z-Image-Turbo's: four steps at 512x512 with whatever guidance the runner defaulted to. Turbo is distilled to run that way, so its cases looked fine and hid the problem. Base Z-Image is a fifty-step CFG model, and at four steps it returned a blurry blob that no comparison against it could mean anything, which is how a quality gate came to be calibrated on unconverged images. Settings are therefore per model and copied from this repo's own benchmark configs rather than chosen here. A model with no entry cannot be run: an image produced at the wrong operating point is worse than no image, because it looks like a result.",
+  "sampling_rationale": "How a model is sampled belongs to the model, not to the matrix. A single default was applied to every model here, and it was Z-Image-Turbo's: four steps at 512x512 with whatever guidance the runner defaulted to. Turbo is distilled to run that way, so its cases looked fine and hid the problem. Base Z-Image is a fifty-step CFG model, and at four steps it returned a blurry blob that no comparison against it could mean anything, which is how a quality gate came to be calibrated on unconverged images. Settings are therefore per model and copied from this repo's own benchmark configs rather than chosen here. A model with no entry cannot be run: an image produced at the wrong operating point is worse than no image, because it looks like a result. Where a model has no config of its own, the settings its runner declares in DefaultInputValues are used instead and the entry says so; that is still the model's own statement of how it runs, and for Krea-2-Turbo the runner enforces it. Only two things here are chosen rather than read: the prompt, which is an input rather than an operating point, and the input image, which is the file the model's own config passes.",
   "sampling": {
     "Z-Image": {
       "prompt": "A crowded beach",
@@ -61,9 +61,112 @@
       "width": 2048,
       "guidance_scale": 0.0,
       "source": ".ci/benchmark_configs/qwen_image.yaml, entry qwen_image.default"
+    },
+    "FLUX.1-Kontext-dev": {
+      "prompt": "Add a cool hat to the cat",
+      "seed": 42,
+      "num_inference_steps": 30,
+      "height": 1024,
+      "width": 1024,
+      "guidance_scale": 2.5,
+      "input_images": "${XDIT_INPUT_IMAGE}",
+      "source": ".ci/benchmark_configs/flux_kontext.yaml, entry flux_kontext.default, whose tags include gfx950. The image this model edits is the one its own config passes, /app/data/flux_cat.png in the benchmark container, reached through XDIT_INPUT_IMAGE so a machine without that file reports an environment mismatch rather than a failure."
+    },
+    "Qwen-Image-Edit": {
+      "prompt": "Add a cool hat to the cat.",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": 4.0,
+      "input_images": "${XDIT_INPUT_IMAGE}",
+      "source": ".ci/benchmark_configs/qwen_image_edit.yaml, entry qwen_image_edit.default, and the same input image as the Kontext entry above, which is what that config passes."
+    },
+    "HunyuanVideo": {
+      "prompt": "In the large cage, two puppies were wagging their tails at each other.",
+      "seed": 1168860793,
+      "num_inference_steps": 50,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 6.0,
+      "num_frames": 129,
+      "runtime_args": ["--enable_tiling", "--enable_slicing"],
+      "source": ".ci/benchmark_configs/hunyuanvideo.yaml, entry hunyuanvideo.default, whose tags include gfx950. Tiling and slicing come from that entry too: decoding 129 frames of 720p in one piece is a VAE memory cost the config declines to pay, and it is not a sampling choice."
+    },
+    "Wan2.1-I2V": {
+      "prompt": "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+      "seed": 123456,
+      "num_inference_steps": 40,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 3.0,
+      "num_frames": 81,
+      "input_images": "${XDIT_WAN_INPUT_IMAGE}",
+      "source": ".ci/benchmark_configs/wan2_1.yaml, entry wan2_1.default, whose tags include gfx950. Its input is /app/data/wan_input.jpg in the benchmark container, reached through the same XDIT_WAN_INPUT_IMAGE the curated Wan cases already use."
+    },
+    "Wan2.2-I2V": {
+      "prompt": "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+      "seed": 42,
+      "num_inference_steps": 40,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 3.5,
+      "num_frames": 81,
+      "input_images": "${XDIT_WAN_INPUT_IMAGE}",
+      "source": ".ci/benchmark_configs/wan2_2.yaml, entry wan2_2.default, whose tags include gfx950, except for guidance: that entry sets none, so the value is the 3.5 this runner declares in its own DefaultInputValues. The curated Wan2.2-I2V cases pass a shorter clip of their own and keep it, since a case's own arguments are applied after these."
+    },
+    "Wan2.1-T2V": {
+      "prompt": "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+      "seed": 42,
+      "num_inference_steps": 40,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 3.5,
+      "num_frames": 81,
+      "source": "xFuserWan21T2VModel.default_input_values, since no benchmark config covers the text-to-video checkpoint: 720x1280, 81 frames, 40 steps, guidance 3.5. The prompt is the one the Wan2.1 image-to-video config uses, because a prompt is an input to the model rather than part of its operating point."
+    },
+    "Wan2.2-T2V": {
+      "prompt": "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+      "seed": 42,
+      "num_inference_steps": 40,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 3.5,
+      "num_frames": 81,
+      "source": "xFuserWan22T2VModel.default_input_values, since the Wan2.2 config covers the image-to-video checkpoint only."
+    },
+    "Wan2.2-TI2V": {
+      "prompt": "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 736,
+      "width": 1280,
+      "guidance_scale": 5.0,
+      "num_frames": 121,
+      "input_images": "${XDIT_WAN_INPUT_IMAGE}",
+      "source": "xFuserWan22TI2VModel.default_input_values, since no benchmark config covers the 5B text-and-image-to-video checkpoint: 736x1280, 121 frames, 50 steps, guidance 5.0. Input image as for the other Wan entries."
+    },
+    "Krea-2-Raw": {
+      "prompt": "A small cat",
+      "seed": 42,
+      "num_inference_steps": 52,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": 3.5,
+      "source": "xFuserKrea2RawModel.default_input_values, since this model has no benchmark config at all: 2048x2048, 52 steps, guidance 3.5. The runner declares that operating point in code and its docstring repeats it, which is the model's own statement of how it is meant to run."
+    },
+    "Krea-2-Turbo": {
+      "prompt": "A small cat",
+      "seed": 42,
+      "num_inference_steps": 8,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": 0.0,
+      "source": "xFuserKrea2TurboModel.default_input_values: 2048x2048 and the fixed 8-step CFG-free schedule the runner enforces, rejecting any other step count and overriding any guidance it is given."
     }
   },
-  "sampling_gaps": "Models still without settings, and why they were not filled in from a benchmark config: FLUX.2-klein-4B has no config of its own, only the 9B. Krea-2-Raw, Krea-2-Turbo, Cosmos3-Nano, Cosmos3-Super and CausalWan have no config at all. SD3.5's entry sets no resolution. Qwen-Image-Edit and FLUX.1-Kontext-dev are image-to-image and need an input image these cases do not pass. The Wan and HunyuanVideo entries are video, and the matrix's image comparison does not apply to them; the Wan configs are also image-to-video while the matrix plans text-to-video, so their settings are not the same workload. Each of these refuses to run rather than borrowing another model's settings.",
+  "sampling_gaps": "Models still without settings: FLUX.2-klein-4B, Cosmos3-Nano, Cosmos3-Super and CausalWan, none of which has weights on any machine this has run on, so filling them in would record an operating point nobody could check. Withheld models need none, since their cases assert a rejection and never reach a sampler. Each of these refuses to run rather than borrowing another model's settings.",
+  "video_scoring_note": "Video entries carry num_frames and render a clip. The blank-output gate reads those clips and fails a uniform frame, so a collapsed video cannot pass, but the SSIM comparison against a reference is not applied to video: it compares one still against another, and no video model here has been shown to reproduce a clip frame for frame across a numeric change. Their scores would be observations of which sample came out, which is the same reason the image comparison only decides Z-Image-Turbo.",
   "cases": [
     {
       "id": "rdna4-flux2-fp8-eager-te-tf5",

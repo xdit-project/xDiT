@@ -266,6 +266,10 @@ class UnknownSampling(LookupError):
 
 
 SAMPLING_KEYS = ("prompt", "seed", "num_inference_steps", "height", "width", "guidance_scale")
+# Present only for the models that need them: frames for a video model, an input image for one that
+# edits or animates a picture, and runtime flags an entry's own benchmark config sets alongside the
+# sampling settings, such as the tiling a 129-frame decode needs.
+OPTIONAL_SAMPLING_KEYS = ("num_frames", "input_images", "runtime_args")
 
 
 def sampling_for(case: dict[str, Any], matrix: dict[str, Any]) -> dict[str, Any]:
@@ -355,6 +359,11 @@ def build_command(
             str(output_root / run_id / case["id"]),
         ]
     )
+    if "num_frames" in settings:
+        command.extend(["--num_frames", str(settings["num_frames"])])
+    if "input_images" in settings:
+        command.extend(["--input_images", str(settings["input_images"])])
+    command.extend(str(argument) for argument in settings.get("runtime_args", []))
 
     if case["world_size"] > 1:
         # The runner asserts dp*cfg*sp*tp*pp == dit_parallel_size, and
@@ -1263,6 +1272,25 @@ def score_against_reference(
             "reason": f"no image artifact for {missing}",
         }
     module = _image_quality()
+    unreadable = [
+        path
+        for path in (reference_path, actual_path)
+        if not module.is_still_image(path)
+    ]
+    if unreadable:
+        # A video model's clip is not compared frame by frame here. This metric already only decides
+        # models whose sample is stable across a numeric change, and no video model has been shown to
+        # be one, so a score would be an observation of which sample came out. The blank-output gate
+        # still reads the clip, so a collapse is caught without this.
+        return {
+            "case_id": reference_id,
+            "verdict": "unscored",
+            "gated": gated,
+            "reason": (
+                "no still-image comparison for "
+                + ", ".join(Path(path).name for path in unreadable)
+            ),
+        }
     scores = module.score_images(reference_path, actual_path)
     return {
         "case_id": reference_id,

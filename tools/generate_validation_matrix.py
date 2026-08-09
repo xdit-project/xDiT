@@ -219,8 +219,16 @@ def accelerators_overlap(left: str, right: str) -> bool:
     )
 
 
-def generate_cases(registry, profiles: dict) -> tuple[list, list]:
-    """Cases the profiles permit, plus a reason for every runner left out."""
+def generate_cases(
+    registry, profiles: dict, sampling: dict | None = None
+) -> tuple[list, list]:
+    """Cases the profiles permit, plus a reason for every runner left out.
+
+    A model that needs an input image is generated once its sampling entry names one, so filling in
+    the image is the whole of the work: the cases appear from the same declarations as everything
+    else rather than being written out by hand.
+    """
+    sampling = sampling or {}
     needs_input = set(profiles["requires_input_image"]["models"])
     cases: list[dict] = []
     skipped: list[dict] = []
@@ -248,8 +256,15 @@ def generate_cases(registry, profiles: dict) -> tuple[list, list]:
                     }
                 )
                 continue
-            if alias in needs_input:
-                skipped.append({"model": alias, "reason": "needs an input image"})
+            if alias in needs_input and not (sampling.get(alias) or {}).get(
+                "input_images"
+            ):
+                skipped.append(
+                    {
+                        "model": alias,
+                        "reason": "needs an input image and its sampling entry names none",
+                    }
+                )
                 continue
             checkpoint = resolve_checkpoint(alias, cls)
             if checkpoint is None:
@@ -351,7 +366,7 @@ def build_matrix(profiles_path: Path, curated_path: Path) -> tuple[dict, dict]:
     profiles = json.loads(profiles_path.read_text())
     curated_doc = json.loads(curated_path.read_text())
     registry = load_registry()
-    generated, skipped = generate_cases(registry, profiles)
+    generated, skipped = generate_cases(registry, profiles, curated_doc["sampling"])
     kept, superseded = merge_cases(curated_doc["cases"], generated)
 
     matrix = {

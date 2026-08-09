@@ -54,9 +54,85 @@ def load_image(path: str | Path) -> np.ndarray:
 # exactly 0, so this floor sits an order of magnitude below the real results and still catches a flat
 # frame. Deliberately not a mean floor: a legitimately dark render has a low mean, while no
 # legitimate render is uniform.
+#
+# The same floor holds for video, measured on the four clips this node has rendered: the flattest
+# sampled frame of a HunyuanVideo, LTX-2.3, Wan2.1-I2V and Wan2.2-I2V render measures 0.2142, 0.0675,
+# 0.2489 and 0.2485. LTX's dark night scene is the tightest of them and still sits nearly seven times
+# above this floor.
 BLANK_LIMITS = {"std_min": 0.01}
 
 READABLE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".gif", ".mkv", ".mov"})
+
+# Decoding every frame of a 129-frame 720p render to gate one number is wasteful, and the frames a
+# collapse would leave behind are not localized, so an even sample across the whole clip finds it.
+VIDEO_FRAME_SAMPLE = 12
+
+
+def iter_video_frames(path: str | Path, limit: int = VIDEO_FRAME_SAMPLE):
+    """Up to `limit` frames spread across the clip, as HxWx3 arrays in [0, 1].
+
+    Yields (index, total, frame). Frames are decoded in order and dropped as they are consumed,
+    because holding a whole video in memory at float64 costs gigabytes for no benefit.
+    """
+    import imageio.v3 as iio
+
+    try:
+        total = int(iio.improps(path, plugin="pyav").n_images)
+    except Exception:
+        total = 0
+    wanted = None
+    if total > limit:
+        wanted = {round(i * (total - 1) / (limit - 1)) for i in range(limit)}
+    for index, frame in enumerate(iio.imiter(path, plugin="pyav")):
+        if wanted is not None and index not in wanted:
+            continue
+        array = np.asarray(frame, dtype=np.float64) / 255.0
+        yield index, total, array[:, :, :3] if array.ndim == 3 else array
+
+
+def describe_video(path: str | Path) -> dict[str, Any]:
+    """Content measured per frame, so a clip that collapses partway through is still visible.
+
+    A whole-clip standard deviation hides that: one good frame in an otherwise black render carries
+    enough variance to clear any floor a flat frame would fail. The per-frame minimum is what a
+    collapse actually moves.
+    """
+    means: list[float] = []
+    deviations: list[float] = []
+    levels = set()
+    total = 0
+    try:
+        for _, count, frame in iter_video_frames(path):
+            total = count
+            means.append(float(frame.mean()))
+            deviations.append(float(frame.std()))
+            levels.update(np.unique(np.round(frame * 255.0)).tolist())
+    except Exception as error:
+        # A file this cannot decode is reported, not raised past the gate: an unreadable artifact is
+        # a fact about the run worth recording, and crashing the scorer would lose the case that
+        # produced it along with every case after it.
+        return {
+            "measured": False,
+            "reason": f"could not decode {Path(path).name}: {type(error).__name__}: {error}",
+        }
+    if not deviations:
+        return {"measured": False, "reason": f"no frames decoded from {Path(path).name}"}
+    return {
+        "measured": True,
+        "kind": "video",
+        "frames": total or len(deviations),
+        "sampled_frames": len(deviations),
+        "mean": round(float(np.mean(means)), 6),
+        "std": round(float(np.mean(deviations)), 6),
+        "frame_std_min": round(min(deviations), 6),
+        "levels": len(levels),
+    }
+
+
+def is_still_image(path: str | Path) -> bool:
+    """Whether the SSIM comparison can read this artifact at all."""
+    return Path(path).suffix.casefold() in READABLE_SUFFIXES
 
 
 def describe_content(path: str | Path) -> dict[str, Any]:
@@ -67,6 +143,8 @@ def describe_content(path: str | Path) -> dict[str, Any]:
     black frame and exited zero is a failure no matter what the model would have drawn.
     """
     suffix = Path(path).suffix.casefold()
+    if suffix in VIDEO_SUFFIXES:
+        return describe_video(path)
     if suffix not in READABLE_SUFFIXES:
         return {
             "measured": False,
@@ -75,6 +153,7 @@ def describe_content(path: str | Path) -> dict[str, Any]:
     image = load_image(path)
     return {
         "measured": True,
+        "kind": "image",
         "mean": round(float(image.mean()), 6),
         "std": round(float(image.std()), 6),
         "levels": int(np.unique(np.round(image * 255.0)).size),
@@ -97,6 +176,11 @@ def blank_verdict(
         failures.append(
             f"uniform image: standard deviation {content['std']:.4f} below "
             f"{floors['std_min']}, {content['levels']} distinct levels"
+        )
+    if "frame_std_min" in content and content["frame_std_min"] < floors["std_min"]:
+        failures.append(
+            f"uniform frame: the flattest of {content['sampled_frames']} sampled frames has "
+            f"standard deviation {content['frame_std_min']:.4f}, below {floors['std_min']}"
         )
     return {
         "verdict": "fail" if failures else "pass",

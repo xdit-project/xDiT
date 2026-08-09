@@ -169,6 +169,73 @@ def test_a_verdict_records_the_thresholds_it_used(quality, write_png):
     assert result["thresholds"]["psnr_min"] == quality.DEFAULT_THRESHOLDS["psnr_min"]
 
 
+@pytest.fixture
+def write_video(tmp_path):
+    """A real encoded clip, since the gate's job is to read the file a run actually wrote."""
+
+    def _write(name, frames):
+        import imageio.v3 as iio
+
+        path = tmp_path / name
+        stack = np.stack(
+            [np.clip(frame * 255, 0, 255).astype(np.uint8) for frame in frames]
+        )
+        iio.imwrite(path, stack, plugin="pyav", codec="libx264", fps=8)
+        return path
+
+    return _write
+
+
+def test_a_video_that_rendered_something_passes_the_blank_gate(quality, write_video):
+    """The floor is calibrated on stills, so it has to leave a real clip alone.
+
+    Measured on this node's four rendered clips, the flattest sampled frame of any of them is LTX's
+    dark night scene at 0.0675, nearly seven times the floor.
+    """
+    path = write_video("clip.mp4", [_picture(seed=index, size=64) for index in range(16)])
+
+    content = quality.describe_content(path)
+
+    assert content["measured"] and content["kind"] == "video"
+    assert content["frames"] >= 16
+    assert quality.blank_verdict(content)["verdict"] == "pass"
+
+
+def test_a_video_that_collapsed_partway_through_fails(quality, write_video):
+    """A clip's overall spread cannot see this, which is why the gate measures frames.
+
+    One good frame carries enough variance to clear any floor a flat frame would fail, so a run that
+    rendered a picture and then produced black would otherwise be recorded as a pass.
+    """
+    frames = [_picture(seed=index, size=64) for index in range(4)]
+    frames += [np.zeros((64, 64, 3)) for _ in range(12)]
+    path = write_video("collapsed.mp4", frames)
+
+    content = quality.describe_content(path)
+    result = quality.blank_verdict(content)
+
+    assert content["std"] > quality.BLANK_LIMITS["std_min"], "the clip as a whole looks fine"
+    assert result["verdict"] == "fail"
+    assert "uniform frame" in " ".join(result["failures"])
+
+
+def test_an_all_black_video_fails(quality, write_video):
+    """The video form of the frame an FP8 NaN produced."""
+    path = write_video("black.mp4", [np.zeros((64, 64, 3)) for _ in range(8)])
+
+    assert quality.blank_verdict(quality.describe_content(path))["verdict"] == "fail"
+
+
+def test_a_long_clip_is_sampled_rather_than_fully_decoded(quality, write_video):
+    """Decoding 129 frames of 720p to produce one number is a cost with no result attached."""
+    path = write_video("long.mp4", [_picture(seed=index, size=32) for index in range(40)])
+
+    content = quality.describe_content(path)
+
+    assert content["frames"] == 40
+    assert content["sampled_frames"] == quality.VIDEO_FRAME_SAMPLE < 40
+
+
 def test_structure_is_compared_and_not_just_overall_brightness(quality, write_png):
     """A global comparison passes images whose statistics match but whose content does not.
 

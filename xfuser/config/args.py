@@ -30,12 +30,12 @@ logger = init_logger(__name__)
 # string each and no way to notice when the two stop agreeing.
 VAE_TILE_OVERLAP_HELP = (
     "Fraction of each VAE tile that repeats its neighbour, between 0 and 1. Turns tiling on by "
-    "itself. This is the other half of --vae_tile_size: the size says how much memory one tile "
-    "costs, this says how much of the decode is spent twice, since tiles overlapping by a "
-    "fraction f decode 1/(1-f)^2 times the latent they were cut from. Lowering it below the "
-    "VAE's own overlap is the way to buy that time back, and it is paid for in seams rather "
-    "than in memory - the opposite trade to a smaller tile. An overlap the VAE cannot step to "
-    "exactly is rounded up to the next one that works."
+    "itself. The height and width flags say how much memory one tile costs; this says how much "
+    "of the decode is spent twice, since tiles overlapping by a fraction f decode 1/(1-f)^2 "
+    "times the latent they were cut from. Lowering it below the VAE's own overlap is the way to "
+    "buy that time back, and it is paid for in seams rather than in memory - the opposite trade "
+    "to a smaller tile. An overlap the VAE cannot step to exactly is rounded up to the next one "
+    "that works."
 )
 
 
@@ -134,7 +134,6 @@ class xFuserArgs:
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
-    vae_tile_size: Optional[int] = None
     vae_tile_size_height: Optional[int] = None
     vae_tile_size_width: Optional[int] = None
     vae_tile_overlap: Optional[float] = None
@@ -415,29 +414,18 @@ class xFuserArgs:
                  "batch size 1.",
         )
         runtime_group.add_argument(
-            "--vae_tile_size",
-            type=int,
-            default=None,
-            help="Edge, in output pixels, of each tile the VAE decodes. Smaller = less peak VRAM "
-                 "at VAE decode, more tiles. Turns tiling on by itself. A size the VAE cannot tile "
-                 "with exactly is rounded down to the next one that works, and a size above the "
-                 "VAE's own window is ignored. Step down one size at a time and watch peak VRAM: "
-                 "the saving stops once the VAE is no longer what peaks, while small tiles visibly "
-                 "degrade the image, each one being normalized over less context than the last.",
-        )
-        runtime_group.add_argument(
             "--vae_tile_size_height",
             type=int,
             default=None,
             help="Exact output-pixel height of each VAE tile. Must be used with "
-                 "--vae_tile_size_width and cannot be combined with --vae_tile_size.",
+                 "--vae_tile_size_width.",
         )
         runtime_group.add_argument(
             "--vae_tile_size_width",
             type=int,
             default=None,
             help="Exact output-pixel width of each VAE tile. Must be used with "
-                 "--vae_tile_size_height and cannot be combined with --vae_tile_size.",
+                 "--vae_tile_size_height.",
         )
         runtime_group.add_argument(
             "--vae_tile_overlap",
@@ -663,29 +651,18 @@ class xFuserArgs:
                  "batch size 1.",
         )
         parser.add_argument(
-            "--vae_tile_size",
-            type=int,
-            default=None,
-            help="Edge, in output pixels, of each tile the VAE decodes. Smaller = less peak VRAM "
-                 "at VAE decode, more tiles. Turns tiling on by itself. A size the VAE cannot tile "
-                 "with exactly is rounded down to the next one that works, and a size above the "
-                 "VAE's own window is ignored. Step down one size at a time and watch peak VRAM: "
-                 "the saving stops once the VAE is no longer what peaks, while small tiles visibly "
-                 "degrade the image, each one being normalized over less context than the last.",
-        )
-        parser.add_argument(
             "--vae_tile_size_height",
             type=int,
             default=None,
             help="Exact output-pixel height of each VAE tile. Must be used with "
-                 "--vae_tile_size_width and cannot be combined with --vae_tile_size.",
+                 "--vae_tile_size_width.",
         )
         parser.add_argument(
             "--vae_tile_size_width",
             type=int,
             default=None,
             help="Exact output-pixel width of each VAE tile. Must be used with "
-                 "--vae_tile_size_height and cannot be combined with --vae_tile_size.",
+                 "--vae_tile_size_height.",
         )
         parser.add_argument(
             "--vae_tile_overlap",

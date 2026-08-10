@@ -288,6 +288,8 @@ def sampling_for(case: dict[str, Any], matrix: dict[str, Any]) -> dict[str, Any]
             "tests/gpu_validation/curated_cases.json, taking the model's own operating point from "
             "its .ci/benchmark_configs entry, and regenerate the matrix"
         )
+    # Presence, not truthiness: guidance_scale may be an explicit null for a model that takes no
+    # value, and a zero step count or guidance of 0.0 is a real setting a distilled model uses.
     missing = [key for key in SAMPLING_KEYS if key not in settings]
     if missing:
         raise UnknownSampling(
@@ -357,14 +359,19 @@ def build_command(
             str(settings["height"]),
             "--width",
             str(settings["width"]),
-            "--guidance_scale",
-            str(settings["guidance_scale"]),
             # Run first, then case: one directory per invocation holding every case it ran, so a
             # sweep across models is one folder to look through rather than one per model.
             "--output_directory",
             str(output_root / run_id / case["id"]),
         ]
     )
+    # An explicit null is the entry saying its model takes no guidance value, which is not the same
+    # as an entry that forgot to say: the key is still required. Ideogram-4 builds its own guidance
+    # schedule and only when the flag is absent, and the MiniMax and HunyuanVideo 1.5 runners never
+    # forward the value at all, so any number here would be a claim about a model that is either
+    # wrong or inert.
+    if settings["guidance_scale"] is not None:
+        command.extend(["--guidance_scale", str(settings["guidance_scale"])])
     if "num_frames" in settings:
         command.extend(["--num_frames", str(settings["num_frames"])])
     if "input_images" in settings:

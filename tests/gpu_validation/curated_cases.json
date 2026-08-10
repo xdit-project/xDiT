@@ -195,9 +195,83 @@
       "width": 2048,
       "guidance_scale": 0.0,
       "source": "xFuserKrea2TurboModel.default_input_values: 2048x2048 and the fixed 8-step CFG-free schedule the runner enforces, rejecting any other step count and overriding any guidance it is given."
+    },
+    "Ideogram-4": {
+      "prompt": "A spectacular sunset over the ocean",
+      "seed": 42,
+      "num_inference_steps": 48,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": null,
+      "source": "xFuserIdeogram4Model.default_input_values, no benchmark config naming this model. Guidance is null because the runner builds its own guidance schedule and only when it is given no value: any number here would replace the schedule the model ships with."
+    },
+    "LingBot-Video-Dense": {
+      "prompt": "A white cat wearing sunglasses sits on a surfboard",
+      "seed": 42,
+      "num_inference_steps": 40,
+      "height": 480,
+      "width": 832,
+      "guidance_scale": 3.0,
+      "num_frames": 81,
+      "source": "xFuserLingBotVideoDenseModel.default_input_values, no benchmark config naming this model. The runner supplies its own structured negative prompt, so no entry has to repeat it."
+    },
+    "LingBot-Video-MoE": {
+      "prompt": "A white cat wearing sunglasses sits on a surfboard",
+      "seed": 42,
+      "num_inference_steps": 40,
+      "height": 480,
+      "width": 832,
+      "guidance_scale": 3.0,
+      "num_frames": 81,
+      "source": "xFuserLingBotVideoMoEModel.default_input_values, no benchmark config naming this model. Same operating point as the dense runner it shares construction with, which declares the same values."
+    },
+    "MiniMax-H3": {
+      "prompt": "A white cat wearing sunglasses sits on a surfboard",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 768,
+      "width": 1344,
+      "guidance_scale": null,
+      "num_frames": 124,
+      "runtime_args": ["--task", "t2va"],
+      "source": "xFuserMiniMaxH3Model.default_input_values, no benchmark config naming this model. Guidance is null because the model is guidance-distilled and the runner forwards no guidance to the pipeline at all. The task is named because the runner declares four and refuses to pick one; t2va is the one that needs no input image."
+    },
+    "MiniMax-H3-Ref2VA": {
+      "prompt": "A white cat wearing sunglasses sits on a surfboard",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 768,
+      "width": 1344,
+      "guidance_scale": null,
+      "num_frames": 124,
+      "input_images": "${XDIT_INPUT_IMAGE}",
+      "runtime_args": ["--task", "ref2va"],
+      "source": "xFuserMiniMaxH3Ref2VAModel.default_input_values, no benchmark config naming this model. Guidance is null for the same distillation reason as the base runner. ref2va is the only task this runner declares, and it takes a reference image, left as a placeholder so a machine without one is an environment mismatch rather than a broken load."
+    },
+    "LTX-2.3": {
+      "prompt": "A white cat wearing sunglasses sits on a surfboard",
+      "seed": 42,
+      "num_inference_steps": 40,
+      "height": 1024,
+      "width": 1536,
+      "guidance_scale": 4.0,
+      "num_frames": 121,
+      "source": "xFuserLTX23VideoModel.default_input_values, no benchmark config naming this model. The runner supplies its own negative prompt, so no entry has to repeat it."
+    },
+    "Hunyuanvideo-1.5-Sparse": {
+      "prompt": "In the large cage, two puppies were wagging their tails",
+      "seed": 42,
+      "num_inference_steps": 50,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": null,
+      "num_frames": 121,
+      "input_images": "${XDIT_INPUT_IMAGE}",
+      "runtime_args": ["--task", "i2v"],
+      "source": "xFuserHunyuanvideo15SparseModel.default_input_values, no benchmark config naming this model. Guidance is null because the 1.5 runner forwards no guidance to the pipeline. The sparse runner declares i2v as its only task, so an image is named as a placeholder."
     }
   },
-  "sampling_gaps": "Models still without settings: CausalWan, which has no weights on any machine this has run on, so filling it in would record an operating point nobody could check. FLUX.2-klein-4B, Cosmos3-Nano and Cosmos3-Super were in that position until their weights were fetched onto the gfx950 node; each now carries its runner's own declared operating point, since none of the three is named by a benchmark config. Withheld models need none, since their cases assert a rejection and never reach a sampler. A model with no entry refuses to run rather than borrowing another model's settings.",
+  "sampling_gaps": "Models still without settings: CausalWan, which has no weights on any machine this has run on, so filling it in would record an operating point nobody could check. FLUX.2-klein-4B, Cosmos3-Nano and Cosmos3-Super were in that position until their weights were fetched onto the gfx950 node; each now carries its runner's own declared operating point, since none of the three is named by a benchmark config. Withheld models were said to need none, since their cases assert a rejection and never reach a sampler, but that was wrong: an entry is looked up while the command is being built, so a rejection case for a model without one reported that it could not run and asserted nothing. The seven withheld models whose weights are on the gfx950 node now carry entries taken from their runners' declarations. Still without one: CausalWan, SD3.5, LTX-2 and the two other HunyuanVideo 1.5 variants, whose checkpoints are not cached anywhere this has run, and Wan2.2-Distilled-I2V, whose base repo is cached but whose distilled state dicts are not. A model with no entry refuses to run rather than borrowing another model's settings.",
   "video_scoring_note": "Video entries carry num_frames and render a clip. The blank-output gate reads those clips and fails a uniform frame, so a collapsed video cannot pass, but the SSIM comparison against a reference is not applied to video: it compares one still against another, and no video model here has been shown to reproduce a clip frame for frame across a numeric change. Their scores would be observations of which sample came out, which is the same reason the image comparison only decides Z-Image-Turbo.",
   "cases": [
     {
@@ -1823,6 +1897,288 @@
       },
       "quality_notes": "Rank0 host load plus GPU broadcast for klein-4B; host peak should stay at 1x the model rather than scaling with ranks.",
       "observed_on_gfx942": "PASSED on gfx942. Promoted from tests/gpu_validation/supplementary/matrix-mi300x-seeded.json; the JSONL record did not survive the node being reclaimed, so this note is provenance rather than an attached result."
+    },
+    {
+      "id": "rocm-ideogram4-fsdp-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserIdeogram4Model does not support fsdp_meta materialization.*single-file state dict"
+      },
+      "quality_notes": "The withheld reason has to be raised before allocation, not discovered as a wrong-weights image: this runner applies a single-file state dict outside the transformer seam and loads a second denoiser from its own subfolder."
+    },
+    {
+      "id": "rocm-lingbot-dense-fsdp-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "LingBot-Video-Dense",
+      "model_family": "lingbot-video",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "robbyant/lingbot-video-dense-1.3b"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserLingBotVideoDenseModel does not support fsdp_meta materialization.*composed _build_pipe"
+      },
+      "quality_notes": "Shares the MoE runner's composed construction and LingBot's own per-block wrapping, so the dense checkpoint must be refused for the same reason and say so."
+    },
+    {
+      "id": "rocm-lingbot-moe-fsdp-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "moe",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "LingBot-Video-MoE",
+      "model_family": "lingbot-video",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "robbyant/lingbot-video-moe-30b-a3b"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserLingBotVideoMoEModel does not support fsdp_meta materialization.*fp32 norm and router"
+      },
+      "quality_notes": "The reason names the minority-dtype fp32 norm and router parameters that LingBot's own wrapping leaves unsharded, which xDiT's sharding path would shard instead."
+    },
+    {
+      "id": "rocm-minimax-h3-fsdp-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "modular-pipeline",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "MiniMax-H3",
+      "model_family": "minimax-h3",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "MiniMaxAI/MiniMax-H3"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserMiniMaxH3Model does not support fsdp_meta materialization.*fuse_qkv_projections"
+      },
+      "quality_notes": "Refusing before allocation is what keeps a 330G checkpoint from being read only to find that qkv fusion has renamed the tensors the shards would be filled from."
+    },
+    {
+      "id": "rocm-minimax-h3-ref2va-fsdp-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "modular-pipeline",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "MiniMax-H3-Ref2VA",
+      "model_family": "minimax-h3",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "MiniMaxAI/MiniMax-H3"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserMiniMaxH3Ref2VAModel does not support fsdp_meta materialization.*transformer_ref"
+      },
+      "quality_notes": "The reference workflow loads its denoiser as transformer_ref, so its refusal is a separate assertion from the base runner's rather than an inherited one."
+    },
+    {
+      "id": "rocm-ltx23-fsdp-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "lora",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "LTX-2.3",
+      "model_family": "ltx2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "dg845/LTX-2.3-Diffusers"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserLTX23VideoModel does not support fsdp_meta materialization.*LoRA is applied before"
+      },
+      "quality_notes": "Applying the stage 2 distilled LoRA before the base checkpoint reaches a meta transformer is a load order, not a capability, so the refusal names the order that has to change."
+    },
+    {
+      "id": "rocm-hunyuan15-sparse-replicated-withheld",
+      "tags": [
+        "rocm",
+        "torchao",
+        "replicated",
+        "withheld",
+        "sparse",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Hunyuanvideo-1.5-Sparse",
+      "model_family": "hunyuan-video-15",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "tencent/HunyuanVideo-1.5"
+      },
+      "world_size": 2,
+      "args": [
+        "--attention_backend",
+        "AITER_SPARSE_SAGE_V2"
+      ],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "xFuserHunyuanvideo15SparseModel does not support replicated_meta materialization.*sparse blocks outside _build_transformer"
+      },
+      "quality_notes": "Composing base non-block weights with remapped Tencent sparse blocks happens outside the transformer seam, so the refusal has to come from the preflight rather than from the composition failing later. Replicated rather than sharded because the sharded flag never reaches the load declaration for this family: the capability gate refuses it first, which rocm-hunyuan15-sparse-fsdp-flag-refused pins separately. A sparse attention backend is named because this runner refuses to run without one, which would otherwise be the failure this case recorded."
+    },
+    {
+      "id": "rocm-hunyuan15-sparse-fsdp-flag-refused",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fsdp",
+        "withheld",
+        "sparse",
+        "capability",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Hunyuanvideo-1.5-Sparse",
+      "model_family": "hunyuan-video-15",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "tencent/HunyuanVideo-1.5"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "does not support fully_shard_degree"
+      },
+      "quality_notes": "The HunyuanVideo 1.5 runners declare no fully_shard_degree capability at all, so the sharding flag is refused while the config is validated, before any load contract is selected. Asserted separately from the withheld reason because it is an earlier and stronger refusal: it holds however the load declaration later changes."
     }
   ]
 }

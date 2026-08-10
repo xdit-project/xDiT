@@ -130,9 +130,14 @@ disk-bound, not H2D-bound. Do not change `_read_device` on the strength of the w
 
 `python tools/load_support_matrix.py --format gaps --backend <backend>` reports where testing does not
 reach. Every model on this node that declares a memory-efficient load and has usable weights has now
-been run through it — nineteen of them, image and video — so what remains is the cached runners their
-own declarations withhold, and Wan2.1-VACE, whose weights are not here and whose sampling entry names
-no input image.
+been run through it — nineteen of them, image and video. The seven withheld models whose weights are
+here are covered the other way: each has a case asserting that it refuses the memory-efficient load,
+naming the reason its own declaration gives. That leaves Wan2.1-VACE, whose weights are not here and
+whose sampling entry names no input image, and the withheld models whose checkpoints are not on this
+node — CausalWan, SD3.5, LTX-2, the other two HunyuanVideo 1.5 variants, and Wan2.2-Distilled-I2V,
+whose base repo is cached but whose distilled state dicts are not. Their rejections would run here as
+cheaply as the rest, since the load contract is chosen before anything is read; what they lack is a
+sampling entry, and an entry naming an operating point nobody can check is what the harness refuses.
 
 One caution when reading that report: it counts a model as reached once any of its cases has run, so a
 model with some cases outstanding stops being named in the gaps bucket. `--format markdown` shows the
@@ -165,7 +170,9 @@ compile. Both are fixed and covered by tests; the results doc has the detail.
 ## Open threads
 
 Enabling collective mapped-checkpoint loads for CausalWan and Wan2.2-Distilled is the most tractable
-way to widen support. Both are withheld for collective-safe key discovery, which is what
+way to widen support, and the refusals are now pinned by cases rather than only declared, so a change
+that starts loading one of these models has to say so by updating the case that expects it not to.
+Both are withheld for collective-safe key discovery, which is what
 `resolve_mapped_checkpoint` and `CheckpointManifest` already provide, and only rank 0 reads while
 `_require_checkpoint_keys` broadcasts the missing-key list from rank 0, so the mapping only has to be
 correct there. Note the withheld declarations are load-bearing, not stale: `LoaderAdapter`

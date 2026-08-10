@@ -101,6 +101,9 @@ def test_a_model_needing_an_input_image_is_generated_once_its_sampling_names_one
     Before this, an image-to-image or image-to-video model was skipped outright, which left the
     edit and animate paths with no coverage at all on a node holding their weights.
     """
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+    from xfuser.model_executor.models.runner_models.loading.contracts import MaterializationMode
+
     profiles = json.loads(PROFILES_PATH.read_text())
     curated = json.loads(CURATED_PATH.read_text())
     needs_input = set(profiles["requires_input_image"]["models"])
@@ -108,6 +111,11 @@ def test_a_model_needing_an_input_image_is_generated_once_its_sampling_names_one
         model
         for model, settings in curated["sampling"].items()
         if settings.get("input_images")
+        # A withheld model is generated nothing whatever its entry names, since every generated
+        # case expects the load to succeed. Its entry exists for the curated case that asserts the
+        # refusal, which needs the image only because the runner asks for one.
+        and list(MODEL_REGISTRY[model].load_declaration.materialization_modes)
+        != [MaterializationMode.EAGER]
     }
     assert supplied & needs_input, "no image-input model has an image, so this proves nothing"
 

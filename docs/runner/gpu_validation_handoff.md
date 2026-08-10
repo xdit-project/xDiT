@@ -6,15 +6,20 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and thirty-five cases on 8× MI355X (`gfx950`), covering the
-memory-efficient load paths in bf16 and FP8 across nineteen models, eleven image
-and eight video, which is every model that node can load through those paths. A
-hundred and thirty passed, every still image scored against an unquantized
-render and every clip checked frame by frame, and one more passed by asserting the
-rejection it expected. Three assert rejections that hold only on other
-accelerators and were correctly not run here. The one recorded failure,
-`gen-mi3xx-z-image-turbo-bf16-fsdp-w4`, predates the port-collision and
-enumerator fixes described in the results doc and has not been re-run.
+What has run: a hundred and forty-one of the matrix's hundred and sixty-seven
+cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
+and FP8 across nineteen models, eleven image and eight video, which is every
+model that node can load through those paths. A hundred and twenty-eight passed,
+every still image scored against an unquantized render and every clip checked
+frame by frame, and ten more passed by asserting the rejection they expected:
+ROCm INT8, and nine refusals from models that withhold the memory-efficient load
+or the sharding flag outright. Three assert rejections that hold only on other
+accelerators and were correctly not run here, and the remaining twenty-six all
+name hardware this node is not. Nothing recorded is failing. The results file
+also holds records for five case IDs the generator no longer emits, among them
+the `gen-mi3xx-z-image-turbo-bf16-fsdp-w4` failure that predates the
+port-collision fix; that configuration was re-run by hand at four ranks and
+loads, shards and renders, so the failure was the collision and not the model.
 [Memory-efficient load results](meta_load_results.md) reports all three sweeps,
 including the defects they found, each of them in a combination nothing had run
 before. HunyuanVideo's six cases were re-run once more after its text encoder was
@@ -67,6 +72,14 @@ are written as environment placeholders, `${XDIT_INPUT_IMAGE}` and
 `${XDIT_WAN_INPUT_IMAGE}`, which resolve to the images the models' own benchmark
 configs pass. Unset, the affected cases record an `environment_mismatch` rather
 than running, which is the harness saying it was not given what the model needs.
+
+`guidance_scale` may be an explicit `null`, which passes no guidance flag at all.
+The key is still required, so silence stays a statement rather than an omission.
+Ideogram-4 needs it: its runner builds a guidance schedule and only when it is
+given no value, so any number, the CLI default included, would replace the
+schedule the model ships with. The MiniMax-H3 and HunyuanVideo 1.5 runners
+forward no guidance to their pipelines at all, where a number would be inert but
+would still read as an operating point somebody measured.
 
 The matrix treats Transformers `4.x` and `5.x` as environment requirements; the
 runner does not install them. Before execution, it probes the installed
@@ -123,6 +136,19 @@ shard uint8 MXFP4 before torch 2.12. Deriving those from the same probe function
 the runner calls would leave the suite asserting only that the code agrees with
 itself. A curated case wins any collision with a generated one, so its ID, and
 therefore its result history, survives regeneration.
+
+The withheld models are curated for the same reason turned around: a model that
+declares eager loading only is generated no cases at all, so without one, nothing
+checks that its refusal happens. Each such case names the refusal in its
+`error_pattern`, and a test compares that pattern against the message the
+runner's own declaration produces, so a pattern loose enough to be satisfied by
+any failure does not pass. These cases are cheap wherever they run, because the
+load contract is selected before allocation: MiniMax-H3's refusal costs process
+startup rather than a read of a 330G checkpoint. Two refusals can apply to one
+model, and then both are asserted: the HunyuanVideo 1.5 runners declare no
+`fully_shard_degree` capability, which is refused while the config is validated
+and before any load contract exists, so the sparse runner has one case for that
+and one on the replicated path for the withheld reason itself.
 
 Generated cases only ever expect success, which is not circular: the declaration
 decides what is worth attempting and the GPU decides whether it works. Generation

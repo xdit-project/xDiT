@@ -6,7 +6,8 @@ cases over six image models with a standard transformer, then seventy-three over
 never run — two that edit a picture, two that arrived upstream untested, and six video models — then
 twenty over the three whose weights had to be fetched before they could run at all. Every case
 passing, every still image scored against an unquantized render of the same prompt, every clip
-checked frame by frame for having rendered anything.
+checked frame by frame for having rendered anything. A final batch of eleven covers the other claim
+these paths make: the models that refuse them, refusing before they allocate.
 
 Read this together with [the handoff](meta_load_handoff.md), which covers the node's setup and the
 threads still open, and [the validation handoff](gpu_validation_handoff.md), which covers how the
@@ -430,6 +431,60 @@ memory-efficient cases died before loading while eager and the control passed. T
 cached `config.json` tells the two apart — if that is on disk then this snapshot is on disk, and the
 missing name is one this checkpoint does not use. This would have hit any single-file component
 loaded offline, and every model run before this one happens to ship a sharded index.
+
+## The refusals, made executable
+
+Everything above is a model loading. This last batch is the opposite claim: the models that withhold
+the memory-efficient load, refusing it before they allocate. Thirteen runners declare eager loading
+only, each with a written reason, and until now the reasons were only declared. Nothing ran them, so
+nothing would have noticed a change that quietly started loading one of them through a path its own
+declaration says has never been verified for it — and the failure mode there is not a crash but wrong
+weights in a render nobody would question.
+
+Nine cases now assert those refusals, on the seven withheld models whose weights are on this node.
+They cost seconds, not loads: the load contract is selected immediately after distributed init, so
+MiniMax-H3 refuses without reading any of its 330G. Each case matches on the reason, not merely on
+failing, and a test compares the pattern against the message the runner's declaration produces, so a
+pattern that would accept any failure does not pass.
+
+| Case | Refused with |
+| --- | --- |
+| `rocm-ideogram4-fsdp-withheld` | a single-file state dict applied outside `_build_transformer`, and a second denoiser in its own subfolder |
+| `rocm-lingbot-dense-fsdp-withheld` | the composed `_build_pipe` construction it shares with the MoE runner |
+| `rocm-lingbot-moe-fsdp-withheld` | LingBot's own per-block wrapping, which leaves fp32 norm and router parameters where xDiT's path would shard them |
+| `rocm-minimax-h3-fsdp-withheld` | `fuse_qkv_projections` renaming attention weights, so live names stop matching checkpoint keys |
+| `rocm-minimax-h3-ref2va-fsdp-withheld` | the same, plus a denoiser loaded as `transformer_ref` |
+| `rocm-ltx23-fsdp-withheld` | stage 2 distilled LoRA applied before a meta transformer would get its base checkpoint |
+| `rocm-hunyuan15-sparse-replicated-withheld` | base non-block weights composed with remapped Tencent sparse blocks outside `_build_transformer` |
+| `rocm-hunyuan15-sparse-fsdp-flag-refused` | no `fully_shard_degree` capability at all, refused while the config is validated |
+| `rocm-zimage-int8-rejected` | INT8 on ROCm, which was already curated and had not been run |
+
+Writing them turned up three things worth keeping. The harness could not run a rejection case for a
+model with no sampling entry: the entry is read while the command is built, before anything hardware
+knows about, so the four rejection cases that already existed for withheld models would have reported
+"cannot run" and asserted nothing had anyone put them on the right hardware. The withheld models with
+weights here now carry entries from their runners' own declarations.
+
+Those declarations then exposed a gap in what an entry can say. Ideogram-4 builds its own guidance
+schedule and only when it is given no guidance value, so every number, the CLI default included, is
+wrong for it; MiniMax-H3 is guidance-distilled and its runner forwards no guidance at all. An entry
+may now say `null`, which passes no flag, while still being required to say something.
+
+And two of the models refuse earlier than their declarations do, which changed what the cases assert.
+The HunyuanVideo 1.5 runners declare no `fully_shard_degree` capability, so the sharding flag is
+refused while the config is validated, before a load contract exists; that refusal is stronger than
+the withheld reason, since it holds however the declaration later changes, so it is asserted on its
+own and the withheld reason is asserted on the replicated path instead. The same runner also refuses
+to run without a sparse attention backend, which is why its case names one.
+
+Two cases that had been curated but never run also ran here: FLUX.2-dev FP8 eager, and Qwen-Image FP8
+on the replicated path with an FP8 text encoder. Both passed. That leaves twenty-six cases in the
+matrix unrun, every one of them naming an accelerator this node is not.
+
+The one unexplained failure in the results file is explained too. `gen-mi3xx-z-image-turbo-bf16-fsdp-w4`
+was recorded as `failed_inference` before the port-collision fix, and the generator no longer emits a
+four-rank case for that model, so it could not be re-run through the harness. Run by hand at four
+ranks, it fills and shards block by block and renders in 6.9s. The failure was the socket.
 
 ## What stood between these models and a first run
 

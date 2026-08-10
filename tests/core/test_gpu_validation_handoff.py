@@ -201,6 +201,35 @@ def test_a_model_is_sampled_the_way_that_model_is_meant_to_be_sampled(runner, ma
     assert distilled[distilled.index("--guidance_scale") + 1] == "0.0"
 
 
+def test_a_model_that_takes_no_guidance_value_is_passed_none(runner, matrix):
+    """Ideogram-4 builds its own guidance schedule, and only when the flag is absent.
+
+    The entry says so with an explicit null rather than a number, so what reaches the runner is
+    silence. Passing anything, including the CLI default, replaces the schedule the model ships
+    with; the MiniMax and HunyuanVideo 1.5 runners forward no guidance at all, so a number there
+    would be inert but would still read as a measured operating point.
+    """
+    ideogram = next(case for case in matrix["cases"] if case["model"] == "Ideogram-4")
+    settings = runner.sampling_for(ideogram, matrix)
+    assert settings["guidance_scale"] is None, "the entry has to say null, not omit the key"
+
+    command = runner.build_command(ideogram, matrix["defaults"], sampling=settings)
+
+    assert "--guidance_scale" not in command
+    assert "--num_inference_steps" in command, "the rest of the operating point still applies"
+
+
+def test_a_sampling_entry_that_omits_guidance_is_still_refused(runner, matrix):
+    """Null is a statement; a missing key is an oversight, and they must not look alike."""
+    case = next(case for case in matrix["cases"] if case["model"] == "Z-Image")
+    incomplete = dict(matrix, sampling={"Z-Image": {"prompt": "a", "seed": 1}})
+
+    with pytest.raises(runner.UnknownSampling) as raised:
+        runner.sampling_for(case, incomplete)
+
+    assert "guidance_scale" in str(raised.value)
+
+
 def test_a_model_that_edits_a_picture_is_given_one(runner, matrix):
     """An image-to-image case that passes no image fails for reasons unrelated to loading.
 
@@ -325,6 +354,43 @@ def test_settings_taken_from_a_runner_declaration_match_what_it_declares(matrix)
             )
         checked += 1
     assert checked, "no entry cites a runner declaration, so this test proves nothing"
+
+
+def test_a_withheld_case_asserts_the_reason_its_runner_actually_gives(matrix):
+    """A rejection case is only worth running if it fails when the refusal stops being the one
+    claimed.
+
+    These cases exist because a withheld model must refuse before it allocates, rather than load
+    the wrong weights quietly. A pattern loose enough to match any refusal would pass on the
+    capability gate, on a missing task, or on a checkpoint that is not there, so each is checked
+    against the message its runner's own declaration produces.
+    """
+    import re
+
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+    from xfuser.model_executor.models.runner_models.loading.contracts import MaterializationMode
+
+    modes = {
+        "fsdp_blockwise": MaterializationMode.FSDP_META,
+        "replicated": MaterializationMode.REPLICATED_META,
+    }
+    checked = 0
+    for case in matrix["cases"]:
+        if "withheld" not in case["tags"] or "capability" in case["tags"]:
+            continue
+        runner_class = MODEL_REGISTRY[case["model"]]
+        reason = runner_class.load_declaration.unsupported_reason
+        assert reason, f"{case['id']} asserts a withheld reason its runner does not declare"
+        message = (
+            f"{runner_class.__name__} does not support "
+            f"{modes[case['placement']].value} materialization: {reason}"
+        )
+        assert re.search(case["expected"]["error_pattern"], message), (
+            f"{case['id']} asserts a pattern that does not match the refusal its runner raises: "
+            f"{message}"
+        )
+        checked += 1
+    assert checked, "no withheld case was checked, so this test proves nothing"
 
 
 def test_no_matrix_wide_sampling_default_remains(runner, matrix):

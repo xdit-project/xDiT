@@ -295,7 +295,8 @@ An entry of “No” means the runner capability check rejects the flag, even if
 - The two memory-efficient load flags represent different layouts and are not used together: FSDP splits weights, while replicated meta-load gives every rank the same weights.
 - CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
 - `--enable_group_cpu_offload` is rejected with FP4 on the AITER backend, including the hybrid FP8/FP4 mode, because packed FP4 weights survive neither leg of the offload: with `--group_offload_low_cpu_mem` the hook pins each tensor and torch has no `pin_memory` for `Float4_e2m1fn_x2`, and without it AITER binds a device from the parameter it is handed, so a host parameter resolves to an invalid ordinal and aborts the process. Offload at FP8 or bf16, or run FP4 without offload.
-- Offload places the pipeline's modules on the default device, so it is a single-rank feature. Combining it with a parallel degree puts every rank on one device, which fails at the first collective rather than at startup.
+- Offload works across ranks: each rank onloads to its own local device, so it combines with a parallel degree and with the replicated meta load.
+- `--enable_group_cpu_offload` and `--enable_sequential_cpu_offload` are rejected with `--fully_shard_degree > 1`, because both reach inside a parameter that sharding has replaced with a DTensor: the group hook asks each parameter whether it is pinned, for which torch registers no sharding strategy, and sequential offload rebuilds each parameter as it moves it, which needs a spec a plain tensor does not carry. `--enable_model_cpu_offload` moves whole components and does work on top of a sharded, blockwise-filled load.
 
 #### Practical Examples
 

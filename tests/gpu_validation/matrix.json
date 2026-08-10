@@ -2204,6 +2204,106 @@
       "quality_notes": "The HunyuanVideo 1.5 runners declare no fully_shard_degree capability at all, so the sharding flag is refused while the config is validated, before any load contract is selected. Asserted separately from the withheld reason because it is an earlier and stronger refusal: it holds however the load declaration later changes."
     },
     {
+      "id": "rocm-zimage-turbo-bf16-fsdp-model-offload",
+      "tags": [
+        "rocm",
+        "bf16",
+        "fsdp",
+        "offload",
+        "multi-rank",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "model",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Offload on top of the blockwise fill, which is the combination this branch exists for and which nothing had run: the weights arrive a block at a time, are sharded, and are then moved between host and device around each call. Whole-model offload is the one mode that survives it, because it moves components rather than reaching into their parameters; the other two are refused, in the two cases below."
+    },
+    {
+      "id": "rocm-zimage-turbo-bf16-fsdp-group-offload-rejected",
+      "tags": [
+        "rocm",
+        "bf16",
+        "fsdp",
+        "offload",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "group",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "is_pinned|group_cpu_offload cannot be combined with --fully_shard_degree"
+      },
+      "quality_notes": "Run before it was refused, and it failed with torch reporting no sharding strategy for aten.is_pinned: the group hook asks every parameter whether it is pinned, and a DTensor cannot answer. It failed mid-denoise, after a full sharded load had been paid for, which is why this is refused before allocation now."
+    },
+    {
+      "id": "rocm-zimage-turbo-bf16-fsdp-sequential-offload-rejected",
+      "tags": [
+        "rocm",
+        "bf16",
+        "fsdp",
+        "offload",
+        "expected-failure",
+        "preflight",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "sequential",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "DTensor spec|sequential_cpu_offload cannot be combined with --fully_shard_degree"
+      },
+      "quality_notes": "Run before it was refused, and it failed with DTensor.__new__ missing its spec: accelerate rebuilds each parameter as it moves it, and a sharded parameter cannot be rebuilt from a plain tensor. Same shape of failure as the group case and the same cost, so both are now refused together."
+    },
+    {
       "id": "rocm-flux1-fp8-replicated-sequential-offload",
       "tags": [
         "rocm",

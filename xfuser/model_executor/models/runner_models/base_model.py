@@ -51,6 +51,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadContract,
     UnsupportedLoadContract,
     assert_offload_is_compatible_with_format,
+    assert_offload_is_compatible_with_sharding,
     assert_requested_materialization_is_honoured,
     select_effective_materialization_mode,
     select_load_contract,
@@ -338,6 +339,7 @@ class xFuserModel(abc.ABC):
         assert_requested_materialization_is_honoured(
             self.config, world_size=world_size
         )
+        assert_offload_is_compatible_with_sharding(self.config)
         mode = select_effective_materialization_mode(
             self.config, world_size=world_size
         )

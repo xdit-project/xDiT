@@ -153,14 +153,22 @@ def test_each_control_case_matches_the_rank_count_it_controls_for(matrix):
     ]
     assert controls, "the control placement stopped being generated"
     for control in controls:
+        # Matched on rank count and offload rather than searched for and then
+        # checked, because a curated blockwise case for the same model at another
+        # rank count is not the pair this control belongs to
         counterpart = next(
-            case
-            for case in matrix["cases"]
-            if case["placement"] == "fsdp_blockwise"
-            and case["model"] == control["model"]
-            and case["quantization"] == control["quantization"]
+            (
+                case
+                for case in matrix["cases"]
+                if case["placement"] == "fsdp_blockwise"
+                and case["model"] == control["model"]
+                and case["quantization"] == control["quantization"]
+                and case["world_size"] == control["world_size"]
+                and case["offload"] == control["offload"]
+            ),
+            None,
         )
-        assert control["world_size"] == counterpart["world_size"], control["id"]
+        assert counterpart is not None, control["id"]
 
 
 def test_every_sharded_model_has_an_unsharded_case_at_the_same_rank_count(matrix):

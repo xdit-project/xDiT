@@ -6,15 +6,15 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and forty-nine of the matrix's hundred and seventy-one
+What has run: a hundred and fifty-four of the matrix's hundred and seventy-six
 cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
 and FP8 across nineteen models, eleven image and eight video, which is every
-model that node can load through those paths. A hundred and thirty-two passed,
+model that node can load through those paths. A hundred and thirty-five passed,
 every still image scored against an unquantized render and every clip checked
-frame by frame, and thirteen more passed by asserting the rejection they
+frame by frame, and fifteen more passed by asserting the rejection they
 expected: ROCm INT8, nine refusals from models that withhold the memory-efficient
-load or the sharding flag outright, and three limits found by running
-combinations that had been waiting on hardware they did not need. Four report an
+load or the sharding flag outright, and five limits found by running combinations
+that had been waiting on hardware they did not need. Four report an
 environment mismatch and were correctly not run: three want an accelerator this
 node is not, one wants Transformers 4. The remaining twenty-two need hardware
 this node is not, and [what needs other hardware](#what-needs-other-hardware)
@@ -238,6 +238,30 @@ CUDA FP4 packs through TorchAO tensor subclasses, whose offload behaviour nothin
 here has tested. `rocm-krea2-fp8-eager-group-offload` keeps a passing result for
 the same offload mode, so the two rejections read as a limit of AITER FP4 rather
 than of group offloading.
+
+Once offload had cases at all, two further questions could be asked of it, and
+both were worth asking:
+
+**Across ranks.** The sequential failure above was read as offload being a
+single-rank feature, and it is not. Group offloading had always computed its
+onload device from `get_world_group().local_rank`; the two whole-pipeline modes
+passed nothing, so Diffusers defaulted them to `cuda:0` and every rank took it.
+Both now name the local device, and `rocm-flux1-fp8-replicated-sequential-offload`
+and `rocm-zimage-turbo-bf16-replicated-model-offload` pass at two ranks, which
+also gives offload its first results on top of the replicated meta load.
+
+**On top of the blockwise fill.** This is the combination the branch is for, and
+nothing had run it. Whole-model offload works, because it moves components rather
+than reaching into them:
+`rocm-zimage-turbo-bf16-fsdp-model-offload` fills block by block, shards, and
+then moves the sharded model between host and device around each call. The other
+two modes cannot, because sharding replaces each parameter with a DTensor. Group
+offloading asks every parameter whether it is pinned and torch registers no
+sharding strategy for `aten.is_pinned`; sequential offloading rebuilds each
+parameter as it moves it, and `DTensor.__new__` needs a spec a plain tensor does
+not carry. Both failed mid-denoise, after a full sharded load had been paid for,
+so `assert_offload_is_compatible_with_sharding` refuses them before allocation
+and the two rejection cases assert that.
 
 ## Selecting and executing cases
 

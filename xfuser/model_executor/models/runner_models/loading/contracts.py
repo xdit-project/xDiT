@@ -421,6 +421,41 @@ def assert_offload_is_compatible_with_format(
     )
 
 
+def assert_offload_is_compatible_with_sharding(config) -> None:
+    """Refuse the offload modes that cannot move an FSDP2-sharded parameter.
+
+    Sharding replaces each parameter with a DTensor, and two of the three offload
+    modes reach through that abstraction. Group offloading asks every parameter
+    whether it is pinned, and torch registers no sharding strategy for
+    aten.is_pinned. Sequential offloading rebuilds each parameter as it moves it,
+    which a DTensor cannot survive: it needs a spec that a plain tensor does not
+    carry. Both surface deep inside the hook, mid-denoise, long after the load
+    the operator was watching.
+
+    Whole-model offload moves entire components rather than reaching inside them,
+    and was measured working on top of the blockwise fill, so it is allowed.
+    """
+
+    if config.fully_shard_degree <= 1:
+        return
+    if getattr(config, "enable_group_cpu_offload", False):
+        raise UnsupportedLoadContract(
+            "--enable_group_cpu_offload cannot be combined with --fully_shard_degree "
+            f"{config.fully_shard_degree}: the group hook asks each parameter whether "
+            "it is pinned, and torch has no sharding strategy for aten.is_pinned. Use "
+            "--enable_model_cpu_offload, which moves whole components, or drop the "
+            "sharding degree."
+        )
+    if getattr(config, "enable_sequential_cpu_offload", False):
+        raise UnsupportedLoadContract(
+            "--enable_sequential_cpu_offload cannot be combined with "
+            f"--fully_shard_degree {config.fully_shard_degree}: it rebuilds each "
+            "parameter as it moves it, and a sharded parameter cannot be rebuilt "
+            "without its DTensor spec. Use --enable_model_cpu_offload, which moves "
+            "whole components, or drop the sharding degree."
+        )
+
+
 def validate_materialization_contract(
     declaration: LoadDeclaration,
     mode: MaterializationMode,

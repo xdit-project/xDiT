@@ -365,7 +365,10 @@ def test_a_request_nothing_contradicts_is_allowed_through(contracts, world_size)
 def _offload_config(**flags):
     defaults = {
         "enable_group_cpu_offload": False,
+        "enable_sequential_cpu_offload": False,
+        "enable_model_cpu_offload": False,
         "group_offload_low_cpu_mem": False,
+        "fully_shard_degree": 1,
     }
     return type("Config", (), {**defaults, **flags})()
 
@@ -428,6 +431,40 @@ def test_an_offload_this_has_no_measurement_for_is_left_alone(
         requested_format=getattr(contracts.QuantizationFormat, format_name),
         selected_backend=getattr(contracts.QuantizationBackend, backend_name),
     )
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected_in_reason"),
+    [
+        ("enable_group_cpu_offload", "is_pinned"),
+        ("enable_sequential_cpu_offload", "DTensor spec"),
+    ],
+)
+def test_offload_that_reaches_inside_a_sharded_parameter_is_refused(
+    contracts, flag, expected_in_reason
+):
+    """Both fail deep in the hook mid-denoise, long after the load being watched."""
+    config = _offload_config(fully_shard_degree=4, **{flag: True})
+
+    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
+        contracts.assert_offload_is_compatible_with_sharding(config)
+
+    assert expected_in_reason in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    ("flags", "shard_degree"),
+    [
+        ({"enable_model_cpu_offload": True}, 4),
+        ({"enable_group_cpu_offload": True}, 1),
+        ({"enable_sequential_cpu_offload": True}, 1),
+    ],
+)
+def test_offload_that_was_measured_working_is_allowed(contracts, flags, shard_degree):
+    """Whole-model offload moves components rather than parameters, and it ran sharded."""
+    config = _offload_config(fully_shard_degree=shard_degree, **flags)
+
+    contracts.assert_offload_is_compatible_with_sharding(config)
 
 
 @pytest.mark.parametrize(

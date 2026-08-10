@@ -946,6 +946,9 @@ def test_mi3xx_token_admits_both_datacentre_archs_but_not_older_rocm(runner, mat
         for case in matrix["cases"]
         if case["hardware"]["accelerator"] == "gfx942_or_gfx950"
         and case["world_size"] == 1
+        # A case that also wants Transformers 4 would mismatch on the library
+        # and say nothing about the token this is measuring
+        and case["transformers"] == "5.x"
     )
     observed = {
         "platform": "rocm",

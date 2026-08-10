@@ -294,6 +294,8 @@ An entry of “No” means the runner capability check rejects the flag, even if
 - `--memory_efficient_replicated_load` is opt-in, requires multiple ranks, and applies only when weights are replicated. It is ignored with FSDP, PipeFusion, or tensor parallelism, and for runners marked “No” above. Pure Ulysses, ring, CFG, and data parallelism remain eligible.
 - The two memory-efficient load flags represent different layouts and are not used together: FSDP splits weights, while replicated meta-load gives every rank the same weights.
 - CPU/model offload can be combined with AITER FP8; converted leaves are evicted as they are processed. Other quantization backends first require their block or component on the GPU.
+- `--enable_group_cpu_offload` is rejected with FP4 on the AITER backend, including the hybrid FP8/FP4 mode, because packed FP4 weights survive neither leg of the offload: with `--group_offload_low_cpu_mem` the hook pins each tensor and torch has no `pin_memory` for `Float4_e2m1fn_x2`, and without it AITER binds a device from the parameter it is handed, so a host parameter resolves to an invalid ordinal and aborts the process. Offload at FP8 or bf16, or run FP4 without offload.
+- Offload places the pipeline's modules on the default device, so it is a single-rank feature. Combining it with a parallel degree puts every rank on one device, which fails at the first collective rather than at startup.
 
 #### Practical Examples
 

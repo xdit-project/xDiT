@@ -381,6 +381,46 @@ def assert_requested_materialization_is_honoured(config, *, world_size: int) -> 
         )
 
 
+def assert_offload_is_compatible_with_format(
+    config,
+    *,
+    requested_format: QuantizationFormat,
+    selected_backend: QuantizationBackend,
+) -> None:
+    """Refuse group offload with AITER FP4, which aborts the process instead of failing.
+
+    Group offloading moves a module's parameters between host and device around each
+    call. AITER FP4 weights survive neither leg. With --group_offload_low_cpu_mem the
+    hook pins each tensor first, and torch has no pin_memory for Float4_e2m1fn_x2, so
+    the offload raises from inside the hook. Without it, AITER's quant module binds a
+    device from the parameter it is handed, and a parameter on the host resolves to an
+    invalid ordinal, which reaches AITER's own abort and kills the rank with SIGABRT
+    and no Python traceback.
+
+    Scoped to the AITER backend because that is where both failures were measured;
+    CUDA FP4 packs through TorchAO tensor subclasses, whose offload behaviour is
+    untested here and would be a different claim.
+    """
+
+    if selected_backend is not QuantizationBackend.AITER:
+        return
+    if requested_format not in (QuantizationFormat.FP4, QuantizationFormat.FP8_FP4):
+        return
+    if not getattr(config, "enable_group_cpu_offload", False):
+        return
+    detail = (
+        "torch cannot pin a Float4_e2m1fn_x2 tensor"
+        if getattr(config, "group_offload_low_cpu_mem", False)
+        else "AITER binds a device from the parameter it is given, and a host "
+        "parameter resolves to an invalid ordinal"
+    )
+    raise UnsupportedLoadContract(
+        f"--enable_group_cpu_offload cannot be combined with {requested_format.name} "
+        f"on the AITER backend: {detail}. Offload the model at FP8 or bf16, or run "
+        f"{requested_format.name} without offload."
+    )
+
+
 def validate_materialization_contract(
     declaration: LoadDeclaration,
     mode: MaterializationMode,

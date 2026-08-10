@@ -305,30 +305,29 @@
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Compare text fidelity and composition against the bf16 case with the same seed."
+      "quality_notes": "Compare text fidelity and composition against the bf16 case with the same seed. This one genuinely needs the arch: _use_aiter_fp8_rdna4 routes FP8 through AITER's quantizer and layer layout only on gfx1200 or gfx1201, so no amount of gfx950 FP8 covers it."
     },
     {
-      "id": "rdna4-flux2-fp8-eager-te-tf4-offload",
+      "id": "rocm-flux2-fp8-eager-te-tf4",
       "tags": [
-        "rdna4",
-        "aiter",
+        "rocm",
+        "torchao",
         "fp8",
         "te-fp8",
         "transformers4",
         "post-load",
-        "offload",
         "hub"
       ],
       "model": "FLUX.2-dev",
       "model_family": "flux2",
       "hardware": {
-        "backend": "rdna4_aiter",
-        "accelerator": "gfx1200_or_gfx1201"
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
       "quantization": "fp8",
       "te_fp8": true,
-      "offload": "model",
+      "offload": "none",
       "transformers": "4.x",
       "checkpoint": {
         "source": "hub",
@@ -339,25 +338,24 @@
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Confirm the logged Transformers 4 text-encoder fallback is post-load, then compare to the Transformers 5 result."
+      "quality_notes": "Confirm the logged Transformers 4 text-encoder fallback is post-load, then compare to the Transformers 5 result. This asked for RDNA4 and an offload mode as well, which confounded three factors: what it tests is a library, feature-detected on whether transformers.core_model_loading imports, and nothing about it is architectural. Pinned here instead, where it records an environment mismatch until a Transformers 4 environment exists, which is the requirement it actually has."
     },
     {
-      "id": "rdna4-flux1-fp8-replicated-no-te",
+      "id": "rocm-flux1-fp8-eager-sequential-offload",
       "tags": [
-        "smoke",
-        "rdna4",
-        "aiter",
+        "rocm",
+        "torchao",
         "fp8",
-        "replicated",
+        "offload",
         "hub"
       ],
       "model": "FLUX.1-dev",
       "model_family": "flux1",
       "hardware": {
-        "backend": "rdna4_aiter",
-        "accelerator": "gfx1200_or_gfx1201"
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
       },
-      "placement": "replicated",
+      "placement": "eager",
       "quantization": "fp8",
       "te_fp8": false,
       "offload": "sequential",
@@ -366,12 +364,12 @@
         "source": "hub",
         "value": "black-forest-labs/FLUX.1-dev"
       },
-      "world_size": 2,
+      "world_size": 1,
       "args": [],
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Verify peer ranks do not independently retain a full host copy of replicated weights."
+      "quality_notes": "Sequential offload moving submodules to the host between calls, with an FP8 transformer, on the torchao backend this arch selects. Sequential offload is an accelerate hook with no platform gate, so waiting for RDNA4 to test it left it untested everywhere. Ran first at two ranks, inherited from the RDNA4 case this replaces, and NCCL refused with a duplicate GPU: accelerate places the offloaded modules on the default device for every rank, so both ranks landed on one device and the first all-to-all failed. One rank is where this belongs, since offload exists to fit a model that does not fit; the multi-rank combination has no owner and should be refused rather than left to fail at the collective."
     },
     {
       "id": "rdna4-wan22-hybrid-fsdp",
@@ -404,15 +402,19 @@
       "world_size": 4,
       "args": [
         "--num_frames",
-        "17"
+        "17",
+        "--num_hybrid_gemm_high_precision_steps",
+        "1"
       ],
       "expected": {
-        "outcome": "inference_success"
+        "outcome": "preflight_failure",
+        "error_pattern": "MXFP4 packed weight cannot be placed under FSDP2|177948"
       },
-      "quality_notes": "Inspect both transformer phases; transformer_2 is expected to remain FP8. Unrun, and the success expectation needs checking against the MXFP4 FSDP2 gate: the FP4 half targets transformer.blocks, which the strategy also wraps, so validate_format_fsdp_placement is required and refuses unless torch carries pytorch/pytorch#177948 (2.12). On an older torch expect a preflight_failure instead."
+      "quality_notes": "Inspect both transformer phases; transformer_2 is expected to remain FP8. Now expects the refusal rather than success, because the equivalent case ran on gfx950 and met the MXFP4 FSDP2 gate; on torch 2.12 or newer both flip back to success. The high-precision step count is required: --use_hybrid_gemm_schedule refuses to run without it, so as written this case would have failed on that rather than on anything it means to test, wherever it ran. What is left that is specific to this arch is the pairing of AITER FP8 with AITER MXFP4; the mixed schedule itself is covered on gfx950 by rocm-flux2-hybrid-eager and rocm-wan22-t2v-hybrid-fsdp4. The success expectation still needs checking against the MXFP4 FSDP2 gate: the FP4 half targets transformer.blocks, which the strategy also wraps, so validate_format_fsdp_placement is required and refuses unless torch carries pytorch/pytorch#177948 (2.12). On an older torch expect a preflight_failure instead."
     },
     {
       "id": "rdna4-krea2-fp4-eager-group-offload",
+      "coverage_note": "What remains specific to this arch is AITER's FP4 kernels as built for gfx1200/gfx1201; the group offload half is covered on gfx950 by rocm-krea2-fp4-eager-group-offload, so this is no longer the only thing standing between the project and any offload coverage.",
       "tags": [
         "rdna4",
         "aiter",
@@ -444,71 +446,72 @@
       "quality_notes": "The Qwen3VL text encoder is excluded from quantization; record host transfer behavior."
     },
     {
-      "id": "rdna4-cosmos3-hybrid-replicated-lowcpu",
+      "id": "rocm-krea2-fp4-replicated-group-lowcpu-rejected",
       "tags": [
-        "rdna4",
-        "aiter",
+        "rocm",
+        "torchao",
         "fp4",
-        "fp8",
-        "hybrid",
         "replicated",
         "offload",
+        "expected-failure",
+        "preflight",
         "hub"
       ],
-      "model": "Cosmos3-Super",
-      "model_family": "cosmos3",
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
       "hardware": {
-        "backend": "rdna4_aiter",
-        "accelerator": "gfx1200_or_gfx1201"
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
       },
       "placement": "replicated",
-      "quantization": "hybrid_fp8_fp4",
+      "quantization": "fp4",
       "te_fp8": false,
       "offload": "group_low_cpu_mem",
       "transformers": "5.x",
       "checkpoint": {
         "source": "hub",
-        "value": "nvidia/Cosmos3-Super"
+        "value": "krea/krea-2-turbo"
       },
       "world_size": 2,
       "args": [],
       "expected": {
-        "outcome": "inference_success"
+        "outcome": "preflight_failure",
+        "error_pattern": "group_cpu_offload cannot be combined with FP4|cannot pin"
       },
-      "quality_notes": "Compare first/last FP8 override ranges to an all-FP8 reference."
+      "quality_notes": "Written expecting success and run: the hook pins each tensor before onloading it and torch has no pin_memory for Float4_e2m1fn_x2, so it raised from inside the offload rather than from anything this project owns. Now refused before allocation, which is what this asserts. Replaces a Cosmos3-Super hybrid case pinned to RDNA4, where a 128G transformer at two ranks was an expensive way to reach the same host-memory flag."
     },
     {
-      "id": "rdna4-zimage-int8-rejected",
+      "id": "rocm-qwen-edit-fp8-eager-model-offload",
       "tags": [
-        "rdna4",
-        "aiter",
-        "int8",
-        "expected-failure",
-        "preflight",
+        "rocm",
+        "torchao",
+        "fp8",
+        "te-fp8",
+        "offload",
+        "edit",
         "hub"
       ],
-      "model": "Z-Image-Turbo",
-      "model_family": "z-image",
+      "model": "Qwen-Image-Edit",
+      "model_family": "qwen-image",
       "hardware": {
-        "backend": "rdna4_aiter",
-        "accelerator": "gfx1200_or_gfx1201"
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "eager",
-      "quantization": "int8",
-      "te_fp8": false,
-      "offload": "none",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "model",
       "transformers": "5.x",
       "checkpoint": {
         "source": "hub",
-        "value": "Tongyi-MAI/Z-Image-Turbo"
+        "value": "Qwen/Qwen-Image-Edit"
       },
       "world_size": 1,
       "args": [],
       "expected": {
-        "outcome": "preflight_failure",
-        "error_pattern": "INT8.*ROCm|ROCm.*INT8"
+        "outcome": "inference_success"
       },
-      "quality_notes": "Expected rejection must occur before checkpoint allocation."
+      "quality_notes": "Whole-model offload with both the transformer and the text encoder quantized, which is where a quantized module moved between devices can lose its scales. Replaces the same combination pinned to Hopper and to RDNA4; FP8 on CUDA stays covered by ada-flux1-fp8-eager-te, and the ROCm INT8 refusal the RDNA4 slot asserted is platform-level, already proven by rocm-zimage-int8-rejected."
     },
     {
       "id": "rdna4-wan22-distilled-fsdp-rejected-local",
@@ -552,7 +555,7 @@
         "outcome": "preflight_failure",
         "error_pattern": "collective-safe|distilled_wan_remap|custom checkpoint"
       },
-      "quality_notes": "Expected rejection must precede reads of the external LightX2V state dicts."
+      "quality_notes": "Expected rejection must precede reads of the external LightX2V state dicts. Blocked before hardware: this model has no sampling entry, and an entry is read while the command is built, so on an RDNA4 node this reports that it cannot run and asserts nothing. Its base repo is cached on the gfx950 node but the distilled state dicts are not, so no operating point can be checked there either."
     },
     {
       "id": "rdna4-sd35-replicated-rejected",
@@ -587,7 +590,7 @@
         "outcome": "preflight_failure",
         "error_pattern": "composition|collective-safe|replicated"
       },
-      "quality_notes": "The composition adapter has no standard meta-construction seam."
+      "quality_notes": "The composition adapter has no standard meta-construction seam. Blocked before hardware: SD3.5 has no sampling entry and no cached checkpoint on any node this has run on, so booking an RDNA4 box for it would report that it cannot run. The refusal itself is not architectural and would hold wherever the weights are."
     },
     {
       "id": "rdna4-causalwan-fsdp-rejected",
@@ -621,13 +624,13 @@
         "outcome": "preflight_failure",
         "error_pattern": "collective-safe|causal_wan_custom|fallback"
       },
-      "quality_notes": "The manual single-file fallback is intentionally excluded from collective loading."
+      "quality_notes": "The manual single-file fallback is intentionally excluded from collective loading. Blocked before hardware: CausalWan has no sampling entry and no cached checkpoint anywhere this has run, so this reports that it cannot run rather than asserting the refusal. Not architectural either; it would hold on any node holding the weights."
     },
     {
-      "id": "rdna4-flux2-fsdp-te-tf4-rejected",
+      "id": "rocm-flux2-fsdp-te-tf4-rejected",
       "tags": [
-        "rdna4",
-        "aiter",
+        "rocm",
+        "torchao",
         "fp8",
         "te-fp8",
         "fsdp",
@@ -639,8 +642,8 @@
       "model": "FLUX.2-dev",
       "model_family": "flux2",
       "hardware": {
-        "backend": "rdna4_aiter",
-        "accelerator": "gfx1200_or_gfx1201"
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
       },
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
@@ -657,7 +660,7 @@
         "outcome": "preflight_failure",
         "error_pattern": "Transformers.*5|text.encoder.*stream|post-load"
       },
-      "quality_notes": "FSDP cannot safely apply the Transformers 4 text-encoder post-load fallback."
+      "quality_notes": "FSDP cannot safely apply the Transformers 4 text-encoder post-load fallback. The refusal is decided by whether the installed Transformers carries the streaming loader, not by the accelerator, so this no longer asks for RDNA4: it records an environment mismatch until a Transformers 4 environment exists, and asserting it there tests the torchao path this arch actually selects."
     },
     {
       "id": "rdna4-hunyuan-fp8-fsdp",
@@ -1096,40 +1099,38 @@
       "quality_notes": "Record transfer overhead and compare output to the non-offloaded INT8 case."
     },
     {
-      "id": "hopper-qwen-fp8-eager-model-offload",
+      "id": "rocm-krea2-fp4-eager-group-offload-rejected",
       "tags": [
-        "cuda",
-        "hopper",
+        "rocm",
         "torchao",
-        "fp8",
-        "te-fp8",
+        "fp4",
         "offload",
+        "expected-failure",
+        "preflight",
         "hub"
       ],
-      "model": "Qwen-Image-Edit",
-      "model_family": "qwen-image",
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
       "hardware": {
-        "backend": "cuda_hopper_torchao",
-        "accelerator": "sm90"
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
       },
       "placement": "eager",
-      "quantization": "fp8",
-      "te_fp8": true,
-      "offload": "model",
+      "quantization": "fp4",
+      "te_fp8": false,
+      "offload": "group",
       "transformers": "5.x",
       "checkpoint": {
         "source": "hub",
-        "value": "Qwen/Qwen-Image-Edit"
+        "value": "krea/krea-2-turbo"
       },
       "world_size": 1,
-      "args": [
-        "--input_images",
-        "${XDIT_QWEN_INPUT_IMAGE}"
-      ],
+      "args": [],
       "expected": {
-        "outcome": "inference_success"
+        "outcome": "preflight_failure",
+        "error_pattern": "group_cpu_offload cannot be combined with FP4|invalid ordinal"
       },
-      "quality_notes": "Use a fixed source image and retain it with the result bundle."
+      "quality_notes": "Written expecting success and run: AITER's quant module took a host parameter, resolved it to an invalid device ordinal and aborted the rank with SIGABRT and no traceback. Group offload with AITER FP4 is now refused before allocation, and this asserts that refusal. Ran here because the hook is not architectural; the same combination sat unrun on RDNA4 and Blackwell, where it would have aborted the same way."
     },
     {
       "id": "hopper-ltx2-fp8-eager",
@@ -1331,12 +1332,15 @@
         "value": "black-forest-labs/FLUX.2-dev"
       },
       "world_size": 1,
-      "args": [],
+      "args": [
+        "--num_hybrid_gemm_high_precision_steps",
+        "1"
+      ],
       "expected": {
         "outcome": "preflight_failure",
         "error_pattern": "hybrid.*ROCm|ROCm.*hybrid|disable.*hybrid"
       },
-      "quality_notes": "CUDA NVFP4 has no runtime FP8/FP4 hybrid wrapper."
+      "quality_notes": "CUDA NVFP4 has no runtime FP8/FP4 hybrid wrapper. The high-precision step count had to be added: without it the mixed schedule refuses for a missing argument, which would have recorded as the wrong rejection. The same model and quantization run to completion on gfx950, so what this asserts is specific to the CUDA FP4 backend rather than to the schedule."
     },
     {
       "id": "blackwell-zimage-int8-group-offload",
@@ -2179,6 +2183,146 @@
         "error_pattern": "does not support fully_shard_degree"
       },
       "quality_notes": "The HunyuanVideo 1.5 runners declare no fully_shard_degree capability at all, so the sharding flag is refused while the config is validated, before any load contract is selected. Asserted separately from the withheld reason because it is an earlier and stronger refusal: it holds however the load declaration later changes."
+    },
+    {
+      "id": "rocm-krea2-fp8-eager-group-offload",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "offload",
+        "hub"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "group",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Group offload against quantized weights that can actually move: FP8 rather than the FP4 the group hook cannot pin or place. Keeps a positive result for this offload mode, so the two FP4 rejections next to it are read as a limit of AITER FP4 rather than of group offloading."
+    },
+    {
+      "id": "rocm-flux2-hybrid-eager",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp4",
+        "fp8",
+        "hybrid",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "eager",
+      "quantization": "hybrid_fp8_fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [
+        "--num_hybrid_gemm_high_precision_steps",
+        "1"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "The mixed FP8/FP4 schedule, keeping the first and last denoising step in the higher precision. Pinned to gfx950 rather than to the arch pair, for the same reason FP4 is: AITER ships no FP4 kernels for gfx942. The mixed schedule had no coverage anywhere while its three cases waited on RDNA4 and Blackwell, and none of them passed the step count the schedule requires."
+    },
+    {
+      "id": "rocm-wan22-t2v-hybrid-fsdp4",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp4",
+        "fp8",
+        "hybrid",
+        "fsdp",
+        "dual-transformer",
+        "video",
+        "hub"
+      ],
+      "model": "Wan2.2-T2V",
+      "model_family": "wan22",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "hybrid_fp8_fp4",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+      },
+      "world_size": 4,
+      "args": [
+        "--num_frames",
+        "17",
+        "--num_hybrid_gemm_high_precision_steps",
+        "1"
+      ],
+      "expected": {
+        "outcome": "preflight_failure",
+        "error_pattern": "MXFP4 packed weight cannot be placed under FSDP2|177948"
+      },
+      "quality_notes": "The mixed schedule against the blockwise fill and a two-phase transformer, which is the same combination rdna4-wan22-hybrid-fsdp asks for. Written expecting success and run: refused, because this torch cannot shard a non-floating-point parameter under FSDP2 and the FP4 half targets the blocks the strategy wraps. That is the gate the RDNA4 case's own notes predicted, now measured rather than guessed, and it flips to a success expectation on torch 2.12 or newer, which carries pytorch/pytorch#177948. Each result records the torch it ran against, so which side of that line a run sits on stays readable."
+    },
+    {
+      "id": "rdna4-flux2-fp8-fsdp-te-tf5",
+      "tags": [
+        "rdna4",
+        "aiter",
+        "fp8",
+        "te-fp8",
+        "fsdp",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rdna4_aiter",
+        "accelerator": "gfx1200_or_gfx1201"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "The densest part of the AITER FP8 path and the one an RDNA4 booking is actually for: per-block quantization during the fill, plus the AITER Transformers streaming adapter for the text encoder, neither of which any other case reaches. The rest of the RDNA4 set was eager, or quantized the transformer alone, so this hole was invisible while the whole group sat unrun."
     }
   ]
 }

@@ -50,6 +50,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadDeclaration,
     LoadContract,
     UnsupportedLoadContract,
+    assert_offload_is_compatible_with_format,
     assert_requested_materialization_is_honoured,
     select_effective_materialization_mode,
     select_load_contract,
@@ -346,6 +347,11 @@ class xFuserModel(abc.ABC):
                 self.config.use_fp8_gemms and _use_aiter_fp8_rdna4()
             ),
             cuda_active=_is_cuda(),
+        )
+        assert_offload_is_compatible_with_format(
+            self.config,
+            requested_format=requested_format,
+            selected_backend=backend,
         )
         return select_load_contract(
             requested_format=requested_format,

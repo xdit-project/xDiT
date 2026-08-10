@@ -478,8 +478,42 @@ own and the withheld reason is asserted on the replicated path instead. The same
 to run without a sparse attention backend, which is why its case names one.
 
 Two cases that had been curated but never run also ran here: FLUX.2-dev FP8 eager, and Qwen-Image FP8
-on the replicated path with an FP8 text encoder. Both passed. That leaves twenty-six cases in the
-matrix unrun, every one of them naming an accelerator this node is not.
+on the replicated path with an FP8 text encoder. Both passed.
+
+## The cases that were waiting on the wrong thing
+
+Twenty-six cases were then left unrun, each naming an accelerator this node is not, which read as
+work that needed a booking. Re-read against what the code actually gates on, most of them did not.
+Only three claims genuinely need other hardware: FP8 through AITER, which `_use_aiter_fp8_rdna4`
+selects on `gfx1200` or `gfx1201` alone; NVFP4, gated on CUDA capability 10.0; and INT8 that works,
+which TorchAO supports on CUDA only. The rest were pinned to hardware by convention. The four CPU
+offload modes are accelerate and Diffusers hooks with no platform gate, and pinning them elsewhere had
+left offload untested everywhere. Transformers 4 is feature-detected on an import. The mixed FP8/FP4
+schedule was held back only because its `gfx942_or_gfx950` token spans two archs that differ on FP4,
+which is the same reason FP4 was curated and pinned to gfx950, where it passes. And the ROCm INT8
+refusal is platform-level, already asserted here, so its RDNA4 twin was retired rather than booked.
+[The handoff](gpu_validation_handoff.md#what-needs-other-hardware) carries the full accounting.
+
+Re-pinning them to this node and running them is where it paid. Four of six failed, and not one
+failure was about hardware. Sequential offload at two ranks died in NCCL with `Duplicate GPU
+detected`, because accelerate places offloaded modules on the default device for every rank, so both
+ranks landed on one device; the case had inherited two ranks from the RDNA4 case it replaced and
+would have failed the same way there. Group offload with AITER FP4 aborted the rank with SIGABRT and
+no traceback, AITER having bound a device from a parameter that was on the host. The same offload with
+`--group_offload_low_cpu_mem` raised from inside the hook, which pins each tensor before onloading it,
+and torch has no `pin_memory` for `Float4_e2m1fn_x2`. Both FP4 failures are now refused before
+allocation and asserted as rejections, scoped to the AITER backend because that is where they were
+measured. The fourth was the mixed schedule under the blockwise fill, refused because this torch
+cannot shard a non-floating-point parameter under FSDP2 while the FP4 half targets the blocks the
+strategy wraps: exactly the gate `rdna4-wan22-hybrid-fsdp` had predicted in its own notes, now
+measured rather than guessed, on hardware that was already here.
+
+What passed is coverage nothing had before: whole-model offload with both the transformer and the text
+encoder in FP8, sequential offload at one rank, group offload against FP8 weights, and the mixed
+FP8/FP4 schedule itself. Twenty-two cases remain unrun, and the three claims above are what a booking
+would be for. Three of the twenty-two cannot run anywhere as written: SD3.5, CausalWan and
+Wan2.2-Distilled-I2V have no sampling entry, and no node this has run on holds their weights, so an
+operating point cannot be chosen without inventing one.
 
 The one unexplained failure in the results file is explained too. `gen-mi3xx-z-image-turbo-bf16-fsdp-w4`
 was recorded as `failed_inference` before the port-collision fix, and the generator no longer emits a

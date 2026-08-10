@@ -6,20 +6,25 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and forty-one of the matrix's hundred and sixty-seven
+What has run: a hundred and forty-nine of the matrix's hundred and seventy-one
 cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
 and FP8 across nineteen models, eleven image and eight video, which is every
-model that node can load through those paths. A hundred and twenty-eight passed,
+model that node can load through those paths. A hundred and thirty-two passed,
 every still image scored against an unquantized render and every clip checked
-frame by frame, and ten more passed by asserting the rejection they expected:
-ROCm INT8, and nine refusals from models that withhold the memory-efficient load
-or the sharding flag outright. Three assert rejections that hold only on other
-accelerators and were correctly not run here, and the remaining twenty-six all
-name hardware this node is not. Nothing recorded is failing. The results file
-also holds records for five case IDs the generator no longer emits, among them
+frame by frame, and thirteen more passed by asserting the rejection they
+expected: ROCm INT8, nine refusals from models that withhold the memory-efficient
+load or the sharding flag outright, and three limits found by running
+combinations that had been waiting on hardware they did not need. Four report an
+environment mismatch and were correctly not run: three want an accelerator this
+node is not, one wants Transformers 4. The remaining twenty-two need hardware
+this node is not, and [what needs other hardware](#what-needs-other-hardware)
+says which of them are worth a booking. Nothing recorded is failing. The results
+file also holds records for nine case IDs the matrix no longer carries, among them
 the `gen-mi3xx-z-image-turbo-bf16-fsdp-w4` failure that predates the
 port-collision fix; that configuration was re-run by hand at four ranks and
 loads, shards and renders, so the failure was the collision and not the model.
+Four more are cases this reassessment renamed or retired, and the section below
+says what each of them found first.
 [Memory-efficient load results](meta_load_results.md) reports all three sweeps,
 including the defects they found, each of them in a combination nothing had run
 before. HunyuanVideo's six cases were re-run once more after its text encoder was
@@ -156,6 +161,83 @@ is also blind to the local HF cache on purpose. The matrix is a plan, and which
 weights a machine happens to hold is an execution-time fact; filtering on it would
 make the file differ per node and make case IDs come and go. Use
 `tools/cache_inventory.py` to see what the current machine can actually reach.
+
+## What needs other hardware
+
+A case names an accelerator, and it is easy to read that as a hardware
+requirement. Often it is not one. Every case that had never run was re-read
+against what its claim is actually gated on in the code, and most of them were
+waiting on a machine for no reason the code supports.
+
+Three things genuinely need hardware this node is not:
+
+- **RDNA4, for the AITER FP8 backend.** `_use_aiter_fp8_rdna4` is true only on
+  `gfx1200` or `gfx1201` with AITER present, and when it is, FP8 goes through
+  AITER's quantizer, its FP8 layer layout and its Transformers streaming adapter
+  instead of torchao. No amount of gfx950 FP8 reaches any of it. Reviewing this
+  found a hole: every RDNA4 FP8 case was eager or quantized the transformer
+  alone, so the densest part of that path, per-block quantization during the fill
+  with a quantized text encoder, was covered by nothing.
+  `rdna4-flux2-fp8-fsdp-te-tf5` was added for it.
+- **Blackwell, for NVFP4.** The probe is `capability >= (10, 0)`; below that the
+  format reports `NVFP4 requires CUDA capability >= 10.0` and there is nothing to
+  measure.
+- **Any CUDA device, for INT8 that works.** `TorchAO INT8 is supported only on
+  CUDA`, so the supported path cannot be seen from ROCm at all.
+
+Everything else that was waiting either belonged here or was already covered:
+
+- **The offload modes are not architectural.** `--enable_model_cpu_offload`,
+  `--enable_sequential_cpu_offload` and the group variants are Diffusers and
+  accelerate hooks with no platform gate, yet all four were pinned to RDNA4,
+  Hopper, Ada or Blackwell, which left offload with no coverage anywhere. They
+  are gfx950 cases now, and running them found three defects described below.
+- **Transformers 4 is a library, not a machine.** The split is feature-detected
+  on whether `transformers.core_model_loading` imports. Both cases are pinned
+  here and record an environment mismatch until a Transformers 4 environment
+  exists, which is the requirement they actually have.
+- **The mixed FP8/FP4 schedule runs here.** It was withheld from generation only
+  because the `gfx942_or_gfx950` token spans two archs that differ on FP4,
+  exactly as FP4 itself is, and FP4 was then curated and pinned to gfx950 where
+  it passes. Its three cases had sat unrun on RDNA4 and Blackwell, and none of
+  them passed `--num_hybrid_gemm_high_precision_steps`, which the schedule
+  requires, so each would have failed on a missing argument wherever it ran.
+- **The ROCm INT8 refusal is platform-level.** `rocm-zimage-int8-rejected`
+  already asserts it here, so the RDNA4 twin was retired rather than booked.
+- **Three rejections cannot run anywhere as written.** SD3.5, CausalWan and
+  Wan2.2-Distilled-I2V have no sampling entry, and an entry is read while the
+  command is built, so on an RDNA4 node each reports that it cannot run and
+  asserts nothing. No node this has run on holds their weights, so an operating
+  point cannot be chosen without guessing one. Their notes say so, so the
+  refusals are not mistaken for work a booking would complete.
+
+Running the re-pinned cases is what made the reassessment worth doing, because
+four of the six failed and none of the failures was about hardware:
+
+- Sequential offload at two ranks died in NCCL with `Duplicate GPU detected`.
+  Accelerate places the offloaded modules on the default device for every rank,
+  so both ranks landed on one device and the first all-to-all failed. The case
+  had inherited two ranks from the RDNA4 case it replaced and would have failed
+  the same way there. It is a one-rank case now, which is where offload belongs.
+- Group offload with AITER FP4 aborted the rank with SIGABRT and no traceback:
+  AITER's quant module binds a device from the parameter it is handed, and a
+  parameter on the host resolves to an invalid ordinal.
+- The same offload with `--group_offload_low_cpu_mem` raised from inside the
+  hook, which pins each tensor before onloading it, because torch has no
+  `pin_memory` for `Float4_e2m1fn_x2`.
+- The mixed schedule under the blockwise fill was refused, because this torch
+  cannot shard a non-floating-point parameter under FSDP2 and the FP4 half
+  targets the blocks the strategy wraps. That is the gate `rdna4-wan22-hybrid-fsdp`
+  predicted in its own notes; it is now measured, and both cases expect the
+  refusal until torch 2.12.
+
+The two FP4 offload failures are now refused before allocation, by
+`assert_offload_is_compatible_with_format`, and asserted as rejections. The
+refusal is scoped to the AITER backend because that is where both were measured;
+CUDA FP4 packs through TorchAO tensor subclasses, whose offload behaviour nothing
+here has tested. `rocm-krea2-fp8-eager-group-offload` keeps a passing result for
+the same offload mode, so the two rejections read as a limit of AITER FP4 rather
+than of group offloading.
 
 ## Selecting and executing cases
 

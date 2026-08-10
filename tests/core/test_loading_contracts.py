@@ -362,6 +362,74 @@ def test_a_request_nothing_contradicts_is_allowed_through(contracts, world_size)
     )
 
 
+def _offload_config(**flags):
+    defaults = {
+        "enable_group_cpu_offload": False,
+        "group_offload_low_cpu_mem": False,
+    }
+    return type("Config", (), {**defaults, **flags})()
+
+
+@pytest.mark.parametrize(
+    ("low_cpu_mem", "expected_in_reason"),
+    [
+        (False, "invalid ordinal"),
+        (True, "pin"),
+    ],
+)
+def test_group_offload_with_aiter_fp4_is_refused(
+    contracts, low_cpu_mem, expected_in_reason
+):
+    """Both legs of the offload fail below Python, one by abort, so neither can be caught."""
+    config = _offload_config(
+        enable_group_cpu_offload=True, group_offload_low_cpu_mem=low_cpu_mem
+    )
+
+    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
+        contracts.assert_offload_is_compatible_with_format(
+            config,
+            requested_format=contracts.QuantizationFormat.FP4,
+            selected_backend=contracts.QuantizationBackend.AITER,
+        )
+
+    assert expected_in_reason in str(refusal.value)
+
+
+def test_the_mixed_schedule_carries_the_fp4_half_into_the_refusal(contracts):
+    """FP8_FP4 quantizes part of the model to FP4, so the same weights cannot be offloaded."""
+    config = _offload_config(enable_group_cpu_offload=True)
+
+    with pytest.raises(contracts.UnsupportedLoadContract) as refusal:
+        contracts.assert_offload_is_compatible_with_format(
+            config,
+            requested_format=contracts.QuantizationFormat.FP8_FP4,
+            selected_backend=contracts.QuantizationBackend.AITER,
+        )
+
+    assert "FP8_FP4" in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    ("format_name", "backend_name", "offload"),
+    [
+        ("FP4", "AITER", False),
+        ("FP8", "AITER", True),
+        ("FP4", "TORCHAO", True),
+    ],
+)
+def test_an_offload_this_has_no_measurement_for_is_left_alone(
+    contracts, format_name, backend_name, offload
+):
+    """Refusing CUDA FP4 offload would assert a claim nothing here has tested."""
+    config = _offload_config(enable_group_cpu_offload=offload)
+
+    contracts.assert_offload_is_compatible_with_format(
+        config,
+        requested_format=getattr(contracts.QuantizationFormat, format_name),
+        selected_backend=getattr(contracts.QuantizationBackend, backend_name),
+    )
+
+
 @pytest.mark.parametrize(
     ("flags", "aiter_fp8", "cuda", "expected"),
     [

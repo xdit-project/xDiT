@@ -139,6 +139,14 @@ whose base repo is cached but whose distilled state dicts are not. Their rejecti
 cheaply as the rest, since the load contract is chosen before anything is read; what they lack is a
 sampling entry, and an entry naming an operating point nobody can check is what the harness refuses.
 
+The coverage that used to be reported as waiting on other hardware was re-read against the code, and
+most of it was not. Of the cases that had never run, only FP8 through AITER, NVFP4, and INT8 on CUDA
+are gated on an accelerator; the CPU offload modes, the Transformers 4 behaviour and the mixed FP8/FP4
+schedule are not, and they now run here. Running them found that FP4 weights survive neither leg of a
+group offload, so that combination is refused before allocation rather than aborting inside AITER, and
+that the mixed schedule meets the MXFP4-under-FSDP2 gate on this torch. See
+[what needs other hardware](gpu_validation_handoff.md#what-needs-other-hardware).
+
 One caution when reading that report: it counts a model as reached once any of its cases has run, so a
 model with some cases outstanding stops being named in the gaps bucket. `--format markdown` shows the
 per-model ratio, which is what to check. Running a Cosmos3 case needs the two prompt placeholders

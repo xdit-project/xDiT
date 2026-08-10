@@ -441,7 +441,8 @@ nothing would have noticed a change that quietly started loading one of them thr
 declaration says has never been verified for it — and the failure mode there is not a crash but wrong
 weights in a render nobody would question.
 
-Nine cases now assert those refusals, on the seven withheld models whose weights are on this node.
+Nine cases asserted those refusals, on the seven withheld models whose weights are on this node
+(Ideogram-4's has since been replaced by a passing case; see "A withheld model, enabled" below).
 They cost seconds, not loads: the load contract is selected immediately after distributed init, so
 MiniMax-H3 refuses without reading any of its 330G. Each case matches on the reason, not merely on
 failing, and a test compares the pattern against the message the runner's declaration produces, so a
@@ -449,7 +450,6 @@ pattern that would accept any failure does not pass.
 
 | Case | Refused with |
 | --- | --- |
-| `rocm-ideogram4-fsdp-withheld` | a single-file state dict applied outside `_build_transformer`, and a second denoiser in its own subfolder |
 | `rocm-lingbot-dense-fsdp-withheld` | the composed `_build_pipe` construction it shares with the MoE runner |
 | `rocm-lingbot-moe-fsdp-withheld` | LingBot's own per-block wrapping, which leaves fp32 norm and router parameters where xDiT's path would shard them |
 | `rocm-minimax-h3-fsdp-withheld` | `fuse_qkv_projections` renaming attention weights, so live names stop matching checkpoint keys |
@@ -514,6 +514,58 @@ FP8/FP4 schedule itself. Twenty-two cases remain unrun, and the three claims abo
 would be for. Three of the twenty-two cannot run anywhere as written: SD3.5, CausalWan and
 Wan2.2-Distilled-I2V have no sampling entry, and no node this has run on holds their weights, so an
 operating point cannot be chosen without inventing one.
+
+Two further questions could then be asked of offload, since it finally had cases. It is not a
+single-rank feature, which is how the sequential failure above had been read: group offloading had
+always taken its onload device from the local rank, while the two whole-pipeline modes passed nothing
+and let Diffusers default them to `cuda:0`, so every rank took the same device. Both name the local
+device now and both pass at two ranks, which also gives offload its first results on top of the
+replicated load. And on top of the blockwise fill — the combination this work exists for, which
+nothing had run — whole-model offload works, because it moves components rather than reaching into
+them. The other two modes cannot: sharding replaces each parameter with a DTensor, group offloading
+asks every parameter whether it is pinned and torch registers no sharding strategy for
+`aten.is_pinned`, and sequential offloading rebuilds each parameter as it moves it, which needs a spec
+a plain tensor does not carry. Both failed mid-denoise, after a full sharded load had been paid for,
+so both are refused before allocation.
+
+## A withheld model, enabled
+
+Ideogram-4 was the first of the seven withheld models to be brought onto the memory-efficient path,
+and what stood in its way was not construction but naming. Its FP8 checkpoint does not store what the
+model asks for: the three attention projections are fused into one `attention.qkv.weight`, the output
+projection is called `o` where the model calls it `to_out.0`, and every quantized weight is stored
+beside the per-row scale needed to read it. The eager path handles that by reading the whole
+checkpoint, converting the state dict in memory and assigning it, which is the exact cost the
+blockwise fill exists to avoid, and doing it outside `_build_transformer` is why the model declared no
+support.
+
+A checkpoint manifest could already rename a tensor. What it could not express is a tensor that no
+stored tensor holds: `to_q` is a third of the fused weight, dequantized with a third of the scale, so
+one live tensor needs two stored ones and one stored tensor feeds three live ones. A manifest may now
+carry derived tensors, each naming its source keys and a function over them, and the fill builds them
+as it reads. Both denoisers now build on meta from config and fill per block, at two ranks and at
+eight, sharded and replicated. The text encoder stays outside: it is built through `AutoModel` with
+`trust_remote_code`, so its parameter names come from code no manifest can read ahead of the load, and
+it is declared as an exclusion and filled eagerly. That makes Ideogram-4 also the first evidence that
+a model can take the memory-efficient path for its denoisers while one component does not.
+
+Enabling it also found a defect that only a model shaped like this could reach. The replicated
+broadcast path chose between filling a component per block and broadcasting it whole by asking whether
+its name was `transformer` or began with `transformer_`. Ideogram 4's second denoiser is
+`unconditional_transformer`, which matches neither, so it took the text-encoder branch and was
+broadcast whole from rank 0 — whose copy was itself still on meta. Every rank ended up with a denoiser
+of empty weights, nothing raised, and the render came out black: `mean=0.00, std=0.00` across every
+pixel, at 48 steps with a full sharded load's worth of work behind it. The choice is made from the
+runner's declaration now, with the name kept only as a fallback, and the replicated render matches the
+sharded one to the last bit — `max abs diff 0.0` over the whole image. It is worth naming what caught
+this: not a crash and not a test, but a case that renders and a harness that reads the pixels.
+
+Two smaller things fell out of it. Strictness — a mapped checkpoint asserting that every key it maps
+was wanted — was recorded where the tensor is read, and only the reading rank reads, so a strict
+manifest would have failed on every peer. It is recorded where keys are retired instead, which every
+rank does with the same list. And `_load_model` was reading `config.model`, which is a registry alias
+such as `Ideogram-4` rather than a repo, so the FP8 branch could only ever be reached by naming the
+repo in full; it reads `settings.model_name` now, like every other checkpoint read in the runner.
 
 The one unexplained failure in the results file is explained too. `gen-mi3xx-z-image-turbo-bf16-fsdp-w4`
 was recorded as `failed_inference` before the port-collision fix, and the generator no longer emits a

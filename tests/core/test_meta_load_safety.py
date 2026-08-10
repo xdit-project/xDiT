@@ -424,6 +424,7 @@ def test_block_fill_requires_and_broadcasts_only_persistent_buffers(runtime):
     block.register_buffer("runtime_cache", torch.ones(1), persistent=False)
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.is_src = True
     filler.subfolder = "transformer"
     filler._id2fqn = {id(block): "blocks.0"}
@@ -484,6 +485,7 @@ def _handle_counting_filler(runtime, monkeypatch, device="cpu"):
     )
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.device = device
     filler._handle_cache = {}
     filler._stack = ExitStack()
@@ -557,6 +559,7 @@ def test_local_block_fill_uses_no_collective_transport(runtime):
     block.register_buffer("saved", torch.ones(1), persistent=True)
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.group = None
     filler.is_src = True
     filler.device = "cpu"
@@ -615,6 +618,7 @@ def test_block_read_failure_is_collective_before_tensor_broadcast(runtime, rank)
             return tensor
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.is_src = rank == 0
     filler.group = Group()
     filler.subfolder = "transformer"
@@ -646,6 +650,7 @@ def test_one_rank_does_the_reading_however_wide_the_group_is(runtime):
     code from re-deriving it the expensive way.
     """
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.group = SimpleNamespace(world_size=8, rank_in_group=3)
 
     readers = [filler._reader_for_block(i) for i in range(9)]
@@ -656,6 +661,7 @@ def test_one_rank_does_the_reading_however_wide_the_group_is(runtime):
 def test_a_single_rank_fill_still_reads_on_itself(runtime):
     """The reader choice must never name a rank that does not exist."""
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.group = None
 
     assert filler._reader_for_block(5) == 0
@@ -667,6 +673,7 @@ def test_every_rank_gets_the_checkpoint_map_so_any_of_them_can_read(runtime):
     A peer with an empty weight map would report every key missing the moment it was asked to read.
     """
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     calls = []
 
     class Group:
@@ -702,6 +709,7 @@ def test_a_shard_is_dropped_only_once_nothing_still_needs_it(runtime, monkeypatc
     monkeypatch.setattr(runtime.meta, "drop_file_page_cache", lambda paths: dropped.extend(paths))
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.weight_map = {
         "blocks.0.weight": "shard-a",
         "blocks.1.weight": "shard-a",
@@ -738,6 +746,7 @@ def test_a_shard_is_streamed_in_before_it_is_mapped(runtime, monkeypatch):
     monkeypatch.setattr(safetensors, "safe_open", lambda *a, **k: nullcontext("handle"))
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.device = "cpu"
     filler._handle_cache = {}
     filler._stack = ExitStack()
@@ -762,6 +771,7 @@ def _prefetch_filler(runtime, monkeypatch, warmed, order, unread=None):
     monkeypatch.setattr(safetensors, "safe_open", lambda *a, **k: nullcontext("handle"))
 
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.device = "cpu"
     filler._handle_cache = {}
     filler._stack = ExitStack()
@@ -924,7 +934,10 @@ def test_only_the_reading_rank_streams_a_shard(runtime):
     Every rank warming every shard would take resident page cache from ~10GB to the whole checkpoint
     while reading no faster, since the bytes still arrive over one stream to one reader.
     """
-    source = inspect.getsource(runtime.meta._BlockwiseDiskFiller._fill)
+    # _fill and the tensor read it delegates to, since the handle may sit in either
+    source = inspect.getsource(
+        runtime.meta._BlockwiseDiskFiller._fill
+    ) + inspect.getsource(runtime.meta._BlockwiseDiskFiller._tensor_for)
 
     assert "self._handle(" in source, "warming must stay behind _fill, which only the reader runs"
     assert "warm_file_page_cache" not in inspect.getsource(
@@ -940,6 +953,7 @@ def test_phase_timing_stays_off_unless_asked_for(runtime, monkeypatch):
     """
     monkeypatch.delenv("XDIT_FILL_PHASE_TIMING", raising=False)
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
 
     with filler._timed("read"):
         pass
@@ -962,6 +976,7 @@ def test_a_failing_read_names_the_tensor_it_could_not_read(runtime):
     torch = runtime.torch
     module = torch.nn.Module()
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.group = None
     filler.is_src = True
     filler.subfolder = "transformer"
@@ -977,6 +992,7 @@ def test_missing_persistent_checkpoint_key_is_reported_to_peers_before_broadcast
     runtime,
 ):
     filler = object.__new__(runtime.meta._BlockwiseDiskFiller)
+    filler._used_keys = set()
     filler.is_src = False
     filler.subfolder = "transformer"
     filler.weight_map = {}

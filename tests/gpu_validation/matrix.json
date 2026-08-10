@@ -1922,14 +1922,12 @@
       "observed_on_gfx942": "PASSED on gfx942. Promoted from tests/gpu_validation/supplementary/matrix-mi300x-seeded.json; the JSONL record did not survive the node being reclaimed, so this note is provenance rather than an attached result."
     },
     {
-      "id": "rocm-ideogram4-fsdp-withheld",
+      "id": "rocm-ideogram4-text-encoder-excluded",
       "tags": [
         "rocm",
         "torchao",
         "fsdp",
-        "withheld",
-        "expected-failure",
-        "preflight",
+        "te-excluded",
         "hub"
       ],
       "model": "Ideogram-4",
@@ -1950,10 +1948,9 @@
       "world_size": 2,
       "args": [],
       "expected": {
-        "outcome": "preflight_failure",
-        "error_pattern": "xFuserIdeogram4Model does not support fsdp_meta materialization.*single-file state dict"
+        "outcome": "inference_success"
       },
-      "quality_notes": "The withheld reason has to be raised before allocation, not discovered as a wrong-weights image: this runner applies a single-file state dict outside the transformer seam and loads a second denoiser from its own subfolder."
+      "quality_notes": "Replaces the rejection this model used to assert. Both denoisers now build on meta and fill per block, with the FP8 checkpoint's conversions carried as derived tensors in the manifest: each of to_q, to_k and to_v is a third of the stored fused weight, read with a third of its scale. The text encoder stays outside that path, built through AutoModel with trust_remote_code, so this case is also what shows a model can take the memory-efficient path for its denoisers while one component is loaded eagerly. Two ranks rather than eight because what is under test is the mapping, and a failure there is identical at any rank count."
     },
     {
       "id": "rocm-lingbot-dense-fsdp-withheld",
@@ -4164,6 +4161,216 @@
         "outcome": "inference_success"
       },
       "quality_notes": "Generated from the HunyuanVideo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-bf16-eager-w1",
+      "tags": [
+        "bf16",
+        "eager",
+        "generated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 1,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-bf16-eager-w6",
+      "tags": [
+        "bf16",
+        "eager",
+        "generated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 6,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-bf16-fsdp-w6",
+      "tags": [
+        "bf16",
+        "fsdp",
+        "generated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 6,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-bf16-fsdp-control-w6",
+      "tags": [
+        "bf16",
+        "fsdp-control",
+        "generated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_eager_fill",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 6,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-fp8-fsdp-w6",
+      "tags": [
+        "fp8",
+        "fsdp",
+        "generated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "fsdp_blockwise",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 6,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-fp8-replicated-w6",
+      "tags": [
+        "fp8",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 6,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
       "id": "gen-mi3xx-krea-2-raw-bf16-eager-w1",

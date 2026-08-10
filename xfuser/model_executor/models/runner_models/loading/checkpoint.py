@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field, replace
 import json
 import os
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -57,6 +57,26 @@ class CheckpointTensorRef:
 
 
 @dataclass(frozen=True)
+class DerivedTensor:
+    """A live tensor computed from checkpoint tensors rather than copied from one.
+
+    Covers the two mappings a name alone cannot express: a checkpoint that fuses
+    what the model keeps separate, where three live tensors are slices of one
+    stored tensor, and a checkpoint that stores a quantized weight beside the
+    scale needed to read it, where one live tensor needs two stored ones.
+
+    ``sources`` are checkpoint keys and ``build`` receives them in that order. It
+    must be pure and cheap: it runs inside the per-block fill, once per tensor,
+    while the fill holds at most one block, so anything it allocates is paid for
+    at every block.
+    """
+
+    sources: tuple[str, ...]
+    build: Callable[..., "torch.Tensor"]
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class CheckpointManifest:
     """Tensor-key mapping produced by discovery, before any tensor is read."""
 
@@ -64,6 +84,29 @@ class CheckpointManifest:
     checkpoint_keys: dict[str, str] = field(default_factory=dict)
     strict: bool = False
     label: str | None = None
+    derived: Mapping[str, DerivedTensor] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Every source has to sit in the shard the live key maps to. The filler keeps
+        # at most one shard mapped, so a source elsewhere would either read through a
+        # second handle, retaining a whole extra shard, or reopen per tensor. Checked
+        # here, where the map is known, rather than discovered mid-fill.
+        for live_key, derived in self.derived.items():
+            path = self.weight_map.get(live_key)
+            if path is None:
+                raise ValueError(
+                    f"derived tensor {live_key} names no shard in the weight map"
+                )
+            elsewhere = [
+                source
+                for source in derived.sources
+                if self.weight_map.get(source, path) != path
+            ]
+            if elsewhere:
+                raise ValueError(
+                    f"derived tensor {live_key} reads {', '.join(elsewhere)} from "
+                    "another shard; a derived tensor must be built from one shard"
+                )
 
     @property
     def shard_paths(self) -> frozenset[str]:

@@ -6,25 +6,29 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and fifty-four of the matrix's hundred and seventy-six
+What has run: a hundred and sixty of the matrix's hundred and eighty-two
 cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
-and FP8 across nineteen models, eleven image and eight video, which is every
-model that node can load through those paths. A hundred and thirty-five passed,
+and FP8 across twenty models, twelve image and eight video, which is every
+model that node can load through those paths. A hundred and forty-two passed,
 every still image scored against an unquantized render and every clip checked
-frame by frame, and fifteen more passed by asserting the rejection they
-expected: ROCm INT8, nine refusals from models that withhold the memory-efficient
+frame by frame, and fourteen more passed by asserting the rejection they
+expected: ROCm INT8, eight refusals from models that withhold the memory-efficient
 load or the sharding flag outright, and five limits found by running combinations
 that had been waiting on hardware they did not need. Four report an
 environment mismatch and were correctly not run: three want an accelerator this
 node is not, one wants Transformers 4. The remaining twenty-two need hardware
 this node is not, and [what needs other hardware](#what-needs-other-hardware)
 says which of them are worth a booking. Nothing recorded is failing. The results
-file also holds records for nine case IDs the matrix no longer carries, among them
-the `gen-mi3xx-z-image-turbo-bf16-fsdp-w4` failure that predates the
+file also holds records for fourteen case IDs the matrix no longer carries, among
+them the `gen-mi3xx-z-image-turbo-bf16-fsdp-w4` failure that predates the
 port-collision fix; that configuration was re-run by hand at four ranks and
 loads, shards and renders, so the failure was the collision and not the model.
-Four more are cases this reassessment renamed or retired, and the section below
-says what each of them found first.
+Four more are cases the hardware reassessment renamed or retired, and the section
+below says what each of them found first. The last six are Ideogram-4's: one
+withheld-refusal case retired when the model stopped withholding the path, and
+five emitted at eight ranks before the generator learned that eighteen attention
+heads cannot be split eight ways, which they failed on rather than on anything
+they meant to measure; they are recorded at six ranks now.
 [Memory-efficient load results](meta_load_results.md) reports all three sweeps,
 including the defects they found, each of them in a combination nothing had run
 before. HunyuanVideo's six cases were re-run once more after its text encoder was

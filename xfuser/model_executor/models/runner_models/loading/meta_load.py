@@ -884,7 +884,7 @@ class MemoryEfficientLoader:
             component = getattr(self.model.pipe, name, None)
             if component is None or not hasattr(component, "named_parameters"):
                 continue
-            if name == "transformer" or name.startswith("transformer_"):
+            if self._is_meta_denoiser(name):
                 if self._all_ranks_loaded_real(component, world, device):
                     # Unwired runner: loaded real on EVERY rank (e.g. a composition-wrapper pipeline
                     # whose _load_model built the whole pipeline real). _fill_transformer_replicated's
@@ -915,6 +915,20 @@ class MemoryEfficientLoader:
                 f"Broadcast-filled {name} from rank0 (replicated). "
                 f"host {host_mem_gb()} GB, VRAM {torch.cuda.memory_allocated()/1e9:.2f}GB"
             )
+
+    def _is_meta_denoiser(self, name: str) -> bool:
+        """Whether this component is filled per block from disk or broadcast whole.
+
+        Asked of the runner's declaration first and of the name only as a fallback,
+        because a name is not a reliable answer: Ideogram 4's second denoiser is
+        called `unconditional_transformer`, which no prefix of `transformer` matches,
+        so it took the text-encoder branch and was broadcast from a rank0 copy that
+        was itself still on meta. That produced a black image rather than an error.
+        """
+
+        if name in self.model.load_declaration.all_meta_transformers:
+            return True
+        return name == "transformer" or name.startswith("transformer_")
 
     def _all_ranks_loaded_real(self, component, world, device) -> bool:
         """True only if EVERY rank has this component fully real (no meta params).
@@ -1417,6 +1431,7 @@ class _BlockwiseDiskFiller:
         )
         self.weight_map = manifest.weight_map
         self.checkpoint_keys = manifest.checkpoint_keys
+        self.derived = manifest.derived
         self.strict = manifest.strict
         self._used_keys = set()
         self.shard_paths = set(self.weight_map.values())
@@ -1692,14 +1707,22 @@ class _BlockwiseDiskFiller:
                     f"missing checkpoint weight for {key} in {self.subfolder}"
                 )
             return
-        checkpoint_key = self.checkpoint_keys.get(key, key)
         set_module_tensor_to_device(
             module,
             local_name,
             self.device,
-            value=self._handle(path).get_tensor(checkpoint_key),
+            value=self._tensor_for(key, path),
         )
         self._used_keys.add(key)
+
+    def _tensor_for(self, key: str, path: str):
+        """This live tensor, read from the shard or built from tensors in it."""
+
+        handle = self._handle(path)
+        derived = self.derived.get(key)
+        if derived is None:
+            return handle.get_tensor(self.checkpoint_keys.get(key, key))
+        return derived.build(*(handle.get_tensor(name) for name in derived.sources))
 
     def _require_checkpoint_keys(self, keys, src: int = 0):
         """Collectively reject missing persistent tensors before any rank enters data broadcast."""
@@ -1769,6 +1792,11 @@ class _BlockwiseDiskFiller:
         dropping on close evicted pages that were about to be read again. Keying on "every key in
         this shard has been consumed" is the condition that actually means finished.
         """
+        # Consumption is recorded here rather than in _fill because only the reading
+        # rank runs the read, while every rank retires the same keys. A strict
+        # manifest asks whether the fill ever wanted a mapped key, which is a
+        # question about the mapping and must get the same answer on every rank.
+        self._used_keys.update(keys)
         by_shard = getattr(self, "_unread_by_shard", None)
         if by_shard is None:
             return

@@ -339,13 +339,28 @@ def test_dual_meta_transformers_keep_distinct_checkpoint_requests(monkeypatch):
 def test_runners_that_bypass_the_meta_seam_declare_it():
     """A runner claiming meta support must construct through _build_transformer."""
     import inspect
+    import re
 
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
+    def load_path_source(cls) -> str:
+        """_load_model, plus the helpers on the runner it hands construction to.
+
+        A runner may reach the seam one call down, as Ideogram 4 does for the FP8
+        checkpoint it has to map on the way in, so reading _load_model alone would
+        report a bypass that is not one.
+        """
+        # _load_model may be inherited; read the source of whichever class defines it
+        source = inspect.getsource(cls._load_model)
+        for name in set(re.findall(r"self\.(_\w+)\(", source)):
+            helper = getattr(cls, name, None)
+            if helper is not None and callable(helper):
+                source += inspect.getsource(helper)
+        return source
+
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
-        # _load_model may be inherited; read the source of whichever class actually defines it.
-        goes_through_seam = "_build_transformer" in inspect.getsource(cls._load_model)
+        goes_through_seam = "_build_transformer" in load_path_source(cls)
         declares_support = bool(cls.load_declaration.meta_transformers)
         if declares_support and not goes_through_seam:
             mismatched.append(f"{cls.__name__} (from {cls._load_model.__qualname__})")

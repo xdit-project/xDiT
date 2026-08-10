@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,6 +141,35 @@ def test_a_model_needing_an_input_image_with_none_supplied_is_still_skipped(gene
         if reasons.get(model, "").startswith("needs an input image")
     ]
     assert withheld, "every image-input model was generated without an image being supplied"
+
+
+def test_a_rank_count_the_model_would_refuse_is_reduced_to_one_it_accepts(generator):
+    """Eight ranks is a policy, not a fact about a model with eighteen attention heads."""
+    eighteen_heads = SimpleNamespace(settings=SimpleNamespace(attention_head_count=18))
+
+    assert generator.admissible_world_size(8, eighteen_heads) == 6
+    assert generator.admissible_world_size(2, eighteen_heads) == 2
+    assert generator.admissible_world_size(1, eighteen_heads) == 1
+
+
+def test_a_model_that_declares_no_head_count_keeps_the_policys_rank_count(generator):
+    """Most runners divide any degree the policy names, and must not be moved off it."""
+    unconstrained = SimpleNamespace(settings=SimpleNamespace(attention_head_count=None))
+
+    assert generator.admissible_world_size(8, unconstrained) == 8
+
+
+def test_every_generated_case_runs_at_a_rank_count_its_model_accepts(matrix):
+    """The refusal is raised while the config is validated, so such a case measures nothing."""
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    for case in matrix["cases"]:
+        heads = getattr(
+            MODEL_REGISTRY[case["model"]].settings, "attention_head_count", None
+        )
+        if not heads:
+            continue
+        assert heads % case["world_size"] == 0, case["id"]
 
 
 def test_each_control_case_matches_the_rank_count_it_controls_for(matrix):

@@ -166,6 +166,20 @@ def canonical_runners(registry) -> list[tuple[str, type]]:
     return [by_class[name] for name in sorted(by_class)]
 
 
+def admissible_world_size(world_size: int, cls) -> int:
+    """The policy's rank count, or the largest one below it the model will accept.
+
+    A Ulysses degree splits attention heads across ranks, so a model whose head count
+    the degree does not divide refuses it while its config is validated. Ideogram 4 has
+    eighteen, which eight does not divide, and a case emitted at eight would fail on
+    that rather than on the placement it exists to measure.
+    """
+    heads = getattr(getattr(cls, "settings", None), "attention_head_count", None)
+    if not heads or heads % world_size == 0:
+        return world_size
+    return max(size for size in range(1, world_size) if heads % size == 0)
+
+
 def resolve_checkpoint(alias: str, cls) -> str | None:
     """The repo this runner would load, whether or not it is on this disk.
 
@@ -291,7 +305,9 @@ def generate_cases(
                 placement = variant["placement"]
                 quantization = variant["quantization"]
                 te_fp8 = variant["te_fp8"]
-                world_size = variant.get("world_size") or policy[placement]
+                world_size = admissible_world_size(
+                    variant.get("world_size") or policy[placement], cls
+                )
                 quant_slug = QUANTIZATION_SLUG.get(quantization, quantization)
                 case_id = "-".join(
                     [

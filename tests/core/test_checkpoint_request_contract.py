@@ -355,6 +355,34 @@ def test_mapped_checkpoint_preserves_live_and_source_keys(checkpoint, tmp_path):
     assert manifest.strict is True
 
 
+def test_a_derived_tensor_must_be_built_from_one_shard(checkpoint):
+    """The fill keeps one shard mapped, so a source elsewhere costs a second one."""
+    with pytest.raises(ValueError, match="another shard"):
+        checkpoint.CheckpointManifest(
+            weight_map={"blocks.0.to_q.weight": "shard-a", "qkv.weight": "shard-b"},
+            derived={
+                "blocks.0.to_q.weight": checkpoint.DerivedTensor(
+                    sources=("qkv.weight",),
+                    build=lambda weight: weight,
+                )
+            },
+        )
+
+
+def test_a_derived_tensor_has_to_name_a_shard_of_its_own(checkpoint):
+    """Without a weight map entry the fill has nothing to open."""
+    with pytest.raises(ValueError, match="names no shard"):
+        checkpoint.CheckpointManifest(
+            weight_map={},
+            derived={
+                "blocks.0.to_q.weight": checkpoint.DerivedTensor(
+                    sources=("qkv.weight",),
+                    build=lambda weight: weight,
+                )
+            },
+        )
+
+
 def test_mapped_checkpoint_rejects_live_key_collisions(checkpoint, tmp_path):
     path = tmp_path / "distilled.safetensors"
     path.write_bytes(b"header")

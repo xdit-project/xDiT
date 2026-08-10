@@ -1903,14 +1903,12 @@
       "observed_on_gfx942": "PASSED on gfx942. Promoted from tests/gpu_validation/supplementary/matrix-mi300x-seeded.json; the JSONL record did not survive the node being reclaimed, so this note is provenance rather than an attached result."
     },
     {
-      "id": "rocm-ideogram4-fsdp-withheld",
+      "id": "rocm-ideogram4-text-encoder-excluded",
       "tags": [
         "rocm",
         "torchao",
         "fsdp",
-        "withheld",
-        "expected-failure",
-        "preflight",
+        "te-excluded",
         "hub"
       ],
       "model": "Ideogram-4",
@@ -1931,10 +1929,9 @@
       "world_size": 2,
       "args": [],
       "expected": {
-        "outcome": "preflight_failure",
-        "error_pattern": "xFuserIdeogram4Model does not support fsdp_meta materialization.*single-file state dict"
+        "outcome": "inference_success"
       },
-      "quality_notes": "The withheld reason has to be raised before allocation, not discovered as a wrong-weights image: this runner applies a single-file state dict outside the transformer seam and loads a second denoiser from its own subfolder."
+      "quality_notes": "Replaces the rejection this model used to assert. Both denoisers now build on meta and fill per block, with the FP8 checkpoint's conversions carried as derived tensors in the manifest: each of to_q, to_k and to_v is a third of the stored fused weight, read with a third of its scale. The text encoder stays outside that path, built through AutoModel with trust_remote_code, so this case is also what shows a model can take the memory-efficient path for its denoisers while one component is loaded eagerly. Two ranks rather than eight because what is under test is the mapping, and a failure there is identical at any rank count."
     },
     {
       "id": "rocm-lingbot-dense-fsdp-withheld",

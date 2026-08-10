@@ -6,13 +6,16 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and nine cases on 8× MI355X (`gfx950`), covering the
-memory-efficient load paths in bf16 and FP8 across sixteen models, ten image and
-six video, which is every model that node can load through those paths. A hundred
-and seven passed, every still image scored against an unquantized render and every
-clip checked frame by frame; the other two assert a rejection that holds only on
-`gfx942` and were correctly not run there.
-[Memory-efficient load results](meta_load_results.md) reports both sweeps,
+What has run: a hundred and thirty-five cases on 8× MI355X (`gfx950`), covering the
+memory-efficient load paths in bf16 and FP8 across nineteen models, eleven image
+and eight video, which is every model that node can load through those paths. A
+hundred and thirty passed, every still image scored against an unquantized
+render and every clip checked frame by frame, and one more passed by asserting the
+rejection it expected. Three assert rejections that hold only on other
+accelerators and were correctly not run here. The one recorded failure,
+`gen-mi3xx-z-image-turbo-bf16-fsdp-w4`, predates the port-collision and
+enumerator fixes described in the results doc and has not been re-run.
+[Memory-efficient load results](meta_load_results.md) reports all three sweeps,
 including the defects they found, each of them in a combination nothing had run
 before. HunyuanVideo's six cases were re-run once more after its text encoder was
 brought into the memory-efficient path, which also renamed its two FP8 cases to

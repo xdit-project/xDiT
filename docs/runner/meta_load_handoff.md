@@ -32,15 +32,17 @@ survive the reclaim.
 
 ## Do these two things first
 
-1. **Set `FLYDSL_GPU_ARCH` in the container environment** (`gfx950` on MI355X, `gfx942` on MI300X,
-   `gfx1201` on RDNA4).
+1. **Set** `FLYDSL_GPU_ARCH` **in the container environment** (`gfx950` on MI355X, `gfx942` on MI300X,
+  `gfx1201` on RDNA4).
    Without it `flydsl.runtime.device` shells out to `rocm_agent_enumerator` with a 300 s timeout, and
    under load the calls pile up faster than they drain. One node reached 1336 concurrent enumerators
    holding 1693 GB of RSS on a 1 TB host. It stalls runs and it dominates every host-memory sample.
    Verify with `python3 -c "import flydsl.runtime.device as d; print(d.get_rocm_arch())"` and confirm
    no `rocm_agent_enumerator` process appears.
-2. **Set `PYTHONPATH` to the checkout.** The image ships its own editable xfuser install, so pytest
-   validates that copy instead of the branch unless `PYTHONPATH` points at the working tree.
+2. **Set** `PYTHONPATH` **to the checkout.** The image ships its own editable xfuser install, so pytest
+  validates that copy instead of the branch unless `PYTHONPATH` points at the working tree.
+
+
 
 ## What the cache can reach
 
@@ -52,10 +54,11 @@ Four of the eight are withheld from memory-efficient load anyway, so nothing is 
 CausalWan, LTX-2, and both non-sparse HunyuanVideo 1.5 variants. Only the Diffusers-format 1.5 repos
 are missing; `tencent/HunyuanVideo-1.5` is cached at 254 GB and serves the sparse variant.
 
-The other four do declare meta-load support and cannot be exercised here: **Cosmos3-Nano**,
-**Cosmos3-Super**, **Wan2.1-VACE**, and **FLUX.2-klein-4B**. klein-4B is the one that matters, since
-its three matrix cases were observed on gfx942 and its cache entry is a 36 KB metadata-only stub, so
-re-confirming them on gfx950 needs a ~24 GB download.
+Three of the other four have since been fetched and run on this node: **FLUX.2-klein-4B** (24 GB),
+**Cosmos3-Nano** (35 GB) and **Cosmos3-Super** (133 GB) hold every case in their matrix rows, at 8
+ranks in bf16 and FP8, and `meta_load_results.md` carries their figures. **Wan2.1-VACE** is the one
+left: both its repos are absent, and it needs an input image its sampling entry does not name, so it
+has no generated case to run.
 
 Read the tool's verdict as a floor on what is missing rather than a promise a given invocation will
 load: runners that pick their repo from CLI flags have several candidates, and one counts as cached
@@ -127,14 +130,19 @@ disk-bound, not H2D-bound. Do not change `_read_device` on the strength of the w
 
 `python tools/load_support_matrix.py --format gaps --backend <backend>` reports where testing does not
 reach. Every model on this node that declares a memory-efficient load and has usable weights has now
-been run through it — sixteen of them, image and video — so what remains is the eight cached runners
-their own declarations withhold and the models whose weights are not here.
+been run through it — nineteen of them, image and video — so what remains is the cached runners their
+own declarations withhold, and Wan2.1-VACE, whose weights are not here and whose sampling entry names
+no input image.
+
+One caution when reading that report: it counts a model as reached once any of its cases has run, so a
+model with some cases outstanding stops being named in the gaps bucket. `--format markdown` shows the
+per-model ratio, which is what to check. Running a Cosmos3 case needs the two prompt placeholders
+exported, as under "Reproducing it" in the results doc.
 
 `tests/gpu_validation/supplementary/` holds the probe matrices this node used, with per-case
-`observed_on_gfx942` notes. FLUX.2-klein-4B passed eager, `fsdp_blockwise` at 4 ranks and `replicated`
-at 4 ranks, which is real coverage for a model the checked-in matrix has none for; those three cases
-can be landed. Z-Image-Turbo, Wan2.2-TI2V and FLUX.1-Kontext are no longer staged: all three are in
-the checked-in matrix and all three have run on gfx950.
+`observed_on_gfx942` notes. FLUX.2-klein-4B's three cases are no longer among them: its weights were
+fetched and all eight of its cases now hold on gfx950. Z-Image-Turbo, Wan2.2-TI2V and FLUX.1-Kontext
+are not staged either, for the same reason.
 
 Run supplementary cases **serially**: the single-process eager path binds port 29500 regardless of
 `PET_MASTER_PORT`, which only reaches torchrun. Multi-rank cases no longer collide on it, since the
@@ -172,14 +180,18 @@ wrong with the path — its declaration named only the transformer, and both met
 components from `fsdp_strategy`, so its 14G Llama encoder was loaded whole by every rank. Declaring it
 puts blockwise at 102.2G with load-time VRAM halved, and the results doc has the table.
 
-Two things that leaves. Cosmos3-Super and Cosmos3-Nano are now the only supported runners whose
-declaration names no text encoder, and the same change is likely to apply to them; it was not made
-because this node has no Cosmos3 weights, so nothing here could tell a correct wrap path from a
-plausible one. That is the same reason the Krea-2 path was wrong for as long as it was. Second, an
-encoder is only offered the blockwise fill if its live tensor names can be proven against its
-checkpoint keys, and a refusal falls back to rank 0 loading it whole and broadcasting — still 1x the
-encoder rather than Nx, but not the flat cost. The Llama encoder maps exactly, 290 keys; a model whose
-encoder needs a fused or split conversion will take the fallback, and the log says which.
+That leaves one thing rather than the two recorded here before. Cosmos3-Super and Cosmos3-Nano were
+listed as the remaining runners whose declaration names no text encoder, with the HunyuanVideo change
+expected to apply to them; it does not, because they have no text encoder. Their pipeline takes a
+`text_tokenizer` and feeds the tokens to the transformer through a chat template, and the only other
+sizeable components are a 1.2G vision encoder and a 2.0G audio tokenizer against a transformer of 30G
+and 128G. There is nothing there to declare, and both models now hold every case in their rows.
+
+What does remain: an encoder is only offered the blockwise fill if its live tensor names can be proven
+against its checkpoint keys, and a refusal falls back to rank 0 loading it whole and broadcasting —
+still 1x the encoder rather than Nx, but not the flat cost. The Llama encoder maps exactly, 290 keys;
+a model whose encoder needs a fused or split conversion will take the fallback, and the log says
+which.
 
 Also worth knowing before running anything on this node: two of the cached repos, both Krea-2 variants,
 refuse file downloads to the token here, so runs need `HF_HUB_OFFLINE=1` to use the snapshots on disk.

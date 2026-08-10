@@ -53,6 +53,15 @@
       "guidance_scale": 1.0,
       "source": ".ci/benchmark_configs/flux2_klein.yaml, entry flux2_klein.default, whose tags include gfx950"
     },
+    "FLUX.2-klein-4B": {
+      "prompt": "A spectacular sunset over the ocean",
+      "seed": 42,
+      "num_inference_steps": 9,
+      "height": 2048,
+      "width": 2048,
+      "guidance_scale": 1.0,
+      "source": "xFuserFlux2Klein4BModel.default_input_values, inherited from the 9B runner: 2048x2048, 9 steps, guidance 1.0. Every entry in .ci/benchmark_configs/flux2_klein.yaml names the 9B checkpoint, so the 4B has no config of its own and the runner's own statement is used instead. That is 9 steps rather than the 4 the config asks of the 9B, which is a throughput setting for that checkpoint. The prompt is the family's, since a prompt is an input rather than an operating point and sharing it keeps the two klein models comparable."
+    },
     "Qwen-Image": {
       "prompt": "A cat holding a sign that says hello world",
       "seed": 42,
@@ -95,6 +104,34 @@
         "--enable_slicing"
       ],
       "source": ".ci/benchmark_configs/hunyuanvideo.yaml, entry hunyuanvideo.default, whose tags include gfx950. Tiling and slicing come from that entry too: decoding 129 frames of 720p in one piece is a VAE memory cost the config declines to pay, and it is not a sampling choice."
+    },
+    "Cosmos3-Nano": {
+      "prompt": "${XDIT_COSMOS3_PROMPT_JSON}",
+      "seed": 42,
+      "num_inference_steps": 35,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 6.0,
+      "num_frames": 189,
+      "runtime_args": [
+        "--negative_prompt",
+        "${XDIT_COSMOS3_NEGATIVE_PROMPT_JSON}"
+      ],
+      "source": "xFuserCosmos3SuperModel.default_input_values, which the Nano runner inherits: 720x1280, 189 frames, 35 steps, guidance 6.0. No benchmark config covers Cosmos3 at all, so the runner's own statement is the only operating point available. The prompt is the structured JSON the checkpoint ships as assets/example_t2v_prompt.json, with assets/negative_prompt.json as its negative, because this runner reads a .json prompt path and serializes it rather than taking prose: the model states that it expects JSON-formatted prompts, so a plain sentence would be the wrong input rather than a different one. Both files are byte-identical in the Nano and Super repos. They are reached through placeholders so a machine without the weights reports an environment mismatch instead of a failure."
+    },
+    "Cosmos3-Super": {
+      "prompt": "${XDIT_COSMOS3_PROMPT_JSON}",
+      "seed": 42,
+      "num_inference_steps": 35,
+      "height": 720,
+      "width": 1280,
+      "guidance_scale": 6.0,
+      "num_frames": 189,
+      "runtime_args": [
+        "--negative_prompt",
+        "${XDIT_COSMOS3_NEGATIVE_PROMPT_JSON}"
+      ],
+      "source": "xFuserCosmos3SuperModel.default_input_values: 720x1280, 189 frames, 35 steps, guidance 6.0, and the same shipped JSON prompt assets as the Nano entry above, for the reasons given there."
     },
     "Wan2.1-I2V": {
       "prompt": "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",

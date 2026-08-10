@@ -1,10 +1,11 @@
 # Memory-efficient load: measured results on MI355X
 
 GPU end-to-end evidence for the memory-efficient load paths, taken on 8× AMD Instinct MI355X
-(`gfx950`) across all sixteen models this node can load through them. Two sweeps: thirty-six
+(`gfx950`) across all nineteen models this node can load through them. Three sweeps: thirty-six
 cases over six image models with a standard transformer, then seventy-three over the ten that had
-never run — two that edit a picture, two that arrived upstream untested, and six video models. Every
-case passing, every still image scored against an unquantized render of the same prompt, every clip
+never run — two that edit a picture, two that arrived upstream untested, and six video models — then
+twenty over the three whose weights had to be fetched before they could run at all. Every case
+passing, every still image scored against an unquantized render of the same prompt, every clip
 checked frame by frame for having rendered anything.
 
 Read this together with [the handoff](meta_load_handoff.md), which covers the node's setup and the
@@ -359,6 +360,77 @@ quantized per block as the fill materializes it. That is the fourteenth model on
 first Llama encoder on it. Its clip is a different sample of the same scene rather than a collapse,
 which is all a video case is checked for here.
 
+## Three models that had never run at all
+
+Sixteen models had run on these paths and three had not, for one reason that looked like three: the
+weights were not on this node. Each of those three declares the memory-efficient load and each had
+generated cases sitting in the matrix, but no sampling entry, because an entry is copied from the
+model's own configuration and recording an operating point for a model nobody can run is recording a
+claim nobody can check. The harness refuses a case with no entry rather than borrowing another
+model's, so the cases could not run even as failures. Fetching 192G of weights, 24G for
+FLUX.2-klein-4B and 35G and 133G for the two Cosmos3 models, turned that from a permanent gap into
+three sampling entries and twenty runnable cases. All twenty pass: eight on klein-4B, six on
+Cosmos3-Nano and six on Cosmos3-Super.
+
+None of the three is named by a benchmark config, so all three take their operating point from their
+runner's own `default_input_values`, which the entries say. For Cosmos3 the prompt comes from the
+checkpoint: it ships `assets/example_t2v_prompt.json` and a matching negative, and the runner reads a
+`.json` prompt path and serializes it because the model asks for structured prompts rather than
+prose. A sentence would have been the wrong input rather than a different one.
+
+**Cosmos3 has no text encoder, and needed none of the work HunyuanVideo needed.** Reading its
+`model_index.json` before its weights arrived settled a question worth settling early: the pipeline
+names a `text_tokenizer`, a `vision_encoder`, a transformer, a VAE and a sound tokenizer, and its
+`__init__` takes a tokenizer where every other model here takes an encoder. Text is tokenized through
+a chat template and consumed by the transformer directly. Its non-transformer components come to
+4.6G against a 128G transformer, so there is no encoder-shaped saving to declare, and the transformer
+the path already covers is the whole of it.
+
+| Case, 8 ranks | host anon | load VRAM | load time |
+| --- | --- | --- | --- |
+| Cosmos3-Super eager | 110.2G | 137.7G | 41.9s |
+| Cosmos3-Super shard-after-materialize control | 114.0G | 32.6G | 84.1s |
+| Cosmos3-Super blockwise | 95.6G | 31.0G | 74.7s |
+| Cosmos3-Super fp8 blockwise | 102.5G | 24.2G | 67.2s |
+| Cosmos3-Super fp8 replicated | 123.5G | 82.7G | 72.5s |
+| Cosmos3-Nano eager | 110.6G | 40.1G | 11.4s |
+| Cosmos3-Nano shard-after-materialize control | 119.6G | 17.8G | 69.7s |
+| Cosmos3-Nano blockwise | 91.1G | 19.0G | 24.1s |
+| Cosmos3-Nano fp8 blockwise | 102.7G | 17.7G | 21.9s |
+| Cosmos3-Nano fp8 replicated | 115.3G | 28.0G | 25.4s |
+| klein-4B eager | 93.0G | 20.6G | 13.7s |
+| klein-4B shard-after-materialize control | 109.1G | 11.4G | 16.6s |
+| klein-4B blockwise | 83.3G | 15.1G | 19.1s |
+| klein-4B fp8-te blockwise | 99.0G | 14.7G | 21.1s |
+| klein-4B fp8-te replicated | 91.7G | 21.5G | 24.0s |
+
+Cosmos3-Super is where the device-memory saving is largest of anything in this document: 137.7G of
+load-time VRAM eager against 31.0G blockwise, 4.4x, and 24.2G with FP8, 5.7x, which is what a 128G
+transformer filled one block at a time buys. Its host anon improves by much less, 110.2G to 95.6G,
+and that is the same story as the paragraph above — there is no encoder to bring inside, so the
+transformer is the only component the fill touches. Cosmos3-Nano halves its load VRAM, 40.1G to
+19.0G, and holds host anon 1.21x under eager and 1.31x under its own control. klein-4B's margins are
+smaller again because the model is smaller, a 7.8G transformer beside its encoder. All three hold the
+shape the rest of the sweep has: eager is cheapest to load and dearest in host memory, the control is
+dearest of all, and blockwise is the only row better than eager on both counts.
+
+Super's replicated row is the one to read carefully: 82.7G of load-time VRAM against 31.0G blockwise,
+and the highest host anon of its six cases at 123.5G. That is the shape of the path rather than a
+defect — rank 0 loads the component whole and broadcasts it, so a 128G transformer is 128G on one rank
+before anything is scattered, and the saving is against eager's per-rank copy rather than against a
+blockwise fill. On a transformer this size the difference between the two memory-efficient paths
+stops being a detail.
+
+**One bug this found, in the offline path rather than in a model.** klein-4B ships its transformer as
+a single `diffusion_pytorch_model.safetensors` with no shard index, and discovery asks for the index
+first and falls through to the single file when the hub answers that no such file exists. With no
+network there is no such answer: a name the repo does not carry and a name that was never cached
+raise the same `LocalEntryNotFoundError`, and discovery treated both as a real error, so all four
+memory-efficient cases died before loading while eager and the control passed. The component's own
+cached `config.json` tells the two apart — if that is on disk then this snapshot is on disk, and the
+missing name is one this checkpoint does not use. This would have hit any single-file component
+loaded offline, and every model run before this one happens to ship a sharded index.
+
 ## What stood between these models and a first run
 
 Five things had to change before these models would run, on top of the Diffusers upgrade above. None of
@@ -417,13 +489,13 @@ revision on disk. Nothing else in the cache was changed.
   what `gfx950` can do: FP4 eager and FP4 replicated load and render, FP4 with FSDP is rejected in
   preflight, which is the torch 2.12 limit described in the handoff.
 - **Only 8 ranks, plus spot checks.** Z-Image-Turbo loads, shards and renders with `fsdp_blockwise` at
-  4 ranks, and the curated Wan2.2-I2V cases cover 2 and 4 ranks. Nothing else was run at another rank
-  count.
-- **Sixteen models,** which is every model this node has usable weights for that these paths can load.
-  Eight more cached runners are withheld from the memory-efficient load by their own declarations, each
-  with its reason recorded, and nine models have no usable weights on this node at all. No offload
-  combination was run. `tools/cache_inventory.py` and `tools/load_support_matrix.py` produce those
-  three lists.
+  4 ranks, klein-4B covers `fsdp_blockwise` and `replicated` in FP8 at 4 ranks, and the curated
+  Wan2.2-I2V cases cover 2 and 4 ranks. Nothing else was run at another rank count.
+- **Nineteen models,** which is every model this node has usable weights for that these paths can
+  load. Thirteen registered runners are withheld from the memory-efficient load by their own
+  declarations, each with its reason recorded, and six have no usable weights on this node at all. No
+  offload combination was run. `tools/cache_inventory.py` and `tools/load_support_matrix.py` produce
+  those three lists.
 - **Video is gated, not compared.** A video case is checked for having rendered something, frame by
   frame; nothing checks that a sharded clip matches a single-rank clip, because SSIM over a clip only
   decides identity-stable models and no video model has been shown to be one.
@@ -477,3 +549,17 @@ HunyuanVideo's six cases were then re-run once more, on the same node and Diffus
 text-encoder declaration in place; that pass is run id `20260810T085256Z-hunyuan-te` and is where the
 before-and-after table in its own section comes from. Its "before" column is the second sweep's
 figures above, so those two columns are one comparison rather than two sweeps.
+
+The three models that had never run were fetched and run last, on the same node and commit, as run ids
+`klein4b-coverage`, `klein4b-offline-fix`, `cosmos3-nano-coverage`, `cosmos3-super-coverage` and
+`cosmos3-super-finish`. Four of klein-4B's eight cases failed on the offline single-file bug above and
+were re-run after the fix, which is the second run id. Cosmos3-Super's sweep was interrupted to free
+the node and its last three cases finished under the fifth; the record the interruption produced was
+removed from the results file rather than left to read as a failure, since it is evidence about the
+interruption and not about the load. The Cosmos3 cases need the checkpoint's own prompt assets
+exported, and the two Cosmos3 repos are byte-identical in those two files:
+
+```bash
+export XDIT_COSMOS3_PROMPT_JSON=<snapshot>/assets/example_t2v_prompt.json
+export XDIT_COSMOS3_NEGATIVE_PROMPT_JSON=<snapshot>/assets/negative_prompt.json
+```

@@ -144,7 +144,8 @@
       "guidance_scale": 5.0,
       "num_frames": 121,
       "input_images": "${XDIT_WAN_INPUT_IMAGE}",
-      "source": "xFuserWan22TI2VModel.default_input_values, since no benchmark config covers the 5B text-and-image-to-video checkpoint: 736x1280, 121 frames, 50 steps, guidance 5.0. Input image as for the other Wan entries."
+      "runtime_args": ["--task", "i2v"],
+      "source": "xFuserWan22TI2VModel.default_input_values, since no benchmark config covers the 5B text-and-image-to-video checkpoint: 736x1280, 121 frames, 50 steps, guidance 5.0. The task is required rather than chosen: this is the one runner serving two of them, valid_tasks=['i2v', 't2v'], and it rejects a run that names neither. i2v is the one that takes the input image the other Wan entries use; t2v refuses an image."
     },
     "Krea-2-Raw": {
       "prompt": "A small cat",

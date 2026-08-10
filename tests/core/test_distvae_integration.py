@@ -98,23 +98,32 @@ def test_xdit_declares_the_distvae_public_api_version_floor():
     assert xfuser_compat.declared_floor("distvae") == "0.0.0beta6"
 
 
-def test_xdit_import_names_required_api_when_old_distvae_lacks_it(tmp_path):
+def test_compat_loader_names_required_api_when_distvae_lacks_it(tmp_path):
     package = tmp_path / "distvae"
     package.mkdir()
     (package / "__init__.py").write_text('__version__ = "0.0.0beta5"\n')
+    vae_package = package / "vae"
+    vae_package.mkdir()
+    (vae_package / "__init__.py").write_text("")
+    for module in ("parallel", "tile_parallel", "tiling"):
+        (vae_package / f"{module}.py").write_text("")
     repo = Path(__file__).parents[2]
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(repo)))
 
     imported = subprocess.run(
-        [sys.executable, "-c", "import xfuser"],
+        [
+            sys.executable,
+            "-c",
+            "from xfuser.compat import load_distvae_vae; load_distvae_vae()",
+        ],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
         text=True,
     )
 
-    assert imported.returncode != 0
+    assert imported.returncode != 0, imported.stderr + imported.stdout
     error = imported.stderr + imported.stdout
     assert "DistVAE>=0.0.0beta6" in error
     assert "public distvae.vae API" in error

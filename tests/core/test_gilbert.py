@@ -58,8 +58,7 @@ class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
         )
 
     def test_a_volume_small_enough_that_everything_touches_is_all_true(self):
-        # The case the two above used to assert a diagonal for: in a 2x2x2 cube every point is a
-        # neighbour of every other, so nothing about the mapping can separate the blocks.
+        # In a 2x2x2 cube every point neighbors every other point, so the mask is fully connected.
         linear_to_hilbert = torch.arange(8, dtype=torch.int64)
         mask = _sliced_gilbert_block_neighbor_mapping(2, 2, 2, 2, 2, linear_to_hilbert)
         self.assertTrue(bool(mask.all()))

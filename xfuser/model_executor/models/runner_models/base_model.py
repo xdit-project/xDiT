@@ -12,11 +12,16 @@ import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
-from xfuser.compat import is_diffusers_import_error
+from xfuser.compat import (
+    is_diffusers_import_error,
+    load_distvae_parallel_context,
+    load_distvae_vae,
+)
 from xfuser.config import args, xFuserArgs
 from xfuser.envs import (
     PACKAGES_CHECKER,
     get_platform,
+    restore_torch_group_norm_for_distvae,
     _is_hip,
     _is_cuda,
 )
@@ -37,7 +42,6 @@ from xfuser.core.utils.runner_utils import (
     _use_aiter_fp8_rdna4,
     rgetattr,
 )
-from xfuser.core.utils import vae_parallel, vae_tile_parallel, vae_tiling
 
 from xfuser.core.distributed import (
     get_world_group,
@@ -53,6 +57,9 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+
+vae_parallel, vae_tile_parallel, vae_tiling = load_distvae_vae()
+ParallelContext = load_distvae_parallel_context()
 
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
@@ -405,9 +412,17 @@ class xFuserModel(abc.ABC):
 
     def _setup_parallel_vae(self) -> None:
         """ Shard VAE decode, and encode where the model declares it, across the VAE group """
-        vae_group = get_vae_parallel_group().device_group
-        log(f"VAE parallel group: world_size={torch.distributed.get_world_size(vae_group)}, "
-            f"rank={torch.distributed.get_rank(vae_group)}", debug=True)
+        coordinator = get_vae_parallel_group()
+        vae_group = coordinator.device_group
+        tile_context = ParallelContext(
+            group=vae_group,
+            rank=coordinator.rank_in_group,
+            world_size=coordinator.world_size,
+            patch_dim=-2,
+            global_ranks=tuple(coordinator.ranks),
+        )
+        log(f"VAE parallel group: world_size={coordinator.world_size}, "
+            f"rank={coordinator.rank_in_group}", debug=True)
         # Tiling has already divided the decode into independent pieces, and sharding divides
         # each piece again: DistVAE splits the rows of every tile it is handed, so the exchanges
         # that split costs are paid per tile rather than per decode. Where the tiling loop is one
@@ -416,7 +431,7 @@ class xFuserModel(abc.ABC):
         # the window whose tiles are being dealt out has been settled.
         for vae in self._decoding_vaes():
             if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
-                vae_tile_parallel.mark(vae, vae_group)
+                vae_tile_parallel.mark(vae, tile_context)
                 log(f"Parallel VAE will deal whole tiles out to the group on "
                     f"{type(vae).__name__}, rather than shard the rows within each tile.")
             else:
@@ -519,7 +534,7 @@ class xFuserModel(abc.ABC):
         if config.use_parallel_vae:
             if not packages_info.get("has_distvae", False):
                 raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
-            if vae_parallel.restore_torch_group_norm():
+            if restore_torch_group_norm_for_distvae():
                 log("AITER GroupNorm cannot be sharded. Reverting to torch GroupNorm so that "
                     "--use_parallel_vae can recognise the norms it has to replace.")
         
@@ -1257,7 +1272,7 @@ class xFuserModel(abc.ABC):
             return
         # Unless the tiles are what the ranks divide, in which case nothing divides a tile and a
         # window narrower than the group is no longer anybody's problem.
-        if vae_tile_parallel.group_of(vae) is not None:
+        if vae_tile_parallel.context_of(vae) is not None:
             return
         ranks = get_vae_parallel_world_size()
         rows = vae_tiling.latent_rows(vae)
@@ -1284,16 +1299,16 @@ class xFuserModel(abc.ABC):
         # them to different ranks. Stacking several into one call was the other, and it only ever
         # paid at window sizes _apply_vae_tile_size now refuses, so with no group there is nothing
         # to install and upstream's own loop stands.
-        group = vae_tile_parallel.group_of(vae)
-        if group is None:
+        context = vae_tile_parallel.context_of(vae)
+        if context is None:
             return
-        dispatch, assemble = vae_tile_parallel.sharing(group)
+        dispatch, assemble = vae_tile_parallel.sharing(context)
         installed = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
         if installed is None:
             return
         vae.tiled_decode = installed
         log(f"VAE tiled decode on {type(vae).__name__}: a tile per call, divided across "
-            f"{torch.distributed.get_world_size(group)} ranks, a run of neighbouring tiles each "
+            f"{context.world_size} ranks, a run of neighbouring tiles each "
             f"to decode and blend where the grid has the tiles to spare them.")
 
     def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:

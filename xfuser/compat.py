@@ -19,6 +19,60 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
+DISTVAE_VAE_API_FLOOR = "0.0.0beta6"
+_DISTVAE_VAE_API = {
+    "distvae.vae.parallel": ("parallelize_decoder", "parallelize_encoder"),
+    "distvae.vae.tile_parallel": ("context_of", "mark", "sharing"),
+    "distvae.vae.tiling": (
+        "apply_tile_plan",
+        "is_tile_padding_error",
+        "latent_rows",
+        "narrowest_useful_window",
+        "require_vae_support",
+        "smallest_tile_window",
+        "snap_tile_window",
+        "supports_tile_parallel",
+        "tile_overlap",
+        "tile_overlap_plan",
+        "tile_window",
+        "tiled_decode_for",
+        "widest_tile_overlap",
+    ),
+}
+
+
+@lru_cache(maxsize=1)
+def load_distvae_vae():
+    """Load the public DistVAE VAE boundary or raise one actionable compatibility error."""
+    try:
+        modules = tuple(
+            importlib.import_module(module) for module in _DISTVAE_VAE_API
+        )
+        for module, required in zip(modules, _DISTVAE_VAE_API.values()):
+            missing = [name for name in required if not hasattr(module, name)]
+            if missing:
+                raise AttributeError(
+                    f"{module.__name__} is missing {', '.join(missing)}"
+                )
+        return modules
+    except (ImportError, AttributeError) as error:
+        raise ImportError(
+            f"xDiT requires DistVAE>={DISTVAE_VAE_API_FLOOR} with the public "
+            "distvae.vae API. Upgrade DistVAE; private adapter modules are not supported."
+        ) from error
+
+
+@lru_cache(maxsize=1)
+def load_distvae_parallel_context():
+    """Load DistVAE's context type after validating the public VAE API boundary."""
+    load_distvae_vae()
+    try:
+        return importlib.import_module("distvae.vae").ParallelContext
+    except (ImportError, AttributeError) as error:
+        raise ImportError(
+            f"xDiT requires DistVAE>={DISTVAE_VAE_API_FLOOR} with ParallelContext support."
+        ) from error
+
 
 @lru_cache(maxsize=None)
 def declared_floor(name: str) -> Optional[str]:

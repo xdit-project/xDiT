@@ -2,7 +2,7 @@
 
 import pytest
 
-from xfuser.core.utils import vae_parallel
+from xfuser.envs import restore_torch_group_norm_for_distvae
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -15,4 +15,4 @@ def torch_group_norm():
     before it builds a VAE it means to shard, and nothing here is testing AITER's norm itself,
     so revert once for the session and let each test see what it expects.
     """
-    vae_parallel.restore_torch_group_norm()
+    restore_torch_group_norm_for_distvae()

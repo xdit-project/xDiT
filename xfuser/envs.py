@@ -382,8 +382,8 @@ class PackagesEnvChecker:
 
     def check_distvae(self):
         try:
-            from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-            return True
+            from distvae.vae import parallelize_decoder
+            return callable(parallelize_decoder)
         except ImportError:
             return False
 
@@ -403,6 +403,19 @@ class PackagesEnvChecker:
 
 PACKAGES_CHECKER = PackagesEnvChecker()
 _TORCH_GROUPNORM = torch.nn.GroupNorm
+
+
+def restore_torch_group_norm_for_distvae() -> bool:
+    """Restore torch GroupNorm when xDiT's ROCm setup replaced it with AITER's.
+
+    DistVAE discovers norms to shard by their torch type. This must run before a VAE intended
+    for sharding is built, while xDiT is still validating its environment.
+    """
+    if torch.nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
+        return False
+    torch.nn.GroupNorm = _TORCH_GROUPNORM
+    return True
+
 
 def _setup_rocm_libraries():
     if PACKAGES_CHECKER.packages_info.get("has_aiter", False):

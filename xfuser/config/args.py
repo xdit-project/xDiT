@@ -135,6 +135,8 @@ class xFuserArgs:
     enable_tiling: bool = False
     enable_slicing: bool = False
     vae_tile_size: Optional[int] = None
+    vae_tile_size_height: Optional[int] = None
+    vae_tile_size_width: Optional[int] = None
     vae_tile_overlap: Optional[float] = None
     # DiTFastAttn arguments
     use_fast_attn: bool = False
@@ -424,6 +426,20 @@ class xFuserArgs:
                  "degrade the image, each one being normalized over less context than the last.",
         )
         runtime_group.add_argument(
+            "--vae_tile_size_height",
+            type=int,
+            default=None,
+            help="Exact output-pixel height of each VAE tile. Must be used with "
+                 "--vae_tile_size_width and cannot be combined with --vae_tile_size.",
+        )
+        runtime_group.add_argument(
+            "--vae_tile_size_width",
+            type=int,
+            default=None,
+            help="Exact output-pixel width of each VAE tile. Must be used with "
+                 "--vae_tile_size_height and cannot be combined with --vae_tile_size.",
+        )
+        runtime_group.add_argument(
             "--vae_tile_overlap",
             type=float,
             default=None,
@@ -656,6 +672,20 @@ class xFuserArgs:
                  "VAE's own window is ignored. Step down one size at a time and watch peak VRAM: "
                  "the saving stops once the VAE is no longer what peaks, while small tiles visibly "
                  "degrade the image, each one being normalized over less context than the last.",
+        )
+        parser.add_argument(
+            "--vae_tile_size_height",
+            type=int,
+            default=None,
+            help="Exact output-pixel height of each VAE tile. Must be used with "
+                 "--vae_tile_size_width and cannot be combined with --vae_tile_size.",
+        )
+        parser.add_argument(
+            "--vae_tile_size_width",
+            type=int,
+            default=None,
+            help="Exact output-pixel width of each VAE tile. Must be used with "
+                 "--vae_tile_size_height and cannot be combined with --vae_tile_size.",
         )
         parser.add_argument(
             "--vae_tile_overlap",

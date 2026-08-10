@@ -47,6 +47,8 @@ def _runner(**config):
         "enable_slicing": False,
         "enable_tiling": False,
         "vae_tile_size": None,
+        "vae_tile_size_height": None,
+        "vae_tile_size_width": None,
         "vae_tile_overlap": None,
         "enable_sequential_cpu_offload": False,
         "enable_model_cpu_offload": False,
@@ -60,7 +62,7 @@ def _runner(**config):
         enable_tiling=True,
         enable_slicing=True,
     )
-    runner.settings = SimpleNamespace(model_name="test-model")
+    runner.settings = SimpleNamespace(model_name="test-model", valid_tasks=[])
     return runner
 
 
@@ -87,6 +89,113 @@ def test_runner_cli_propagates_vae_settings():
     assert config.vae_tile_overlap == 0.125
 
 
+def test_runner_cli_propagates_rectangular_vae_tile_settings():
+    parser = xFuserArgs.add_runner_args(
+        FlexibleArgumentParser(description="xDiT runner")
+    )
+    parsed = parser.parse_args(
+        [
+            "--model",
+            "test-model",
+            "--vae_tile_size_height",
+            "320",
+            "--vae_tile_size_width",
+            "512",
+        ]
+    )
+
+    config = xFuserArgs.from_cli_args(parsed)
+
+    assert config.vae_tile_size_height == 320
+    assert config.vae_tile_size_width == 512
+
+
+def test_engine_cli_propagates_rectangular_vae_tile_settings():
+    parser = xFuserArgs.add_cli_args(
+        FlexibleArgumentParser(description="xDiT engine")
+    )
+    parsed = parser.parse_args(
+        [
+            "--model",
+            "test-model",
+            "--vae_tile_size_height",
+            "320",
+            "--vae_tile_size_width",
+            "512",
+        ]
+    )
+
+    config = xFuserArgs.from_cli_args(parsed)
+
+    assert config.vae_tile_size_height == 320
+    assert config.vae_tile_size_width == 512
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            {"vae_tile_size_height": 320},
+            "--vae_tile_size_height and --vae_tile_size_width must be provided together",
+        ),
+        (
+            {"vae_tile_size_width": 512},
+            "--vae_tile_size_height and --vae_tile_size_width must be provided together",
+        ),
+        (
+            {"vae_tile_size_height": 0, "vae_tile_size_width": 512},
+            "--vae_tile_size_height must be positive",
+        ),
+        (
+            {"vae_tile_size_height": 320, "vae_tile_size_width": -1},
+            "--vae_tile_size_width must be positive",
+        ),
+        (
+            {
+                "vae_tile_size": 384,
+                "vae_tile_size_height": 320,
+                "vae_tile_size_width": 512,
+            },
+            "--vae_tile_size cannot be combined with --vae_tile_size_height and --vae_tile_size_width",
+        ),
+    ],
+)
+def test_rectangular_vae_tile_settings_are_validated(config, message):
+    runner = _runner()
+
+    with pytest.raises(ValueError, match=message):
+        runner._validate_config(xFuserArgs(model="test-model", **config))
+
+
+def test_rectangular_vae_tile_flag_implies_tiling():
+    runner = _runner(vae_tile_size_height=320, vae_tile_size_width=None)
+
+    assert runner._tiling_flag() == "--vae_tile_size_height"
+
+
+def test_old_config_without_rectangular_fields_keeps_tiling_helpers_compatible():
+    runner = _runner()
+    del runner.config.vae_tile_size_height
+    del runner.config.vae_tile_size_width
+
+    assert runner._tiling_flag() is None
+    assert runner._requested_vae_tile_shape() is None
+
+
+def test_old_config_without_rectangular_fields_passes_validation():
+    current = xFuserArgs(model="test-model")
+    old_config = SimpleNamespace(
+        **{
+            name: value
+            for name, value in vars(current).items()
+            if name not in {"vae_tile_size_height", "vae_tile_size_width"}
+        }
+    )
+    runner = _runner()
+
+    runner._validate_config(old_config)
+
+
 def test_base_model_uses_public_distvae_modules():
     assert base_model.vae_parallel is parallel
     assert base_model.vae_tiling is tiling
@@ -95,13 +204,13 @@ def test_base_model_uses_public_distvae_modules():
 
 def test_xdit_declares_the_distvae_public_api_version_floor():
     xfuser_compat.declared_floor.cache_clear()
-    assert xfuser_compat.declared_floor("distvae") == "0.0.0beta6"
+    assert xfuser_compat.declared_floor("distvae") == "0.0.0beta7"
 
 
 def test_compat_loader_names_required_api_when_distvae_lacks_it(tmp_path):
     package = tmp_path / "distvae"
     package.mkdir()
-    (package / "__init__.py").write_text('__version__ = "0.0.0beta5"\n')
+    (package / "__init__.py").write_text('__version__ = "0.0.0beta6"\n')
     vae_package = package / "vae"
     vae_package.mkdir()
     (vae_package / "__init__.py").write_text("")
@@ -125,13 +234,19 @@ def test_compat_loader_names_required_api_when_distvae_lacks_it(tmp_path):
 
     assert imported.returncode != 0, imported.stderr + imported.stdout
     error = imported.stderr + imported.stdout
-    assert "DistVAE>=0.0.0beta6" in error
+    assert "DistVAE>=0.0.0beta7" in error
     assert "public distvae.vae API" in error
 
 
 def test_distvae_compat_loader_returns_normal_local_public_modules():
     loaded = xfuser_compat.load_distvae_vae()
     assert loaded == (parallel, tile_parallel, tiling)
+
+
+def test_distvae_compat_requires_local_tiled_decode_api():
+    assert "local_tiled_decode_for" in xfuser_compat._DISTVAE_VAE_API[
+        "distvae.vae.tiling"
+    ]
 
 
 def test_all_xdit_python_callers_use_public_distvae_boundaries():
@@ -300,6 +415,119 @@ def test_tile_size_and_overlap_are_applied_through_distvae():
     ]
 
 
+def test_rectangular_tile_shape_is_applied_exactly_through_distvae():
+    vae = SimpleNamespace()
+    runner = _runner(vae_tile_size_height=320, vae_tile_size_width=512)
+    plan = {
+        "tile_sample_min_height": 320,
+        "tile_sample_min_width": 512,
+        "tile_latent_min_height": 40,
+        "tile_latent_min_width": 64,
+    }
+
+    with (
+        mock.patch.object(
+            base_model.vae_tiling, "tile_shape_plan", return_value=plan
+        ) as tile_shape_plan,
+        mock.patch.object(base_model.vae_tiling, "apply_tile_plan") as apply,
+    ):
+        assert runner._apply_vae_tile_size(vae) == (320, 512)
+
+    tile_shape_plan.assert_called_once_with(vae, 320, 512)
+    apply.assert_called_once_with(vae, plan)
+
+
+def test_rectangular_tile_shape_refuses_a_non_exact_plan_actionably():
+    vae = SimpleNamespace()
+    runner = _runner(vae_tile_size_height=321, vae_tile_size_width=512)
+
+    with mock.patch.object(
+        base_model.vae_tiling, "tile_shape_plan", return_value=None
+    ):
+        with pytest.raises(ValueError) as error:
+            runner._apply_vae_tile_size(vae)
+
+    message = str(error.value)
+    assert "--vae_tile_size_height 321" in message
+    assert "--vae_tile_size_width 512" in message
+    assert "exactly" in message
+
+
+def test_rectangular_tile_shape_reaches_every_staged_vae():
+    first = SimpleNamespace(enable_tiling=mock.Mock(), decode=mock.Mock())
+    second = SimpleNamespace(enable_tiling=mock.Mock(), decode=mock.Mock())
+    runner = _runner(vae_tile_size_height=320, vae_tile_size_width=512)
+    runner.pipe = SimpleNamespace(vae=first)
+    runner.second_pipe = SimpleNamespace(vae=second)
+
+    with (
+        mock.patch.object(base_model.vae_tiling, "require_vae_support"),
+        mock.patch.object(
+            base_model.vae_tiling, "tile_shape", return_value=(512, 512)
+        ),
+        mock.patch.object(
+            runner, "_apply_vae_tile_size", return_value=(320, 512)
+        ) as apply_size,
+        mock.patch.object(runner, "_apply_vae_tile_overlap"),
+        mock.patch.object(runner, "_check_tiles_against_parallel_vae"),
+        mock.patch.object(runner, "_install_vae_tiled_decode"),
+        mock.patch.object(runner, "_install_vae_decode_guard"),
+    ):
+        runner._enable_options()
+
+    assert apply_size.call_args_list == [mock.call(first), mock.call(second)]
+
+
+def test_single_gpu_rectangular_scalar_vae_installs_local_tiled_decode():
+    vae = SimpleNamespace()
+    runner = _runner(
+        use_parallel_vae=False,
+        vae_tile_size_height=320,
+        vae_tile_size_width=512,
+    )
+    installed = mock.Mock()
+
+    with (
+        mock.patch.object(
+            base_model.vae_tile_parallel, "context_of", return_value=None
+        ),
+        mock.patch.object(
+            base_model.vae_tiling,
+            "local_tiled_decode_for",
+            return_value=installed,
+        ) as local_tiled_decode_for,
+        mock.patch.object(base_model.vae_tiling, "tiled_decode_for") as tiled_decode_for,
+    ):
+        runner._install_vae_tiled_decode(vae)
+
+    local_tiled_decode_for.assert_called_once_with(vae)
+    tiled_decode_for.assert_not_called()
+    assert vae.tiled_decode is installed
+
+
+def test_native_keyed_vae_keeps_its_tiled_decode_when_distvae_returns_none():
+    native = mock.Mock()
+    vae = SimpleNamespace(tiled_decode=native)
+    runner = _runner(vae_tile_size_height=320, vae_tile_size_width=512)
+
+    with (
+        mock.patch.object(
+            base_model.vae_tile_parallel, "context_of", return_value=None
+        ),
+        mock.patch.object(
+            base_model.vae_tiling,
+            "local_tiled_decode_for",
+            return_value=None,
+        ) as local_tiled_decode_for,
+        mock.patch.object(base_model.vae_tiling, "tiled_decode_for") as tiled_decode_for,
+    ):
+        runner._install_vae_tiled_decode(vae)
+
+    local_tiled_decode_for.assert_called_once_with(vae)
+    tiled_decode_for.assert_not_called()
+    assert vae.tiled_decode is native
+
+
 def test_tiled_decode_install_uses_distvae_context_and_sharing():
     group = object()
     context = ParallelContext(
@@ -327,11 +555,15 @@ def test_tiled_decode_install_uses_distvae_context_and_sharing():
             "tiled_decode_for",
             return_value=installed,
         ) as tiled_decode_for,
+        mock.patch.object(
+            base_model.vae_tiling, "local_tiled_decode_for"
+        ) as local_tiled_decode_for,
     ):
         runner._install_vae_tiled_decode(vae)
 
     sharing.assert_called_once_with(context)
     tiled_decode_for.assert_called_once_with(vae, "dispatch", "assemble")
+    local_tiled_decode_for.assert_not_called()
     assert vae.tiled_decode is installed
 
 
@@ -350,6 +582,27 @@ def test_decode_guard_delegates_padding_detection_to_distvae():
     is_padding.assert_called_once()
 
 
+def test_decode_guard_reports_rectangular_window_and_flags():
+    original = mock.Mock(side_effect=RuntimeError("decoder padding failure"))
+    vae = SimpleNamespace(decode=original)
+    runner = _runner(
+        vae_tile_size_height=320,
+        vae_tile_size_width=512,
+    )
+
+    with mock.patch.object(
+        base_model.vae_tiling, "is_tile_padding_error", return_value=True
+    ):
+        runner._install_vae_decode_guard(vae, tile_window=(320, 512))
+        with pytest.raises(RuntimeError) as error:
+            vae.decode(object())
+
+    message = str(error.value)
+    assert "320x512" in message
+    assert "--vae_tile_size_height" in message
+    assert "--vae_tile_size_width" in message
+
+
 def test_decode_oom_hint_uses_distvae_size_api():
     vae = SimpleNamespace(use_tiling=True)
     runner = _runner()
@@ -364,6 +617,36 @@ def test_decode_oom_hint_uses_distvae_size_api():
 
     snap.assert_called_once_with(vae, 256)
     assert "--vae_tile_size 256" in hint
+
+
+def test_decode_oom_hint_reports_rectangular_window():
+    vae = SimpleNamespace(use_tiling=True)
+    runner = _runner()
+
+    with mock.patch.object(
+        base_model.vae_tiling, "tile_shape", return_value=(320, 512)
+    ):
+        hint = runner._vae_decode_oom_hint(vae)
+
+    assert "320x512" in hint
+    assert "--vae_tile_size_height" in hint
+    assert "--vae_tile_size_width" in hint
+    assert "no single tile window" not in hint
+
+
+def test_decode_oom_hint_reports_requested_equal_rectangular_dimensions():
+    vae = SimpleNamespace(use_tiling=True)
+    runner = _runner(vae_tile_size_height=384, vae_tile_size_width=384)
+
+    with mock.patch.object(
+        base_model.vae_tiling, "tile_shape", return_value=(384, 384)
+    ):
+        hint = runner._vae_decode_oom_hint(vae)
+
+    assert "384x384" in hint
+    assert "--vae_tile_size_height" in hint
+    assert "--vae_tile_size_width" in hint
+    assert "--vae_tile_size " not in hint
 
 
 class AiterGroupNorm(nn.Module):

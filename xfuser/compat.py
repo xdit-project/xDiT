@@ -19,7 +19,7 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-DISTVAE_VAE_API_FLOOR = "0.0.0beta6"
+DISTVAE_VAE_API_FLOOR = "0.0.0beta7"
 _DISTVAE_VAE_API = {
     "distvae.vae.parallel": ("parallelize_decoder", "parallelize_encoder"),
     "distvae.vae.tile_parallel": ("context_of", "mark", "sharing"),
@@ -27,6 +27,7 @@ _DISTVAE_VAE_API = {
         "apply_tile_plan",
         "is_tile_padding_error",
         "latent_rows",
+        "local_tiled_decode_for",
         "narrowest_useful_window",
         "require_vae_support",
         "smallest_tile_window",
@@ -34,6 +35,8 @@ _DISTVAE_VAE_API = {
         "supports_tile_parallel",
         "tile_overlap",
         "tile_overlap_plan",
+        "tile_shape",
+        "tile_shape_plan",
         "tile_window",
         "tiled_decode_for",
         "widest_tile_overlap",

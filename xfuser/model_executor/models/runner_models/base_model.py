@@ -5,7 +5,7 @@ import argparse
 import json
 import functools
 from PIL.Image import Image
-from typing import Callable, List, Optional, Tuple, Generator
+from typing import Callable, List, Optional, Tuple, Generator, Union
 from dataclasses import dataclass, field
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
@@ -347,7 +347,11 @@ class xFuserModel(abc.ABC):
             if self._tiles(vae):
                 # Before anything narrows it, since a refusal below has to be able to say what
                 # this VAE's own window was and search the sizes between the two.
-                own_window = vae_tiling.tile_window(vae)
+                own_window = (
+                    vae_tiling.tile_shape(vae)
+                    if self._requested_vae_tile_shape() is not None
+                    else vae_tiling.tile_window(vae)
+                )
                 if tiling_flag is not None:
                     vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
                     log(f"Enabling VAE tiling on {type(vae).__name__}...")
@@ -377,6 +381,14 @@ class xFuserModel(abc.ABC):
         for asked, flag in (
             (self.config.enable_tiling, "--enable_tiling"),
             (self.config.vae_tile_size is not None, "--vae_tile_size"),
+            (
+                getattr(self.config, "vae_tile_size_height", None) is not None,
+                "--vae_tile_size_height",
+            ),
+            (
+                getattr(self.config, "vae_tile_size_width", None) is not None,
+                "--vae_tile_size_width",
+            ),
             (self.config.vae_tile_overlap is not None, "--vae_tile_overlap"),
         ):
             if asked:
@@ -537,6 +549,31 @@ class xFuserModel(abc.ABC):
             if restore_torch_group_norm_for_distvae():
                 log("AITER GroupNorm cannot be sharded. Reverting to torch GroupNorm so that "
                     "--use_parallel_vae can recognise the norms it has to replace.")
+
+        height = getattr(config, "vae_tile_size_height", None)
+        width = getattr(config, "vae_tile_size_width", None)
+        height_asked = height is not None
+        width_asked = width is not None
+        if height_asked != width_asked:
+            raise ValueError(
+                "--vae_tile_size_height and --vae_tile_size_width must be provided together."
+            )
+        if config.vae_tile_size is not None and height_asked:
+            raise ValueError(
+                "--vae_tile_size cannot be combined with --vae_tile_size_height and "
+                "--vae_tile_size_width."
+            )
+        for value, flag in (
+            (height, "--vae_tile_size_height"),
+            (width, "--vae_tile_size_width"),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{flag} must be positive, got {value}.")
+        if height_asked and not self.capabilities.enable_tiling:
+            raise ValueError(
+                "--vae_tile_size_height and --vae_tile_size_width decode the VAE in tiles, "
+                f"which model {self.settings.model_name} does not support."
+            )
         
         if config.distilled_transformer_path or config.distilled_transformer_2_path:
             if not self.capabilities.supports_distilled_weights:
@@ -1165,8 +1202,41 @@ class xFuserModel(abc.ABC):
         self.pipe.vae.decode = decode_wrapper
         self.pipe.vae._xfuser_decode_channels_last = True
 
-    def _apply_vae_tile_size(self, vae) -> Optional[int]:
+    def _requested_vae_tile_shape(self) -> Optional[Tuple[int, int]]:
+        height = getattr(self.config, "vae_tile_size_height", None)
+        width = getattr(self.config, "vae_tile_size_width", None)
+        if height is None or width is None:
+            return None
+        return height, width
+
+    def _apply_vae_tile_size(
+        self, vae
+    ) -> Optional[Union[int, Tuple[int, int]]]:
         """ The window set on this VAE, None where the VAE keeps its own """
+        shape = self._requested_vae_tile_shape()
+        if shape is not None:
+            height, width = shape
+            plan = vae_tiling.tile_shape_plan(vae, height, width)
+            if plan is None:
+                native = vae_tiling.tile_shape(vae)
+                native_shown = (
+                    f" Its native window is {native[0]}x{native[1]}."
+                    if native is not None
+                    else ""
+                )
+                raise ValueError(
+                    f"--vae_tile_size_height {height} with --vae_tile_size_width {width} "
+                    f"is not a shape this VAE ({type(vae).__name__}) can tile exactly."
+                    f"{native_shown} Choose dimensions compatible with the VAE's latent "
+                    "scale and tile stride."
+                )
+            vae_tiling.apply_tile_plan(vae, plan)
+            log(
+                f"VAE tile window set to {height}x{width}px "
+                f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})"
+            )
+            return shape
+
         # The default window tracks the VAE's training resolution and never shrinks for an
         # above-training-res decode, so a single tile can outgrow free VRAM. This shrinks it.
         requested = self.config.vae_tile_size
@@ -1257,7 +1327,9 @@ class xFuserModel(abc.ABC):
             return f"{down:g}"
         return f"{down:g} down, {across:g} across"
 
-    def _check_tiles_against_parallel_vae(self, vae, own_window: Optional[int]) -> None:
+    def _check_tiles_against_parallel_vae(
+        self, vae, own_window: Optional[Union[int, Tuple[int, int]]]
+    ) -> None:
         """ Refuse a tile holding fewer latent rows than the ranks that will split them """
         # Tiling and sharding divide the same axis: diffusers hands the decoder one tile, and
         # DistVAE then splits that tile's latent rows across the VAE group. Under a row per rank
@@ -1278,19 +1350,31 @@ class xFuserModel(abc.ABC):
         rows = vae_tiling.latent_rows(vae)
         if ranks < 2 or rows is None or rows >= ranks:
             return
+        shape = vae_tiling.tile_shape(vae)
         window = vae_tiling.tile_window(vae)
         smallest = (
             vae_tiling.smallest_tile_window(vae, window, own_window, min_latent_rows=ranks)
-            if window is not None and own_window is not None
+            if window is not None and isinstance(own_window, int)
             else None
         )
+        shown = (
+            f"{shape[0]}x{shape[1]}px"
+            if shape is not None and shape[0] != shape[1]
+            else f"{window}px"
+        )
+        rectangular_remedy = (
+            " Increase --vae_tile_size_height, or decode across fewer VAE ranks."
+            if shape is not None and shape[0] != shape[1]
+            else ""
+        )
         raise ValueError(
-            f"A {window}px VAE tile window leaves {rows} latent rows for the {ranks} ranks "
+            f"A {shown} VAE tile window leaves {rows} latent rows for the {ranks} ranks "
             f"--use_parallel_vae splits each tile across" +
             (f"; the smallest window with a row per rank is --vae_tile_size {smallest}."
              if smallest else
-             f", and no window up to this VAE's own {own_window}px gives them one each. Decode "
-             f"without tiling, or across fewer VAE ranks.")
+             (rectangular_remedy or
+              f", and no window up to this VAE's own {own_window}px gives them one each. "
+              f"Decode without tiling, or across fewer VAE ranks."))
         )
 
     def _install_vae_tiled_decode(self, vae) -> None:
@@ -1301,17 +1385,30 @@ class xFuserModel(abc.ABC):
         # to install and upstream's own loop stands.
         context = vae_tile_parallel.context_of(vae)
         if context is None:
-            return
-        dispatch, assemble = vae_tile_parallel.sharing(context)
-        installed = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
+            if self._requested_vae_tile_shape() is None:
+                return
+            installed = vae_tiling.local_tiled_decode_for(vae)
+        else:
+            dispatch, assemble = vae_tile_parallel.sharing(context)
+            installed = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
         if installed is None:
             return
         vae.tiled_decode = installed
+        if context is None:
+            log(
+                f"VAE tiled decode on {type(vae).__name__}: using DistVAE's local "
+                "rectangular overlap loop."
+            )
+            return
         log(f"VAE tiled decode on {type(vae).__name__}: a tile per call, divided across "
             f"{context.world_size} ranks, a run of neighbouring tiles each "
             f"to decode and blend where the grid has the tiles to spare them.")
 
-    def _install_vae_decode_guard(self, vae, tile_window: Optional[int] = None) -> None:
+    def _install_vae_decode_guard(
+        self,
+        vae,
+        tile_window: Optional[Union[int, Tuple[int, int]]] = None,
+    ) -> None:
         # Point a failed VAE decode at the knob that fixes it. Success path untouched.
         #
         # The window is recorded on the VAE rather than closed over, so that installing again
@@ -1339,12 +1436,24 @@ class xFuserModel(abc.ABC):
                 # Whether a window leaves a tile the decoder cannot pad depends on the output size,
                 # so this cannot be caught when the window is set; name the window, being the part
                 # the caller can change, and keep the decoder's own words underneath.
+                if isinstance(window, tuple):
+                    shown = f"{window[0]}x{window[1]}"
+                    flags = "--vae_tile_size_height and --vae_tile_size_width"
+                    remedy = (
+                        "try another exact height and width, or drop both flags to decode at "
+                        "this VAE's own window"
+                    )
+                else:
+                    shown = str(window)
+                    flags = "--vae_tile_size"
+                    remedy = (
+                        "try another --vae_tile_size, or drop it to decode at this VAE's own "
+                        "window"
+                    )
                 raise RuntimeError(
-                    f"VAE tiled decode failed at the {window}px tile window set by "
-                    f"--vae_tile_size: at this output size the window leaves a tile too thin for "
-                    f"the decoder to pad. A larger window can fail where a smaller one works, so "
-                    f"try another --vae_tile_size, or drop it to decode at this VAE's own "
-                    f"window.\n{e}"
+                    f"VAE tiled decode failed at the {shown}px tile window set by {flags}: "
+                    "at this output size the window leaves a tile too thin for the decoder to "
+                    f"pad. A larger window can fail where a smaller one works, so {remedy}.\n{e}"
                 ) from e
 
         vae.decode = decode_guard
@@ -1359,6 +1468,17 @@ class xFuserModel(abc.ABC):
             return (f"VAE decode ran out of memory, and model {self.settings.model_name} does not "
                     "support VAE tiling.")
 
+        shape = vae_tiling.tile_shape(vae)
+        requested_shape = self._requested_vae_tile_shape()
+        if shape is not None and (
+            requested_shape is not None or shape[0] != shape[1]
+        ):
+            height, width = shape
+            return (
+                f"VAE tiled decode ran out of memory at a {height}x{width}px tile window. "
+                "Shrink it by choosing another exact pair with --vae_tile_size_height and "
+                "--vae_tile_size_width, then re-run and compare peak VRAM."
+            )
         window = vae_tiling.tile_window(vae)
         if window is None:
             return ("VAE tiled decode ran out of memory. This model's VAE "

@@ -58,10 +58,84 @@ def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
     assert '@LoadDeclaration.declare("transformer", replicated=True)' in source
     assert "fully_shard_degree=True" in source
     assert '"transformer_blocks", "single_transformer_blocks"' in source
-    assert 'revision="refs/pr/18"' in source
+    assert '_DIFFUSERS_FORMAT_REVISION = "refs/pr/18"' in source
     assert "self._build_transformer(" in source
     assert "checkpoint_request=transformer_request" in source
     assert "request.from_pretrained_kwargs(include_subfolder=False)" in source
+    # The pin belongs to the runner's checkpoint identity, not to the one call site that used to
+    # pass it: the text encoder's meta construction and its checkpoint mapping ask the runner.
+    assert "def _checkpoint_request" in source
+    assert 'kwargs.setdefault("revision", self._DIFFUSERS_FORMAT_REVISION)' in source
+
+
+def test_hunyuanvideo_offers_its_llama_encoder_to_the_memory_efficient_load():
+    """The encoder every rank loaded whole is what kept this model's host peak where it was.
+
+    Fourteen gigabytes of Llama per rank, against a transformer that fills a block at a time, so
+    the transformer path working was not visible in the host figure at all. Both meta paths pick
+    their components out of fsdp_strategy, and the pipeline only skips loading a component it was
+    handed, so declaring the encoder and passing the kwargs are one change.
+    """
+    source = _source("hunyuan.py", "xFuserHunyuanvideoModel")
+
+    assert '"text_encoder": {' in source
+    assert '"wrap_attrs": ["layers"]' in source
+    assert "te_kwargs, te_quant = self._meta_te_kwargs()" in source
+    assert "quantization_config=te_quant" in source
+    assert "**te_kwargs" in source
+    # The 0.2G CLIP stays out: a collective per prompt to save a fraction of a gigabyte.
+    assert '"text_encoder_2"' not in source
+
+
+def test_hunyuanvideo_encoder_shard_path_exists_on_the_encoder_it_loads():
+    """A wrap path is a claim about another library's module layout, so check it against that library.
+
+    LlamaModel keeps its decoder layers at the top level. "model.layers", which is where the
+    causal-LM wrapper and several other encoders keep theirs, would raise an AttributeError in
+    every sharded case and nowhere else.
+    """
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    accelerate = pytest.importorskip("accelerate")
+    from xfuser.core.distributed.sharding import rgetattr
+    from xfuser.model_executor.models.runner_models.hunyuan import (
+        xFuserHunyuanvideoModel,
+    )
+
+    config = transformers.LlamaConfig(
+        num_hidden_layers=2, hidden_size=8, intermediate_size=16, num_attention_heads=2
+    )
+    with accelerate.init_empty_weights():
+        encoder = transformers.LlamaModel(config)
+
+    strategy = xFuserHunyuanvideoModel.settings.fsdp_strategy["text_encoder"]
+    for attr in strategy["wrap_attrs"]:
+        assert len(rgetattr(encoder, attr)) == 2, f"{attr} does not reach the decoder layers"
+
+
+def test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves():
+    """Whoever asks for the checkpoint identity gets the pinned revision, subfolder or not.
+
+    The text encoder is built from its config and then mapped onto its own checkpoint, and both
+    steps ask the runner rather than being handed a request. On the default revision this repo has
+    no diffusers-format subfolders to find, so an unpinned request cannot resolve them.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    from xfuser.model_executor.models.runner_models.hunyuan import (
+        xFuserHunyuanvideoModel,
+    )
+
+    # No __init__: the request only reads the class's settings, and a runner needs a config and a
+    # device this test has neither of.
+    runner = object.__new__(xFuserHunyuanvideoModel)
+
+    for subfolder in (None, "transformer", "text_encoder"):
+        request = runner._checkpoint_request(subfolder)
+        assert request.revision == "refs/pr/18"
+        assert request.subfolder == subfolder
+    # A caller that has already decided still wins, as on the base runner.
+    assert runner._checkpoint_request(revision="main").revision == "main"
 
 
 @pytest.mark.parametrize(

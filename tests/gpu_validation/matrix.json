@@ -3383,12 +3383,13 @@
       "quality_notes": "Generated from the HunyuanVideo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
-      "id": "gen-mi3xx-hunyuanvideo-fp8-fsdp-w8",
+      "id": "gen-mi3xx-hunyuanvideo-fp8-te-fsdp-w8",
       "tags": [
         "fp8",
         "fsdp",
         "generated",
         "rocm",
+        "te-fp8",
         "torchao"
       ],
       "model": "HunyuanVideo",
@@ -3399,7 +3400,7 @@
       },
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
-      "te_fp8": false,
+      "te_fp8": true,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -3418,12 +3419,13 @@
       "quality_notes": "Generated from the HunyuanVideo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
-      "id": "gen-mi3xx-hunyuanvideo-fp8-replicated-w8",
+      "id": "gen-mi3xx-hunyuanvideo-fp8-te-replicated-w8",
       "tags": [
         "fp8",
         "generated",
         "replicated",
         "rocm",
+        "te-fp8",
         "torchao"
       ],
       "model": "HunyuanVideo",
@@ -3434,7 +3436,7 @@
       },
       "placement": "replicated",
       "quantization": "fp8",
-      "te_fp8": false,
+      "te_fp8": true,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {

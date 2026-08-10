@@ -256,9 +256,11 @@ of the model.
 HunyuanVideo is the exception and worth stating plainly: 145.9G eager against 155.3G blockwise, no
 improvement. Its load declaration covers the transformer alone, and the fill logs show that part
 working, holding host anon flat at 51.9G for the whole transformer fill. The peak is elsewhere — its
-Llama text encoder and VAE, which every rank loads in full in all three cases. That is the next
-component worth bringing inside this path, not a defect in it, and it is why load-time VRAM still
-improves 1.5x while the host figure does not.
+Llama text encoder, which every rank loads in full in all three cases. That is the next component
+worth bringing inside this path, not a defect in it, and it is why load-time VRAM still improves 1.5x
+while the host figure does not. It was brought inside afterwards, and
+[the section below](#hunyuanvideos-text-encoder-brought-inside-the-path) has the figures; the row
+above is what the model measured before that change.
 
 ### Did it draw anything
 
@@ -316,6 +318,46 @@ has been measured to be one, so those cases record as `unscored` and rely on the
 | Wan2.2-T2V | 348.9s | 285.1s |
 | Wan2.2-I2V | 392.5s | 289.6s |
 | Wan2.2-TI2V | 153.2s | 115.4s |
+
+## HunyuanVideo's text encoder, brought inside the path
+
+The anomaly above turned out to be a gap in what the model declared rather than in the path. Both
+meta paths pick their components out of `fsdp_strategy`, and HunyuanVideo named only its transformer,
+so its 14G Llama encoder was loaded whole by every rank in all five cases — 112G of the peak at eight
+ranks, against a transformer that was already filling one block at a time. Declaring the encoder, and
+handing the pipeline the meta module the declaration produces, is the whole change; the path itself
+needed nothing. Its 0.2G CLIP encoder stays out, as FLUX's does, because a collective per prompt to
+save a fraction of a gigabyte is not worth having.
+
+The same six cases, before the change and after:
+
+| Case | host anon | load VRAM | load time |
+| --- | --- | --- | --- |
+| eager, 8 ranks | 145.9G → 145.8G | 42.6G → 42.4G | 54.7s → 54.1s |
+| shard-after-materialize control | 146.9G → 159.2G | 26.2G → 13.9G | 55.0s → 55.4s |
+| blockwise | 155.3G → 102.2G | 29.2G → 15.4G | 41.3s → 35.9s |
+| fp8 blockwise | 155.3G → 104.6G | 28.0G → 14.6G | 41.6s → 37.0s |
+| fp8 replicated | 156.4G → 105.5G | 35.6G → 34.9G | 40.4s → 29.2s |
+
+Blockwise now holds host anon to 102.2G, inside the 76–104G band every other model in this sweep sits
+in, and 1.6x under its own control. Load-time VRAM improves twice over: the encoder is never whole on
+any rank, so 42.4G eager becomes 15.4G, where before the change it was 29.2G. The model renders the
+same clip, and the frame gate reads it the same way, 0.2149 on the flattest of twelve sampled frames
+against a 0.01 floor.
+
+Two rows deserve reading rather than skimming. The eager row is unchanged, which is the point of it:
+declaring a component tells the meta paths and the sharding step about it and leaves an ordinary load
+alone. The control row got 12G *worse*, and that is correct — it now materializes the encoder per rank
+and then FSDP-wraps it, paying a transient the old control never paid, which is exactly the cost
+blockwise avoids. A control that covered fewer components than the case it is a control for was
+flattering the comparison.
+
+The two fp8 cases changed identity as well as numbers. A model with declared text-encoder FP8 targets
+gets a `te_fp8` case rather than a transformer-only one, so `hunyuanvideo-fp8-fsdp-w8` and
+`-fp8-replicated-w8` are now `-fp8-te-fsdp-w8` and `-fp8-te-replicated-w8`, and the encoder is
+quantized per block as the fill materializes it. That is the fourteenth model on that path and the
+first Llama encoder on it. Its clip is a different sample of the same scene rather than a collapse,
+which is all a video case is checked for here.
 
 ## What stood between these models and a first run
 
@@ -430,3 +472,8 @@ the six video models have no scored column by design. The passes are run ids
 `20260809T101323Z-coverage-krea-fixed2`, `20260809T102509Z-coverage-video`,
 `20260810T062730Z-coverage-video-rerun` and `20260810T071614Z-coverage-score`. Result JSONL, logs,
 images and clips are node-local and not checked in.
+
+HunyuanVideo's six cases were then re-run once more, on the same node and Diffusers commit, with the
+text-encoder declaration in place; that pass is run id `20260810T085256Z-hunyuan-te` and is where the
+before-and-after table in its own section comes from. Its "before" column is the second sweep's
+figures above, so those two columns are one comparison rather than two sweeps.

@@ -14,7 +14,10 @@ clip checked frame by frame; the other two assert a rejection that holds only on
 `gfx942` and were correctly not run there.
 [Memory-efficient load results](meta_load_results.md) reports both sweeps,
 including the defects they found, each of them in a combination nothing had run
-before. Those records live on that node and are not checked in.
+before. HunyuanVideo's six cases were re-run once more after its text encoder was
+brought into the memory-efficient path, which also renamed its two FP8 cases to
+the `fp8-te` form the other quantizing models use. Those records live on that node
+and are not checked in.
 
 The artifacts are:
 

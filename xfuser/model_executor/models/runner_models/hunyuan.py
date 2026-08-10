@@ -60,6 +60,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_text_encoder_module_list=["text_encoder.layers"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": [
@@ -67,8 +68,34 @@ class xFuserHunyuanvideoModel(xFuserModel):
                 ],
                 "dtype": torch.bfloat16,
             },
+            # The 14G Llama encoder was this model's host peak: every rank loaded it whole
+            # while the transformer was already filling one block at a time. LlamaModel keeps
+            # its decoder layers at the top level, not under "model" as text-only encoders do.
+            # text_encoder_2, a 0.2G CLIP, is deliberately absent: wrapping it would add a
+            # collective per prompt to save a fraction of a gigabyte.
+            "text_encoder": {
+                "wrap_attrs": ["layers"],
+                # Shards stay on CPU between uses so the encoder's all_gather buffer does not
+                # compete with the sharded transformer during encode_prompt.
+                "offload_policy": "cpu",
+            },
         },
     )
+
+    # The diffusers-format conversion of this repo lives on a PR branch rather than main.
+    _DIFFUSERS_FORMAT_REVISION = "refs/pr/18"
+
+    def _checkpoint_request(self, subfolder: str | None = None, **kwargs):
+        """Pin the revision for every checkpoint request, not just the pipeline's own load.
+
+        The load paths that build a component from its config and then find its weights --
+        the text encoder's meta construction and its checkpoint mapping -- ask the runner for
+        the checkpoint identity rather than being handed one. Left to default they would
+        resolve main, which for this repo is a different revision that carries no
+        diffusers-format subfolders at all.
+        """
+        kwargs.setdefault("revision", self._DIFFUSERS_FORMAT_REVISION)
+        return super()._checkpoint_request(subfolder, **kwargs)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideoPipeline
@@ -76,16 +103,19 @@ class xFuserHunyuanvideoModel(xFuserModel):
             xFuserHunyuanVideoTransformer3DWrapper,
         )
 
-        request = self._checkpoint_request(revision="refs/pr/18")
+        request = self._checkpoint_request()
         transformer_request = request.with_subfolder("transformer")
         transformer = self._build_transformer(
             xFuserHunyuanVideoTransformer3DWrapper,
             checkpoint_request=transformer_request,
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = HunyuanVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
+            quantization_config=te_quant,
+            **te_kwargs,
             **request.from_pretrained_kwargs(include_subfolder=False),
         )
         fix_llama_tokenizer_pretokenizer(

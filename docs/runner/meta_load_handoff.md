@@ -165,13 +165,21 @@ distinguishes `supports_local_blockwise` from `supports_standard_collectives`, a
 `validate_materialization_contract` rejects the latter for anything but `STANDARD_TRANSFORMER`.
 
 Still open from the earlier plan: routing text encoders through the blockwise fill on the replicated
-path, which still uses `broadcast_load` and so materializes a whole encoder before scattering. The
-video sweep put a number on what that costs. HunyuanVideo is the one model measured whose peak host
-memory does not improve at all under blockwise loading, 145.9G eager against 155.3G, and the fill logs
-show why: it holds host anon flat at 51.9G across all sixty transformer blocks, and the peak comes from
-the Llama text encoder and VAE that every rank still loads in full. Its declaration covers the
-transformer alone, so bringing the encoder inside this path is the next thing that would move that
-figure.
+path, which still uses `broadcast_load` and so materializes a whole encoder before scattering. On the
+sharded path this is done, including for HunyuanVideo, which the video sweep had left as the one model
+whose peak host memory did not improve at all: 145.9G eager against 155.3G blockwise. Nothing was
+wrong with the path — its declaration named only the transformer, and both meta paths take their
+components from `fsdp_strategy`, so its 14G Llama encoder was loaded whole by every rank. Declaring it
+puts blockwise at 102.2G with load-time VRAM halved, and the results doc has the table.
+
+Two things that leaves. Cosmos3-Super and Cosmos3-Nano are now the only supported runners whose
+declaration names no text encoder, and the same change is likely to apply to them; it was not made
+because this node has no Cosmos3 weights, so nothing here could tell a correct wrap path from a
+plausible one. That is the same reason the Krea-2 path was wrong for as long as it was. Second, an
+encoder is only offered the blockwise fill if its live tensor names can be proven against its
+checkpoint keys, and a refusal falls back to rank 0 loading it whole and broadcasting — still 1x the
+encoder rather than Nx, but not the flat cost. The Llama encoder maps exactly, 290 keys; a model whose
+encoder needs a fused or split conversion will take the fallback, and the log says which.
 
 Also worth knowing before running anything on this node: two of the cached repos, both Krea-2 variants,
 refuse file downloads to the token here, so runs need `HF_HUB_OFFLINE=1` to use the snapshots on disk.

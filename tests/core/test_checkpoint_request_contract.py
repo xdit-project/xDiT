@@ -193,6 +193,77 @@ def test_hub_resolution_propagates_request_kwargs(checkpoint, monkeypatch):
     ]
 
 
+def _fake_hub(monkeypatch, *, present, cached):
+    """A hub that only answers from the cache, as it does with no network."""
+
+    hub = types.ModuleType("huggingface_hub")
+    errors = types.ModuleType("huggingface_hub.errors")
+
+    class EntryNotFoundError(Exception):
+        pass
+
+    class LocalEntryNotFoundError(Exception):
+        pass
+
+    def download(*, filename, subfolder=None, **kwargs):
+        path = f"{subfolder}/{filename}" if subfolder else filename
+        if path not in present:
+            raise LocalEntryNotFoundError(path)
+        return f"/cache/{path}"
+
+    def try_to_load_from_cache(*, repo_id, filename, cache_dir=None, revision=None):
+        return f"/cache/{filename}" if filename in cached else None
+
+    hub.hf_hub_download = download
+    hub.try_to_load_from_cache = try_to_load_from_cache
+    errors.EntryNotFoundError = EntryNotFoundError
+    errors.LocalEntryNotFoundError = LocalEntryNotFoundError
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", errors)
+
+
+def test_offline_treats_a_name_the_cached_snapshot_lacks_as_absent(
+    checkpoint, monkeypatch
+):
+    """A single-file checkpoint has no shard index, and offline that must not be an error.
+
+    With no network there is one error for two situations: the repo does not carry this name,
+    and this name was never cached. FLUX.2-klein-4B ships its transformer as one file, so asking
+    for the index it does not have failed the whole load rather than falling through to the file
+    that is there. The component's own cached config tells the two apart.
+    """
+    _fake_hub(
+        monkeypatch,
+        present={"transformer/diffusion_pytorch_model.safetensors"},
+        cached={"transformer/config.json"},
+    )
+    request = checkpoint.CheckpointRequest(
+        "org/repo", subfolder="transformer", local_files_only=True
+    )
+
+    assert (
+        checkpoint.resolve_checkpoint_file(
+            request, "diffusion_pytorch_model.safetensors.index.json"
+        )
+        is None
+    )
+
+
+def test_offline_still_fails_when_nothing_of_the_component_is_cached(
+    checkpoint, monkeypatch
+):
+    """Absence has to be read off a snapshot that is actually here, or it is a guess."""
+    _fake_hub(monkeypatch, present=set(), cached=set())
+    request = checkpoint.CheckpointRequest(
+        "org/repo", subfolder="transformer", local_files_only=True
+    )
+
+    with pytest.raises(Exception, match="index.json"):
+        checkpoint.resolve_checkpoint_file(
+            request, "diffusion_pytorch_model.safetensors.index.json"
+        )
+
+
 def test_sharded_discovery_maps_keys_without_reading_tensors(checkpoint, tmp_path):
     component = tmp_path / "transformer"
     component.mkdir()

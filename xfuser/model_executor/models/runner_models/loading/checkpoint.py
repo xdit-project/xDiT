@@ -83,6 +83,23 @@ def _is_within(directory: str, path: str) -> bool:
         return False
 
 
+def _cached_component_config(request: CheckpointRequest) -> str | None:
+    """This component's cached config, or None when its snapshot is not cached."""
+
+    from huggingface_hub import try_to_load_from_cache
+
+    filename = "config.json"
+    if request.subfolder:
+        filename = f"{request.subfolder}/{filename}"
+    cached = try_to_load_from_cache(
+        repo_id=os.fspath(request.model_name_or_path),
+        filename=filename,
+        cache_dir=request.cache_dir,
+        revision=request.revision,
+    )
+    return cached if isinstance(cached, str) else None
+
+
 def resolve_checkpoint_file(request: CheckpointRequest, filename: str) -> str | None:
     """Resolve one request-relative file; only genuine absence maps to None."""
 
@@ -116,7 +133,13 @@ def resolve_checkpoint_file(request: CheckpointRequest, filename: str) -> str | 
             **request.hub_kwargs(),
         )
     except LocalEntryNotFoundError:
-        raise
+        # With no network, a name the repo does not carry and a name that was never
+        # cached raise the same error, since neither can be checked against the hub.
+        # The component's own config settles it: if that is cached then this snapshot
+        # is here, and the missing name is one this checkpoint does not use.
+        if _cached_component_config(request) is None:
+            raise
+        return None
     except EntryNotFoundError:
         return None
 

@@ -369,7 +369,7 @@
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Sequential offload moving submodules to the host between calls, with an FP8 transformer, on the torchao backend this arch selects. Sequential offload is an accelerate hook with no platform gate, so waiting for RDNA4 to test it left it untested everywhere. Ran first at two ranks, inherited from the RDNA4 case this replaces, and NCCL refused with a duplicate GPU: accelerate places the offloaded modules on the default device for every rank, so both ranks landed on one device and the first all-to-all failed. One rank is where this belongs, since offload exists to fit a model that does not fit; the multi-rank combination has no owner and should be refused rather than left to fail at the collective."
+      "quality_notes": "Sequential offload moving submodules to the host between calls, with an FP8 transformer, on the torchao backend this arch selects. Sequential offload is an accelerate hook with no platform gate, so waiting for RDNA4 to test it left it untested everywhere. One rank, so the offload is measured without a parallel degree in the way; rocm-flux1-fp8-replicated-sequential-offload is the same offload across two ranks."
     },
     {
       "id": "rdna4-wan22-hybrid-fsdp",
@@ -2183,6 +2183,71 @@
         "error_pattern": "does not support fully_shard_degree"
       },
       "quality_notes": "The HunyuanVideo 1.5 runners declare no fully_shard_degree capability at all, so the sharding flag is refused while the config is validated, before any load contract is selected. Asserted separately from the withheld reason because it is an earlier and stronger refusal: it holds however the load declaration later changes."
+    },
+    {
+      "id": "rocm-flux1-fp8-replicated-sequential-offload",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "replicated",
+        "offload",
+        "multi-rank",
+        "hub"
+      ],
+      "model": "FLUX.1-dev",
+      "model_family": "flux1",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "sequential",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-dev"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Offload across two ranks, which is what caught that Diffusers onloads to cuda:0 unless told otherwise: this failed in NCCL with a duplicate GPU because both ranks took that default, while group offload, which had always named the local device, was fine. Both whole-pipeline modes name it now, and this case is what holds them to it on hardware. Also verify peer ranks do not independently retain a full host copy of the replicated weights."
+    },
+    {
+      "id": "rocm-zimage-turbo-bf16-replicated-model-offload",
+      "tags": [
+        "rocm",
+        "bf16",
+        "replicated",
+        "offload",
+        "multi-rank",
+        "hub"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "model",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 2,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "The other whole-pipeline offload mode across two ranks, on a four-step model so the case is cheap, and with nothing quantized so a failure is the offload rather than a scale that did not survive a device move."
     },
     {
       "id": "rocm-krea2-fp8-eager-group-offload",

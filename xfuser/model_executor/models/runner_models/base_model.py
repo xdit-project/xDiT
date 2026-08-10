@@ -864,6 +864,10 @@ class xFuserModel(abc.ABC):
                 return meta_kwargs
         return {}, pipeline_config
 
+    def _local_onload_device(self) -> torch.device:
+        """The device this rank offloads to and from, which is never implicitly cuda:0."""
+        return torch.device(f"cuda:{get_world_group().local_rank}")
+
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
         if getattr(self.config, "use_spargeattn_head_balance", False):
@@ -885,8 +889,7 @@ class xFuserModel(abc.ABC):
             # one unmatched group -> OOM; they use leaf_level, which recurses.
             from diffusers.hooks import apply_group_offloading
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
-            local_rank = get_world_group().local_rank
-            onload_device = torch.device(f"cuda:{local_rank}")
+            onload_device = self._local_onload_device()
             block_level_names = set(self._get_compiled_pipe_components())
             for name, component in self.pipe.components.items():
                 if not isinstance(component, torch.nn.Module):
@@ -911,10 +914,13 @@ class xFuserModel(abc.ABC):
                     apply_group_offloading(module=component, **kwargs)
         elif self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
-            self.pipe.enable_sequential_cpu_offload()
+            # Diffusers defaults the onload device to cuda:0, which every rank would
+            # then share, so the first collective fails with a duplicate GPU. The
+            # group offload above already names the local device; these must too.
+            self.pipe.enable_sequential_cpu_offload(device=self._local_onload_device())
         elif self.config.enable_model_cpu_offload:
             log("Enabling model CPU offload...")
-            self.pipe.enable_model_cpu_offload()
+            self.pipe.enable_model_cpu_offload(device=self._local_onload_device())
 
     def _get_runtime_state_pipeline(self):
         return self.pipe

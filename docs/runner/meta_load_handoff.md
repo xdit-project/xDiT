@@ -126,16 +126,19 @@ disk-bound, not H2D-bound. Do not change `_read_device` on the strength of the w
 ## Coverage
 
 `python tools/load_support_matrix.py --format gaps --backend <backend>` reports where testing does not
-reach. The larger gap is not capability but coverage: most models declaring a memory-efficient load
-have no matrix case at all.
+reach. Every model on this node that declares a memory-efficient load and has usable weights has now
+been run through it — sixteen of them, image and video — so what remains is the eight cached runners
+their own declarations withhold and the models whose weights are not here.
 
 `tests/gpu_validation/supplementary/` holds the probe matrices this node used, with per-case
 `observed_on_gfx942` notes. FLUX.2-klein-4B passed eager, `fsdp_blockwise` at 4 ranks and `replicated`
 at 4 ranks, which is real coverage for a model the checked-in matrix has none for; those three cases
-can be landed. Z-Image-Turbo, Wan2.2-TI2V and FLUX.1-Kontext are staged but unproven.
+can be landed. Z-Image-Turbo, Wan2.2-TI2V and FLUX.1-Kontext are no longer staged: all three are in
+the checked-in matrix and all three have run on gfx950.
 
 Run supplementary cases **serially**: the single-process eager path binds port 29500 regardless of
-`PET_MASTER_PORT`, which only reaches torchrun. `seed_cache.py` re-seeds the four models these
+`PET_MASTER_PORT`, which only reaches torchrun. Multi-rank cases no longer collide on it, since the
+harness launches torchrun with `--standalone`. `seed_cache.py` re-seeds the four models these
 matrices need (about 150 GB, roughly four minutes).
 
 ## Resolved: the 8-rank divergence was not a load bug
@@ -162,4 +165,14 @@ distinguishes `supports_local_blockwise` from `supports_standard_collectives`, a
 `validate_materialization_contract` rejects the latter for anything but `STANDARD_TRANSFORMER`.
 
 Still open from the earlier plan: routing text encoders through the blockwise fill on the replicated
-path, which still uses `broadcast_load` and so materializes a whole encoder before scattering.
+path, which still uses `broadcast_load` and so materializes a whole encoder before scattering. The
+video sweep put a number on what that costs. HunyuanVideo is the one model measured whose peak host
+memory does not improve at all under blockwise loading, 145.9G eager against 155.3G, and the fill logs
+show why: it holds host anon flat at 51.9G across all sixty transformer blocks, and the peak comes from
+the Llama text encoder and VAE that every rank still loads in full. Its declaration covers the
+transformer alone, so bringing the encoder inside this path is the next thing that would move that
+figure.
+
+Also worth knowing before running anything on this node: two of the cached repos, both Krea-2 variants,
+refuse file downloads to the token here, so runs need `HF_HUB_OFFLINE=1` to use the snapshots on disk.
+The results doc records what that depends on.

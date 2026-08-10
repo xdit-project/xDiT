@@ -6,12 +6,15 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: thirty-six cases on 8× MI355X (`gfx950`), covering the
-memory-efficient load paths in bf16 and FP8 across six image models, all passing
-and all scored against an unquantized render.
-[Memory-efficient load results](meta_load_results.md) reports them, including two
-bugs the sweep found in combinations nothing had run before. Those records live on
-that node and are not checked in.
+What has run: a hundred and nine cases on 8× MI355X (`gfx950`), covering the
+memory-efficient load paths in bf16 and FP8 across sixteen models, ten image and
+six video, which is every model that node can load through those paths. A hundred
+and seven passed, every still image scored against an unquantized render and every
+clip checked frame by frame; the other two assert a rejection that holds only on
+`gfx942` and were correctly not run there.
+[Memory-efficient load results](meta_load_results.md) reports both sweeps,
+including the defects they found, each of them in a combination nothing had run
+before. Those records live on that node and are not checked in.
 
 The artifacts are:
 
@@ -40,12 +43,24 @@ python tools/gpu_validation.py --dry-run --tag smoke
 
 Each case is sampled the way its own model is meant to be sampled, from that
 model's entry in `.ci/benchmark_configs`, which the matrix carries under
-`sampling` alongside the source it was read from. There is no global default to
-fall back on: a model with no entry raises `UnknownSampling` and reports as a
-case that cannot run, rather than being rendered at someone else's step count.
-This matters beyond fairness — four steps at 512×512 left Z-Image an
-unconverged blob, and a model's step count and resolution also decide how much a
-numeric change moves its output, which is what the quality gate below measures.
+`sampling` alongside the source it was read from. A model no benchmark config
+covers may cite its own runner's `DefaultInputValues` instead, which is a
+declaration in this repository and is checked against the runner rather than
+taken on trust. There is no global default to fall back on: a model with neither
+raises `UnknownSampling` and reports as a case that cannot run, rather than being
+rendered at someone else's step count. This matters beyond fairness — four steps
+at 512×512 left Z-Image an unconverged blob, and a model's step count and
+resolution also decide how much a numeric change moves its output, which is what
+the quality gate below measures.
+
+A sampling entry may also carry what a model needs beyond a prompt: `num_frames`
+for a video model, `input_images` for one that edits a picture, and
+`runtime_args` for an argument the model requires and nothing else does, such as
+the task Wan2.2-TI2V must be given because it serves both `i2v` and `t2v`. Paths
+are written as environment placeholders, `${XDIT_INPUT_IMAGE}` and
+`${XDIT_WAN_INPUT_IMAGE}`, which resolve to the images the models' own benchmark
+configs pass. Unset, the affected cases record an `environment_mismatch` rather
+than running, which is the harness saying it was not given what the model needs.
 
 The matrix treats Transformers `4.x` and `5.x` as environment requirements; the
 runner does not install them. Before execution, it probes the installed
@@ -92,7 +107,8 @@ from those declarations, so two inputs stay hand-written:
 
 `tests/gpu_validation/profiles.json` holds what cannot be derived: which
 quantizations a hardware profile may attempt, how many ranks each placement gets,
-and which models need an input image the harness cannot supply.
+and which models need an input image. A model on that list is generated once its
+sampling entry names an image, and skipped while none does.
 
 `tests/gpu_validation/curated_cases.json` holds cases whose expected outcome is a
 claim about the world rather than about the code, which in practice means every
@@ -267,9 +283,15 @@ exists because an FP8 Qwen-Image run wrote a pure black 2048×2048 frame and was
 reported as passed: reference comparison had nothing to say about that model, so
 nothing looked at the image at all. The measure is spread rather than mean, since
 a night scene is legitimately dark but no legitimate render is uniform, and the
-floor sits two orders of magnitude below the flattest real render measured. An
-artifact with no still-image reader, a video, records as unmeasured rather than
-being credited with having drawn something.
+floor sits two orders of magnitude below the flattest real render measured.
+
+A video clip is read the same way, per frame as well as whole: twelve evenly
+spaced frames are decoded and the flattest of them is measured, so a clip that
+renders one good frame and then collapses to black cannot average its way past
+the floor. Twelve keeps the check cheap on a 129-frame clip while still sampling
+the whole timeline. Across every video case run so far the flattest sampled frame
+measured 0.21 or above against a floor of 0.01. An artifact nothing can decode
+records as unmeasured rather than being credited with having drawn something.
 
 ### Does it match an unquantized render
 
@@ -308,6 +330,10 @@ Four things about that path are deliberate:
   pictures of its prompt that score 0.6254 against each other, so on models like
   it a low score says a different sample came out, not that the load was wrong.
   `IDENTITY_STABLE_MODELS` holds the list and the argument.
+- **A video case records as `unscored` rather than being compared.** SSIM over a
+  clip would only decide identity-stable models, and no video model has been
+  measured to be one; the blank-output gate above still reads every clip, so a
+  collapsed render is still caught.
 
 Pass `--ssim-min` to override the floor a case would otherwise get. Treat the
 result as a gross-correctness check: it answers whether the model still drew the

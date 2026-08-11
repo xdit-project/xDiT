@@ -14,7 +14,9 @@ transformer is 128 GB, needs 128 GB eagerly against 29 filled. It also beats eag
 the control does not — sharding after materializing buys the device saving and pays for it on the host, up
 to 522 GB on Wan2.2-I2V where blockwise holds 88 GB, because every rank holds a whole copy while it waits
 to be cut down. Blockwise's host cost is flat across models, 68–104 GB on nineteen of the twenty, which is the
-useful property: it is a cost of the strategy rather than of the model. On the images, eager, the control
+useful property: it is a cost of the strategy rather than of the model. It is also faster than eager on
+seventeen of the twenty, and faster than the control on nineteen, so none of this is bought with load time.
+On the images, eager, the control
 and blockwise are indistinguishable: scored against the same single-rank render they agree to every digit
 the comparison reports, on all ten models scored, so the loading strategy costs nothing in quality.
 
@@ -28,55 +30,112 @@ report an environment mismatch for wanting `gfx942` alone. torch `2.9.1+gitff65f
 transformers `5.5.4`, diffusers `0.39.0.dev0` (`21ba39457`, the first sweep on `447e571ad`), AITER
 present, ROCm 6.16.2, Python 3.12.3, 288 GB per device, 3 TB host, `HF_HUB_OFFLINE=1`.
 
-Every column header is a measurement and the way the weights were placed. The four placements, in the
-order they appear:
+Each table below reports one measurement across every model, with the same five columns: one per
+placement. The placements, in the order the columns run:
 
 | Column (placement) | How the weights get to the device | Flags |
 | --- | --- | --- |
 | `eager` | Every component built in full on every rank, nothing sharded. The baseline. | none |
 | `fsdp eager`<br>(`fsdp_eager_fill`) | Built in full on every rank, then sharded — what a naive FSDP load does, and the control for the column beside it. | `--fully_shard_degree N` |
 | `fsdp block`<br>(`fsdp_blockwise`) | Built on meta, then filled and sharded one block at a time, so no rank ever holds the component whole. The streamed load. | `--fully_shard_degree N --memory_efficient_sharding` |
-| `repl`<br>(`replicated`) | Rank 0 reads each block and broadcasts it. Streamed too, but replicated rather than sharded, so every rank keeps a full copy. | `--memory_efficient_replicated_load` |
+| `block fp8` | `fsdp block`, quantizing each block on the way in. | the above plus `--use_fp8_gemms` |
+| `repl fp8` | Rank 0 reads each block, quantizes it and broadcasts it. Streamed too, but replicated rather than sharded, so every rank keeps a full copy. | `--memory_efficient_replicated_load --use_fp8_gemms` |
 
-`fsdp eager` and `fsdp block` are the two FSDP-sharded placements and differ only in how they fill;
-`fp8` on a column means that placement quantized on the way in (`--use_fp8_gemms`). `VRAM` is the peak on
-one device while the load is in flight, in GB, and `host` is peak host anonymous memory over the same
-window, also in GB; `load s` is how long that load took, in seconds. Ulysses across all ranks,
-`torch.compile` on, AITER attention. Every model at eight ranks except Ideogram-4 at six, whose 18
-attention heads do not divide eight ways. There is no quality column: every placement of a model scores
-the same, so a per-model number would report on the model rather than on the load, as
-[below](#how-to-read-the-numbers):
+`fsdp eager` and `fsdp block` are the two FSDP-sharded placements and differ only in how they fill.
+Ulysses across all ranks, `torch.compile` on, AITER attention. Every model at eight ranks except
+Ideogram-4 at six, whose 18 attention heads do not divide eight ways. There is no quality table: every
+placement of a model scores the same, so a per-model number would report on the model rather than on the
+load, as [below](#how-to-read-the-numbers).
 
-| Model | VRAM eager | VRAM fsdp eager | VRAM fsdp block | VRAM fsdp block fp8 | VRAM repl fp8 | host eager | host fsdp eager | host fsdp block | load s eager | load s fsdp block |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| FLUX.2-dev | 109 | 24 | 21 | 34 | 87 | 103 | 173 | 76 | 154 | 83 |
-| Qwen-Image | 58 | 17 | 19 | 16 | 43 | 68 | 111 | 75 | 79 | 48 |
-| Qwen-Image-Edit | 58 | 16 | 19 | 16 | 43 | 84 | 110 | 83 | 81 | 45 |
-| FLUX.2-klein-9B | 37 | 15 | 16 | 18 | 33 | 99 | 170 | 83 | 46 | 33 |
-| FLUX.2-klein-4B | 19 | 11 | 14 | 14 | 20 | 87 | 102 | 78 | 14 | 19 |
-| FLUX.1-dev | 36 | 15 | 16 | 19 | 29 | 102 | 188 | 86 | 48 | 32 |
-| FLUX.1-Kontext-dev | 36 | 13 | 16 | 15 | 29 | 102 | 184 | 76 | 48 | 30 |
-| Krea-2-Raw | 37 | 14 | 15 | 15 | 30 | 102 | 179 | 104 | 49 | 39 |
-| Krea-2-Turbo | 37 | 15 | 15 | 15 | 30 | 104 | 177 | 103 | 49 | 39 |
-| Z-Image | 24 | 11 | 14 | 13 | 22 | 119 | 127 | 77 | 30 | 26 |
-| Z-Image-Turbo | 24 | 11 | 14 | 13 | 23 | 148 | 180 | 68 | 37 | 34 |
-| Ideogram-4 | 55 | 28 | 30 | 26 | 41 | 424 | 433 | 186 | 234 | 172 |
-| HunyuanVideo | 42 | 14 | 15 | 15 | 35 | 146 | 159 | 102 | 54 | 36 |
-| Wan2.1-T2V | 42 | 14 | 21 | 21 | 33 | 328 | 343 | 88 | 94 | 56 |
-| Wan2.1-I2V | 47 | 16 | 21 | 21 | 36 | 368 | 372 | 84 | 102 | 51 |
-| Wan2.2-T2V | 69 | 18 | 19 | 17 | 48 | 493 | 523 | 84 | 152 | 80 |
-| Wan2.2-I2V | 69 | 18 | 19 | 17 | 48 | 492 | 522 | 88 | 152 | 80 |
-| Wan2.2-TI2V | 26 | 13 | 16 | 16 | 26 | 151 | 173 | 90 | 41 | 33 |
-| Cosmos3-Nano | 37 | 17 | 18 | 16 | 26 | 103 | 111 | 85 | 11 | 24 |
-| Cosmos3-Super | 128 | 30 | 29 | 23 | 77 | 103 | 106 | 89 | 42 | 75 |
+**Load-time VRAM**, the peak on the busiest device while the load is in flight, in GB. The figure these
+paths exist to move:
 
-Four things in that table need a note rather than a second look. **Ideogram-4** is the only model with a component
+| Model | eager | fsdp eager | fsdp block | block fp8 | repl fp8 |
+| --- | --- | --- | --- | --- | --- |
+| FLUX.2-dev | 109 | 24 | 21 | 34 | 87 |
+| Qwen-Image | 58 | 17 | 19 | 16 | 43 |
+| Qwen-Image-Edit | 58 | 16 | 19 | 16 | 43 |
+| FLUX.2-klein-9B | 37 | 15 | 16 | 18 | 33 |
+| FLUX.2-klein-4B | 19 | 11 | 14 | 14 | 20 |
+| FLUX.1-dev | 36 | 15 | 16 | 19 | 29 |
+| FLUX.1-Kontext-dev | 36 | 13 | 16 | 15 | 29 |
+| Krea-2-Raw | 37 | 14 | 15 | 15 | 30 |
+| Krea-2-Turbo | 37 | 15 | 15 | 15 | 30 |
+| Z-Image | 24 | 11 | 14 | 13 | 22 |
+| Z-Image-Turbo | 24 | 11 | 14 | 13 | 23 |
+| Ideogram-4 | 55 | 28 | 30 | 26 | 41 |
+| HunyuanVideo | 42 | 14 | 15 | 15 | 35 |
+| Wan2.1-T2V | 42 | 14 | 21 | 21 | 33 |
+| Wan2.1-I2V | 47 | 16 | 21 | 21 | 36 |
+| Wan2.2-T2V | 69 | 18 | 19 | 17 | 48 |
+| Wan2.2-I2V | 69 | 18 | 19 | 17 | 48 |
+| Wan2.2-TI2V | 26 | 13 | 16 | 16 | 26 |
+| Cosmos3-Nano | 37 | 17 | 18 | 16 | 26 |
+| Cosmos3-Super | 128 | 30 | 29 | 23 | 77 |
+
+**Host anonymous memory**, the peak over the same window, in GB. The cost the control pays for the column
+beside it:
+
+| Model | eager | fsdp eager | fsdp block | block fp8 | repl fp8 |
+| --- | --- | --- | --- | --- | --- |
+| FLUX.2-dev | 103 | 173 | 76 | 88 | 93 |
+| Qwen-Image | 68 | 111 | 75 | 78 | 84 |
+| Qwen-Image-Edit | 84 | 110 | 83 | 88 | 107 |
+| FLUX.2-klein-9B | 99 | 170 | 83 | 92 | 100 |
+| FLUX.2-klein-4B | 87 | 102 | 78 | 82 | 85 |
+| FLUX.1-dev | 102 | 188 | 86 | 87 | 91 |
+| FLUX.1-Kontext-dev | 102 | 184 | 76 | 81 | 80 |
+| Krea-2-Raw | 102 | 179 | 104 | 104 | 106 |
+| Krea-2-Turbo | 104 | 177 | 103 | 104 | 106 |
+| Z-Image | 119 | 127 | 77 | 77 | 79 |
+| Z-Image-Turbo | 148 | 180 | 68 | 74 | 72 |
+| Ideogram-4 | 424 | 433 | 186 | 194 | 182 |
+| HunyuanVideo | 146 | 159 | 102 | 105 | 106 |
+| Wan2.1-T2V | 328 | 343 | 88 | 105 | 99 |
+| Wan2.1-I2V | 368 | 372 | 84 | 99 | 99 |
+| Wan2.2-T2V | 493 | 523 | 84 | 94 | 84 |
+| Wan2.2-I2V | 492 | 522 | 88 | 96 | 93 |
+| Wan2.2-TI2V | 151 | 173 | 90 | 100 | 105 |
+| Cosmos3-Nano | 103 | 111 | 85 | 96 | 107 |
+| Cosmos3-Super | 103 | 106 | 89 | 95 | 115 |
+
+**Load duration**, in seconds. One run each on a shared node, so read these as indicative:
+
+| Model | eager | fsdp eager | fsdp block | block fp8 | repl fp8 |
+| --- | --- | --- | --- | --- | --- |
+| FLUX.2-dev | 154 | 152 | 83 | 81 | 93 |
+| Qwen-Image | 79 | 83 | 48 | 50 | 36 |
+| Qwen-Image-Edit | 81 | 84 | 45 | 45 | 50 |
+| FLUX.2-klein-9B | 46 | 51 | 33 | 34 | 37 |
+| FLUX.2-klein-4B | 14 | 17 | 19 | 22 | 24 |
+| FLUX.1-dev | 48 | 53 | 32 | 35 | 36 |
+| FLUX.1-Kontext-dev | 48 | 51 | 30 | 32 | 35 |
+| Krea-2-Raw | 49 | 53 | 39 | 39 | 38 |
+| Krea-2-Turbo | 49 | 51 | 39 | 39 | 38 |
+| Z-Image | 30 | 34 | 26 | 26 | 27 |
+| Z-Image-Turbo | 37 | 43 | 34 | 31 | 32 |
+| Ideogram-4 | 234 | 229 | 172 | 170 | 177 |
+| HunyuanVideo | 54 | 55 | 36 | 37 | 29 |
+| Wan2.1-T2V | 94 | 98 | 56 | 57 | 45 |
+| Wan2.1-I2V | 102 | 105 | 51 | 50 | 43 |
+| Wan2.2-T2V | 152 | 154 | 80 | 82 | 85 |
+| Wan2.2-I2V | 152 | 158 | 80 | 82 | 84 |
+| Wan2.2-TI2V | 41 | 46 | 33 | 33 | 35 |
+| Cosmos3-Nano | 11 | 70 | 24 | 22 | 25 |
+| Cosmos3-Super | 42 | 84 | 75 | 67 | 73 |
+
+Five things in those tables need a note rather than a second look. **Ideogram-4** is the only model with a component
 outside the path — its text encoder is built through `AutoModel` with `trust_remote_code`, so no
 manifest can know its names ahead of the load — and its 424 GB eager host figure is that encoder on
-every rank; blockwise still cuts it to 186. **Cosmos3-Nano and klein-4B load slower** blockwise than eager,
-11s against 24s and 14s against 19s, which is the fill's per-block collective costing more than it saves
-on a transformer small enough to materialize. Nano still halves its load VRAM; klein-4B, the smallest
-model here, cuts it by a third. **The `fsdp block fp8`
+every rank; blockwise still cuts it to 186. **The control is the slowest placement**, not just the
+hungriest: it is behind eager on eighteen of the twenty models, because it does eager's work and then a
+sharding pass, and on Cosmos3-Nano that is 70s against 11s. So the sharding it adds to eager buys device
+memory at a cost in host memory and in time, which is the whole reason to fill blockwise instead.
+**Three models load slower** blockwise than eager. Cosmos3-Nano at 24s against 11s and klein-4B at 19s
+against 14s are the fill's per-block collective costing more than it saves on a transformer small enough
+to materialize, and both still cut their load VRAM, Nano by half and klein-4B, the smallest model here, by
+a third. Cosmos3-Super is the third, 75s against 42s, which that explanation does not cover on the largest
+transformer in the table; with one run per cell it is a thread to pull rather than a result. **The `block fp8`
 column also fills and quantizes the text encoder** wherever the model declares targets for it, so it is
 not a pure quantization delta, and on FLUX.2-dev, klein-9B and FLUX.1-dev that makes the quantized fill
 dearer than the bf16 one. **`repl fp8` is consistently the dearest of the three** memory-efficient

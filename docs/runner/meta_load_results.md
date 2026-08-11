@@ -16,9 +16,8 @@ sharding after materializing buys the device saving and pays for it on the host,
 Wan2.2-I2V where blockwise holds 88 GB, because every rank holds a whole copy while it waits to be cut
 down. Blockwise's host cost is flat across models, 68–104 GB on nineteen of the twenty, which is the
 useful property: it is a cost of the strategy rather than of the model. On the images, eager, the control
-and blockwise score identically against a single-rank render, to four decimals on every model, so the
-loading strategy contributes nothing on top of the parallelism, and the two quantized paths land within
-0.009 of each other everywhere — far closer than either is to bf16.
+and blockwise are indistinguishable: scored against the same single-rank render they agree to every digit
+the comparison reports, on all ten models scored, so the loading strategy costs nothing in quality.
 
 Read this with [the validation handoff](gpu_validation_handoff.md) for how the harness plans, runs and
 scores a case, and [the meta-load handoff](meta_load_handoff.md) for the node's setup.
@@ -33,32 +32,33 @@ present, ROCm 6.16.2, Python 3.12.3, 288 GB per device, 3 TB host, `HF_HUB_OFFLI
 Every model at the rank count it is served at, Ulysses across all of them, `torch.compile` on, AITER
 attention. Each column names a measurement and the placement it was measured on. `VRAM` is the peak on
 one device while the load is in flight, in GB, and `host` is peak host anonymous memory over the same
-window, also in GB; `load s` is how long that load took. `SSIM` is against the same model's single-rank
-eager render. `+fp8` is the blockwise fill quantizing as it goes and `repl+fp8` the replicated broadcast
-doing the same:
+window, also in GB; `load s` is how long that load took. `+fp8` is the blockwise fill quantizing as it
+goes and `repl+fp8` the replicated broadcast doing the same. There is no quality column: every placement of
+a model scores the same, so a per-model number would report on the model rather than on the load, as
+[below](#how-to-read-the-numbers):
 
-| Model | ranks | VRAM eager | VRAM control | VRAM blockwise | VRAM +fp8 | VRAM repl+fp8 | host eager | host control | host blockwise | load s eager | load s blockwise | SSIM bf16 | SSIM fp8 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| FLUX.2-dev | 8 | 109 | 24 | 21 | 34 | 87 | 103 | 173 | 76 | 154 | 83 | 0.998 | 0.901 |
-| Qwen-Image | 8 | 58 | 17 | 19 | 16 | 43 | 68 | 111 | 75 | 79 | 48 | 0.992 | 0.575 |
-| Qwen-Image-Edit | 8 | 58 | 16 | 19 | 16 | 43 | 84 | 110 | 83 | 81 | 45 | 0.987 | 0.950 |
-| FLUX.2-klein-9B | 8 | 37 | 15 | 16 | 18 | 33 | 99 | 170 | 83 | 46 | 33 | 0.973 | 0.888 |
-| FLUX.2-klein-4B | 8 | 19 | 11 | 14 | 14 | 20 | 87 | 102 | 78 | 14 | 19 | - | - |
-| FLUX.1-dev | 8 | 36 | 15 | 16 | 19 | 29 | 102 | 188 | 86 | 48 | 32 | 0.995 | 0.974 |
-| FLUX.1-Kontext-dev | 8 | 36 | 13 | 16 | 15 | 29 | 102 | 184 | 76 | 48 | 30 | 0.993 | 0.810 |
-| Krea-2-Raw | 8 | 37 | 14 | 15 | 15 | 30 | 102 | 179 | 104 | 49 | 39 | 0.934 | 0.940 |
-| Krea-2-Turbo | 8 | 37 | 15 | 15 | 15 | 30 | 104 | 177 | 103 | 49 | 39 | 0.858 | 0.660 |
-| Z-Image | 8 | 24 | 11 | 14 | 13 | 22 | 119 | 127 | 77 | 30 | 26 | 0.936 | 0.635 |
-| Z-Image-Turbo | 8 | 24 | 11 | 14 | 13 | 23 | 148 | 180 | 68 | 37 | 34 | 0.993 | 0.733 |
-| Ideogram-4 | 6 | 55 | 28 | 30 | 26 | 41 | 424 | 433 | 186 | 234 | 172 | - | - |
-| HunyuanVideo | 8 | 42 | 14 | 15 | 15 | 35 | 146 | 159 | 102 | 54 | 36 | - | - |
-| Wan2.1-T2V | 8 | 42 | 14 | 21 | 21 | 33 | 328 | 343 | 88 | 94 | 56 | - | - |
-| Wan2.1-I2V | 8 | 47 | 16 | 21 | 21 | 36 | 368 | 372 | 84 | 102 | 51 | - | - |
-| Wan2.2-T2V | 8 | 69 | 18 | 19 | 17 | 48 | 493 | 523 | 84 | 152 | 80 | - | - |
-| Wan2.2-I2V | 8 | 69 | 18 | 19 | 17 | 48 | 492 | 522 | 88 | 152 | 80 | - | - |
-| Wan2.2-TI2V | 8 | 26 | 13 | 16 | 16 | 26 | 151 | 173 | 90 | 41 | 33 | - | - |
-| Cosmos3-Nano | 8 | 37 | 17 | 18 | 16 | 26 | 103 | 111 | 85 | 11 | 24 | - | - |
-| Cosmos3-Super | 8 | 128 | 30 | 29 | 23 | 77 | 103 | 106 | 89 | 42 | 75 | - | - |
+| Model | ranks | VRAM eager | VRAM control | VRAM blockwise | VRAM +fp8 | VRAM repl+fp8 | host eager | host control | host blockwise | load s eager | load s blockwise |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FLUX.2-dev | 8 | 109 | 24 | 21 | 34 | 87 | 103 | 173 | 76 | 154 | 83 |
+| Qwen-Image | 8 | 58 | 17 | 19 | 16 | 43 | 68 | 111 | 75 | 79 | 48 |
+| Qwen-Image-Edit | 8 | 58 | 16 | 19 | 16 | 43 | 84 | 110 | 83 | 81 | 45 |
+| FLUX.2-klein-9B | 8 | 37 | 15 | 16 | 18 | 33 | 99 | 170 | 83 | 46 | 33 |
+| FLUX.2-klein-4B | 8 | 19 | 11 | 14 | 14 | 20 | 87 | 102 | 78 | 14 | 19 |
+| FLUX.1-dev | 8 | 36 | 15 | 16 | 19 | 29 | 102 | 188 | 86 | 48 | 32 |
+| FLUX.1-Kontext-dev | 8 | 36 | 13 | 16 | 15 | 29 | 102 | 184 | 76 | 48 | 30 |
+| Krea-2-Raw | 8 | 37 | 14 | 15 | 15 | 30 | 102 | 179 | 104 | 49 | 39 |
+| Krea-2-Turbo | 8 | 37 | 15 | 15 | 15 | 30 | 104 | 177 | 103 | 49 | 39 |
+| Z-Image | 8 | 24 | 11 | 14 | 13 | 22 | 119 | 127 | 77 | 30 | 26 |
+| Z-Image-Turbo | 8 | 24 | 11 | 14 | 13 | 23 | 148 | 180 | 68 | 37 | 34 |
+| Ideogram-4 | 6 | 55 | 28 | 30 | 26 | 41 | 424 | 433 | 186 | 234 | 172 |
+| HunyuanVideo | 8 | 42 | 14 | 15 | 15 | 35 | 146 | 159 | 102 | 54 | 36 |
+| Wan2.1-T2V | 8 | 42 | 14 | 21 | 21 | 33 | 328 | 343 | 88 | 94 | 56 |
+| Wan2.1-I2V | 8 | 47 | 16 | 21 | 21 | 36 | 368 | 372 | 84 | 102 | 51 |
+| Wan2.2-T2V | 8 | 69 | 18 | 19 | 17 | 48 | 493 | 523 | 84 | 152 | 80 |
+| Wan2.2-I2V | 8 | 69 | 18 | 19 | 17 | 48 | 492 | 522 | 88 | 152 | 80 |
+| Wan2.2-TI2V | 8 | 26 | 13 | 16 | 16 | 26 | 151 | 173 | 90 | 41 | 33 |
+| Cosmos3-Nano | 8 | 37 | 17 | 18 | 16 | 26 | 103 | 111 | 85 | 11 | 24 |
+| Cosmos3-Super | 8 | 128 | 30 | 29 | 23 | 77 | 103 | 106 | 89 | 42 | 75 |
 
 Four things in that table need a note rather than a second look. **Ideogram-4** is the only model with a component
 outside the path — its text encoder is built through `AutoModel` with `trust_remote_code`, so no
@@ -181,12 +181,15 @@ now refused before they can waste a load.
   over devices, so it is comparable across rank counts. It is the figure these paths exist to move.
 - **Host anon** is the container's anonymous pages, which is what the OOM killer watches, and is not
   summed over ranks. Page cache is excluded: the kernel reclaims it under pressure, so it is not a cost.
-- **SSIM** is against the same model's single-rank eager render with `torch.compile` disabled on both
-  sides, from a separate scoring pass whose timings are kept out of the columns above. It is a
-  gross-correctness check, not a quality assessment: it answers whether the model still drew the
-  picture. Only Z-Image-Turbo's is a verdict; a model that redraws its sample under any numeric change
-  cannot be judged by this metric, so the rest are observations. See `IDENTITY_STABLE_MODELS` in
-  `tools/gpu_validation.py`.
+- **Quality is a property of the model here, not of the load.** SSIM is measured against the same model's
+  single-rank eager render with `torch.compile` disabled on both sides, in a separate scoring pass whose
+  timings are kept out of the columns above. On every model scored, eager, the control and blockwise
+  return the same score to every digit reported, so no score in that pass is attributable to how the
+  weights were loaded: what is left is the parallelism, and whether the model redraws its sample under any
+  numeric change. Only Z-Image-Turbo's score is a verdict for that reason; see `IDENTITY_STABLE_MODELS` in
+  `tools/gpu_validation.py`. Quantizing does move the score, by construction and by a model-dependent
+  amount, which is why the fp8 numbers are not reported beside the memory a quantized load saves —
+  `tools/validation_report.py` prints the per-case scores.
 - **Video is gated, not compared.** Twelve evenly spaced frames of each clip are read for having
   rendered anything, so a clip that collapses after one good frame cannot average past the floor. The
   closest any real clip came to the 0.01 floor was 0.2149, twenty times above it.

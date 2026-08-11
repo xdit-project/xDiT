@@ -30,9 +30,9 @@ def _load_module(path, name):
 @pytest.fixture(scope="module")
 def modules():
     return SimpleNamespace(
-        adapter=_load_module(ADAPTER_PATH, "roadmap5_text_encoder_adapter"),
-        backends=_load_module(BACKENDS_PATH, "roadmap5_fp8_backends"),
-        contracts=_load_module(CONTRACTS_PATH, "roadmap5_contracts"),
+        adapter=_load_module(ADAPTER_PATH, "te_framework_adapter"),
+        backends=_load_module(BACKENDS_PATH, "te_framework_backends"),
+        contracts=_load_module(CONTRACTS_PATH, "te_framework_contracts"),
     )
 
 
@@ -62,7 +62,7 @@ def test_import_has_no_diffusers_or_transformers_dependency(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr("builtins.__import__", guarded)
-    _load_module(ADAPTER_PATH, "roadmap5_adapter_import_probe")
+    _load_module(ADAPTER_PATH, "te_adapter_import_probe")
 
 
 def test_transformers_5_probe_is_lazy_and_actionable(modules):

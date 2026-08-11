@@ -36,7 +36,7 @@ def setup_distributed():
     Scoped to the module and unwound rather than left up for the session: the rendezvous
     variables are read by any process started later, so a test that spawns workers of its
     own inherits RANK=0 and WORLD_SIZE=1 from here and hangs waiting for a rendezvous that
-    has already happened. test_roadmap2_distributed does exactly that.
+    has already happened. test_multirank_load_and_sharding does exactly that.
     """
     started = not dist.is_initialized()
     previous = {

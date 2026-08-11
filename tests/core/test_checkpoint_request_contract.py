@@ -16,7 +16,7 @@ CHECKPOINT_PATH = (
 
 def _load_checkpoint_module():
     spec = importlib.util.spec_from_file_location(
-        "roadmap3_checkpoint", CHECKPOINT_PATH
+        "checkpoint_request_under_test", CHECKPOINT_PATH
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

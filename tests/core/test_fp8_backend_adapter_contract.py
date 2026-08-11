@@ -26,8 +26,8 @@ def _load_module(path, name):
 
 @pytest.fixture(scope="module")
 def modules():
-    contracts = _load_module(CONTRACTS_PATH, "roadmap4_contracts")
-    backends = _load_module(BACKENDS_PATH, "roadmap4_fp8_backends")
+    contracts = _load_module(CONTRACTS_PATH, "fp8_adapter_contracts")
+    backends = _load_module(BACKENDS_PATH, "fp8_adapter_backends")
     return SimpleNamespace(contracts=contracts, backends=backends)
 
 

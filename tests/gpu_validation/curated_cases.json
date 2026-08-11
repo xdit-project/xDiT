@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "External GPU end-to-end validation matrix for loading and quantization roadmap task 8. Entries are plans, not results.",
+  "description": "External GPU end-to-end validation matrix for the loading and quantization paths. Entries are plans, not results.",
   "rationale": "Cases written by hand because their expected outcome is a claim about the world rather than about the code: which archs AITER builds FP4 kernels for, which torch versions can shard uint8 MXFP4, which inputs a model needs. A generator reading the same probe functions the runner calls could only assert that the code agrees with itself. These win any collision with a generated case, so their IDs and result history stay stable.",
   "defaults": {
     "output_root": "gpu-validation-output",

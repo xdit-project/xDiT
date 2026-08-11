@@ -1,4 +1,4 @@
-"""Spawned distributed regressions for roadmap task 2."""
+"""Spawned two-rank regressions: a load that fails must fail on every rank, not hang."""
 
 import queue
 import time

@@ -527,7 +527,7 @@ def _unsupported_error(contract):
 
 
 def select_fp8_backend(contract, *, capabilities: Fp8BackendCapabilities):
-    """Select exactly the backend in the task-3 contract or fail explicitly."""
+    """Select exactly the backend the contract names, or fail explicitly."""
 
     format_value = contract.requested_format.value
     backend_value = contract.selected_backend.value

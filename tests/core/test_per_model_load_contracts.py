@@ -1,4 +1,8 @@
-"""Task-6 contracts for incremental model loading coverage.
+"""Load contracts for the individual models that needed one of their own.
+
+Each test here is about a named model whose checkpoint, encoder or wrapper made it
+the exception: HunyuanVideo's pinned revision and Llama encoder, LTX's withheld
+declaration, Krea-2's excluded text encoder, the runners on dedicated adapters.
 
 The AST checks stay dependency-light. Model API checks are guarded so a core
 test environment without Diffusers can still enforce the declarations.
@@ -116,7 +120,7 @@ def _call_keywords(filename, class_name, attribute):
 
 def _load_contracts():
     spec = importlib.util.spec_from_file_location(
-        "roadmap6_loading_contracts", CONTRACTS
+        "per_model_loading_contracts", CONTRACTS
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

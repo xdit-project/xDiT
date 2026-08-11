@@ -1,4 +1,5 @@
-"""Dependency-free structural checks for roadmap task 2."""
+"""Dependency-free structural checks on the load path: who owns a quantization flag,
+which helpers the collective fill requires, and what survives a disk fill."""
 
 import ast
 from pathlib import Path

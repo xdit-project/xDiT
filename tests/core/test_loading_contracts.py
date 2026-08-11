@@ -20,7 +20,7 @@ def _load_module(path, name):
 
 @pytest.fixture(scope="module")
 def contracts():
-    return _load_module(CONTRACTS_PATH, "roadmap3_loading_contracts")
+    return _load_module(CONTRACTS_PATH, "loading_contracts_under_test")
 
 
 def test_declaration_defaults_are_explicitly_unsupported(contracts):

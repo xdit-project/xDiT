@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "validation_status": "NOT RUN",
-  "description": "External GPU end-to-end validation matrix for loading and quantization roadmap task 8. Entries are plans, not results.",
+  "description": "External GPU end-to-end validation matrix for the loading and quantization paths. Entries are plans, not results.",
   "generated_by": "tools/generate_validation_matrix.py",
   "defaults": {
     "output_root": "gpu-validation-output",

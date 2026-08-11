@@ -1,9 +1,7 @@
 import abc
 import torch
 import copy
-import argparse
 import json
-import functools
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field
@@ -12,24 +10,14 @@ import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
-from xfuser.compat import (
-    is_diffusers_import_error,
-    load_distvae_parallel_context,
-    load_distvae_vae,
-)
-from xfuser.config import args, xFuserArgs
+from xfuser.compat import is_diffusers_import_error
+from xfuser.config import xFuserArgs
 from xfuser.envs import (
     PACKAGES_CHECKER,
-    get_platform,
-    restore_torch_group_norm_for_distvae,
     _is_hip,
     _is_cuda,
 )
-from xfuser.core.distributed.parallel_state import (
-    get_fs_group,
-    get_vae_parallel_group,
-    get_vae_parallel_world_size,
-)
+from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
@@ -38,9 +26,12 @@ from xfuser.core.utils.runner_utils import (
     quantize_linear_layers_to_fp8_blockscale,
     quantize_linear_layers_to_fp4,
     quantize_linear_layers_to_nvfp4,
-    convert_model_convs_to_channels_last,
     _use_aiter_fp8_rdna4,
     rgetattr,
+)
+from xfuser.model_executor.models.runner_models.vae_manager import (
+    VAEManager,
+    validate_vae_config,
 )
 
 from xfuser.core.distributed import (
@@ -57,10 +48,6 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
-
-vae_parallel, vae_tile_parallel, vae_tiling = load_distvae_vae()
-ParallelContext = load_distvae_parallel_context()
-
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -258,6 +245,7 @@ class xFuserModel(abc.ABC):
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
+        self._vae_manager = VAEManager(config, self.capabilities, self.settings)
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -335,30 +323,7 @@ class xFuserModel(abc.ABC):
         if getattr(self.config, "use_spargeattn_head_balance", False):
             log("Enabling Sparge block-sparse head balancing...")
 
-        tiling_flag = self._tiling_flag()
-        for vae in self._decoding_vaes():
-            if self.config.enable_slicing:
-                vae_tiling.require_vae_support(vae, "slicing", "--enable_slicing")
-                log(f"Enabling VAE slicing on {type(vae).__name__}...")
-                vae.enable_slicing()
-
-            applied_shape = None
-            if self._tiles(vae):
-                # Before a requested shape changes it, so a refusal below can name the VAE's
-                # native window.
-                native_shape = vae_tiling.tile_shape(vae)
-                if tiling_flag is not None:
-                    vae_tiling.require_vae_support(vae, "tiling", tiling_flag)
-                    log(f"Enabling VAE tiling on {type(vae).__name__}...")
-                    vae.enable_tiling()
-                applied_shape = self._apply_vae_tile_shape(vae)
-                # After the window, never before: exact output-pixel overlap is planned against
-                # the final per-axis tile shape.
-                self._apply_vae_tile_overlap(vae)
-                self._check_tiles_against_parallel_vae(vae, native_shape)
-                self._install_vae_tiled_decode(vae)
-            # Installed either way, so a decode that OOMs with tiling off still says so.
-            self._install_vae_decode_guard(vae, applied_shape)
+        self._vae_manager.enable_options(self._decoding_vaes())
 
         if self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
@@ -368,93 +333,15 @@ class xFuserModel(abc.ABC):
             self.pipe.enable_model_cpu_offload()
 
 
-    def _tiling_flag(self) -> Optional[str]:
-        """ The flag asking this run to tile its VAE decode, None where none does """
-        # Either knob is a request to tile, so either turns tiling on by itself. Sizing the
-        # window would otherwise mean passing --enable_tiling as well, which tiles every stage
-        # to reach the one that ran out of memory.
-        for asked, flag in (
-            (self.config.enable_tiling, "--enable_tiling"),
-            (
-                getattr(self.config, "vae_tile_size_height", None) is not None,
-                "--vae_tile_size_height",
-            ),
-            (
-                getattr(self.config, "vae_tile_size_width", None) is not None,
-                "--vae_tile_size_width",
-            ),
-            (
-                getattr(self.config, "vae_tile_overlap_height", None) is not None,
-                "--vae_tile_overlap_height",
-            ),
-            (
-                getattr(self.config, "vae_tile_overlap_width", None) is not None,
-                "--vae_tile_overlap_width",
-            ),
-        ):
-            if asked:
-                return flag
-        return None
-
-    def _tiles(self, vae) -> bool:
-        """ Whether this VAE's decode will be cut into tiles """
-        # Off the VAE as well as off the config, because a model can arrive already tiling: LTX
-        # 2.3 turns it on for its stage-2 VAE at load, where nothing on the command line says so.
-        #
-        # Asked in the two places that have to agree - where the tiled decode is installed, and
-        # where the parallel VAE chooses between dealing whole tiles out and sharding the rows
-        # inside each one - so it is answered once. Disagreeing is not a slower decode but a hung
-        # one: reading the config alone left a tiling VAE on the sharding path, where a tile
-        # holding fewer latent rows than the group leaves the surplus ranks indexing off the end
-        # of a split the rest are waiting in.
-        return self._tiling_flag() is not None or getattr(vae, "use_tiling", False)
-
     def _decoding_vaes(self) -> List:
-        """ Every VAE a run decodes through, staged models included """
-        # A model that decodes in stages loads a second pipeline with its own VAE, and the later
-        # stage is the one at full resolution, so leaving it out would aim the requested tile
-        # shape at the smaller decode. Collected here by name rather than left to each subclass,
-        # since a subclass that forgets gets no error, only flags that miss the largest decode.
-        vaes = []
-        for pipe in (self.pipe, getattr(self, "second_pipe", None)):
-            vae = getattr(pipe, "vae", None)
-            # Stages sometimes share one VAE, which must not be wrapped or sized twice.
-            if vae is not None and not any(vae is seen for seen in vaes):
-                vaes.append(vae)
-        return vaes
+        """Forward staged VAE discovery to the VAE manager."""
+        return self._vae_manager.decoding_vaes(
+            self.pipe, getattr(self, "second_pipe", None)
+        )
 
     def _setup_parallel_vae(self) -> None:
-        """ Shard VAE decode, and encode where the model declares it, across the VAE group """
-        coordinator = get_vae_parallel_group()
-        vae_group = coordinator.device_group
-        tile_context = ParallelContext(
-            group=vae_group,
-            rank=coordinator.rank_in_group,
-            world_size=coordinator.world_size,
-            patch_dim=-2,
-            global_ranks=tuple(coordinator.ranks),
-        )
-        log(f"VAE parallel group: world_size={coordinator.world_size}, "
-            f"rank={coordinator.rank_in_group}", debug=True)
-        # Tiling has already divided the decode into independent pieces, and sharding divides
-        # each piece again: DistVAE splits the rows of every tile it is handed, so the exchanges
-        # that split costs are paid per tile rather than per decode. Where the tiling loop is one
-        # xFuser owns, whole tiles go out to the ranks instead and the decoder is left alone,
-        # each rank decoding a tile the way one GPU would. _enable_options installs that, once
-        # the window whose tiles are being dealt out has been settled.
-        for vae in self._decoding_vaes():
-            if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
-                vae_tile_parallel.mark(vae, tile_context)
-                log(f"Parallel VAE will deal whole tiles out to the group on "
-                    f"{type(vae).__name__}, rather than shard the rows within each tile.")
-            else:
-                adapter = vae_parallel.parallelize_decoder(vae, vae_group)
-                log(f"Parallel VAE decoder enabled on {type(vae).__name__} via {adapter}.")
-            # Only an I2V or V2V model encodes anything worth sharding, so this is a capability
-            # rather than a flag: there is nothing for a user to decide.
-            if self.capabilities.use_parallel_vae_encoder:
-                adapter = vae_parallel.parallelize_encoder(vae, vae_group)
-                log(f"Parallel VAE encoder enabled on {type(vae).__name__} via {adapter}.")
+        """Forward parallel VAE setup for subclass compatibility."""
+        self._vae_manager.setup_parallel_vae(self._decoding_vaes())
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
@@ -523,7 +410,7 @@ class xFuserModel(abc.ABC):
         if not possible_task and self.settings.valid_tasks:
             raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.settings.valid_tasks}")
         if config.dataset_path and not config.batch_size:
-            raise ValueError(f"Dataset path specified without batch size. Please specify batch size for dataset inference.")
+            raise ValueError("Dataset path specified without batch size. Please specify batch size for dataset inference.")
 
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
@@ -544,62 +431,11 @@ class xFuserModel(abc.ABC):
                         f"NVFP4 GEMMs require CUDA capability >= 10.0 (Blackwell). "
                         f"Detected: {torch.cuda.get_device_capability()}"
                     )
-        if config.use_parallel_vae:
-            if not packages_info.get("has_distvae", False):
-                raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
-            if restore_torch_group_norm_for_distvae():
-                log("AITER GroupNorm cannot be sharded. Reverting to torch GroupNorm so that "
-                    "--use_parallel_vae can recognise the norms it has to replace.")
-
-        height = getattr(config, "vae_tile_size_height", None)
-        width = getattr(config, "vae_tile_size_width", None)
-        height_asked = height is not None
-        width_asked = width is not None
-        if height_asked != width_asked:
-            raise ValueError(
-                "--vae_tile_size_height and --vae_tile_size_width must be provided together."
-            )
-        for value, flag in (
-            (height, "--vae_tile_size_height"),
-            (width, "--vae_tile_size_width"),
-        ):
-            if value is not None and value <= 0:
-                raise ValueError(f"{flag} must be positive, got {value}.")
-        if height_asked and not self.capabilities.enable_tiling:
-            raise ValueError(
-                "--vae_tile_size_height and --vae_tile_size_width decode the VAE in tiles, "
-                f"which model {self.settings.model_name} does not support."
-            )
+        validate_vae_config(config, self.capabilities, self.settings)
         
         if config.distilled_transformer_path or config.distilled_transformer_2_path:
             if not self.capabilities.supports_distilled_weights:
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
-
-        overlap_height = getattr(config, "vae_tile_overlap_height", None)
-        overlap_width = getattr(config, "vae_tile_overlap_width", None)
-        overlap_height_asked = overlap_height is not None
-        overlap_width_asked = overlap_width is not None
-        if overlap_height_asked != overlap_width_asked:
-            raise ValueError(
-                "--vae_tile_overlap_height and --vae_tile_overlap_width must be provided "
-                "together."
-            )
-        for value, flag in (
-            (overlap_height, "--vae_tile_overlap_height"),
-            (overlap_width, "--vae_tile_overlap_width"),
-        ):
-            if value is not None and value < 0:
-                raise ValueError(
-                    f"{flag} must be non-negative, got {value}."
-                )
-        if overlap_height_asked:
-            if not self.capabilities.enable_tiling:
-                raise ValueError(
-                    "--vae_tile_overlap_height and --vae_tile_overlap_width set the exact "
-                    "output-pixel overlap of a tiled VAE decode, "
-                    f"which model {self.settings.model_name} does not support."
-                )
-
 
     def _get_compile_mode(self) -> str:
         # Overrides should return "default" when PACKAGES_CHECKER._on_rdna4():
@@ -739,7 +575,7 @@ class xFuserModel(abc.ABC):
             for iteration in range(self.config.warmup_calls):
                 log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
                 self._run_timed_pipe(input_args)
-            log(f"Warmup complete.")
+            log("Warmup complete.")
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
@@ -820,7 +656,7 @@ class xFuserModel(abc.ABC):
                 export_to_video(video, output_path, fps=self.settings.fps)
                 log(f"Output video saved to {output_path}")
         else:
-            raise NotImplementedError(f"No output to save.")
+            raise NotImplementedError("No output to save.")
 
     def save_timings(self, timings: list) -> None:
         timing_file_name = f"{self.config.output_directory}/timings.json"
@@ -1178,277 +1014,8 @@ class xFuserModel(abc.ABC):
         get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
 
     def _convert_vae_to_channels_last(self) -> None:
-        """ Convert every VAE a run decodes through to channels last """
-        # Every VAE, not only pipe.vae: a model that decodes in stages keeps the full-resolution
-        # decode in a second pipeline, so reaching for pipe.vae alone converts the small decode
-        # and leaves the one this is for untouched. Every other VAE step here walks the same list.
-        for vae in self._decoding_vaes():
-            self._convert_one_vae_to_channels_last(vae)
-
-    def _convert_one_vae_to_channels_last(self, vae) -> None:
-        # Once only. The convolutions can be converted again harmlessly, but the wrapper below
-        # replaces decode, and installing it over itself would put a second copy of the same
-        # conversion in front of every decode for the rest of the process.
-        if getattr(vae, "_xfuser_decode_channels_last", False):
-            return
-        convert_model_convs_to_channels_last(vae)
-
-        original_decode = vae.decode
-        memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
-
-        @functools.wraps(original_decode)
-        def decode_wrapper(*args, **kwargs):
-            if args:
-                args = list(args)
-                args[0] = args[0].to(memory_format=memory_format)
-                args = tuple(args)
-            elif "z" in kwargs:
-                kwargs["z"] = kwargs["z"].to(memory_format=memory_format)
-            output = original_decode(*args, **kwargs)
-            return output
-
-        vae.decode = decode_wrapper
-        vae._xfuser_decode_channels_last = True
-
-    def _requested_vae_tile_shape(self) -> Optional[Tuple[int, int]]:
-        height = getattr(self.config, "vae_tile_size_height", None)
-        width = getattr(self.config, "vae_tile_size_width", None)
-        if height is None or width is None:
-            return None
-        return height, width
-
-    def _requested_vae_tile_overlap(self) -> Optional[Tuple[int, int]]:
-        height = getattr(self.config, "vae_tile_overlap_height", None)
-        width = getattr(self.config, "vae_tile_overlap_width", None)
-        if height is None or width is None:
-            return None
-        return height, width
-
-    def _apply_vae_tile_shape(self, vae) -> Optional[Tuple[int, int]]:
-        """The exact shape set on this VAE, or None where it keeps its native window."""
-        shape = self._requested_vae_tile_shape()
-        if shape is None:
-            return None
-        height, width = shape
-        plan = vae_tiling.tile_shape_plan(vae, height, width)
-        if plan is None:
-            native = vae_tiling.tile_shape(vae)
-            native_shown = (
-                f" Its native window is {native[0]}x{native[1]}."
-                if native is not None
-                else ""
-            )
-            raise ValueError(
-                f"--vae_tile_size_height {height} with --vae_tile_size_width {width} "
-                f"is not a shape this VAE ({type(vae).__name__}) can tile exactly."
-                f"{native_shown} Choose dimensions compatible with the VAE's latent "
-                "scale and tile stride."
-            )
-        vae_tiling.apply_tile_plan(vae, plan)
-        log(
-            f"VAE tile window set to {height}x{width}px "
-            f"({', '.join(f'{a}={v}' for a, v in sorted(plan.items()))})"
-        )
-        return shape
-
-    def _apply_vae_tile_overlap(self, vae) -> None:
-        """Set this VAE's exact per-axis output-pixel tile overlap, when requested."""
-        requested = self._requested_vae_tile_overlap()
-        if requested is None:
-            return
-        overlap_height, overlap_width = requested
-        sample_shape = (self.config.height, self.config.width)
-        plan = vae_tiling.tile_overlap_plan(
-            vae,
-            overlap_height,
-            overlap_width,
-            sample_shape=sample_shape,
-        )
-        if plan is None:
-            shape = vae_tiling.tile_shape(vae)
-            shape_shown = (
-                f"{shape[0]}x{shape[1]} pixels"
-                if shape is not None
-                else "an unknown pixel shape"
-            )
-            raise ValueError(
-                f"The requested VAE tile overlap of {overlap_height}x{overlap_width} pixels "
-                f"is not exact for this VAE ({type(vae).__name__}) at its current tile shape "
-                f"of {shape_shown}. Height and width are output pixels; use 0 for an inactive "
-                "strip axis."
-            )
-        vae_tiling.apply_tile_plan(vae, plan)
-        landed = vae_tiling.tile_overlap(vae)
-        shown = (
-            f"{landed[0]}x{landed[1]}px"
-            if landed is not None
-            else f"{overlap_height}x{overlap_width}px"
-        )
-        log(f"VAE tile overlap set to {shown} "
-            f"({', '.join(f'{a}={v:g}' for a, v in sorted(plan.items()))})")
-
-    def _check_tiles_against_parallel_vae(
-        self, vae, native_shape: Optional[Tuple[int, int]]
-    ) -> None:
-        """ Refuse a tile holding fewer latent rows than the ranks that will split them """
-        # Tiling and sharding divide the same axis: diffusers hands the decoder one tile, and
-        # DistVAE then splits that tile's latent rows across the VAE group. Under a row per rank
-        # it splits into fewer patches than there are ranks, and the surplus ranks index off the
-        # end of the split rather than reporting anything - so this hangs the group rather than
-        # failing it, and is worth refusing up front.
-        #
-        # Read off the VAE once the window and the stride are settled, rather than off the plan
-        # a flag applied, because what is dangerous is the composition and not the flag: a VAE
-        # tiling at its own default window reaches it with no plan to check.
-        if not (self.config.use_parallel_vae and self.capabilities.use_parallel_vae):
-            return
-        # Unless the tiles are what the ranks divide, in which case nothing divides a tile and a
-        # window narrower than the group is no longer anybody's problem.
-        if vae_tile_parallel.context_of(vae) is not None:
-            return
-        ranks = get_vae_parallel_world_size()
-        rows = vae_tiling.latent_rows(vae)
-        if ranks < 2 or rows is None or rows >= ranks:
-            return
-        shape = vae_tiling.tile_shape(vae)
-        smallest = self._minimum_square_vae_tile_shape(
-            vae, shape, native_shape, ranks
-        )
-        shown = (
-            f"{shape[0]}x{shape[1]}px"
-            if shape is not None
-            else "unknown-size"
-        )
-        native_shown = (
-            f"{native_shape[0]}x{native_shape[1]}px"
-            if native_shape is not None
-            else "unknown"
-        )
-        raise ValueError(
-            f"A {shown} VAE tile window leaves {rows} latent rows for the {ranks} ranks "
-            f"--use_parallel_vae splits each tile across" +
-            (f"; the smallest square window with a row per rank is "
-             f"--vae_tile_size_height {smallest} --vae_tile_size_width {smallest}."
-             if smallest else
-             f", and no shape up to this VAE's native {native_shown} window gives them one "
-             f"each. Decode without tiling, increase --vae_tile_size_height and "
-             f"--vae_tile_size_width, or use fewer VAE ranks.")
-        )
-
-    @staticmethod
-    def _minimum_square_vae_tile_shape(
-        vae,
-        shape: Optional[Tuple[int, int]],
-        native_shape: Optional[Tuple[int, int]],
-        min_latent_rows: int,
-    ) -> Optional[int]:
-        """Find the first exact square plan between the current and native shapes."""
-        if shape is None or native_shape is None:
-            return None
-        floor = max(shape)
-        ceiling = min(native_shape)
-        if floor > ceiling:
-            return None
-        for candidate in range(floor, ceiling + 1):
-            plan = vae_tiling.tile_shape_plan(vae, candidate, candidate)
-            if plan is None:
-                continue
-            rows = vae_tiling.latent_rows(vae, plan)
-            if rows is not None and rows >= min_latent_rows:
-                return candidate
-        return None
-
-    def _install_vae_tiled_decode(self, vae) -> None:
-        """Decode a tiled VAE's tiles apart across a group, a tile to a call"""
-        # With a group, independent tiles can be given to different ranks. Without one,
-        # DistVAE decides whether this VAE needs its local replacement loop.
-        context = vae_tile_parallel.context_of(vae)
-        if context is None:
-            if (
-                self._requested_vae_tile_shape() is None
-                and self._requested_vae_tile_overlap() is None
-            ):
-                return
-            installed = vae_tiling.tiled_decode_for(vae)
-        else:
-            dispatch, assemble = vae_tile_parallel.sharing(context)
-            installed = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
-        if installed is None:
-            return
-        vae.tiled_decode = installed
-        if context is None:
-            log(
-                f"VAE tiled decode on {type(vae).__name__}: using DistVAE's local "
-                "overlap loop."
-            )
-            return
-        log(f"VAE tiled decode on {type(vae).__name__}: a tile per call, divided across "
-            f"{context.world_size} ranks, a run of neighbouring tiles each "
-            f"to decode and blend where the grid has the tiles to spare them.")
-
-    def _install_vae_decode_guard(
-        self,
-        vae,
-        tile_shape: Optional[Tuple[int, int]] = None,
-    ) -> None:
-        # Point a failed VAE decode at the knob that fixes it. Success path untouched.
-        #
-        # The window is recorded on the VAE rather than closed over, so that installing again
-        # over an already-guarded decode is a matter of updating what the guard reports rather
-        # than nesting a second guard holding the older window. initialize() can run more than
-        # once in a process, and a stack of guards would name whichever window was set first.
-        vae._xfuser_guarded_tile_shape = tile_shape
-        if getattr(vae, "_xfuser_decode_guarded", False):
-            return
-        original_decode = vae.decode
-
-        @functools.wraps(original_decode)
-        def decode_guard(*args, **kwargs):
-            try:
-                return original_decode(*args, **kwargs)
-            except torch.cuda.OutOfMemoryError as e:
-                raise torch.cuda.OutOfMemoryError(f"{self._vae_decode_oom_hint(vae)}\n{e}") from e
-            except RuntimeError as e:
-                # Two things have to hold before the window gets the blame: this run narrowed it,
-                # and the decoder failed the way a narrow window makes it fail. A dtype or device
-                # error is failing for reasons of its own, as is a VAE still at its own window.
-                shape = getattr(vae, "_xfuser_guarded_tile_shape", None)
-                if shape is None or not vae_tiling.is_tile_padding_error(e):
-                    raise
-                # Whether a window leaves a tile the decoder cannot pad depends on the output size,
-                # so this cannot be caught when the window is set; name the window, being the part
-                # the caller can change, and keep the decoder's own words underneath.
-                shown = f"{shape[0]}x{shape[1]}"
-                raise RuntimeError(
-                    f"VAE tiled decode failed at the {shown}px tile window set by "
-                    "--vae_tile_size_height and --vae_tile_size_width: at this output size the "
-                    "window leaves a tile too thin for the decoder to pad. A larger window can "
-                    "fail where a smaller one works, so try another exact height and width, or "
-                    f"drop both flags to decode at this VAE's native window.\n{e}"
-                ) from e
-
-        vae.decode = decode_guard
-        vae._xfuser_decode_guarded = True
-
-    def _vae_decode_oom_hint(self, vae) -> str:
-        # Read from the VAE, since a model can arrive with tiling on and no flag set.
-        if not getattr(vae, "use_tiling", False):
-            if self.capabilities.enable_tiling:
-                return ("VAE decode ran out of memory with tiling disabled. Re-run with "
-                        "--enable_tiling to decode in tiles.")
-            return (f"VAE decode ran out of memory, and model {self.settings.model_name} does not "
-                    "support VAE tiling.")
-
-        shape = vae_tiling.tile_shape(vae)
-        if shape is None:
-            return ("VAE tiled decode ran out of memory. This model's VAE "
-                    f"({type(vae).__name__}) does not expose a pixel-space tile shape to resize.")
-        height, width = shape
-        return (
-            f"VAE tiled decode ran out of memory at a {height}x{width}px tile window. Shrink it "
-            "by choosing another exact pair with --vae_tile_size_height and "
-            "--vae_tile_size_width, then re-run and compare peak VRAM."
-        )
+        """Forward channels-last conversion for subclass compatibility."""
+        self._vae_manager.convert_to_channels_last(self._decoding_vaes())
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

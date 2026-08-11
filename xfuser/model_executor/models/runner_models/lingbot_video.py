@@ -6,7 +6,6 @@ from diffusers import AutoencoderKLWan
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
-from xfuser import xFuserArgs
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -19,7 +18,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
-from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 
 
@@ -460,15 +458,12 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 @register_model("robbyant/lingbot-video-dense-1.3b")
 @register_model("LingBot-Video-Dense")
 class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
-
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
-        self.settings = ModelSettings(
-            model_name="robbyant/lingbot-video-dense-1.3b",
-            output_name="lingbot_video_dense",
-            model_output_type="video",
-            fps=24,
-            fp8_gemm_module_list=["transformer.blocks"],
-            fp4_gemm_module_list=["transformer.blocks"],
-            fsdp_strategy=LINGBOT_FSDP_STRATEGY,
-        )
+    settings = ModelSettings(
+        model_name="robbyant/lingbot-video-dense-1.3b",
+        output_name="lingbot_video_dense",
+        model_output_type="video",
+        fps=24,
+        fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
+        fsdp_strategy=LINGBOT_FSDP_STRATEGY,
+    )

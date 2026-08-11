@@ -20,6 +20,7 @@ from torch import nn
 
 from xfuser.model_executor.models import runner_models
 from xfuser.model_executor.models.runner_models import base_model
+from xfuser.model_executor.models.runner_models import vae_manager
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 
 
@@ -46,16 +47,18 @@ class Settings:
 
 
 class Staged:
-    """A runner model with two stages, borrowing the methods under test from the real class"""
+    """A runner model with two stages, borrowing the lifecycle delegators under test."""
 
     _decoding_vaes = xFuserModel._decoding_vaes
     _convert_vae_to_channels_last = xFuserModel._convert_vae_to_channels_last
-    _convert_one_vae_to_channels_last = xFuserModel._convert_one_vae_to_channels_last
 
     def __init__(self, first, second):
         self.pipe = Pipe(first)
         self.second_pipe = Pipe(second) if second is not None else None
         self.settings = Settings()
+        self._vae_manager = vae_manager.VAEManager(
+            config=object(), capabilities=object(), settings=self.settings
+        )
 
 
 class TestStagedVAEsAreAllReached(unittest.TestCase):
@@ -163,6 +166,33 @@ class TestNothingReachesPastTheList(unittest.TestCase):
         names = {method.name for method in self._vae_methods()}
         self.assertIn("_convert_vae_to_channels_last", names)
         self.assertIn("_decoding_vaes", names)
+
+
+class TestVAEOrchestrationBoundary(unittest.TestCase):
+    def test_manager_owns_planning_and_guards_while_base_keeps_delegators(self):
+        manager_methods = {
+            "_apply_vae_tile_shape",
+            "_apply_vae_tile_overlap",
+            "_check_tiles_against_parallel_vae",
+            "_install_vae_tiled_decode",
+            "_install_vae_decode_guard",
+            "_vae_decode_oom_hint",
+        }
+        self.assertTrue(manager_methods <= set(vars(vae_manager.VAEManager)))
+        self.assertTrue(
+            {"_setup_parallel_vae", "_convert_vae_to_channels_last", "_decoding_vaes"}
+            <= set(vars(xFuserModel))
+        )
+        self.assertTrue(manager_methods.isdisjoint(vars(xFuserModel)))
+        base_source = Path(inspect.getfile(base_model)).read_text(encoding="utf-8")
+        for implementation_name in (
+            "load_distvae_vae",
+            "load_distvae_parallel_context",
+            "vae_tiling",
+            "vae_tile_parallel",
+            "vae_parallel",
+        ):
+            self.assertNotIn(implementation_name, base_source)
 
 
 class TestTheParallelVAEIsSetUpBeforeTheOptions(unittest.TestCase):

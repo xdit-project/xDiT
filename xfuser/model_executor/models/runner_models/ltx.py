@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.utils.runner_utils import (
     log,
 )
+from xfuser.core.utils.video_utils import encode_video_with_audio
 
 DEFAULT_NEGATIVE_PROMPT = "" \
 "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, " \
@@ -194,7 +195,6 @@ class xFuserLTX23VideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
-        from diffusers.pipelines.ltx2.export_utils import encode_video
         pipe_args = output.pipe_args
         output = output.videos
         audio_sample_rate = self.pipe.vocoder.config.output_sampling_rate
@@ -204,7 +204,13 @@ class xFuserLTX23VideoModel(xFuserModel):
             video = torch.from_numpy(video)
             output_name = self.get_output_name(pipe_args[i])
             output_path = f"{self.config.output_directory}/{output_name}_{i}.mp4"
-            encode_video(video[0], audio=audio[0].float().cpu(), audio_sample_rate=audio_sample_rate, fps=self.settings.fps, output_path=output_path)
+            encode_video_with_audio(
+                video[0],
+                audio=audio[0].float().cpu(),
+                audio_sample_rate=audio_sample_rate,
+                fps=self.settings.fps,
+                output_path=output_path,
+            )
             log(f"Output video saved to {output_path}")
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -334,7 +340,6 @@ class xFuserLTX2VideoModel(xFuserModel):
         self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
-        from diffusers.pipelines.ltx2.export_utils import encode_video
         pipe_args = output.pipe_args
         output = output.videos
         for i, video_object in enumerate(output):
@@ -343,7 +348,13 @@ class xFuserLTX2VideoModel(xFuserModel):
             video = torch.from_numpy(video)
             output_name = self.get_output_name(pipe_args[i])
             output_path = f"{self.config.output_directory}/{output_name}_{i}.mp4"
-            encode_video(video[0], audio=audio[0].float().cpu(), audio_sample_rate=24000, fps=self.settings.fps, output_path=output_path)
+            encode_video_with_audio(
+                video[0],
+                audio=audio[0].float().cpu(),
+                audio_sample_rate=24000,
+                fps=self.settings.fps,
+                output_path=output_path,
+            )
             log(f"Output video saved to {output_path}")
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:

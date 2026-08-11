@@ -56,6 +56,7 @@ class RuntimeConfig:
     warmup_steps: int = 1
     dtype: torch.dtype = torch.float16
     use_cuda_graph: bool = False
+    use_hybrid_attn_schedule: bool = False
     use_parallel_vae: bool = False
     use_profiler: bool = False
     use_torch_compile: bool = False
@@ -70,6 +71,15 @@ class RuntimeConfig:
     spargeattn_simthreshold: float = 0.3
     spargeattn_cdfthreshold: float = 0.92
     use_spargeattn_head_balance: bool = False
+    vsa_block_size: int = 128
+    vsa_top_k: int = 1
+    vsa_top_k_ratio: float = 0.0
+    vsa_drop_rates: Optional[List[float]] = None
+    vsa_prob_threshold: float = 0.9
+    vsa_reorder_sequence: bool = True
+    use_vsa_static_block_mask: bool = True
+    use_vsa_first_frame_mask: bool = True
+    vsa_collect_density: bool = False
 
     def __post_init__(self):
         check_packages()

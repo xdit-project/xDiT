@@ -5,7 +5,7 @@ import torch
 import functools
 import numpy as np
 from PIL.Image import Image
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from xfuser.envs import _is_cuda, _is_hip, PACKAGES_CHECKER
 
 logger = logging.getLogger(__name__)
@@ -334,13 +334,18 @@ def quantize_linear_layers_to_int8(
 
 def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    include_suffixes: Optional[Tuple[str, ...]] = None,
     device: Optional[torch.device] = None) -> None:
     """Quantize all linear layers in the given module or module list to FP8."""
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 
     if filter_fn is None:
-        filter_fn = _is_linear
+        if include_suffixes:
+            def filter_fn(module, fqn):
+                return _is_linear(module, fqn) and fqn.endswith(include_suffixes)
+        else:
+            filter_fn = _is_linear
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
@@ -359,6 +364,8 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
 
 def quantize_linear_layers_to_fp8_blockscale(
     model: torch.nn.Module,
+    parent_name: str = "",
+    include_suffixes: Optional[Tuple[str, ...]] = None,
     device: Optional[torch.device] = None,
 ) -> None:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
@@ -369,7 +376,10 @@ def quantize_linear_layers_to_fp8_blockscale(
     from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
 
     for name, module in list(model.named_children()):
-        if isinstance(module, torch.nn.Linear):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+        if isinstance(module, torch.nn.Linear) and (
+            not include_suffixes or full_name.endswith(include_suffixes)
+        ):
             weight = module.weight.data
             bias = module.bias.data if module.bias is not None else None
             fp8_layer = xFuserFP8BlockScaleLinear(
@@ -387,7 +397,12 @@ def quantize_linear_layers_to_fp8_blockscale(
             del weight, bias
             setattr(model, name, fp8_layer)
         elif next(module.children(), None) is not None:
-            quantize_linear_layers_to_fp8_blockscale(module, device=device)
+            quantize_linear_layers_to_fp8_blockscale(
+                module,
+                parent_name=full_name,
+                include_suffixes=include_suffixes,
+                device=device,
+            )
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:

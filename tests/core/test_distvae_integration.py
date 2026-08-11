@@ -48,7 +48,8 @@ def _runner(**config):
         "enable_tiling": False,
         "vae_tile_size_height": None,
         "vae_tile_size_width": None,
-        "vae_tile_overlap": None,
+        "vae_tile_overlap_height": None,
+        "vae_tile_overlap_width": None,
         "enable_sequential_cpu_offload": False,
         "enable_model_cpu_offload": False,
         "use_parallel_vae": False,
@@ -74,15 +75,32 @@ def test_runner_cli_propagates_vae_settings():
             "--model",
             "test-model",
             "--use-parallel-vae",
-            "--vae-tile-overlap",
-            "0.125",
+            "--vae-tile-overlap-height",
+            "32",
+            "--vae-tile-overlap-width",
+            "64",
         ]
     )
 
     config = xFuserArgs.from_cli_args(parsed)
 
     assert config.use_parallel_vae is True
-    assert config.vae_tile_overlap == 0.125
+    assert config.vae_tile_overlap_height == 32
+    assert config.vae_tile_overlap_width == 64
+
+
+@pytest.mark.parametrize("add_args", [xFuserArgs.add_runner_args, xFuserArgs.add_cli_args])
+def test_legacy_scalar_overlap_cli_is_rejected(add_args):
+    parser = add_args(FlexibleArgumentParser(description="xDiT"))
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--model", "test-model", "--vae_tile_overlap", "0.125"]
+        )
+
+
+def test_xfuser_args_has_no_legacy_scalar_overlap_field():
+    assert not hasattr(xFuserArgs(model="test-model"), "vae_tile_overlap")
 
 
 @pytest.mark.parametrize("add_args", [xFuserArgs.add_runner_args, xFuserArgs.add_cli_args])
@@ -176,9 +194,48 @@ def test_rectangular_vae_tile_flag_implies_tiling():
 
 
 def test_tile_overlap_flag_implies_tiling():
-    runner = _runner(vae_tile_overlap=0.125)
+    runner = _runner(vae_tile_overlap_height=32, vae_tile_overlap_width=64)
 
-    assert runner._tiling_flag() == "--vae_tile_overlap"
+    assert runner._tiling_flag() == "--vae_tile_overlap_height"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            {"vae_tile_overlap_height": 32},
+            "--vae_tile_overlap_height and --vae_tile_overlap_width must be provided together",
+        ),
+        (
+            {"vae_tile_overlap_width": 64},
+            "--vae_tile_overlap_height and --vae_tile_overlap_width must be provided together",
+        ),
+        (
+            {"vae_tile_overlap_height": -1, "vae_tile_overlap_width": 64},
+            "--vae_tile_overlap_height must be non-negative",
+        ),
+        (
+            {"vae_tile_overlap_height": 32, "vae_tile_overlap_width": -1},
+            "--vae_tile_overlap_width must be non-negative",
+        ),
+    ],
+)
+def test_per_axis_vae_tile_overlap_settings_are_validated(config, message):
+    runner = _runner()
+
+    with pytest.raises(ValueError, match=message):
+        runner._validate_config(xFuserArgs(model="test-model", **config))
+
+
+def test_zero_overlap_is_valid_for_an_inactive_strip_axis():
+    runner = _runner()
+    config = xFuserArgs(
+        model="test-model",
+        vae_tile_overlap_height=0,
+        vae_tile_overlap_width=64,
+    )
+
+    runner._validate_config(config)
 
 
 def test_enable_tiling_without_dimensions_keeps_native_window():
@@ -233,14 +290,15 @@ def test_base_model_uses_public_distvae_modules():
 
 
 def test_xdit_declares_the_distvae_public_api_version_floor():
-    xfuser_compat.declared_floor.cache_clear()
-    assert xfuser_compat.declared_floor("distvae") == "0.0.0beta7"
+    setup = (Path(__file__).parents[2] / "setup.py").read_text()
+    assert '"distvae>=0.0.0beta9"' in setup
 
 
 def test_compat_loader_names_required_api_when_distvae_lacks_it(tmp_path):
     package = tmp_path / "distvae"
     package.mkdir()
-    (package / "__init__.py").write_text('__version__ = "0.0.0beta6"\n')
+    (package / "__init__.py").write_text("")
+    (package / "__version__.py").write_text('__version__ = "0.0.0beta6"\n')
     vae_package = package / "vae"
     vae_package.mkdir()
     (vae_package / "__init__.py").write_text("")
@@ -264,8 +322,44 @@ def test_compat_loader_names_required_api_when_distvae_lacks_it(tmp_path):
 
     assert imported.returncode != 0, imported.stderr + imported.stdout
     error = imported.stderr + imported.stdout
-    assert "DistVAE>=0.0.0beta7" in error
+    assert "DistVAE>=0.0.0beta9" in error
     assert "public distvae.vae API" in error
+
+
+def test_compat_loader_rejects_beta8_even_with_every_required_symbol(tmp_path):
+    package = tmp_path / "distvae"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "__version__.py").write_text('__version__ = "0.0.0beta8"\n')
+    vae_package = package / "vae"
+    vae_package.mkdir()
+    for module_name, required in xfuser_compat._DISTVAE_VAE_API.items():
+        path = (
+            vae_package / "__init__.py"
+            if module_name == "distvae.vae"
+            else vae_package / f"{module_name.rsplit('.', 1)[-1]}.py"
+        )
+        path.write_text("\n".join(f"{name} = object()" for name in required))
+    repo = Path(__file__).parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(repo)))
+
+    imported = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from xfuser.compat import load_distvae_vae; load_distvae_vae()",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert imported.returncode != 0, imported.stderr + imported.stdout
+    error = imported.stderr + imported.stdout
+    assert "DistVAE>=0.0.0beta9" in error
+    assert "Upgrade DistVAE" in error
 
 
 def test_distvae_compat_loader_returns_normal_local_public_modules():
@@ -273,10 +367,30 @@ def test_distvae_compat_loader_returns_normal_local_public_modules():
     assert loaded == (parallel, tile_parallel, tiling)
 
 
-def test_distvae_compat_requires_local_tiled_decode_api():
-    assert "local_tiled_decode_for" in xfuser_compat._DISTVAE_VAE_API[
-        "distvae.vae.tiling"
-    ]
+def test_distvae_compat_requires_beta9_canonical_api_only():
+    required = {
+        name
+        for names in xfuser_compat._DISTVAE_VAE_API.values()
+        for name in names
+    }
+    removed = {
+        "local_tiled_decode_for",
+        "smallest_tile_window",
+        "snap_tile_window",
+        "tile_plan",
+        "tile_window",
+        "widest_tile_overlap",
+    }
+
+    assert removed.isdisjoint(required)
+    assert {
+        "apply_tile_plan",
+        "latent_rows",
+        "tile_overlap_plan",
+        "tile_shape",
+        "tile_shape_plan",
+        "tiled_decode_for",
+    } <= required
 
 
 def test_all_xdit_python_callers_use_public_distvae_boundaries():
@@ -412,12 +526,20 @@ def test_parallel_setup_adapts_runtime_group_for_distvae():
 
 def test_tile_overlap_is_applied_through_distvae():
     vae = SimpleNamespace()
-    runner = _runner(vae_tile_overlap=0.125, height=320, width=1280)
-    overlap_plan = {"tile_overlap_factor": 0.125}
+    runner = _runner(
+        vae_tile_overlap_height=32,
+        vae_tile_overlap_width=64,
+        height=320,
+        width=1280,
+    )
+    overlap_plan = {
+        "tile_overlap_factor_height": 0.0625,
+        "tile_overlap_factor_width": 0.125,
+    }
 
     with (
         mock.patch.object(
-            base_model.vae_tiling, "tile_overlap", side_effect=[(0.25, 0.25), (0.125, 0.125)]
+            base_model.vae_tiling, "tile_overlap", side_effect=[(128, 128), (32, 64)]
         ),
         mock.patch.object(
             base_model.vae_tiling,
@@ -429,9 +551,37 @@ def test_tile_overlap_is_applied_through_distvae():
         runner._apply_vae_tile_overlap(vae)
 
     tile_overlap_plan.assert_called_once_with(
-        vae, 0.125, sample_shape=(320, 1280)
+        vae, 32, 64, sample_shape=(320, 1280)
     )
     apply.assert_called_once_with(vae, overlap_plan)
+
+
+def test_tile_overlap_refuses_an_inexact_plan_without_mutating_the_vae():
+    vae = SimpleNamespace()
+    runner = _runner(
+        vae_tile_overlap_height=33,
+        vae_tile_overlap_width=65,
+        height=1024,
+        width=1024,
+    )
+
+    with (
+        mock.patch.object(
+            base_model.vae_tiling, "tile_shape", return_value=(512, 768)
+        ),
+        mock.patch.object(
+            base_model.vae_tiling,
+            "tile_overlap_plan",
+            return_value=None,
+        ),
+        mock.patch.object(base_model.vae_tiling, "apply_tile_plan") as apply,
+    ):
+        with pytest.raises(ValueError) as error:
+            runner._apply_vae_tile_overlap(vae)
+
+    assert "33x65 pixels" in str(error.value)
+    assert "512x768" in str(error.value)
+    apply.assert_not_called()
 
 
 def test_rectangular_tile_shape_is_applied_exactly_through_distvae():
@@ -497,7 +647,7 @@ def test_rectangular_tile_shape_reaches_every_staged_vae():
     assert apply_shape.call_args_list == [mock.call(first), mock.call(second)]
 
 
-def test_single_gpu_rectangular_scalar_vae_installs_local_tiled_decode():
+def test_single_gpu_rectangular_scalar_vae_installs_undispatched_tiled_decode():
     vae = SimpleNamespace()
     runner = _runner(
         use_parallel_vae=False,
@@ -511,16 +661,31 @@ def test_single_gpu_rectangular_scalar_vae_installs_local_tiled_decode():
             base_model.vae_tile_parallel, "context_of", return_value=None
         ),
         mock.patch.object(
-            base_model.vae_tiling,
-            "local_tiled_decode_for",
-            return_value=installed,
-        ) as local_tiled_decode_for,
-        mock.patch.object(base_model.vae_tiling, "tiled_decode_for") as tiled_decode_for,
+            base_model.vae_tiling, "tiled_decode_for", return_value=installed
+        ) as tiled_decode_for,
     ):
         runner._install_vae_tiled_decode(vae)
 
-    local_tiled_decode_for.assert_called_once_with(vae)
-    tiled_decode_for.assert_not_called()
+    tiled_decode_for.assert_called_once_with(vae)
+    assert vae.tiled_decode is installed
+
+
+def test_single_gpu_custom_overlap_installs_undispatched_tiled_decode():
+    vae = SimpleNamespace()
+    runner = _runner(vae_tile_overlap_height=32, vae_tile_overlap_width=64)
+    installed = mock.Mock()
+
+    with (
+        mock.patch.object(
+            base_model.vae_tile_parallel, "context_of", return_value=None
+        ),
+        mock.patch.object(
+            base_model.vae_tiling, "tiled_decode_for", return_value=installed
+        ) as tiled_decode_for,
+    ):
+        runner._install_vae_tiled_decode(vae)
+
+    tiled_decode_for.assert_called_once_with(vae)
     assert vae.tiled_decode is installed
 
 
@@ -534,16 +699,12 @@ def test_native_keyed_vae_keeps_its_tiled_decode_when_distvae_returns_none():
             base_model.vae_tile_parallel, "context_of", return_value=None
         ),
         mock.patch.object(
-            base_model.vae_tiling,
-            "local_tiled_decode_for",
-            return_value=None,
-        ) as local_tiled_decode_for,
-        mock.patch.object(base_model.vae_tiling, "tiled_decode_for") as tiled_decode_for,
+            base_model.vae_tiling, "tiled_decode_for", return_value=None
+        ) as tiled_decode_for,
     ):
         runner._install_vae_tiled_decode(vae)
 
-    local_tiled_decode_for.assert_called_once_with(vae)
-    tiled_decode_for.assert_not_called()
+    tiled_decode_for.assert_called_once_with(vae)
     assert vae.tiled_decode is native
 
 
@@ -574,16 +735,40 @@ def test_tiled_decode_install_uses_distvae_context_and_sharing():
             "tiled_decode_for",
             return_value=installed,
         ) as tiled_decode_for,
-        mock.patch.object(
-            base_model.vae_tiling, "local_tiled_decode_for"
-        ) as local_tiled_decode_for,
     ):
         runner._install_vae_tiled_decode(vae)
 
     sharing.assert_called_once_with(context)
     tiled_decode_for.assert_called_once_with(vae, "dispatch", "assemble")
-    local_tiled_decode_for.assert_not_called()
     assert vae.tiled_decode is installed
+
+
+def test_parallel_vae_rank_hint_searches_exact_square_plans_below_half_native():
+    vae = SimpleNamespace()
+    runner = _runner(use_parallel_vae=True)
+
+    def shape_plan(_vae, height, width):
+        if height != width or height % 32:
+            return None
+        return {"rows": height // 64}
+
+    def rows(_vae, plan=None):
+        return 1 if plan is None else plan["rows"]
+
+    with (
+        mock.patch.object(base_model.vae_tile_parallel, "context_of", return_value=None),
+        mock.patch.object(base_model, "get_vae_parallel_world_size", return_value=2),
+        mock.patch.object(base_model.vae_tiling, "latent_rows", side_effect=rows),
+        mock.patch.object(base_model.vae_tiling, "tile_shape", return_value=(64, 64)),
+        mock.patch.object(
+            base_model.vae_tiling, "tile_shape_plan", side_effect=shape_plan
+        ) as tile_shape_plan,
+    ):
+        with pytest.raises(ValueError) as error:
+            runner._check_tiles_against_parallel_vae(vae, (512, 512))
+
+    assert "--vae_tile_size_height 128 --vae_tile_size_width 128" in str(error.value)
+    assert tile_shape_plan.call_args_list[0] == mock.call(vae, 64, 64)
 
 
 def test_decode_guard_delegates_padding_detection_to_distvae():

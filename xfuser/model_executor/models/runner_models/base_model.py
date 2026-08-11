@@ -352,8 +352,8 @@ class xFuserModel(abc.ABC):
                     log(f"Enabling VAE tiling on {type(vae).__name__}...")
                     vae.enable_tiling()
                 applied_shape = self._apply_vae_tile_shape(vae)
-                # After the window, never before: the overlap is a fraction of the window, and
-                # sizing the window rescales the stride to keep whatever overlap the VAE had.
+                # After the window, never before: exact output-pixel overlap is planned against
+                # the final per-axis tile shape.
                 self._apply_vae_tile_overlap(vae)
                 self._check_tiles_against_parallel_vae(vae, native_shape)
                 self._install_vae_tiled_decode(vae)
@@ -383,7 +383,14 @@ class xFuserModel(abc.ABC):
                 getattr(self.config, "vae_tile_size_width", None) is not None,
                 "--vae_tile_size_width",
             ),
-            (self.config.vae_tile_overlap is not None, "--vae_tile_overlap"),
+            (
+                getattr(self.config, "vae_tile_overlap_height", None) is not None,
+                "--vae_tile_overlap_height",
+            ),
+            (
+                getattr(self.config, "vae_tile_overlap_width", None) is not None,
+                "--vae_tile_overlap_width",
+            ),
         ):
             if asked:
                 return flag
@@ -568,18 +575,30 @@ class xFuserModel(abc.ABC):
             if not self.capabilities.supports_distilled_weights:
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
 
-        if config.vae_tile_overlap is not None:
-            # A fraction of the window, so one and above is a step of nothing: the grid would
-            # never advance and the loop would walk the same tile until it ran out of memory.
-            if not 0.0 <= config.vae_tile_overlap < 1.0:
+        overlap_height = getattr(config, "vae_tile_overlap_height", None)
+        overlap_width = getattr(config, "vae_tile_overlap_width", None)
+        overlap_height_asked = overlap_height is not None
+        overlap_width_asked = overlap_width is not None
+        if overlap_height_asked != overlap_width_asked:
+            raise ValueError(
+                "--vae_tile_overlap_height and --vae_tile_overlap_width must be provided "
+                "together."
+            )
+        for value, flag in (
+            (overlap_height, "--vae_tile_overlap_height"),
+            (overlap_width, "--vae_tile_overlap_width"),
+        ):
+            if value is not None and value < 0:
                 raise ValueError(
-                    f"--vae_tile_overlap is the fraction of each tile that repeats its "
-                    f"neighbour, so it must be at least 0 and below 1, got "
-                    f"{config.vae_tile_overlap}."
+                    f"{flag} must be non-negative, got {value}."
                 )
+        if overlap_height_asked:
             if not self.capabilities.enable_tiling:
-                raise ValueError(f"--vae_tile_overlap steps the tiles of a tiled VAE decode, "
-                                 f"which model {self.settings.model_name} does not support.")
+                raise ValueError(
+                    "--vae_tile_overlap_height and --vae_tile_overlap_width set the exact "
+                    "output-pixel overlap of a tiled VAE decode, "
+                    f"which model {self.settings.model_name} does not support."
+                )
 
 
     def _get_compile_mode(self) -> str:
@@ -1198,6 +1217,13 @@ class xFuserModel(abc.ABC):
             return None
         return height, width
 
+    def _requested_vae_tile_overlap(self) -> Optional[Tuple[int, int]]:
+        height = getattr(self.config, "vae_tile_overlap_height", None)
+        width = getattr(self.config, "vae_tile_overlap_width", None)
+        if height is None or width is None:
+            return None
+        return height, width
+
     def _apply_vae_tile_shape(self, vae) -> Optional[Tuple[int, int]]:
         """The exact shape set on this VAE, or None where it keeps its native window."""
         shape = self._requested_vae_tile_shape()
@@ -1226,65 +1252,40 @@ class xFuserModel(abc.ABC):
         return shape
 
     def _apply_vae_tile_overlap(self, vae) -> None:
-        """ Step this VAE's tile grid at the requested overlap, where one was requested """
-        # The window and the overlap divide different things. The window decides what one tile
-        # costs to hold; the overlap decides how much of the decode is spent twice, since tiles
-        # overlapping by f cover 1/(1-f)^2 times the latent they were cut from. A VAE ships the
-        # overlap its own training resolution wanted, and at a large decode that redundancy is
-        # what tiling costs in time - so this is the knob that gives it back.
-        requested = self.config.vae_tile_overlap
+        """Set this VAE's exact per-axis output-pixel tile overlap, when requested."""
+        requested = self._requested_vae_tile_overlap()
         if requested is None:
             return
-        if vae_tiling.tile_overlap(vae) is None:
-            raise ValueError(
-                f"Model {self.settings.model_name} does not support --vae_tile_overlap: its VAE "
-                f"({type(vae).__name__}) does not say how far apart it steps its tiles, so there "
-                f"is nothing here to set."
-            )
-        height = getattr(self.config, "height", None)
-        width = getattr(self.config, "width", None)
-        sample_shape = (
-            (height, width)
-            if all(
-                isinstance(value, int) and not isinstance(value, bool) and value > 0
-                for value in (height, width)
-            )
-            else None
-        )
+        overlap_height, overlap_width = requested
+        sample_shape = (self.config.height, self.config.width)
         plan = vae_tiling.tile_overlap_plan(
-            vae, requested, sample_shape=sample_shape
+            vae,
+            overlap_height,
+            overlap_width,
+            sample_shape=sample_shape,
         )
         if plan is None:
-            widest = vae_tiling.widest_tile_overlap(vae)
+            shape = vae_tiling.tile_shape(vae)
+            shape_shown = (
+                f"{shape[0]}x{shape[1]} pixels"
+                if shape is not None
+                else "an unknown pixel shape"
+            )
             raise ValueError(
-                f"--vae_tile_overlap {requested} is not a step this VAE "
-                f"({type(vae).__name__}) can take" +
-                (f"; the most overlap it can step by is {widest:g}."
-                 if widest is not None else
-                 ", and neither is any overlap: this VAE's tiling loop is not one xFuser knows "
-                 "how to step.")
+                f"The requested VAE tile overlap of {overlap_height}x{overlap_width} pixels "
+                f"is not exact for this VAE ({type(vae).__name__}) at its current tile shape "
+                f"of {shape_shown}. Height and width are output pixels; use 0 for an inactive "
+                "strip axis."
             )
         vae_tiling.apply_tile_plan(vae, plan)
-        # Read back off the VAE rather than off the plan: the two families store different things
-        # - one the fraction, one the stride it implies - and only what the VAE ends up holding
-        # says what the decode will actually do.
         landed = vae_tiling.tile_overlap(vae)
-        shown = self._vae_tile_overlap_shown(landed)
-        if landed is not None and any(abs(f - requested) > 1e-9 for f in landed):
-            log(f"--vae_tile_overlap {requested:g} is not a step this VAE can take exactly; "
-                f"using the next one up at {shown}.")
+        shown = (
+            f"{landed[0]}x{landed[1]}px"
+            if landed is not None
+            else f"{overlap_height}x{overlap_width}px"
+        )
         log(f"VAE tile overlap set to {shown} "
             f"({', '.join(f'{a}={v:g}' for a, v in sorted(plan.items()))})")
-
-    @staticmethod
-    def _vae_tile_overlap_shown(overlap: Optional[Tuple[float, float]]) -> str:
-        """ An overlap as one number, or as two where the VAE steps its axes differently """
-        if overlap is None:
-            return "unknown"
-        down, across = overlap
-        if abs(down - across) < 1e-9:
-            return f"{down:g}"
-        return f"{down:g} down, {across:g} across"
 
     def _check_tiles_against_parallel_vae(
         self, vae, native_shape: Optional[Tuple[int, int]]
@@ -1310,18 +1311,8 @@ class xFuserModel(abc.ABC):
         if ranks < 2 or rows is None or rows >= ranks:
             return
         shape = vae_tiling.tile_shape(vae)
-        window = vae_tiling.tile_window(vae)
-        native_window = (
-            native_shape[0]
-            if native_shape is not None and native_shape[0] == native_shape[1]
-            else None
-        )
-        smallest = (
-            vae_tiling.smallest_tile_window(
-                vae, window, native_window, min_latent_rows=ranks
-            )
-            if window is not None and native_window is not None
-            else None
+        smallest = self._minimum_square_vae_tile_shape(
+            vae, shape, native_shape, ranks
         )
         shown = (
             f"{shape[0]}x{shape[1]}px"
@@ -1344,15 +1335,41 @@ class xFuserModel(abc.ABC):
              f"--vae_tile_size_width, or use fewer VAE ranks.")
         )
 
+    @staticmethod
+    def _minimum_square_vae_tile_shape(
+        vae,
+        shape: Optional[Tuple[int, int]],
+        native_shape: Optional[Tuple[int, int]],
+        min_latent_rows: int,
+    ) -> Optional[int]:
+        """Find the first exact square plan between the current and native shapes."""
+        if shape is None or native_shape is None:
+            return None
+        floor = max(shape)
+        ceiling = min(native_shape)
+        if floor > ceiling:
+            return None
+        for candidate in range(floor, ceiling + 1):
+            plan = vae_tiling.tile_shape_plan(vae, candidate, candidate)
+            if plan is None:
+                continue
+            rows = vae_tiling.latent_rows(vae, plan)
+            if rows is not None and rows >= min_latent_rows:
+                return candidate
+        return None
+
     def _install_vae_tiled_decode(self, vae) -> None:
         """Decode a tiled VAE's tiles apart across a group, a tile to a call"""
-        # With a group, independent tiles can be given to different ranks. Locally, only a
-        # rectangular plan on a legacy scalar VAE needs DistVAE's replacement loop.
+        # With a group, independent tiles can be given to different ranks. Without one,
+        # DistVAE decides whether this VAE needs its local replacement loop.
         context = vae_tile_parallel.context_of(vae)
         if context is None:
-            if self._requested_vae_tile_shape() is None:
+            if (
+                self._requested_vae_tile_shape() is None
+                and self._requested_vae_tile_overlap() is None
+            ):
                 return
-            installed = vae_tiling.local_tiled_decode_for(vae)
+            installed = vae_tiling.tiled_decode_for(vae)
         else:
             dispatch, assemble = vae_tile_parallel.sharing(context)
             installed = vae_tiling.tiled_decode_for(vae, dispatch, assemble)
@@ -1362,7 +1379,7 @@ class xFuserModel(abc.ABC):
         if context is None:
             log(
                 f"VAE tiled decode on {type(vae).__name__}: using DistVAE's local "
-                "rectangular overlap loop."
+                "overlap loop."
             )
             return
         log(f"VAE tiled decode on {type(vae).__name__}: a tile per call, divided across "

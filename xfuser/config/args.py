@@ -28,14 +28,15 @@ logger = init_logger(__name__)
 
 # Written once and passed to both parsers below, which otherwise carry a copy of every help
 # string each and no way to notice when the two stop agreeing.
-VAE_TILE_OVERLAP_HELP = (
-    "Fraction of each VAE tile that repeats its neighbour, between 0 and 1. Turns tiling on by "
-    "itself. The height and width flags say how much memory one tile costs; this says how much "
-    "of the decode is spent twice, since tiles overlapping by a fraction f decode 1/(1-f)^2 "
-    "times the latent they were cut from. Lowering it below the VAE's own overlap is the way to "
-    "buy that time back, and it is paid for in seams rather than in memory - the opposite trade "
-    "to a smaller tile. An overlap the VAE cannot step to exactly is rounded up to the next one "
-    "that works."
+VAE_TILE_OVERLAP_HEIGHT_HELP = (
+    "Exact VAE tile overlap along the height axis, in output pixels. Must be used with "
+    "--vae_tile_overlap_width and turns tiling on. Height and width may differ; use 0 for an "
+    "inactive strip axis."
+)
+VAE_TILE_OVERLAP_WIDTH_HELP = (
+    "Exact VAE tile overlap along the width axis, in output pixels. Must be used with "
+    "--vae_tile_overlap_height and turns tiling on. Height and width may differ; use 0 for an "
+    "inactive strip axis."
 )
 
 
@@ -136,7 +137,8 @@ class xFuserArgs:
     enable_slicing: bool = False
     vae_tile_size_height: Optional[int] = None
     vae_tile_size_width: Optional[int] = None
-    vae_tile_overlap: Optional[float] = None
+    vae_tile_overlap_height: Optional[int] = None
+    vae_tile_overlap_width: Optional[int] = None
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8
@@ -428,10 +430,16 @@ class xFuserArgs:
                  "--vae_tile_size_height.",
         )
         runtime_group.add_argument(
-            "--vae_tile_overlap",
-            type=float,
+            "--vae_tile_overlap_height",
+            type=int,
             default=None,
-            help=VAE_TILE_OVERLAP_HELP,
+            help=VAE_TILE_OVERLAP_HEIGHT_HELP,
+        )
+        runtime_group.add_argument(
+            "--vae_tile_overlap_width",
+            type=int,
+            default=None,
+            help=VAE_TILE_OVERLAP_WIDTH_HELP,
         )
         runtime_group.add_argument(
             "--use_fp8_t5_encoder",
@@ -665,10 +673,16 @@ class xFuserArgs:
                  "--vae_tile_size_height.",
         )
         parser.add_argument(
-            "--vae_tile_overlap",
-            type=float,
+            "--vae_tile_overlap_height",
+            type=int,
             default=None,
-            help=VAE_TILE_OVERLAP_HELP,
+            help=VAE_TILE_OVERLAP_HEIGHT_HELP,
+        )
+        parser.add_argument(
+            "--vae_tile_overlap_width",
+            type=int,
+            default=None,
+            help=VAE_TILE_OVERLAP_WIDTH_HELP,
         )
         parser.add_argument(
             "--use_int8_gemms",

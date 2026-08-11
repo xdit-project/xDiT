@@ -19,33 +19,53 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-DISTVAE_VAE_API_FLOOR = "0.0.0beta7"
+DISTVAE_VAE_API_FLOOR = "0.0.0beta9"
 _DISTVAE_VAE_API = {
+    "distvae.vae": (
+        "ParallelContext",
+        "apply_tile_plan",
+        "context_of",
+        "decoder_adapter_name",
+        "encoder_adapter_name",
+        "encoder_scale_factor",
+        "is_tile_padding_error",
+        "parallelize_decoder",
+        "parallelize_encoder",
+        "require_vae_support",
+        "sharing",
+        "supports_tile_parallel",
+        "tile_overlap",
+        "tile_overlap_plan",
+        "tile_shape",
+        "tile_shape_plan",
+        "tiled_decode_for",
+    ),
     "distvae.vae.parallel": ("parallelize_decoder", "parallelize_encoder"),
     "distvae.vae.tile_parallel": ("context_of", "mark", "sharing"),
     "distvae.vae.tiling": (
         "apply_tile_plan",
         "is_tile_padding_error",
         "latent_rows",
-        "local_tiled_decode_for",
         "require_vae_support",
-        "smallest_tile_window",
         "supports_tile_parallel",
         "tile_overlap",
         "tile_overlap_plan",
         "tile_shape",
         "tile_shape_plan",
-        "tile_window",
         "tiled_decode_for",
-        "widest_tile_overlap",
     ),
 }
 
 
 @lru_cache(maxsize=1)
 def load_distvae_vae():
-    """Load the public DistVAE VAE boundary or raise one actionable compatibility error."""
+    """Load DistVAE's supported VAE boundary or raise one compatibility error."""
     try:
+        distvae_version = importlib.import_module("distvae.__version__").__version__
+        if Version(distvae_version) < Version(DISTVAE_VAE_API_FLOOR):
+            raise ImportError(
+                f"DistVAE {distvae_version} predates {DISTVAE_VAE_API_FLOOR}"
+            )
         modules = tuple(
             importlib.import_module(module) for module in _DISTVAE_VAE_API
         )
@@ -55,11 +75,12 @@ def load_distvae_vae():
                 raise AttributeError(
                     f"{module.__name__} is missing {', '.join(missing)}"
                 )
-        return modules
-    except (ImportError, AttributeError) as error:
+        return modules[1:]
+    except (ImportError, AttributeError, InvalidVersion) as error:
         raise ImportError(
             f"xDiT requires DistVAE>={DISTVAE_VAE_API_FLOOR} with the public "
-            "distvae.vae API. Upgrade DistVAE; private adapter modules are not supported."
+            "distvae.vae API plus the required parallel, tile_parallel, and tiling "
+            "module contracts. Upgrade DistVAE; distvae.modules.adapters is not supported."
         ) from error
 
 

@@ -60,8 +60,8 @@ models do fit an 80 GB device eagerly, so this is not yet a wall for most of the
 are the two largest, the margin grows with model size everywhere in the table, and the transformer that
 needs 128 GB today is the size of an ordinary one soon enough.
 
-Read this with [the validation handoff](gpu_validation_handoff.md) for how the harness plans, runs and
-scores a case, and [the meta-load handoff](meta_load_handoff.md) for the node's setup.
+Read this with [External GPU validation](gpu_validation_handoff.md) for how the harness plans, runs and
+scores a case, and for the environment a run needs before its numbers mean anything.
 
 ## MI355X (`gfx950`), 8 devices
 
@@ -329,6 +329,21 @@ now refused before they can waste a load.
   42, which is why the load times are not comparable between models. A test checks each citation against
   what the runner declares, so an entry cannot go stale. Cosmos3 takes its prompt from the checkpoint's
   own `assets/example_t2v_prompt.json`, because the model wants structured prompts rather than prose.
+
+## Two earlier measurements that did not hold up
+
+Both are recorded because the numbers were quotable and wrong, and the mistake is easy to repeat.
+
+**Host-memory peaks taken before `FLYDSL_GPU_ARCH` was set are not measurements of the load path.**
+The `rocm_agent_enumerator` storm described under Setup in
+[External GPU validation](gpu_validation_handoff.md) put roughly 313 GB of unrelated anonymous memory
+into the trace before a model began loading, so a figure like "582 GB peak for a 24 GB model" is mostly
+storm. Anything sampled in that state needs re-measuring rather than adjusting.
+
+**Reading safetensors through a pinned staging buffer is not 9x faster than the direct-to-GPU read.**
+It measured 12.3 GB/s against 1.35 GB/s on a warm page cache. Repeated cold with a busy disk, every
+strategy collapsed to 0.1-0.7 GB/s and the difference disappeared: the fill is disk-bound, not
+H2D-bound. `_read_device` should not be changed on the strength of the warm number.
 
 ## Reproducing it
 

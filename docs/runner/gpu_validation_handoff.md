@@ -1,46 +1,14 @@
-# External GPU Validation Handoff
+# External GPU validation
 
-## Current status: partially run
+How the validation matrix is planned, run, recorded and scored. The checked-in
+`validation_status` stays **NOT RUN** and `tools/gpu_validation.py` refuses a
+matrix that says otherwise: a result is evidence only once an operator attaches
+its JSONL record, log and generated output, and those live with the operator
+rather than in this repository.
 
-The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
-has not been executed anywhere and a result is only evidence once an operator
-attaches its JSONL record, log, and generated output.
-
-What has run: a hundred and eighty-one of the matrix's two hundred and three
-cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
-and FP8 across twenty models, twelve image and eight video, which is every
-model that node can load through those paths. A hundred and sixty-four passed,
-every still image scored against an unquantized render and every clip checked
-frame by frame, and fifteen more passed by asserting the rejection they
-expected: ROCm INT8, seven refusals from models that withhold the memory-efficient
-load or the sharding flag outright, and seven limits found by running combinations
-that had been waiting on hardware they did not need. Two report an
-environment mismatch and were correctly not run, both wanting `gfx942` alone for
-the FP4 refusal they assert. The remaining twenty-two need hardware
-this node is not, and [what needs other hardware](#what-needs-other-hardware)
-says which of them are worth a booking. Nothing recorded is failing. The results
-file also holds records for fourteen case IDs the matrix no longer carries, among
-them the `gen-mi3xx-z-image-turbo-bf16-fsdp-w4` failure that predates the
-port-collision fix; that configuration was re-run by hand at four ranks and
-loads, shards and renders, so the failure was the collision and not the model.
-Four more are cases the hardware reassessment renamed or retired, and the section
-below says what each of them found first. The last six are Ideogram-4's: one
-withheld-refusal case retired when the model stopped withholding the path, and
-five emitted at eight ranks before the generator learned that eighteen attention
-heads cannot be split eight ways, which they failed on rather than on anything
-they meant to measure; they are recorded at six ranks now.
-[Memory-efficient load results](meta_load_results.md) reports all three sweeps,
-including the defects they found, each of them in a combination nothing had run
-before. HunyuanVideo's six cases were re-run once more after its text encoder was
-brought into the memory-efficient path, which also renamed its two FP8 cases to
-the `fp8-te` form the other quantizing models use. The two eager text-encoder FP8
-cases were re-run again after the streaming probe was corrected, since their
-earlier records measured the fallback rather than the path the flag asks for.
-The screening plan gained an unquantized `replicated` case per model, twenty in
-all, because the broadcast fill had only ever been generated with FP8 on top of
-it: reading its cost meant reading the broadcast and the quantization together,
-and the only unquantized measurement of it was a curated pair at four ranks.
-Those records live on that node and are not checked in.
+What has actually been measured, on which hardware, and what it found, is in
+[Memory-efficient load results](meta_load_results.md). That is the one place
+those counts are kept, so they cannot drift between documents.
 
 The artifacts are:
 
@@ -58,6 +26,21 @@ backend-specific PyTorch, TorchAO, AITER, Diffusers, and Transformers versions
 under test. Authentication remains external to the artifact: use the standard
 Hugging Face CLI or environment on the validation host. Never put a token in
 the matrix, command line, result, or attachment.
+
+Two environment variables decide whether a run measures anything:
+
+- **`FLYDSL_GPU_ARCH`** must name the arch (`gfx950` on MI355X, `gfx942` on
+  MI300X, `gfx1201` on RDNA4). Without it `flydsl.runtime.device` shells out to
+  `rocm_agent_enumerator` with a 300 s timeout, and under load those calls pile
+  up faster than they drain: one node reached 1336 concurrent enumerators
+  holding 1693 GB of RSS on a 1 TB host. It stalls runs, and because the memory
+  is anonymous and arrives before a model loads, it dominates every host-memory
+  sample taken. Verify with
+  `python3 -c "import flydsl.runtime.device as d; print(d.get_rocm_arch())"`
+  and confirm no `rocm_agent_enumerator` process appears.
+- **`PYTHONPATH`** must point at the checkout. Images that ship their own
+  editable xfuser install will otherwise validate that copy rather than the
+  commit under test.
 
 Before a run, capture the environment and inspect the plan:
 

@@ -353,18 +353,15 @@ These examples show the loading contract, not universal performance recommendati
 #### Validation Status
 
 The reproducible external execution matrix, recorder, result schema, and
-operator workflow are in the
-[GPU Validation Handoff](gpu_validation_handoff.md). Its checked-in status is
-**NOT RUN**; dry-runs and repository tests are not GPU end-to-end evidence.
+operator workflow are in [External GPU validation](gpu_validation_handoff.md).
+Its checked-in status is **NOT RUN**; dry-runs and repository tests are not GPU
+end-to-end evidence.
 
-Part of the matrix has now been executed. A hundred and nine cases on 8× MI355X
-(`gfx950`) cover the memory-efficient load paths in bf16 and FP8 across sixteen
-models — ten image, six video, which is every model this node can load through
-those paths. A hundred and seven passed; the other two assert a rejection that
-holds only on `gfx942` and were correctly not run here. Reported in
-[Memory-efficient load results](meta_load_results.md); the rows below are marked
-against that. Everything outside those paths, models and quantizations remains
-GPU-unvalidated here.
+Part of the matrix has been executed on 8× MI355X (`gfx950`), covering the
+memory-efficient load paths in bf16 and FP8. What ran, what passed and what it
+found are reported in [Memory-efficient load results](meta_load_results.md),
+which the rows below are marked against; everything outside the paths, models
+and quantizations it names remains GPU-unvalidated here.
 
 | Contract area | Implementation status | Static / unit-test evidence in the repository | GPU end-to-end status |
 |---------------|-----------------------|----------------------------------------------|-----------------------|

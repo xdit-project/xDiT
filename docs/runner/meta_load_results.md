@@ -572,6 +572,68 @@ was recorded as `failed_inference` before the port-collision fix, and the genera
 four-rank case for that model, so it could not be re-run through the harness. Run by hand at four
 ranks, it fills and shards block by block and renders in 6.9s. The failure was the socket.
 
+## What the text encoders were actually doing
+
+Every quantized text encoder in these sweeps logged the path it took, and the ones that had to ask the
+library for it were not getting it. `--use_fp8_text_encoder` asks the installed Transformers whether it
+can quantize
+one parameter at a time while reading it, and the probe answered that by looking for
+`create_quantized_param` and `check_if_quantized_param`. Transformers 5 replaced that pair with
+`get_quantize_ops` and `param_needs_quantization`. Diffusers still carries the old pair, so the probe
+found neither whole, reported the API unavailable, and fell back to materializing the encoder and
+quantizing it afterwards — which is the cost the flag is asked for in order to avoid. Nothing failed.
+The picture is the same either way, so every case that could have streamed passed instead with a log
+line reading `materialization=post_load; fallback=...` that no expectation was ever checked against.
+The probe accepts either surface now, and which one it found is not something to infer from a version
+number: one library renamed the pair while another kept it.
+
+Three cases on this node were reaching for that path and missing it, all of them eager, which is worth
+saying because it is fewer than the thirty-odd cases that quantize a text encoder. The blockwise fill
+and the replicated broadcast decide this for themselves, below, and neither was ever asking the probe.
+
+What that is worth was then measured, cleanest on FLUX.2-dev at one rank, which happened to run on both
+sides of the fix with the same library, the same page cache and the same seed. Streaming its Mistral
+encoder holds load-time VRAM at 57.8 GB where materializing it first needed 79.0, and the peak for the
+whole run falls with it, 63.6 against 83.2. It costs time to do: the load goes from 29.5 to 62.1
+seconds, since quantization now happens per parameter on the way in rather than once over a finished
+model. The image is the same image, 0.372741 against its unquantized reference either way. Twenty-one
+gigabytes for thirty seconds, once, is the trade this flag is actually offering, and it was not on offer
+at all until the probe was fixed.
+
+Its Transformers 4 twin now reads as the pair was meant to. That case exists to compare the two
+libraries, and it lands at 80.0 GB of load-time VRAM and a 29.9-second load — the pre-fix Transformers 5
+figures almost exactly, because Transformers 4.57 is the library that genuinely cannot stream: it
+carries `create_quantized_param` but not `check_if_quantized_param`, so neither pair is whole there
+either, and the fallback is correct rather than a defect. The two rows differ in one column and the
+consequence is visible in the next.
+
+The other two cases the fix invalidated were re-run too, Qwen-Image-Edit with a Qwen2.5-VL encoder under
+whole-model offload and Wan2.2-I2V with a UMT5 one. Load-time VRAM fell from 28.7 to 22.3 GB and from
+41.6 to 38.1, both drawing the same picture as before, and both are smaller encoders than FLUX.2-dev's,
+which is the shape the saving has: it is the encoder's own bf16 cost that is avoided. Their load times
+cannot be compared, because their pre-fix runs had a much colder page cache, 190 and 125 GB against 290,
+and the whole-run peak on this node is a device-global reading that drifts a gigabyte or two between
+runs. Load-phase VRAM is the figure to read.
+
+Two paths were never on the fallback and did not change. The blockwise fill quantizes each block on the
+way in from disk, before anything wraps it, so a text encoder it maps was already streaming. The
+replicated broadcast path refuses on purpose, and that refusal is worth stating precisely because it is
+where the saving above is still on the table. Rank 0 loads the encoder through `from_pretrained` and
+peers build a matching layout on meta, then every parameter is broadcast by name into the slot waiting
+for it. TorchAO's streaming produces `Float8Tensor` tensor subclasses, and the meta builder only knows
+how to make AITER's plain `weight_fp8` plus `weight_scale` pair, so peers would build slots that do not
+match what rank 0 holds — a divergence the fill's own contract check would catch, after the load. So it
+streams under AITER and falls back under TorchAO, which costs each rank a full bf16 encoder it converts
+in place — the same figures measured above, now paid on every rank at once. Closing it means teaching the
+meta builder to construct the subclass layout and the broadcast to walk inside it, which is more than
+the flag flip it looks like from the call site.
+
+The record now carries which materialization each component took, so this cannot go quiet again. It was
+only ever in the log, and the JSONL beside it looked identical whichever path ran, which is how two
+runs of one case came to measure different things without saying so. A `te quant` column in the report
+reads it, and a record written before this existed shows `?` rather than an empty cell, because
+"nothing quantized" and "nobody wrote it down" are different claims.
+
 ## What stood between these models and a first run
 
 Five things had to change before these models would run, on top of the Diffusers upgrade above. None of

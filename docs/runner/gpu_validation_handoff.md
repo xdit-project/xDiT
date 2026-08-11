@@ -6,17 +6,17 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and sixty of the matrix's hundred and eighty-two
+What has run: a hundred and sixty-one of the matrix's hundred and eighty-three
 cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
 and FP8 across twenty models, twelve image and eight video, which is every
-model that node can load through those paths. A hundred and forty-two passed,
+model that node can load through those paths. A hundred and forty-four passed,
 every still image scored against an unquantized render and every clip checked
-frame by frame, and fourteen more passed by asserting the rejection they
-expected: ROCm INT8, eight refusals from models that withhold the memory-efficient
-load or the sharding flag outright, and five limits found by running combinations
-that had been waiting on hardware they did not need. Four report an
-environment mismatch and were correctly not run: three want an accelerator this
-node is not, one wants Transformers 4. The remaining twenty-two need hardware
+frame by frame, and fifteen more passed by asserting the rejection they
+expected: ROCm INT8, seven refusals from models that withhold the memory-efficient
+load or the sharding flag outright, and seven limits found by running combinations
+that had been waiting on hardware they did not need. Two report an
+environment mismatch and were correctly not run, both wanting `gfx942` alone for
+the FP4 refusal they assert. The remaining twenty-two need hardware
 this node is not, and [what needs other hardware](#what-needs-other-hardware)
 says which of them are worth a booking. Nothing recorded is failing. The results
 file also holds records for fourteen case IDs the matrix no longer carries, among
@@ -33,8 +33,10 @@ they meant to measure; they are recorded at six ranks now.
 including the defects they found, each of them in a combination nothing had run
 before. HunyuanVideo's six cases were re-run once more after its text encoder was
 brought into the memory-efficient path, which also renamed its two FP8 cases to
-the `fp8-te` form the other quantizing models use. Those records live on that node
-and are not checked in.
+the `fp8-te` form the other quantizing models use. The two eager text-encoder FP8
+cases were re-run again after the streaming probe was corrected, since their
+earlier records measured the fallback rather than the path the flag asks for.
+Those records live on that node and are not checked in.
 
 The artifacts are:
 
@@ -197,9 +199,23 @@ Everything else that was waiting either belonged here or was already covered:
   Hopper, Ada or Blackwell, which left offload with no coverage anywhere. They
   are gfx950 cases now, and running them found three defects described below.
 - **Transformers 4 is a library, not a machine.** The split is feature-detected
-  on whether `transformers.core_model_loading` imports. Both cases are pinned
-  here and record an environment mismatch until a Transformers 4 environment
-  exists, which is the requirement they actually have.
+  on whether `transformers.core_model_loading` imports, so both cases are pinned
+  here, and an environment satisfying them was built on this node rather than
+  booked. Transformers 4 caps `huggingface-hub` below 1.0 while the image ships
+  1.20, and Diffusers accepts anything under 2.0, so a directory holding just
+  those two, ahead of the image on `PYTHONPATH`, satisfies both without touching
+  the ROCm torch build:
+
+  ```bash
+  pip install --no-deps --target /opt/tf4-libs "transformers==4.57.1" "huggingface_hub<1.0"
+  PYTHONPATH=/opt/tf4-libs:$PWD python tools/gpu_validation.py --case ... --execute
+  ```
+
+  The harness reads the version through `importlib.metadata`, which sees the
+  shadowing copy, so the gate opens and each record carries
+  `packages.transformers: 4.57.1`. `rocm-flux2-fsdp-te-tf4-rejected` refuses
+  before allocation there, as it claims: sharding cannot apply the post-load
+  text-encoder fallback that Transformers 4 forces.
 - **The mixed FP8/FP4 schedule runs here.** It was withheld from generation only
   because the `gfx942_or_gfx950` token spans two archs that differ on FP4,
   exactly as FP4 itself is, and FP4 was then curated and pinned to gfx950 where
@@ -356,6 +372,13 @@ case to the selected JSONL file:
 - first-forward state: `not_reached`, `failed`, or `succeeded`. Here
   `succeeded` means the inference call reached `Running model...` and the
   process exited successfully;
+- which materialization each quantized component took, under
+  `quantization_paths`, read back from the descriptor line every one of them
+  logs. Whether a text encoder quantizes each parameter as it is read or
+  materializes first and converts afterwards is chosen at runtime from what the
+  installed libraries expose, so it is not derivable from the case, and it moves
+  the memory figures below by gigabytes. A record without the field predates its
+  being captured, which is not the same as a run that quantized nothing;
 - sampled peak RSS summed across the launcher process tree and sampled cgroup
   memory. Cgroup memory is scope-wide and may include unrelated processes;
 - sampled peak GPU memory. NVIDIA measurements are filtered to the process
@@ -384,7 +407,8 @@ python tools/validation_report.py \
 ```
 
 It states whether the run is green, gives the outcome, load time, wall time and
-peak device and host memory per case, and then lists which combinations for each
+peak device and host memory per case, says for a quantized text encoder which
+materialization it took, and then lists which combinations for each
 model on this hardware have still not run. The denominator counts only cases
 this machine's accelerator can run, so cases needing other hardware are not
 reported as outstanding work. Pass `--format markdown` for a version to paste

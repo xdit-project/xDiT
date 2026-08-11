@@ -500,6 +500,48 @@ def failure_text(log: str) -> str:
     return "\n".join(selected)
 
 
+# The descriptor line every quantized component logs, in either of the two shapes the
+# FP8 and format backends emit: both open with the same four fields and both append
+# "; fallback=" when the path asked for was not the path taken.
+QUANTIZATION_LINE = re.compile(
+    r"(?P<component>[\w.]+) quantization: "
+    r"requested=(?P<requested>[^,;]+), "
+    r"backend=(?P<backend>[^,;]+), "
+    r"storage=(?P<storage>[^,;]+), "
+    r"materialization=(?P<materialization>[^,;]+)"
+)
+QUANTIZATION_FALLBACK = re.compile(r"; fallback=(?P<fallback>.+)$")
+
+
+def quantization_paths(log: str) -> dict[str, dict[str, str | None]]:
+    """Which materialization each quantized component took, per component.
+
+    Whether a text encoder streamed its quantization during the load or quantized after
+    materializing decides what the run's peak memory can be, and it is chosen at runtime
+    from what the installed libraries expose. The record carried the peaks but not that
+    choice, so two runs of one case could differ in the thing being measured and only the
+    log said which was which. A component absent here did not report a descriptor; the
+    whole mapping absent means the record predates this being captured.
+    """
+    paths: dict[str, dict[str, str | None]] = {}
+    for raw in log.splitlines():
+        line = LINE_PREFIX.sub("", raw).rstrip()
+        found = QUANTIZATION_LINE.search(line)
+        if not found:
+            continue
+        # Ranks log the same descriptor, so the first occurrence is the whole story.
+        if found["component"] in paths:
+            continue
+        fallback = QUANTIZATION_FALLBACK.search(line)
+        paths[found["component"]] = {
+            "requested": found["requested"],
+            "backend": found["backend"],
+            "materialization": found["materialization"],
+            "fallback": fallback["fallback"] if fallback else None,
+        }
+    return paths
+
+
 def classify_outcome(
     exit_status: int,
     log: str,
@@ -1425,6 +1467,7 @@ def make_environment_mismatch_record(
             "wall_duration_seconds": None,
             "load_duration_seconds": None,
             "first_forward": "not_reached",
+            "quantization_paths": {},
             "peak_host_rss_bytes": None,
             "peak_cgroup_memory_bytes": None,
             "peak_gpu_memory_bytes": None,
@@ -1613,6 +1656,7 @@ def execute_case(
             round(compile_duration, 3) if compile_duration is not None else None
         ),
         "first_forward": first_forward,
+        "quantization_paths": quantization_paths("\n".join(log_lines)),
         "peak_host_rss_bytes": monitor.peak_host_rss or None,
         "peak_cgroup_memory_bytes": monitor.peak_cgroup or None,
         "peak_host_anon_bytes": monitor.peak_host_anon or None,

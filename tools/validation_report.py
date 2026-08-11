@@ -156,6 +156,31 @@ def _combination(case: dict) -> str:
     return "+".join([label, *extras])
 
 
+def _text_encoder_path(record: dict) -> str:
+    """Whether the text encoder streamed its quantization or quantized after loading.
+
+    Its own column because it is not decided by the case's flags but at runtime, from what
+    the installed libraries expose and which load path the denoiser took. Two rows asking
+    for the same thing can therefore have measured different things, and the memory columns
+    beside this one are where that shows up.
+    """
+    case = record["case"]
+    if not case.get("te_fp8"):
+        return "-"
+    paths = (record.get("metrics") or {}).get("quantization_paths")
+    if paths is None:
+        return "?"
+    modes = {
+        detail["materialization"]
+        for name, detail in paths.items()
+        if name.startswith("text_encoder")
+    }
+    if not modes:
+        return "none"
+    short = {"streaming": "stream", "post_load": "post"}
+    return "+".join(sorted(short.get(mode, mode) for mode in modes))
+
+
 def _post_load(metrics: dict):
     """Wall minus the two phases the runner times, so the columns account for the whole run.
 
@@ -174,7 +199,7 @@ def _table(rows: list[list[str]], headers: list[str]) -> list[str]:
         max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
         for i in range(len(headers))
     ]
-    numeric = set(range(4, len(headers)))
+    numeric = set(range(5, len(headers)))
 
     def fmt(cells: list[str]) -> str:
         out = []
@@ -318,6 +343,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
                 record["case_id"],
                 case["model"],
                 _combination(case),
+                _text_encoder_path(record),
                 _seconds(metrics.get("load_duration_seconds")),
                 _seconds(metrics.get("compile_duration_seconds")),
                 _seconds(_post_load(metrics)),
@@ -339,6 +365,7 @@ def render(report: dict, *, markdown: bool = False) -> str:
         "case",
         "model",
         "placement/quant/world",
+        "te quant",
         "load s",
         "compile s",
         "post-load s",
@@ -360,6 +387,12 @@ def render(report: dict, *, markdown: bool = False) -> str:
     lines.append(
         "rej means the case was refused as the matrix expects, so a guard fired before "
         "the load and there are no timings to report."
+    )
+    lines.append(
+        "te quant is which path the quantized text encoder took: stream quantizes each "
+        "parameter as it is read, post materializes the encoder first and quantizes after. "
+        "The runner chooses at runtime, so it is not read off the case; ? means the record "
+        "predates this being captured and only its log can say."
     )
     lines.append(
         "vs ref is SSIM against the same model's eager bf16 case. It comes from a separate run made "

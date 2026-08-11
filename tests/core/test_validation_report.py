@@ -111,6 +111,57 @@ def test_an_expected_rejection_is_not_shown_as_a_working_combination(
     assert "GREEN" in text and "NOT GREEN" not in text
 
 
+def test_a_quantized_text_encoder_reports_which_path_it_took(
+    report_tool, matrix, tmp_path
+):
+    """Two runs of one case can differ here, so the row has to say which it measured."""
+    case = next(c for c in _cases_for(matrix, "gfx942_or_gfx950") if c.get("te_fp8"))
+    streamed = _record(
+        case,
+        "passed",
+        wall_duration_seconds=1.0,
+        quantization_paths={
+            "transformer": {"materialization": "streaming", "fallback": None},
+            "text_encoder": {"materialization": "streaming", "fallback": None},
+        },
+    )
+    fell_back = _record(
+        case,
+        "passed",
+        wall_duration_seconds=1.0,
+        quantization_paths={
+            "text_encoder": {
+                "materialization": "post_load",
+                "fallback": "streaming disabled by the runner",
+            }
+        },
+    )
+
+    assert report_tool._text_encoder_path(streamed) == "stream"
+    assert report_tool._text_encoder_path(fell_back) == "post"
+
+
+def test_a_record_written_before_the_path_was_captured_says_so(
+    report_tool, matrix, tmp_path
+):
+    """Blank would read as a case that quantized nothing, which is a different claim."""
+    case = next(c for c in _cases_for(matrix, "gfx942_or_gfx950") if c.get("te_fp8"))
+    older = _record(case, "passed", wall_duration_seconds=1.0)
+
+    assert report_tool._text_encoder_path(older) == "?"
+
+
+def test_a_case_with_no_quantized_text_encoder_claims_nothing_about_one(
+    report_tool, matrix
+):
+    case = next(
+        c for c in _cases_for(matrix, "gfx942_or_gfx950") if not c.get("te_fp8")
+    )
+    record = _record(case, "passed", wall_duration_seconds=1.0, quantization_paths={})
+
+    assert report_tool._text_encoder_path(record) == "-"
+
+
 def test_the_denominator_counts_only_cases_this_hardware_can_run(
     report_tool, matrix, tmp_path
 ):

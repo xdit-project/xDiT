@@ -1779,6 +1779,65 @@ def test_compile_warmup_is_timed_separately_from_the_load(runner, monkeypatch, t
     assert metrics["compile_duration_seconds"] > 0.5
 
 
+def test_the_record_says_which_materialization_each_component_took(runner):
+    """The peaks alone cannot say whether a text encoder streamed or quantized after loading.
+
+    Which one it does is decided at runtime from what the installed libraries expose, so two
+    runs of one case can differ in the thing being measured. Until this was captured, only
+    the log said which, and the JSONL record beside it looked identical either way.
+    """
+    log = "\n".join(
+        [
+            "INFO 08-11 08:24:27 [runner_utils.py:30] transformer quantization: "
+            "requested=fp8, backend=torchao, storage=tensorwise_dynamic, "
+            "materialization=streaming",
+            "INFO 08-11 08:24:38 [runner_utils.py:30] text_encoder quantization: "
+            "requested=fp8, backend=torchao, storage=tensorwise_dynamic, "
+            "materialization=post_load; fallback=streaming disabled by the runner",
+        ]
+    )
+
+    paths = runner.quantization_paths(log)
+
+    assert paths["transformer"]["materialization"] == "streaming"
+    assert paths["transformer"]["fallback"] is None
+    assert paths["text_encoder"]["materialization"] == "post_load"
+    assert paths["text_encoder"]["fallback"] == "streaming disabled by the runner"
+
+
+def test_the_longer_format_descriptor_reads_the_same(runner):
+    """The FP4 and MXFP4 backends log more fields after the one being read."""
+    log = (
+        "INFO 08-11 08:24:27 [runner_utils.py:30] transformer quantization: "
+        "requested=fp4, backend=aiter, storage=aiter_mxfp4_per_1x32, "
+        "materialization=post_load, parameters=replaced, auxiliary=none, "
+        "trainability=inference_only, serialization=xdit; "
+        "fallback=AITER MXFP4 has no quantize-on-load path"
+    )
+
+    paths = runner.quantization_paths(log)
+
+    assert paths["transformer"]["materialization"] == "post_load"
+    assert paths["transformer"]["backend"] == "aiter"
+    assert paths["transformer"]["fallback"] == "AITER MXFP4 has no quantize-on-load path"
+
+
+def test_every_rank_logging_the_descriptor_is_one_component(runner):
+    log = "\n".join(
+        f"[rank{rank}]: 2026-08-11T08:24:27+00:00 text_encoder quantization: "
+        "requested=fp8, backend=torchao, storage=tensorwise_dynamic, "
+        "materialization=streaming"
+        for rank in range(8)
+    )
+
+    assert list(runner.quantization_paths(log)) == ["text_encoder"]
+
+
+def test_a_log_with_nothing_quantized_reports_nothing(runner):
+    """Empty is a measurement; the key missing entirely means the run predates it."""
+    assert runner.quantization_paths("INFO Running model...\nINFO Done.") == {}
+
+
 def test_result_record_serializes_required_fields(runner, tmp_path, matrix):
     case = matrix["cases"][0]
     record = runner.make_result_record(

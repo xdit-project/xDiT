@@ -1,768 +1,240 @@
-# Memory-efficient load: measured results on MI355X
+# Memory-efficient load: measured results
 
-GPU end-to-end evidence for the memory-efficient load paths, taken on 8× AMD Instinct MI355X
-(`gfx950`) across all nineteen models this node can load through them. Three sweeps: thirty-six
-cases over six image models with a standard transformer, then seventy-three over the ten that had
-never run — two that edit a picture, two that arrived upstream untested, and six video models — then
-twenty over the three whose weights had to be fetched before they could run at all. Every case
-passing, every still image scored against an unquantized render of the same prompt, every clip
-checked frame by frame for having rendered anything. A final batch of eleven covers the other claim
-these paths make: the models that refuse them, refusing before they allocate.
+Two load paths are measured here against the two ways of loading that already existed. `fsdp_blockwise`
+builds on meta and fills and shards one block at a time; `replicated` has rank 0 read each block and
+broadcast it, quantizing before placement. They are measured against `eager`, which builds every
+component in full on every rank, and `fsdp_eager_fill`, which does the same and then shards it — what a
+naive FSDP load does, and the control. The claim under test is that the first two hold a load inside a
+device and a host that the other two do not, and draw the same picture doing it.
 
-Read this together with [the handoff](meta_load_handoff.md), which covers the node's setup and the
-threads still open, and [the validation handoff](gpu_validation_handoff.md), which covers how the
-harness plans, runs and scores a case.
+They do, on every one of the twenty models this node can load through them. Blockwise beats eager on
+load-time VRAM everywhere, by 1.4x to 5.2x, and the margin grows with the model: FLUX.2-dev peaks at
+109 GB loaded eagerly at eight ranks and 21 GB filled block by block, and Cosmos3-Super, whose
+transformer is 128 GB, needs 128 GB eagerly against 29 filled. It also beats eager on host memory, which
+the control does not —
+sharding after materializing buys the device saving and pays for it on the host, up to 522 GB on
+Wan2.2-I2V where blockwise holds 88 GB, because every rank holds a whole copy while it waits to be cut
+down. Blockwise's host cost is flat across models, 68–104 GB on nineteen of the twenty, which is the
+useful property: it is a cost of the strategy rather than of the model. On the images, eager, the control
+and blockwise score identically against a single-rank render, to four decimals on every model, so the
+loading strategy contributes nothing on top of the parallelism, and the two quantized paths land within
+0.009 of each other everywhere — far closer than either is to bf16.
 
-## What ran
+Read this with [the validation handoff](gpu_validation_handoff.md) for how the harness plans, runs and
+scores a case, and [the meta-load handoff](meta_load_handoff.md) for the node's setup.
 
-Six cases per model, at the rank count these models are served at:
+## MI355X (`gfx950`), 8 devices
 
-| Case | What it is |
+161 of the matrix's 183 cases have run, all of them on this node: 144 passed, 15 asserted a refusal, 2
+report an environment mismatch for wanting `gfx942` alone. torch `2.9.1+gitff65f5b`, torchao `0.18.0+git92dcc9616`,
+transformers `5.5.4`, diffusers `0.39.0.dev0` (`21ba39457`, the first sweep on `447e571ad`), AITER
+present, ROCm 6.16.2, Python 3.12.3, 288 GB per device, 3 TB host, `HF_HUB_OFFLINE=1`.
+
+Every model at the rank count it is served at, Ulysses across all of them, `torch.compile` on, AITER
+attention. `VRAM` is load-time peak on one device and `host` is peak host anonymous memory, both in GB;
+`load` is seconds; `SSIM` is against the same model's single-rank eager render. `+fp8` is the blockwise
+fill quantizing as it goes and `repl+fp8` the replicated broadcast doing the same:
+
+| Model | ranks | VRAM eager | VRAM control | VRAM blockwise | VRAM +fp8 | VRAM repl+fp8 | host eager | host control | host blockwise | load eager | load blockwise | SSIM bf16 | SSIM fp8 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FLUX.2-dev | 8 | 109 | 24 | 21 | 34 | 87 | 103 | 173 | 76 | 154 | 83 | 0.998 | 0.901 |
+| Qwen-Image | 8 | 58 | 17 | 19 | 16 | 43 | 68 | 111 | 75 | 79 | 48 | 0.992 | 0.575 |
+| Qwen-Image-Edit | 8 | 58 | 16 | 19 | 16 | 43 | 84 | 110 | 83 | 81 | 45 | 0.987 | 0.950 |
+| FLUX.2-klein-9B | 8 | 37 | 15 | 16 | 18 | 33 | 99 | 170 | 83 | 46 | 33 | 0.973 | 0.888 |
+| FLUX.2-klein-4B | 8 | 19 | 11 | 14 | 14 | 20 | 87 | 102 | 78 | 14 | 19 | - | - |
+| FLUX.1-dev | 8 | 36 | 15 | 16 | 19 | 29 | 102 | 188 | 86 | 48 | 32 | 0.995 | 0.974 |
+| FLUX.1-Kontext-dev | 8 | 36 | 13 | 16 | 15 | 29 | 102 | 184 | 76 | 48 | 30 | 0.993 | 0.810 |
+| Krea-2-Raw | 8 | 37 | 14 | 15 | 15 | 30 | 102 | 179 | 104 | 49 | 39 | 0.934 | 0.940 |
+| Krea-2-Turbo | 8 | 37 | 15 | 15 | 15 | 30 | 104 | 177 | 103 | 49 | 39 | 0.858 | 0.660 |
+| Z-Image | 8 | 24 | 11 | 14 | 13 | 22 | 119 | 127 | 77 | 30 | 26 | 0.936 | 0.635 |
+| Z-Image-Turbo | 8 | 24 | 11 | 14 | 13 | 23 | 148 | 180 | 68 | 37 | 34 | 0.993 | 0.733 |
+| Ideogram-4 | 6 | 55 | 28 | 30 | 26 | 41 | 424 | 433 | 186 | 234 | 172 | - | - |
+| HunyuanVideo | 8 | 42 | 14 | 15 | 15 | 35 | 146 | 159 | 102 | 54 | 36 | - | - |
+| Wan2.1-T2V | 8 | 42 | 14 | 21 | 21 | 33 | 328 | 343 | 88 | 94 | 56 | - | - |
+| Wan2.1-I2V | 8 | 47 | 16 | 21 | 21 | 36 | 368 | 372 | 84 | 102 | 51 | - | - |
+| Wan2.2-T2V | 8 | 69 | 18 | 19 | 17 | 48 | 493 | 523 | 84 | 152 | 80 | - | - |
+| Wan2.2-I2V | 8 | 69 | 18 | 19 | 17 | 48 | 492 | 522 | 88 | 152 | 80 | - | - |
+| Wan2.2-TI2V | 8 | 26 | 13 | 16 | 16 | 26 | 151 | 173 | 90 | 41 | 33 | - | - |
+| Cosmos3-Nano | 8 | 37 | 17 | 18 | 16 | 26 | 103 | 111 | 85 | 11 | 24 | - | - |
+| Cosmos3-Super | 8 | 128 | 30 | 29 | 23 | 77 | 103 | 106 | 89 | 42 | 75 | - | - |
+
+Four things in that table need a note rather than a second look. **Ideogram-4** is the only model with a component
+outside the path — its text encoder is built through `AutoModel` with `trust_remote_code`, so no
+manifest can know its names ahead of the load — and its 424 GB eager host figure is that encoder on
+every rank; blockwise still cuts it to 186. **Cosmos3-Nano and klein-4B load slower** blockwise than eager,
+11s against 24s and 14s against 19s, which is the fill's per-block collective costing more than it saves
+on a transformer small enough to materialize. Nano still halves its load VRAM; klein-4B, the smallest
+model here, cuts it by a third. **The `+fp8`
+column also fills and quantizes the text encoder** wherever the model declares targets for it, so it is
+not a pure quantization delta, and on FLUX.2-dev, klein-9B and FLUX.1-dev that makes the quantized fill
+dearer than the bf16 one. **`repl+fp8` is consistently the dearest of the three** memory-efficient
+columns, and on Cosmos3-Super dramatically so at 77 GB, because rank 0 holds the component whole before
+broadcasting it. On a 128 GB transformer the choice between the two paths stops being a detail.
+
+The other 43 cases cover what the grid does not: quantization formats, offload modes, rank counts, a
+library version, and the refusals.
+
+| Case | Model | Combination | load VRAM | load s | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| `rocm-flux1-fp8-eager-sequential-offload` | FLUX.1-dev | eager/fp8/w1+offload=sequential | 15 | 27 | pass |
+| `rocm-flux1-fp8-replicated-sequential-offload` | FLUX.1-dev | replicated/fp8/w2+offload=sequential | 24 | 18 | pass |
+| `rocm-flux2-fp8-eager` | FLUX.2-dev | eager/fp8/w1 | 79 | 113 | pass |
+| `rocm-flux2-fp8-eager-te-tf4` | FLUX.2-dev | eager/fp8/w1+te, Transformers 4 | 80 | 30 | pass |
+| `rocm-flux2-fp8-eager-te-tf5` | FLUX.2-dev | eager/fp8/w1+te, Transformers 5 | 58 | 62 | pass |
+| `rocm-flux2-fsdp-te-tf4-rejected` | FLUX.2-dev | fsdp_blockwise/fp8/w2+te, Transformers 4 | - | - | refused |
+| `rocm-flux2-hybrid-eager` | FLUX.2-dev | eager/hybrid FP8+FP4/w1 | 93 | 33 | pass |
+| `rocm-klein4b-bf16-eager` | FLUX.2-klein-4B | eager/bf16/w1 | 16 | 5 | pass |
+| `rocm-klein4b-fp8-fsdp4` | FLUX.2-klein-4B | fsdp_blockwise/fp8/w4 | 11 | 16 | pass |
+| `rocm-klein4b-fp8-replicated4` | FLUX.2-klein-4B | replicated/fp8/w4 | 17 | 19 | pass |
+| `rocm-hunyuan15-sparse-fsdp-flag-refused` | Hunyuanvideo-1.5-Sparse | fsdp_blockwise/bf16/w2 | - | - | refused |
+| `rocm-hunyuan15-sparse-replicated-withheld` | Hunyuanvideo-1.5-Sparse | replicated/bf16/w2 | - | - | refused |
+| `rocm-ideogram4-text-encoder-excluded` | Ideogram-4 | fsdp_blockwise/bf16/w2 | 45 | 163 | pass |
+| `rocm-gfx950-krea2-fp4-eager` | Krea-2-Turbo | eager/fp4/w1 | 17 | 23 | pass |
+| `rocm-gfx950-krea2-fp4-fsdp4` | Krea-2-Turbo | fsdp_blockwise/fp4/w4 | - | - | refused |
+| `rocm-gfx950-krea2-fp4-replicated4` | Krea-2-Turbo | replicated/fp4/w4 | 21 | 34 | pass |
+| `rocm-krea2-fp4-eager-group-offload-rejected` | Krea-2-Turbo | eager/fp4/w1+offload=group | - | - | refused |
+| `rocm-krea2-fp4-replicated-group-lowcpu-rejected` | Krea-2-Turbo | replicated/fp4/w2+offload=group low-cpu | - | - | refused |
+| `rocm-krea2-fp8-eager-group-offload` | Krea-2-Turbo | eager/fp8/w1+offload=group | 16 | 39 | pass |
+| `rocm-ltx23-fsdp-withheld` | LTX-2.3 | fsdp_blockwise/bf16/w2 | - | - | refused |
+| `rocm-lingbot-dense-fsdp-withheld` | LingBot-Video-Dense | fsdp_blockwise/bf16/w2 | - | - | refused |
+| `rocm-lingbot-moe-fsdp-withheld` | LingBot-Video-MoE | fsdp_blockwise/bf16/w2 | - | - | refused |
+| `rocm-minimax-h3-fsdp-withheld` | MiniMax-H3 | fsdp_blockwise/bf16/w2 | - | - | refused |
+| `rocm-minimax-h3-ref2va-fsdp-withheld` | MiniMax-H3-Ref2VA | fsdp_blockwise/bf16/w2 | - | - | refused |
+| `rocm-qwen-fp8-replicated-te` | Qwen-Image | replicated/fp8/w2+te | 39 | 39 | pass |
+| `rocm-qwen-edit-fp8-eager-model-offload` | Qwen-Image-Edit | eager/fp8/w1+te+offload=model | 22 | 27 | pass |
+| `rocm-wan22-i2v-bf16-eager` | Wan2.2-I2V | eager/bf16/w1 | 66 | 60 | pass |
+| `rocm-wan22-i2v-bf16-replicated4` | Wan2.2-I2V | replicated/bf16/w4 | 69 | 69 | pass |
+| `rocm-wan22-i2v-bf16-ulysses4-control` | Wan2.2-I2V | eager/bf16/w4 | 67 | 110 | pass |
+| `rocm-wan22-i2v-fp4-eager` | Wan2.2-I2V | eager/fp4/w1 | - | - | wants `gfx942` |
+| `rocm-wan22-i2v-fp4-fsdp4` | Wan2.2-I2V | fsdp_blockwise/fp4/w4 | - | - | wants `gfx942` |
+| `rocm-wan22-i2v-fp8-eager` | Wan2.2-I2V | eager/fp8/w1 | 42 | 50 | pass |
+| `rocm-wan22-i2v-fp8-fsdp4` | Wan2.2-I2V | fsdp_blockwise/fp8/w4 | 16 | 69 | pass |
+| `rocm-wan22-i2v-fp8-replicated2` | Wan2.2-I2V | replicated/fp8/w2 | 43 | 62 | pass |
+| `rocm-wan22-i2v-fp8-replicated4` | Wan2.2-I2V | replicated/fp8/w4 | 45 | 71 | pass |
+| `rocm-wan22-i2v-fp8-te-eager` | Wan2.2-I2V | eager/fp8/w1+te | 38 | 23 | pass |
+| `rocm-wan22-i2v-fp8-ulysses4-control` | Wan2.2-I2V | eager/fp8/w4 | 43 | 92 | pass |
+| `rocm-wan22-t2v-hybrid-fsdp4` | Wan2.2-T2V | fsdp_blockwise/hybrid FP8+FP4/w4 | - | - | refused |
+| `rocm-zimage-int8-rejected` | Z-Image-Turbo | eager/int8/w1 | - | - | refused |
+| `rocm-zimage-turbo-bf16-fsdp-group-offload-rejected` | Z-Image-Turbo | fsdp_blockwise/bf16/w2+offload=group | - | - | refused |
+| `rocm-zimage-turbo-bf16-fsdp-model-offload` | Z-Image-Turbo | fsdp_blockwise/bf16/w2+offload=model | 15 | 22 | pass |
+| `rocm-zimage-turbo-bf16-fsdp-sequential-offload-rejected` | Z-Image-Turbo | fsdp_blockwise/bf16/w2+offload=sequential | - | - | refused |
+| `rocm-zimage-turbo-bf16-replicated-model-offload` | Z-Image-Turbo | replicated/bf16/w2+offload=model | 23 | 26 | pass |
+
+Every refusal fires before the load allocates and is matched on its reason rather than on merely failing,
+and a test compares each pattern against the message the runner's declaration produces. Seven come from
+models that withhold the memory-efficient load or the sharding flag outright — MiniMax-H3 refuses without
+reading any of its 330 GB — and the other eight are limits these runs found, below.
+
+## Other GPUs
+
+Nothing has run anywhere else, so nothing here has a second data point. Twenty-two cases are pinned to
+hardware this node is not, and only three of their claims are genuinely architectural: FP8 through
+AITER, which is selected on `gfx1200` and `gfx1201` alone; NVFP4, gated on CUDA capability 10.0; and
+INT8 that works rather than refuses, which TorchAO supports on CUDA only.
+
+| Accelerator | Cases | What they would add |
+| --- | --- | --- |
+| `gfx1200`/`gfx1201` (RDNA4) | 8 | the AITER FP8 quantizer, which is also the only backend whose text encoder can stream under a replicated load |
+| `sm100`+ (Blackwell) | 6 | NVFP4 across all three placements, INT8 with group offload, and a hybrid-schedule refusal |
+| `sm90` (Hopper) | 4 | FP8 and INT8 on CUDA, INT8 with sequential offload, and LTX-2, which nothing here covers |
+| `sm89` (Ada) | 3 | FP8 with a text encoder and INT8 replicated on an older CUDA arch, plus an NVFP4 refusal |
+| `gfx942` | 1 | the FP4 refusal that holds where AITER ships no FP4 kernels |
+
+Three of the twenty-two cannot run anywhere as written: SD3.5, CausalWan and Wan2.2-Distilled-I2V have
+no sampling entry and no node has their weights, so an operating point cannot be chosen without
+inventing one. [The handoff](gpu_validation_handoff.md#what-needs-other-hardware) carries the full
+accounting of which are worth a booking.
+
+## What these runs found
+
+Nineteen things, none of them findable by a case that had already run: each needed a model, a placement
+or an environment nothing had combined before. Some are defects that are fixed, some are limits that are
+now refused before they can waste a load.
+
+| Where | What it was |
 | --- | --- |
-| `eager` at 1 rank | the reference every image is scored against |
-| `eager` at 8 ranks | the honest baseline: what the same node does without this branch, at the same parallelism |
-| `fsdp_eager_fill` at 8 ranks | the control: materialize the transformer, then shard it, which is what a naive FSDP load does |
-| `fsdp_blockwise` at 8 ranks | this branch: build on meta, fill and shard block by block |
-| `fsdp_blockwise` + fp8 at 8 ranks | the same, quantizing each block as it materializes, text encoder included |
-| `replicated` + fp8 at 8 ranks | rank 0 loads and broadcasts, quantizing before placement |
-
-Every multi-rank case uses Ulysses 8, `torch.compile` is on throughout, the attention backend is
-AITER, and each model is sampled the way its own benchmark config samples it:
-
-| Model | Steps | Size (w×h) | Guidance | Seed |
-| --- | --- | --- | --- | --- |
-| FLUX.2-dev | 50 | 1024×1024 | 4.0 | 42 |
-| Qwen-Image | 50 | 2048×2048 | 0.0 | 42 |
-| FLUX.2-klein-9B | 4 | 2048×2048 | 1.0 | 42 |
-| FLUX.1-dev | 25 | 1024×1024 | 0.0 | 42 |
-| Z-Image | 50 | 1920×1088 | 4.0 | 42 |
-| Z-Image-Turbo | 4 | 320×512 | 0.0 | 42 |
-
-Environment: torch `2.9.1+gitff65f5b`, torchao `0.18.0+git92dcc9616`, transformers `5.5.4`, diffusers
-`0.38.0.dev0`, AITER present, ROCm 6.16.2, Python 3.12.3, 8 × `gfx950` with 288 GB each on a
-64-core EPYC 9575F with 3T of host memory. Page cache was dropped before every timed run, so the load times are cold-cache
-and comparable to each other.
-
-## Load time and load-time VRAM
-
-Blockwise fill beats the eager baseline on both, on every model, and the margin grows with the model.
-
-| Model | eager, 8 ranks | blockwise, 8 ranks | speedup | eager load VRAM | blockwise load VRAM | reduction |
-| --- | --- | --- | --- | --- | --- | --- |
-| FLUX.2-dev | 153.5s | 82.8s | 1.85x | 109.2G | 21.0G | 5.2x |
-| Qwen-Image | 79.4s | 48.0s | 1.65x | 58.2G | 18.8G | 3.1x |
-| FLUX.2-klein-9B | 46.2s | 33.2s | 1.39x | 36.7G | 16.1G | 2.3x |
-| FLUX.1-dev | 47.8s | 32.3s | 1.48x | 35.8G | 15.6G | 2.3x |
-| Z-Image | 29.5s | 25.5s | 1.16x | 23.9G | 13.9G | 1.7x |
-| Z-Image-Turbo | 37.0s | 34.2s | 1.08x | 23.9G | 13.9G | 1.7x |
-
-Load VRAM is the peak on the busiest single device while the load is in flight, not a sum over
-devices, so the figures are comparable across rank counts. It is the number a memory-efficient load
-exists to move: loading FLUX.2-dev eagerly at 8 ranks peaks at 109.2G, because every rank builds the
-whole pipeline before FSDP takes the transformer apart, and 109.2G of a card's 288G is most of the
-headroom inference then wants for activations.
-
-## Host memory
-
-| Model | eager anon | control anon | blockwise anon | control load VRAM |
-| --- | --- | --- | --- | --- |
-| FLUX.2-dev | 102.7G | 173.3G | 76.0G | 23.6G |
-| Qwen-Image | 67.6G | 110.6G | 75.0G | 16.6G |
-| FLUX.2-klein-9B | 99.2G | 170.0G | 82.7G | 15.0G |
-| FLUX.1-dev | 102.1G | 187.6G | 86.2G | 15.2G |
-| Z-Image | 118.9G | 126.6G | 77.1G | 11.3G |
-| Z-Image-Turbo | 148.0G | 180.1G | 67.9G | 11.1G |
-
-The control is the point of that table. Sharding after materialization gets the device saving —
-15.2G against eager's 35.8G on FLUX.1-dev — and pays for it on the host, 187.6G against 102.1G,
-because every rank holds a full copy while it waits to be cut down. Blockwise gets the same device
-saving and *reduces* the host figure instead, because no rank ever holds a whole component.
-
-Blockwise's host cost is also the flat one: 68–86G on all six models, where eager ranges 68–148G.
-Qwen-Image is the one model where eager is already as cheap on the host as blockwise, so the 75.0G
-there is not blockwise behaving oddly — it is Qwen's eager path being unusually cheap. Why eager
-varies that much between models is a question about the stock loader, not about this branch.
-
-Host anon is the container's anonymous pages, which is what the OOM killer watches. It is not summed
-over ranks. Page-cache figures are excluded here on purpose: the kernel reclaims that under pressure,
-so it is not a cost.
-
-## The image is the same image
-
-Every case's render, scored against the same model's single-rank eager render with `torch.compile`
-disabled on both sides so the comparison is deterministic:
-
-| Model | eager w8 | eager-fill w8 | blockwise w8 | fp8 blockwise | fp8 replicated |
-| --- | --- | --- | --- | --- | --- |
-| FLUX.2-dev | 0.9982 | 0.9982 | 0.9982 | 0.9006 | 0.9006 |
-| Qwen-Image | 0.9920 | 0.9920 | 0.9920 | 0.5748 | 0.5748 |
-| FLUX.2-klein-9B | 0.9735 | 0.9735 | 0.9735 | 0.8882 | 0.8821 |
-| FLUX.1-dev | 0.9949 | 0.9949 | 0.9949 | 0.9741 | 0.9741 |
-| Z-Image | 0.9364 | 0.9364 | 0.9364 | 0.6353 | 0.6353 |
-| Z-Image-Turbo | 0.9935 | 0.9935 | 0.9935 | 0.7328 | 0.7244 |
-
-SSIM, so 1.0 is identical. The three bf16 columns agree to four decimals on every model, which is the
-claim this branch has to support: whatever separates an 8-rank render from a 1-rank one is the
-parallelism, and the loading strategy contributes nothing on top of it. Only Z-Image-Turbo's row is
-a verdict; the other models record the number as an observation, because a model that redraws the
-prompt as a different sample under any numeric change cannot be judged by this metric. See
-`IDENTITY_STABLE_MODELS` in `tools/gpu_validation.py` for that argument in full.
-
-The fp8 column is quantization error, and how much of it lands in the image depends on the sampling
-trajectory rather than on the load. Against its own bf16 row, fp8 costs FLUX.1-dev 0.021 over
-twenty-five steps and Qwen-Image 0.417 over fifty at 2048² — and the Qwen render is a converged,
-legible picture of the prompt, just a different sample of it. The two fp8 placements land within
-0.009 of each other on every model, so replicated and blockwise quantization agree with each other far
-more closely than either agrees with bf16, which is what you want from two routes to the same
-quantized weights.
-
-Wall time, for completeness, since a faster load is not worth much if the run gets slower:
-
-| Model | eager w8 | blockwise w8 |
-| --- | --- | --- |
-| FLUX.2-dev | 235.8s | 165.5s |
-| Qwen-Image | 138.4s | 103.3s |
-| FLUX.2-klein-9B | 94.6s | 87.1s |
-| FLUX.1-dev | 144.7s | 118.9s |
-| Z-Image | 80.2s | 74.3s |
-| Z-Image-Turbo | 77.5s | 72.3s |
-
-## Two bugs this sweep found
-
-Neither is in the load path. Both need a combination that nothing had run before: quantization at a
-rank count high enough to leave a rank with nothing but padding, and sharding together with a
-CUDA-graph compile mode, which CI only pairs on RDNA4 where the mode is `default`.
-
-**Every FP8 render of Qwen-Image at eight ranks was pure black.** A dynamic per-tensor FP8 scale is
-`max_abs / 448`, which is zero for a tensor of zeros, and quantizing divides by that scale, so the
-layer returned NaN where it should have returned its bias. Zeros are not a corner case: a model that
-zero-pads its text sequence up to a multiple of the sequence-parallel world size hands whole
-padding-only chunks to late ranks, and the NaN then reached every rank through the attention
-all-to-all. Fixed with torchao's `activation_value_lb`, set to the EPS torchao uses on its own
-training path, at every site that builds the config. It only binds when the largest value in the
-tensor is below it, so ordinary activations are measured bit-identical. In the four-step bisect that
-isolated it, the case measured 0.0006 against bf16 at the same rank count before the fix and 0.9463
-after.
-
-**Every FLUX case with sharding and compile failed to run.** Sharding turns one compiled transformer
-into one compiled block per layer, each its own CUDA graph segment; recording a later block reads the
-previous block's output buffer, and the graph system refuses the read because it still holds the
-previous step's outputs live. The FLUX runners ask for `reduce-overhead` off RDNA4, so this was the
-whole FLUX column. Fixed with a forward pre-hook that announces the step boundary, which is the
-remedy the error message names and the one the FLUX.2 cache adapter already applied for the same
-reason.
-
-The black frames also exposed a hole in the harness: nothing had looked at the image, because
-reference comparison only gates models that reproduce their sample. Whether a picture exists needs no
-reference and no per-model judgement, so a spread measurement now gates every case, and a run that
-writes a uniform frame is `failed_blank_output` no matter what it exited with.
-
-## One gate defect the scoring found
-
-Scoring failed Z-Image-Turbo's two fp8 cases at 0.7244 against a floor of 0.80, and the images are
-the same cat in the same pose with slightly different fur. That floor had been calibrated when every
-model rendered 512×512 at seed 1234, where the same case measured 0.9227; sampling each model its own
-way moved it and the floor was left behind. A floor only means something next to the sampling it was
-measured at, which the calibration in `tools/image_quality.py` now records.
-
-Recalibrating to a single looser floor would have given up the check that matters most here, since
-sharding alone measures 0.9935 against the same reference: a floor loose enough for fp8 would pass a
-shard that rendered a different picture. So a case that only moves weights is held to 0.90 and one
-that quantizes them to 0.60, both clearing their measured result by a wide margin and both failing
-the 0.0006 a collapsed render scores.
-
-## The second sweep: ten models that had never run
-
-The first sweep took the six image models with a standard transformer. This one takes the rest of what
-this node's cache holds: two models that edit a picture rather than drawing one, two that arrived
-upstream and had never been run at all, and six video models. Seventy-three cases, of which
-seventy-one ran and passed; the two that did not are curated FP4 cases
-asserting a rejection that only holds on `gfx942`, and they correctly reported
-`environment_mismatch` on this `gfx950` node.
-
-Same node, same harness, one environment change: the container's from-source Diffusers was 248 commits
-behind and had no `krea2` package at all, so it moved from `0.38.0.dev0` (`447e571ad`) to
-`0.39.0.dev0` (`21ba39457`). Z-Image-Turbo was re-run on the new version and still passes, so treat
-the first sweep's figures as taken on the older one rather than assuming both sweeps are one
-experiment.
-
-Each model is sampled its own way, as before. Five of these ten have no benchmark config at all, so
-their entries cite their runner's own `DefaultInputValues`, and a test checks each citation against
-what the runner declares so it cannot go stale:
-
-| Model | Steps | Size (w×h) | Guidance | Frames | Sampling from |
-| --- | --- | --- | --- | --- | --- |
-| FLUX.1-Kontext-dev | 30 | 1024×1024 | 2.5 | — | benchmark config, plus an input image |
-| Qwen-Image-Edit | 50 | 2048×2048 | 4.0 | — | benchmark config, plus an input image |
-| Krea-2-Raw | 52 | 2048×2048 | 3.5 | — | runner declaration |
-| Krea-2-Turbo | 8 | 2048×2048 | 0.0 | — | runner declaration, fixed schedule |
-| HunyuanVideo | 50 | 1280×720 | 6.0 | 129 | benchmark config, tiled and sliced VAE |
-| Wan2.1-T2V | 40 | 1280×720 | 3.5 | 81 | runner declaration |
-| Wan2.1-I2V | 40 | 1280×720 | 3.0 | 81 | benchmark config, plus an input image |
-| Wan2.2-T2V | 40 | 1280×720 | 3.5 | 81 | runner declaration |
-| Wan2.2-I2V | 40 | 1280×720 | 3.5 | 81 | benchmark config, plus an input image; guidance from the runner, which is the one value that config leaves unset |
-| Wan2.2-TI2V | 50 | 1280×736 | 5.0 | 121 | runner declaration, and `--task i2v`, which it requires |
-
-The two input images are the ones these models' benchmark configs pass, and they ship in the
-container; the matrix names them as environment placeholders so a case reports an environment
-mismatch when they are absent rather than failing as if the load were broken.
-
-The case counts are six per model, fifty-nine generated cases in all, plus fourteen curated ones — the
-three FP4 Krea-2 cases and eleven Wan2.2-I2V cases that predate this sweep. Wan2.2-I2V is the one
-model with five generated cases rather than six, because a curated single-rank eager case already
-occupies that slot; it renders a 17-frame clip rather than 81, which matters only in that it is not a
-like-for-like reference, and no video case is scored against a reference anyway.
-
-### Load time and load-time VRAM
-
-| Model | eager, 8 ranks | blockwise, 8 ranks | speedup | eager load VRAM | blockwise load VRAM | reduction |
-| --- | --- | --- | --- | --- | --- | --- |
-| FLUX.1-Kontext-dev | 47.7s | 29.7s | 1.61x | 35.8G | 15.6G | 2.3x |
-| Qwen-Image-Edit | 80.7s | 45.4s | 1.78x | 58.2G | 18.8G | 3.1x |
-| Krea-2-Raw | 48.6s | 38.7s | 1.26x | 36.7G | 15.4G | 2.4x |
-| Krea-2-Turbo | 48.6s | 39.2s | 1.24x | 36.7G | 15.4G | 2.4x |
-| HunyuanVideo | 54.7s | 41.3s | 1.32x | 42.6G | 29.2G | 1.5x |
-| Wan2.1-T2V | 93.5s | 55.9s | 1.67x | 42.1G | 21.1G | 2.0x |
-| Wan2.1-I2V | 102.3s | 50.8s | 2.01x | 47.3G | 21.1G | 2.2x |
-| Wan2.2-T2V | 151.7s | 80.4s | 1.89x | 68.9G | 19.0G | 3.6x |
-| Wan2.2-I2V | 152.1s | 80.0s | 1.90x | 69.0G | 19.1G | 3.6x |
-| Wan2.2-TI2V | 41.2s | 33.3s | 1.24x | 25.6G | 16.3G | 1.6x |
-
-The direction holds on every one of them, and the two Wan2.2 A14B models give up the largest absolute
-saving measured in either sweep: 72 seconds of load time and 50G of load-time VRAM. They are also the
-models that most need it, being the only ones here that carry two transformers.
-
-### Host memory
-
-| Model | eager anon | control anon | blockwise anon | reduction against control |
-| --- | --- | --- | --- | --- |
-| FLUX.1-Kontext-dev | 101.7G | 184.3G | 76.3G | 2.4x |
-| Qwen-Image-Edit | 84.0G | 110.0G | 82.8G | 1.3x |
-| Krea-2-Raw | 102.4G | 178.6G | 103.8G | 1.7x |
-| Krea-2-Turbo | 103.6G | 177.1G | 103.0G | 1.7x |
-| HunyuanVideo | 145.9G | 146.9G | 155.3G | 0.9x |
-| Wan2.1-T2V | 328.4G | 343.0G | 88.4G | 3.9x |
-| Wan2.1-I2V | 368.4G | 372.4G | 84.4G | 4.4x |
-| Wan2.2-T2V | 493.5G | 522.9G | 84.0G | 6.2x |
-| Wan2.2-I2V | 492.1G | 522.0G | 88.1G | 5.9x |
-| Wan2.2-TI2V | 151.3G | 173.4G | 89.9G | 1.9x |
-
-The video models are where the host figure starts to constrain what is possible. Loading Wan2.2-I2V
-eagerly at eight ranks peaks at 492.1G of anonymous host memory. This node has 3T, so it fits here;
-the same load does not fit on a 512G host, and the figure grows with rank count because every rank
-holds its own copy. Blockwise holds it to 88.1G, and holds every model in this sweep except
-HunyuanVideo between 76G and 104G, close to the 68–86G the first sweep measured across models a
-quarter the size. That flatness is the point: the host cost is a property of the strategy rather than
-of the model.
-
-HunyuanVideo is the exception and worth stating plainly: 145.9G eager against 155.3G blockwise, no
-improvement. Its load declaration covers the transformer alone, and the fill logs show that part
-working, holding host anon flat at 51.9G for the whole transformer fill. The peak is elsewhere — its
-Llama text encoder, which every rank loads in full in all three cases. That is the next component
-worth bringing inside this path, not a defect in it, and it is why load-time VRAM still improves 1.5x
-while the host figure does not. It was brought inside afterwards, and
-[the section below](#hunyuanvideos-text-encoder-brought-inside-the-path) has the figures; the row
-above is what the model measured before that change.
-
-### Did it draw anything
-
-Every video case's clip is read frame by frame, twelve evenly spaced samples of it, so a clip that
-renders one good frame and then collapses cannot average its way past the floor:
-
-| Model | Frames | Flattest sampled frame |
-| --- | --- | --- |
-| HunyuanVideo | 129 | 0.2149 |
-| Wan2.1-T2V | 81 | 0.2852 |
-| Wan2.1-I2V | 81 | 0.2502 |
-| Wan2.2-T2V | 81 | 0.2868 |
-| Wan2.2-I2V | 81 | 0.2487 |
-| Wan2.2-TI2V | 121 | 0.2560 |
-
-Blockwise cases shown; the floor is 0.01, so the closest any real clip came to it was twenty times
-above. That margin is the useful part: it says the gate has room to catch a collapse without
-threatening a legitimately flat render.
-
-### The image is the same image
-
-The four image models, scored against their own single-rank eager render with `torch.compile`
-disabled on both sides:
-
-| Model | eager w8 | eager-fill w8 | blockwise w8 | fp8 blockwise | fp8 replicated |
-| --- | --- | --- | --- | --- | --- |
-| FLUX.1-Kontext-dev | 0.9931 | 0.9931 | 0.9931 | 0.8099 | 0.8099 |
-| Qwen-Image-Edit | 0.9873 | 0.9873 | 0.9873 | 0.9495 | 0.9495 |
-| Krea-2-Raw | 0.9344 | 0.9344 | 0.9344 | 0.9403 | 0.9403 |
-| Krea-2-Turbo | 0.8576 | 0.8576 | 0.8576 | 0.6596 | 0.6597 |
-
-Every number is an observation rather than a verdict, since none of these four is in
-`IDENTITY_STABLE_MODELS`. The claim they support is the same as before and it holds again: the three
-bf16 columns agree to four decimals on every model, so the loading strategy contributes nothing on
-top of whatever separates an 8-rank render from a 1-rank one, and the two fp8 placements agree with
-each other to the fourth decimal or better. Krea-2-Raw scoring marginally *higher* under fp8 (0.9403)
-than in bf16 (0.9344) is the clearest available reminder of what these numbers are on a model that
-redraws its sample: noise around a different picture of the same prompt, not a measurement of
-quantization error.
-
-No video case is scored. SSIM over a clip would only decide identity-stable models and no video model
-has been measured to be one, so those cases record as `unscored` and rely on the frame gate above.
-
-### Wall time
-
-| Model | eager w8 | blockwise w8 |
-| --- | --- | --- |
-| FLUX.1-Kontext-dev | 102.2s | 78.1s |
-| Qwen-Image-Edit | 361.5s | 118.3s |
-| Krea-2-Raw | 161.2s | 100.0s |
-| Krea-2-Turbo | 103.5s | 84.8s |
-| HunyuanVideo | 279.7s | 218.0s |
-| Wan2.1-T2V | 279.5s | 188.4s |
-| Wan2.1-I2V | 235.1s | 185.8s |
-| Wan2.2-T2V | 348.9s | 285.1s |
-| Wan2.2-I2V | 392.5s | 289.6s |
-| Wan2.2-TI2V | 153.2s | 115.4s |
-
-## HunyuanVideo's text encoder, brought inside the path
-
-The anomaly above turned out to be a gap in what the model declared rather than in the path. Both
-meta paths pick their components out of `fsdp_strategy`, and HunyuanVideo named only its transformer,
-so its 14G Llama encoder was loaded whole by every rank in all five cases — 112G of the peak at eight
-ranks, against a transformer that was already filling one block at a time. Declaring the encoder, and
-handing the pipeline the meta module the declaration produces, is the whole change; the path itself
-needed nothing. Its 0.2G CLIP encoder stays out, as FLUX's does, because a collective per prompt to
-save a fraction of a gigabyte is not worth having.
-
-The same six cases, before the change and after:
-
-| Case | host anon | load VRAM | load time |
-| --- | --- | --- | --- |
-| eager, 8 ranks | 145.9G → 145.8G | 42.6G → 42.4G | 54.7s → 54.1s |
-| shard-after-materialize control | 146.9G → 159.2G | 26.2G → 13.9G | 55.0s → 55.4s |
-| blockwise | 155.3G → 102.2G | 29.2G → 15.4G | 41.3s → 35.9s |
-| fp8 blockwise | 155.3G → 104.6G | 28.0G → 14.6G | 41.6s → 37.0s |
-| fp8 replicated | 156.4G → 105.5G | 35.6G → 34.9G | 40.4s → 29.2s |
-
-Blockwise now holds host anon to 102.2G, inside the 76–104G band every other model in this sweep sits
-in, and 1.6x under its own control. Load-time VRAM improves twice over: the encoder is never whole on
-any rank, so 42.4G eager becomes 15.4G, where before the change it was 29.2G. The model renders the
-same clip, and the frame gate reads it the same way, 0.2149 on the flattest of twelve sampled frames
-against a 0.01 floor.
-
-Two rows deserve reading rather than skimming. The eager row is unchanged, which is the point of it:
-declaring a component tells the meta paths and the sharding step about it and leaves an ordinary load
-alone. The control row got 12G *worse*, and that is correct — it now materializes the encoder per rank
-and then FSDP-wraps it, paying a transient the old control never paid, which is exactly the cost
-blockwise avoids. A control that covered fewer components than the case it is a control for was
-flattering the comparison.
-
-The two fp8 cases changed identity as well as numbers. A model with declared text-encoder FP8 targets
-gets a `te_fp8` case rather than a transformer-only one, so `hunyuanvideo-fp8-fsdp-w8` and
-`-fp8-replicated-w8` are now `-fp8-te-fsdp-w8` and `-fp8-te-replicated-w8`, and the encoder is
-quantized per block as the fill materializes it. That is the fourteenth model on that path and the
-first Llama encoder on it. Its clip is a different sample of the same scene rather than a collapse,
-which is all a video case is checked for here.
-
-## Three models that had never run at all
-
-Sixteen models had run on these paths and three had not, for one reason that looked like three: the
-weights were not on this node. Each of those three declares the memory-efficient load and each had
-generated cases sitting in the matrix, but no sampling entry, because an entry is copied from the
-model's own configuration and recording an operating point for a model nobody can run is recording a
-claim nobody can check. The harness refuses a case with no entry rather than borrowing another
-model's, so the cases could not run even as failures. Fetching 192G of weights, 24G for
-FLUX.2-klein-4B and 35G and 133G for the two Cosmos3 models, turned that from a permanent gap into
-three sampling entries and twenty runnable cases. All twenty pass: eight on klein-4B, six on
-Cosmos3-Nano and six on Cosmos3-Super.
-
-None of the three is named by a benchmark config, so all three take their operating point from their
-runner's own `default_input_values`, which the entries say. For Cosmos3 the prompt comes from the
-checkpoint: it ships `assets/example_t2v_prompt.json` and a matching negative, and the runner reads a
-`.json` prompt path and serializes it because the model asks for structured prompts rather than
-prose. A sentence would have been the wrong input rather than a different one.
-
-**Cosmos3 has no text encoder, and needed none of the work HunyuanVideo needed.** Reading its
-`model_index.json` before its weights arrived settled a question worth settling early: the pipeline
-names a `text_tokenizer`, a `vision_encoder`, a transformer, a VAE and a sound tokenizer, and its
-`__init__` takes a tokenizer where every other model here takes an encoder. Text is tokenized through
-a chat template and consumed by the transformer directly. Its non-transformer components come to
-4.6G against a 128G transformer, so there is no encoder-shaped saving to declare, and the transformer
-the path already covers is the whole of it.
-
-| Case, 8 ranks | host anon | load VRAM | load time |
-| --- | --- | --- | --- |
-| Cosmos3-Super eager | 110.2G | 137.7G | 41.9s |
-| Cosmos3-Super shard-after-materialize control | 114.0G | 32.6G | 84.1s |
-| Cosmos3-Super blockwise | 95.6G | 31.0G | 74.7s |
-| Cosmos3-Super fp8 blockwise | 102.5G | 24.2G | 67.2s |
-| Cosmos3-Super fp8 replicated | 123.5G | 82.7G | 72.5s |
-| Cosmos3-Nano eager | 110.6G | 40.1G | 11.4s |
-| Cosmos3-Nano shard-after-materialize control | 119.6G | 17.8G | 69.7s |
-| Cosmos3-Nano blockwise | 91.1G | 19.0G | 24.1s |
-| Cosmos3-Nano fp8 blockwise | 102.7G | 17.7G | 21.9s |
-| Cosmos3-Nano fp8 replicated | 115.3G | 28.0G | 25.4s |
-| klein-4B eager | 93.0G | 20.6G | 13.7s |
-| klein-4B shard-after-materialize control | 109.1G | 11.4G | 16.6s |
-| klein-4B blockwise | 83.3G | 15.1G | 19.1s |
-| klein-4B fp8-te blockwise | 99.0G | 14.7G | 21.1s |
-| klein-4B fp8-te replicated | 91.7G | 21.5G | 24.0s |
-
-Cosmos3-Super is where the device-memory saving is largest of anything in this document: 137.7G of
-load-time VRAM eager against 31.0G blockwise, 4.4x, and 24.2G with FP8, 5.7x, which is what a 128G
-transformer filled one block at a time buys. Its host anon improves by much less, 110.2G to 95.6G,
-and that is the same story as the paragraph above — there is no encoder to bring inside, so the
-transformer is the only component the fill touches. Cosmos3-Nano halves its load VRAM, 40.1G to
-19.0G, and holds host anon 1.21x under eager and 1.31x under its own control. klein-4B's margins are
-smaller again because the model is smaller, a 7.8G transformer beside its encoder. All three hold the
-shape the rest of the sweep has: eager is cheapest to load and dearest in host memory, the control is
-dearest of all, and blockwise is the only row better than eager on both counts.
-
-Super's replicated row is the one to read carefully: 82.7G of load-time VRAM against 31.0G blockwise,
-and the highest host anon of its six cases at 123.5G. That is the shape of the path rather than a
-defect — rank 0 loads the component whole and broadcasts it, so a 128G transformer is 128G on one rank
-before anything is scattered, and the saving is against eager's per-rank copy rather than against a
-blockwise fill. On a transformer this size the difference between the two memory-efficient paths
-stops being a detail.
-
-**One bug this found, in the offline path rather than in a model.** klein-4B ships its transformer as
-a single `diffusion_pytorch_model.safetensors` with no shard index, and discovery asks for the index
-first and falls through to the single file when the hub answers that no such file exists. With no
-network there is no such answer: a name the repo does not carry and a name that was never cached
-raise the same `LocalEntryNotFoundError`, and discovery treated both as a real error, so all four
-memory-efficient cases died before loading while eager and the control passed. The component's own
-cached `config.json` tells the two apart — if that is on disk then this snapshot is on disk, and the
-missing name is one this checkpoint does not use. This would have hit any single-file component
-loaded offline, and every model run before this one happens to ship a sharded index.
-
-## The refusals, made executable
-
-Everything above is a model loading. This last batch is the opposite claim: the models that withhold
-the memory-efficient load, refusing it before they allocate. Thirteen runners declare eager loading
-only, each with a written reason, and until now the reasons were only declared. Nothing ran them, so
-nothing would have noticed a change that quietly started loading one of them through a path its own
-declaration says has never been verified for it — and the failure mode there is not a crash but wrong
-weights in a render nobody would question.
-
-Nine cases asserted those refusals, on the seven withheld models whose weights are on this node
-(Ideogram-4's has since been replaced by a passing case; see "A withheld model, enabled" below).
-They cost seconds, not loads: the load contract is selected immediately after distributed init, so
-MiniMax-H3 refuses without reading any of its 330G. Each case matches on the reason, not merely on
-failing, and a test compares the pattern against the message the runner's declaration produces, so a
-pattern that would accept any failure does not pass.
-
-| Case | Refused with |
-| --- | --- |
-| `rocm-lingbot-dense-fsdp-withheld` | the composed `_build_pipe` construction it shares with the MoE runner |
-| `rocm-lingbot-moe-fsdp-withheld` | LingBot's own per-block wrapping, which leaves fp32 norm and router parameters where xDiT's path would shard them |
-| `rocm-minimax-h3-fsdp-withheld` | `fuse_qkv_projections` renaming attention weights, so live names stop matching checkpoint keys |
-| `rocm-minimax-h3-ref2va-fsdp-withheld` | the same, plus a denoiser loaded as `transformer_ref` |
-| `rocm-ltx23-fsdp-withheld` | stage 2 distilled LoRA applied before a meta transformer would get its base checkpoint |
-| `rocm-hunyuan15-sparse-replicated-withheld` | base non-block weights composed with remapped Tencent sparse blocks outside `_build_transformer` |
-| `rocm-hunyuan15-sparse-fsdp-flag-refused` | no `fully_shard_degree` capability at all, refused while the config is validated |
-| `rocm-zimage-int8-rejected` | INT8 on ROCm, which was already curated and had not been run |
-
-Writing them turned up three things worth keeping. The harness could not run a rejection case for a
-model with no sampling entry: the entry is read while the command is built, before anything hardware
-knows about, so the four rejection cases that already existed for withheld models would have reported
-"cannot run" and asserted nothing had anyone put them on the right hardware. The withheld models with
-weights here now carry entries from their runners' own declarations.
-
-Those declarations then exposed a gap in what an entry can say. Ideogram-4 builds its own guidance
-schedule and only when it is given no guidance value, so every number, the CLI default included, is
-wrong for it; MiniMax-H3 is guidance-distilled and its runner forwards no guidance at all. An entry
-may now say `null`, which passes no flag, while still being required to say something.
-
-And two of the models refuse earlier than their declarations do, which changed what the cases assert.
-The HunyuanVideo 1.5 runners declare no `fully_shard_degree` capability, so the sharding flag is
-refused while the config is validated, before a load contract exists; that refusal is stronger than
-the withheld reason, since it holds however the declaration later changes, so it is asserted on its
-own and the withheld reason is asserted on the replicated path instead. The same runner also refuses
-to run without a sparse attention backend, which is why its case names one.
-
-Two cases that had been curated but never run also ran here: FLUX.2-dev FP8 eager, and Qwen-Image FP8
-on the replicated path with an FP8 text encoder. Both passed.
-
-## The cases that were waiting on the wrong thing
-
-Twenty-six cases were then left unrun, each naming an accelerator this node is not, which read as
-work that needed a booking. Re-read against what the code actually gates on, most of them did not.
-Only three claims genuinely need other hardware: FP8 through AITER, which `_use_aiter_fp8_rdna4`
-selects on `gfx1200` or `gfx1201` alone; NVFP4, gated on CUDA capability 10.0; and INT8 that works,
-which TorchAO supports on CUDA only. The rest were pinned to hardware by convention. The four CPU
-offload modes are accelerate and Diffusers hooks with no platform gate, and pinning them elsewhere had
-left offload untested everywhere. Transformers 4 is feature-detected on an import. The mixed FP8/FP4
-schedule was held back only because its `gfx942_or_gfx950` token spans two archs that differ on FP4,
-which is the same reason FP4 was curated and pinned to gfx950, where it passes. And the ROCm INT8
-refusal is platform-level, already asserted here, so its RDNA4 twin was retired rather than booked.
-[The handoff](gpu_validation_handoff.md#what-needs-other-hardware) carries the full accounting.
-
-Re-pinning them to this node and running them is where it paid. Four of six failed, and not one
-failure was about hardware. Sequential offload at two ranks died in NCCL with `Duplicate GPU
-detected`, because accelerate places offloaded modules on the default device for every rank, so both
-ranks landed on one device; the case had inherited two ranks from the RDNA4 case it replaced and
-would have failed the same way there. Group offload with AITER FP4 aborted the rank with SIGABRT and
-no traceback, AITER having bound a device from a parameter that was on the host. The same offload with
-`--group_offload_low_cpu_mem` raised from inside the hook, which pins each tensor before onloading it,
-and torch has no `pin_memory` for `Float4_e2m1fn_x2`. Both FP4 failures are now refused before
-allocation and asserted as rejections, scoped to the AITER backend because that is where they were
-measured. The fourth was the mixed schedule under the blockwise fill, refused because this torch
-cannot shard a non-floating-point parameter under FSDP2 while the FP4 half targets the blocks the
-strategy wraps: exactly the gate `rdna4-wan22-hybrid-fsdp` had predicted in its own notes, now
-measured rather than guessed, on hardware that was already here.
-
-What passed is coverage nothing had before: whole-model offload with both the transformer and the text
-encoder in FP8, sequential offload at one rank, group offload against FP8 weights, and the mixed
-FP8/FP4 schedule itself. Twenty-two cases remain unrun, and the three claims above are what a booking
-would be for. Three of the twenty-two cannot run anywhere as written: SD3.5, CausalWan and
-Wan2.2-Distilled-I2V have no sampling entry, and no node this has run on holds their weights, so an
-operating point cannot be chosen without inventing one.
-
-Two further questions could then be asked of offload, since it finally had cases. It is not a
-single-rank feature, which is how the sequential failure above had been read: group offloading had
-always taken its onload device from the local rank, while the two whole-pipeline modes passed nothing
-and let Diffusers default them to `cuda:0`, so every rank took the same device. Both name the local
-device now and both pass at two ranks, which also gives offload its first results on top of the
-replicated load. And on top of the blockwise fill — the combination this work exists for, which
-nothing had run — whole-model offload works, because it moves components rather than reaching into
-them. The other two modes cannot: sharding replaces each parameter with a DTensor, group offloading
-asks every parameter whether it is pinned and torch registers no sharding strategy for
-`aten.is_pinned`, and sequential offloading rebuilds each parameter as it moves it, which needs a spec
-a plain tensor does not carry. Both failed mid-denoise, after a full sharded load had been paid for,
-so both are refused before allocation.
-
-## A withheld model, enabled
-
-Ideogram-4 was the first of the seven withheld models to be brought onto the memory-efficient path,
-and what stood in its way was not construction but naming. Its FP8 checkpoint does not store what the
-model asks for: the three attention projections are fused into one `attention.qkv.weight`, the output
-projection is called `o` where the model calls it `to_out.0`, and every quantized weight is stored
-beside the per-row scale needed to read it. The eager path handles that by reading the whole
-checkpoint, converting the state dict in memory and assigning it, which is the exact cost the
-blockwise fill exists to avoid, and doing it outside `_build_transformer` is why the model declared no
-support.
-
-A checkpoint manifest could already rename a tensor. What it could not express is a tensor that no
-stored tensor holds: `to_q` is a third of the fused weight, dequantized with a third of the scale, so
-one live tensor needs two stored ones and one stored tensor feeds three live ones. A manifest may now
-carry derived tensors, each naming its source keys and a function over them, and the fill builds them
-as it reads. Both denoisers now build on meta from config and fill per block, at two ranks and at
-eight, sharded and replicated. The text encoder stays outside: it is built through `AutoModel` with
-`trust_remote_code`, so its parameter names come from code no manifest can read ahead of the load, and
-it is declared as an exclusion and filled eagerly. That makes Ideogram-4 also the first evidence that
-a model can take the memory-efficient path for its denoisers while one component does not.
-
-Enabling it also found a defect that only a model shaped like this could reach. The replicated
-broadcast path chose between filling a component per block and broadcasting it whole by asking whether
-its name was `transformer` or began with `transformer_`. Ideogram 4's second denoiser is
-`unconditional_transformer`, which matches neither, so it took the text-encoder branch and was
-broadcast whole from rank 0 — whose copy was itself still on meta. Every rank ended up with a denoiser
-of empty weights, nothing raised, and the render came out black: `mean=0.00, std=0.00` across every
-pixel, at 48 steps with a full sharded load's worth of work behind it. The choice is made from the
-runner's declaration now, with the name kept only as a fallback, and the replicated render matches the
-sharded one to the last bit — `max abs diff 0.0` over the whole image. It is worth naming what caught
-this: not a crash and not a test, but a case that renders and a harness that reads the pixels.
-
-Two smaller things fell out of it. Strictness — a mapped checkpoint asserting that every key it maps
-was wanted — was recorded where the tensor is read, and only the reading rank reads, so a strict
-manifest would have failed on every peer. It is recorded where keys are retired instead, which every
-rank does with the same list. And `_load_model` was reading `config.model`, which is a registry alias
-such as `Ideogram-4` rather than a repo, so the FP8 branch could only ever be reached by naming the
-repo in full; it reads `settings.model_name` now, like every other checkpoint read in the runner.
-
-The one unexplained failure in the results file is explained too. `gen-mi3xx-z-image-turbo-bf16-fsdp-w4`
-was recorded as `failed_inference` before the port-collision fix, and the generator no longer emits a
-four-rank case for that model, so it could not be re-run through the harness. Run by hand at four
-ranks, it fills and shards block by block and renders in 6.9s. The failure was the socket.
-
-## What the text encoders were actually doing
-
-Every quantized text encoder in these sweeps logged the path it took, and the ones that had to ask the
-library for it were not getting it. `--use_fp8_text_encoder` asks the installed Transformers whether it
-can quantize
-one parameter at a time while reading it, and the probe answered that by looking for
-`create_quantized_param` and `check_if_quantized_param`. Transformers 5 replaced that pair with
-`get_quantize_ops` and `param_needs_quantization`. Diffusers still carries the old pair, so the probe
-found neither whole, reported the API unavailable, and fell back to materializing the encoder and
-quantizing it afterwards — which is the cost the flag is asked for in order to avoid. Nothing failed.
-The picture is the same either way, so every case that could have streamed passed instead with a log
-line reading `materialization=post_load; fallback=...` that no expectation was ever checked against.
-The probe accepts either surface now, and which one it found is not something to infer from a version
-number: one library renamed the pair while another kept it.
-
-Three cases on this node were reaching for that path and missing it, all of them eager, which is worth
-saying because it is fewer than the thirty-odd cases that quantize a text encoder. The blockwise fill
-and the replicated broadcast decide this for themselves, below, and neither was ever asking the probe.
-
-What that is worth was then measured, cleanest on FLUX.2-dev at one rank, which happened to run on both
-sides of the fix with the same library, the same page cache and the same seed. Streaming its Mistral
-encoder holds load-time VRAM at 57.8 GB where materializing it first needed 79.0, and the peak for the
-whole run falls with it, 63.6 against 83.2. It costs time to do: the load goes from 29.5 to 62.1
-seconds, since quantization now happens per parameter on the way in rather than once over a finished
-model. The image is the same image, 0.372741 against its unquantized reference either way. Twenty-one
-gigabytes for thirty seconds, once, is the trade this flag is actually offering, and it was not on offer
-at all until the probe was fixed.
-
-Its Transformers 4 twin now reads as the pair was meant to. That case exists to compare the two
-libraries, and it lands at 80.0 GB of load-time VRAM and a 29.9-second load — the pre-fix Transformers 5
-figures almost exactly, because Transformers 4.57 is the library that genuinely cannot stream: it
-carries `create_quantized_param` but not `check_if_quantized_param`, so neither pair is whole there
-either, and the fallback is correct rather than a defect. The two rows differ in one column and the
-consequence is visible in the next.
-
-The other two cases the fix invalidated were re-run too, Qwen-Image-Edit with a Qwen2.5-VL encoder under
-whole-model offload and Wan2.2-I2V with a UMT5 one. Load-time VRAM fell from 28.7 to 22.3 GB and from
-41.6 to 38.1, both drawing the same picture as before, and both are smaller encoders than FLUX.2-dev's,
-which is the shape the saving has: it is the encoder's own bf16 cost that is avoided. Their load times
-cannot be compared, because their pre-fix runs had a much colder page cache, 190 and 125 GB against 290,
-and the whole-run peak on this node is a device-global reading that drifts a gigabyte or two between
-runs. Load-phase VRAM is the figure to read.
-
-Two paths were never on the fallback and did not change. The blockwise fill quantizes each block on the
-way in from disk, before anything wraps it, so a text encoder it maps was already streaming. The
-replicated broadcast path refuses on purpose, and that refusal is worth stating precisely because it is
-where the saving above is still on the table. Rank 0 loads the encoder through `from_pretrained` and
-peers build a matching layout on meta, then every parameter is broadcast by name into the slot waiting
-for it. TorchAO's streaming produces `Float8Tensor` tensor subclasses, and the meta builder only knows
-how to make AITER's plain `weight_fp8` plus `weight_scale` pair, so peers would build slots that do not
-match what rank 0 holds — a divergence the fill's own contract check would catch, after the load. So it
-streams under AITER and falls back under TorchAO, which costs each rank a full bf16 encoder it converts
-in place — the same figures measured above, now paid on every rank at once. Closing it means teaching the
-meta builder to construct the subclass layout and the broadcast to walk inside it, which is more than
-the flag flip it looks like from the call site.
-
-The record now carries which materialization each component took, so this cannot go quiet again. It was
-only ever in the log, and the JSONL beside it looked identical whichever path ran, which is how two
-runs of one case came to measure different things without saying so. A `te quant` column in the report
-reads it, and a record written before this existed shows `?` rather than an empty cell, because
-"nothing quantized" and "nobody wrote it down" are different claims.
-
-## What stood between these models and a first run
-
-Five things had to change before these models would run, on top of the Diffusers upgrade above. None of
-them could have been found by a case that had already run: each needed a model, a placement or an
-environment nothing had combined before. Four blocked a load outright; the fifth made working loads
-look broken.
-
-**Krea-2 could not be loaded from weights it already had.** Both variants are cached in full, 34G
-each, but the repo refuses file downloads to this node's token, and Diffusers skips its
-"does the repo have these shards" metadata call only when `local_files_only` is set. Exporting
-`HF_HUB_OFFLINE` was not enough, because that variable does not reach the decision. A checkpoint
-request now takes its default from it, which is the standard way to say the network is not there.
-
-**Every sharded Krea-2 case died before reaching a load.** The FSDP strategy named `model.layers` for
-its text encoder, which is where a text-only encoder keeps its decoder layers; Krea-2's encoder is a
-`Qwen3VLModel`, which holds them under `language_model` beside the vision tower. Eager and replicated
-cases never walk that path, so twelve passing cases said nothing about it. The test now checks the
-declared path against the class Transformers actually builds, because a wrap path is a claim about
-another library's module layout.
-
-**HunyuanVideo could not load at all.** Transformers v5 parses a model's root `config.json` for an
-unrelated Mistral regex fix, and once offline mode is set it does that for every model rather than
-only official Mistral repos. HunyuanVideo ships a root `config.json` with a trailing comma, which is
-not JSON, so the tokenizer reload raised `JSONDecodeError` — on a file no loader here needs and which
-is not ours to fix. The reload now reads the tokenizer's own directory, which has no `config.json` to
-trip over.
-
-**Wan2.2-TI2V rejected all six of its cases.** It is the one runner serving both `i2v` and `t2v`, so
-it requires the task to be named, and the sampling entry gave it an input image but no task.
-
-**Four cases were recorded as `failed_inference` when a socket was the problem.** Back-to-back runs
-collided on torchrun's default port 29500, and because the affected placements differed between two
-runs of the same set, the pattern read as a nondeterministic bug in the sharded load. Each case now
-asks the OS for a free rendezvous port. This one is worth remembering as a reading error as much as a
-bug: three of those four cases had already been fixed by the change above them, and the port
-collision hid it.
-
-## What this node needed, which is not in the repository
-
-Two facts about this machine's cache, recorded because the runs depended on them and the next operator
-will not guess them:
-
-Every case in the second sweep ran with `HF_HUB_OFFLINE=1`. All the weights are on disk, two of the
-repos refuse downloads to this token, and a metadata round trip is variance in a load-time measurement
-for nothing. It also means the offline path above is what these figures were taken through.
-
-`krea/krea-2-turbo`'s cache held a complete snapshot of one revision while `refs/main` named a
-different one, so nothing could resolve it offline; the ref was pointed at the snapshot that is
-actually there. All fifty repos on this node were checked for that inconsistency and one other has it,
-`tencent/HunyuanVideo`, which needs no repair because its runner pins `refs/pr/18` and that is the
-revision on disk. Nothing else in the cache was changed.
-
-## What this does not show
-
-- **Only bf16 and FP8, plus three FP4 cases on Krea-2.** Those three are curated cases that assert
-  what `gfx950` can do: FP4 eager and FP4 replicated load and render, FP4 with FSDP is rejected in
-  preflight, which is the torch 2.12 limit described in the handoff.
-- **Only 8 ranks, plus spot checks.** Z-Image-Turbo loads, shards and renders with `fsdp_blockwise` at
-  4 ranks, klein-4B covers `fsdp_blockwise` and `replicated` in FP8 at 4 ranks, and the curated
-  Wan2.2-I2V cases cover 2 and 4 ranks. Nothing else was run at another rank count.
-- **Nineteen models,** which is every model this node has usable weights for that these paths can
-  load. Thirteen registered runners are withheld from the memory-efficient load by their own
-  declarations, each with its reason recorded, and six have no usable weights on this node at all. No
-  offload combination was run. `tools/cache_inventory.py` and `tools/load_support_matrix.py` produce
-  those three lists.
-- **Video is gated, not compared.** A video case is checked for having rendered something, frame by
-  frame; nothing checks that a sharded clip matches a single-rank clip, because SSIM over a clip only
-  decides identity-stable models and no video model has been shown to be one.
-- **Timings are one run each,** on a shared node with device-global VRAM sampling, so treat the VRAM
-  figures as upper bounds and the times as indicative rather than as a benchmark. The two sweeps also
-  ran on different Diffusers commits, so compare within a sweep rather than across them.
-- **The comparison is gross correctness,** not a quality assessment. It answers whether the model
-  still drew the picture; it does not say fp8 output is as good as bf16 output.
+| FP8 quantization | A dynamic per-tensor scale is `max_abs / 448`, which is zero for a tensor of zeros, so quantizing returned NaN. Padding-only sequence chunks at 8 ranks made every FP8 Qwen-Image render pure black. Fixed with torchao's `activation_value_lb`, which only binds below it, so ordinary activations measure bit-identical. |
+| Sharding with compile | Sharding turns one compiled transformer into one CUDA graph per block, and recording a later block reads a buffer the graph system still holds live. This was the whole FLUX column. Fixed with the step-boundary pre-hook the error message names. |
+| HunyuanVideo declaration | Its 14 GB Llama encoder was outside `fsdp_strategy`, so every rank loaded it whole and host memory did not improve. Declaring it took blockwise from 155 to 102 GB and load VRAM from 29 to 15 GB. |
+| Ideogram-4 checkpoint | Its FP8 checkpoint fuses the three attention projections and stores each weight beside its scale, so one live tensor needs two stored ones. Manifests carry derived tensors now, and the model came off the withheld list. |
+| Replicated denoiser routing | The path chose per-block fill against whole broadcast by name, so Ideogram-4's `unconditional_transformer` took the text-encoder branch and was broadcast from a rank-0 copy still on meta. Every render was black at `std=0.00`, and nothing raised. Decided from the declaration now. |
+| Text-encoder FP8 | The streaming probe looked for a method pair Transformers 5 had renamed, so every eager text encoder took the post-load fallback and materialized in bf16 first. Accepting either surface holds FLUX.2-dev at 58 GB where the fallback needs 79, for a load twice as long. |
+| Offload placement | Model and sequential offload passed no device, so Diffusers defaulted every rank to `cuda:0` and multi-rank offload died in NCCL with `Duplicate GPU detected`. Both name the local rank's device now. |
+| Offload with sharding | Group offload asks each parameter whether it is pinned and torch has no sharding strategy for `aten.is_pinned`; sequential offload rebuilds each parameter, which needs a spec a DTensor's replacement does not carry. Both failed mid-denoise after a full sharded load; both are refused up front. Whole-model offload works, because it moves components rather than reaching into them. |
+| Offload with AITER FP4 | Group offload aborted the rank with SIGABRT, AITER having bound a device from a host parameter, and with `--group_offload_low_cpu_mem` raised inside the hook, torch having no `pin_memory` for `Float4_e2m1fn_x2`. Both refused, scoped to AITER. |
+| Mixed FP8/FP4 with sharding | Refused: this torch cannot shard a non-floating-point parameter under FSDP2 while the FP4 half targets the wrapped blocks. Exactly the gate an unrun RDNA4 case had predicted in its notes. |
+| Quality gate | Nothing looked at the image, because reference scoring only gates models that reproduce their sample. A spread measurement gates every case now, and a uniform frame is `failed_blank_output` whatever it exited with. |
+| Quality floor | A single floor calibrated at 512×512 and seed 1234 failed two FP8 cases whose images are the same cat. Floors are recorded next to the sampling they were measured at, and split: 0.90 for a case that only moves weights, 0.60 for one that quantizes them. |
+| Offline Krea-2 | Diffusers skips its "does the repo have these shards" call only under `local_files_only`, which `HF_HUB_OFFLINE` does not reach, and the repo refuses downloads to this token. A checkpoint request takes its default from the variable now. |
+| Krea-2 wrap path | The FSDP strategy named `model.layers`, where a text-only encoder keeps its decoder layers; Krea-2's `Qwen3VLModel` keeps them under `language_model`. Twelve passing eager and replicated cases had said nothing about it. |
+| Offline single-file discovery | klein-4B ships one unsharded transformer file, and offline a name the repo lacks and a name never cached raise the same error, so discovery read "no index" as failure. The component's cached `config.json` tells them apart. |
+| HunyuanVideo tokenizer | Transformers 5 parses every model's root `config.json` offline for an unrelated Mistral fix, and HunyuanVideo's has a trailing comma. The reload reads the tokenizer's own directory now. |
+| Wan2.2-TI2V | The one runner serving both tasks requires `--task`, which its sampling entry did not pass. |
+| Rendezvous ports | Back-to-back runs collided on torchrun's default 29500, and because the affected placements moved between runs it read as a nondeterministic sharded-load bug. Each case asks the OS for a free port. |
+| Ulysses degree | The generator emitted 8-rank cases for a model with 18 attention heads, which cannot be split 8 ways. Models declare their head count and the generator picks the largest admissible rank count. |
+
+## How to read the numbers
+
+- **Load-time VRAM** is the peak on the busiest single device while the load is in flight, not a sum
+  over devices, so it is comparable across rank counts. It is the figure these paths exist to move.
+- **Host anon** is the container's anonymous pages, which is what the OOM killer watches, and is not
+  summed over ranks. Page cache is excluded: the kernel reclaims it under pressure, so it is not a cost.
+- **SSIM** is against the same model's single-rank eager render with `torch.compile` disabled on both
+  sides, from a separate scoring pass whose timings are kept out of the columns above. It is a
+  gross-correctness check, not a quality assessment: it answers whether the model still drew the
+  picture. Only Z-Image-Turbo's is a verdict; a model that redraws its sample under any numeric change
+  cannot be judged by this metric, so the rest are observations. See `IDENTITY_STABLE_MODELS` in
+  `tools/gpu_validation.py`.
+- **Video is gated, not compared.** Twelve evenly spaced frames of each clip are read for having
+  rendered anything, so a clip that collapses after one good frame cannot average past the floor. The
+  closest any real clip came to the 0.01 floor was 0.2149, twenty times above it.
+- **Timings are one run each** on a shared node, and ROCm samples VRAM device-globally, so treat the
+  memory figures as upper bounds and the times as indicative. The first sweep ran on an older Diffusers
+  commit than the rest, so compare within a sweep rather than across.
+- **Each model is sampled the way its own benchmark config or runner declaration samples it**, at seed
+  42, which is why the load times are not comparable between models. A test checks each citation against
+  what the runner declares, so an entry cannot go stale. Cosmos3 takes its prompt from the checkpoint's
+  own `assets/example_t2v_prompt.json`, because the model wants structured prompts rather than prose.
 
 ## Reproducing it
 
-The sweep runs one case per invocation with a shared run id, so the whole thing lands in one output
-directory, with a page-cache drop between cases so the load times mean something:
+One case per invocation with a shared run id, and a page-cache drop between cases so the load times mean
+something:
 
 ```bash
 python tools/gpu_validation.py --case <case-id> --execute --continue-on-error \
   --run-id my-sweep --results gpu-validation-results/results.jsonl
 ```
 
-Scoring is a second pass over the same cases. It disables `torch.compile`, so its timings are marked
-as scoring runs and kept out of the performance columns, and each case reuses the recorded
-compile-free render of its model's `eager`/1-rank case, so run those first:
-
-```bash
-python tools/gpu_validation.py --case <case-id> --execute --continue-on-error --score-quality \
-  --run-id my-scoring --results gpu-validation-results/results.jsonl
-```
-
-Then read both passes together, which is what the tables above came from:
+Scoring is a second pass with `--score-quality`, which disables `torch.compile` and reuses each model's
+recorded compile-free single-rank render, so run those first. Then read both passes together, which is
+where the tables above come from:
 
 ```bash
 python tools/validation_report.py --results gpu-validation-results/results.jsonl
 ```
 
-The first sweep's records were taken at `86c4113` with the working tree that became the six commits
-from `d2a8745` to `8287cc9`. The eleven cases that first failed were re-run after the two fixes above,
-and every scoring run is from after them. Its performance pass is run id
-`20260808T081101Z-feature-evidence` and its scoring pass `20260808T154216Z-feature-evidence-scoring`.
+Records, logs, images and clips are node-local and not checked in. The run ids behind the tables, in the
+order the work happened:
 
-The second sweep's records were taken with the working tree that became the seven commits from
-`bef8aab` onwards, on Diffusers `21ba39457`, with `HF_HUB_OFFLINE=1` and the two input image paths
-exported. Every case that failed was re-run after the change that fixed it, so no figure above comes
-from a run predating the change its own model needed. Its scoring pass covers the four image models;
-the six video models have no scored column by design. The passes are run ids
-`20260809T085227Z-coverage-images`, `20260809T100205Z-coverage-krea-fixed`,
-`20260809T101323Z-coverage-krea-fixed2`, `20260809T102509Z-coverage-video`,
-`20260810T062730Z-coverage-video-rerun` and `20260810T071614Z-coverage-score`. Result JSONL, logs,
-images and clips are node-local and not checked in.
+| Run ids | What they cover |
+| --- | --- |
+| `20260808T081101Z-feature-evidence`, `20260808T154216Z-feature-evidence-scoring` | the six image models with a standard transformer, performance then scoring |
+| `20260809T085227Z-coverage-images`, `20260809T100205Z-coverage-krea-fixed`, `20260809T101323Z-coverage-krea-fixed2`, `20260809T102509Z-coverage-video`, `20260810T062730Z-coverage-video-rerun`, `20260810T071614Z-coverage-score` | the ten models that had never run |
+| `20260810T085256Z-hunyuan-te` | HunyuanVideo again, with its text encoder declared |
+| `withheld-rejections`, `withheld-rejections-sparse` | the models that refuse the path |
+| `klein4b-coverage`, `klein4b-offline-fix`, `cosmos3-nano-coverage`, `cosmos3-super-coverage`, `cosmos3-super-finish` | the three models whose weights had to be fetched |
+| `curated-backfill`, `repin-gfx950`, `repin-gfx950-fixed`, `offload-multirank`, `offload-sharded` | the curated cases and the offload work |
+| `ideogram-meta`, `ideogram-w6`, `ideogram-replicated-fix` | Ideogram-4 coming onto the path |
+| `te-streaming`, `te-streaming-eager`, `te-path-recorded`, `te-path-recorded-tf4` | the text-encoder streaming fix and its measurement |
 
-HunyuanVideo's six cases were then re-run once more, on the same node and Diffusers commit, with the
-text-encoder declaration in place; that pass is run id `20260810T085256Z-hunyuan-te` and is where the
-before-and-after table in its own section comes from. Its "before" column is the second sweep's
-figures above, so those two columns are one comparison rather than two sweeps.
+Every case that failed was re-run after the change that fixed it, so no figure here predates the change
+its own model needed. Cosmos3-Super's sweep was interrupted to free the node and its last three cases
+finished under a second run id; the record the interruption produced was removed from the results file
+rather than left to read as a failure, since it is evidence about the interruption and not the load.
 
-The three models that had never run were fetched and run last, on the same node and commit, as run ids
-`klein4b-coverage`, `klein4b-offline-fix`, `cosmos3-nano-coverage`, `cosmos3-super-coverage` and
-`cosmos3-super-finish`. Four of klein-4B's eight cases failed on the offline single-file bug above and
-were re-run after the fix, which is the second run id. Cosmos3-Super's sweep was interrupted to free
-the node and its last three cases finished under the fifth; the record the interruption produced was
-removed from the results file rather than left to read as a failure, since it is evidence about the
-interruption and not about the load. The Cosmos3 cases need the checkpoint's own prompt assets
-exported, and the two Cosmos3 repos are byte-identical in those two files:
-
-```bash
-export XDIT_COSMOS3_PROMPT_JSON=<snapshot>/assets/example_t2v_prompt.json
-export XDIT_COSMOS3_NEGATIVE_PROMPT_JSON=<snapshot>/assets/negative_prompt.json
-```
+Two facts about this node's cache the next operator will not guess: `krea/krea-2-turbo` held a complete
+snapshot of one revision while `refs/main` named another, so nothing could resolve it offline and the
+ref was pointed at the snapshot that is there; and of the fifty repos checked for that inconsistency the
+only other one is `tencent/HunyuanVideo`, which needs no repair because its runner pins the revision on
+disk.

@@ -26,13 +26,6 @@ def _classes(filename):
     }
 
 
-def _source(filename, class_name):
-    text = (RUNNERS / filename).read_text()
-    node = _classes(filename)[class_name]
-    start = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
-    return "\n".join(text.splitlines()[start - 1 : node.end_lineno])
-
-
 def _load_declaration(filename, class_name):
     return next(
         decorator
@@ -41,6 +34,84 @@ def _load_declaration(filename, class_name):
         and isinstance(decorator.func, ast.Attribute)
         and decorator.func.attr == "declare"
     )
+
+
+def _literal(node):
+    """A literal-ish view of an AST node.
+
+    A declaration is written to be read, so a test that asks what it says should not also
+    depend on how it is spaced or which line it wrapped on. Containers recurse so that one
+    value ast cannot evaluate -- torch.bfloat16, a named constant, an enum member -- costs
+    only itself and not the structure around it; those come back as their source text,
+    which is the thing worth asserting on anyway.
+    """
+    if isinstance(node, ast.Dict):
+        return {_literal(k): _literal(v) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return [_literal(element) for element in node.elts]
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError):
+        return ast.unparse(node)
+
+
+def _keyword(call, name, default=None):
+    """One keyword argument of a call, as a literal-ish value."""
+    node = next((kw.value for kw in call.keywords if kw.arg == name), None)
+    return default if node is None else _literal(node)
+
+
+def _class_attribute(filename, class_name, attribute):
+    """A class-body assignment's value node, e.g. the ModelSettings(...) call behind `settings`."""
+    for statement in _classes(filename)[class_name].body:
+        targets = getattr(statement, "targets", [])
+        if any(isinstance(t, ast.Name) and t.id == attribute for t in targets):
+            return statement.value
+    return None
+
+
+def _class_attribute_value(filename, class_name, attribute):
+    node = _class_attribute(filename, class_name, attribute)
+    return None if node is None else _literal(node)
+
+
+def _self_calls(filename, class_name):
+    """Every method the class calls on self, however the call is formatted."""
+    return {
+        node.func.attr
+        for node in ast.walk(_classes(filename)[class_name])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    }
+
+
+def _calls_on(filename, class_name, receiver):
+    """Every attribute called on a named receiver, e.g. SomeWrapper.from_pretrained."""
+    return {
+        node.func.attr
+        for node in ast.walk(_classes(filename)[class_name])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == receiver
+    }
+
+
+def _call_keywords(filename, class_name, attribute):
+    """The keyword names passed to one call anywhere in a class body, plus its **kwargs names."""
+    found = set()
+    for node in ast.walk(_classes(filename)[class_name]):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name != attribute:
+            continue
+        for keyword in node.keywords:
+            found.add(keyword.arg if keyword.arg is not None else ast.unparse(keyword.value))
+    return found
 
 
 def _load_contracts():
@@ -53,19 +124,44 @@ def _load_contracts():
 
 
 def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
-    source = _source("hunyuan.py", "xFuserHunyuanvideoModel")
+    declaration = _load_declaration("hunyuan.py", "xFuserHunyuanvideoModel")
+    settings = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "settings")
+    capabilities = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "capabilities")
 
-    assert '@LoadDeclaration.declare("transformer", replicated=True)' in source
-    assert "fully_shard_degree=True" in source
-    assert '"transformer_blocks", "single_transformer_blocks"' in source
-    assert '_DIFFUSERS_FORMAT_REVISION = "refs/pr/18"' in source
-    assert "self._build_transformer(" in source
-    assert "checkpoint_request=transformer_request" in source
-    assert "request.from_pretrained_kwargs(include_subfolder=False)" in source
+    assert [ast.literal_eval(arg) for arg in declaration.args] == ["transformer"]
+    assert _keyword(declaration, "replicated") is True
+    assert _keyword(capabilities, "fully_shard_degree") is True
+    assert _keyword(settings, "fsdp_strategy")["transformer"]["wrap_attrs"] == [
+        "transformer_blocks",
+        "single_transformer_blocks",
+    ]
+    assert (
+        _class_attribute_value(
+            "hunyuan.py", "xFuserHunyuanvideoModel", "_DIFFUSERS_FORMAT_REVISION"
+        )
+        == "refs/pr/18"
+    )
+    assert "checkpoint_request" in _call_keywords(
+        "hunyuan.py", "xFuserHunyuanvideoModel", "_build_transformer"
+    )
+    assert _keyword(
+        next(
+            node
+            for node in ast.walk(_classes("hunyuan.py")["xFuserHunyuanvideoModel"])
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_pretrained_kwargs"
+        ),
+        "include_subfolder",
+    ) is False
     # The pin belongs to the runner's checkpoint identity, not to the one call site that used to
     # pass it: the text encoder's meta construction and its checkpoint mapping ask the runner.
-    assert "def _checkpoint_request" in source
-    assert 'kwargs.setdefault("revision", self._DIFFUSERS_FORMAT_REVISION)' in source
+    # test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves calls it for real.
+    assert "_checkpoint_request" in {
+        node.name
+        for node in _classes("hunyuan.py")["xFuserHunyuanvideoModel"].body
+        if isinstance(node, ast.FunctionDef)
+    }
 
 
 def test_hunyuanvideo_offers_its_llama_encoder_to_the_memory_efficient_load():
@@ -76,15 +172,18 @@ def test_hunyuanvideo_offers_its_llama_encoder_to_the_memory_efficient_load():
     their components out of fsdp_strategy, and the pipeline only skips loading a component it was
     handed, so declaring the encoder and passing the kwargs are one change.
     """
-    source = _source("hunyuan.py", "xFuserHunyuanvideoModel")
+    settings = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "settings")
+    strategy = _keyword(settings, "fsdp_strategy")
+    pipeline_kwargs = _call_keywords(
+        "hunyuan.py", "xFuserHunyuanvideoModel", "from_pretrained"
+    )
 
-    assert '"text_encoder": {' in source
-    assert '"wrap_attrs": ["layers"]' in source
-    assert "te_kwargs, te_quant = self._meta_te_kwargs()" in source
-    assert "quantization_config=te_quant" in source
-    assert "**te_kwargs" in source
+    assert strategy["text_encoder"]["wrap_attrs"] == ["layers"]
+    assert "_meta_te_kwargs" in _self_calls("hunyuan.py", "xFuserHunyuanvideoModel")
+    assert "quantization_config" in pipeline_kwargs
+    assert "te_kwargs" in pipeline_kwargs
     # The 0.2G CLIP stays out: a collective per prompt to save a fraction of a gigabyte.
-    assert '"text_encoder_2"' not in source
+    assert "text_encoder_2" not in strategy
 
 
 def test_hunyuanvideo_encoder_shard_path_exists_on_the_encoder_it_loads():
@@ -143,7 +242,6 @@ def test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves():
     ["xFuserLTX2VideoModel", "xFuserLTX23VideoModel"],
 )
 def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
-    source = _source("ltx.py", class_name)
     declaration = _load_declaration("ltx.py", class_name)
     reason = ast.literal_eval(
         next(
@@ -153,12 +251,19 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
         )
     )
 
+    capabilities = _class_attribute("ltx.py", class_name, "capabilities")
+    settings = _class_attribute("ltx.py", class_name, "settings")
+
     assert declaration.args == []
     assert not any(keyword.arg == "replicated" for keyword in declaration.keywords)
-    assert "fully_shard_degree=True" in source
-    assert '"wrap_attrs": ["transformer_blocks"]' in source
-    assert "self._build_transformer(" in source
-    assert "xFuserLTX2VideoTransformer3DWrapper.from_pretrained(" not in source
+    assert _keyword(capabilities, "fully_shard_degree") is True
+    assert _keyword(settings, "fsdp_strategy")["transformer"]["wrap_attrs"] == [
+        "transformer_blocks"
+    ]
+    assert "_build_transformer" in _self_calls("ltx.py", class_name)
+    assert "from_pretrained" not in _calls_on(
+        "ltx.py", class_name, "xFuserLTX2VideoTransformer3DWrapper"
+    )
     assert "stage 2 distilled LoRA" in reason
 
     contracts = _load_contracts()
@@ -299,19 +404,27 @@ def test_distilled_wan_declares_local_meta_without_collective_support():
     ],
 )
 def test_custom_runners_declare_their_dedicated_adapter(filename, class_name, adapter):
-    source = _source(filename, class_name)
+    declaration = _load_declaration(filename, class_name)
 
-    assert f"loader_adapter=LoaderAdapter.{adapter}" in source
-    assert "unsupported_reason=" in source
+    assert _keyword(declaration, "loader_adapter") == f"LoaderAdapter.{adapter}"
+    assert _keyword(declaration, "unsupported_reason")
 
 
 def test_krea2_text_encoder_is_declaratively_excluded():
-    source = _source("krea2.py", "_Krea2BaseModel")
+    """The exclusion carries the reason, so reading the declaration explains the omission.
 
-    assert "KREA2_TEXT_ENCODER_EXCLUSION" in source
-    assert "component_exclusions=" in source
-    assert "Qwen3VL" in source
-    assert "ROCm" in source
+    Asserting on the class source instead would accept the words appearing in a comment,
+    which is where "ROCm" appears in this file anyway.
+    """
+    declaration = _load_declaration("krea2.py", "_Krea2BaseModel")
+
+    assert _keyword(declaration, "component_exclusions") == ["KREA2_TEXT_ENCODER_EXCLUSION"]
+
+    exclusion = _load_contracts().KREA2_TEXT_ENCODER_EXCLUSION
+
+    assert exclusion.component == "text_encoder"
+    assert "Qwen3VL" in exclusion.reason
+    assert "ROCm" in exclusion.reason
 
 
 def test_tokenizer_reload_reads_the_tokenizer_directory_not_the_repo_root(

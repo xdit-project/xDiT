@@ -336,7 +336,6 @@ class xFuserModel(abc.ABC):
             log("Enabling Sparge block-sparse head balancing...")
 
         tiling_flag = self._tiling_flag()
-
         for vae in self._decoding_vaes():
             if self.config.enable_slicing:
                 vae_tiling.require_vae_support(vae, "slicing", "--enable_slicing")
@@ -1160,15 +1159,22 @@ class xFuserModel(abc.ABC):
         get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
 
     def _convert_vae_to_channels_last(self) -> None:
-        """ Convert the VAE to channels last """
+        """ Convert every VAE a run decodes through to channels last """
+        # Every VAE, not only pipe.vae: a model that decodes in stages keeps the full-resolution
+        # decode in a second pipeline, so reaching for pipe.vae alone converts the small decode
+        # and leaves the one this is for untouched. Every other VAE step here walks the same list.
+        for vae in self._decoding_vaes():
+            self._convert_one_vae_to_channels_last(vae)
+
+    def _convert_one_vae_to_channels_last(self, vae) -> None:
         # Once only. The convolutions can be converted again harmlessly, but the wrapper below
         # replaces decode, and installing it over itself would put a second copy of the same
         # conversion in front of every decode for the rest of the process.
-        if getattr(self.pipe.vae, "_xfuser_decode_channels_last", False):
+        if getattr(vae, "_xfuser_decode_channels_last", False):
             return
-        convert_model_convs_to_channels_last(self.pipe.vae)
+        convert_model_convs_to_channels_last(vae)
 
-        original_decode = self.pipe.vae.decode
+        original_decode = vae.decode
         memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
 
         @functools.wraps(original_decode)
@@ -1182,8 +1188,8 @@ class xFuserModel(abc.ABC):
             output = original_decode(*args, **kwargs)
             return output
 
-        self.pipe.vae.decode = decode_wrapper
-        self.pipe.vae._xfuser_decode_channels_last = True
+        vae.decode = decode_wrapper
+        vae._xfuser_decode_channels_last = True
 
     def _requested_vae_tile_shape(self) -> Optional[Tuple[int, int]]:
         height = getattr(self.config, "vae_tile_size_height", None)

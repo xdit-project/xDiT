@@ -36,7 +36,7 @@ placement. The placements, in the order the columns run:
 | Column (placement) | How the weights get to the device | Flags |
 | --- | --- | --- |
 | `eager` | Every component built in full on every rank. The baseline. | none |
-| `repl fp8` | Rank 0 reads each block, quantizes it and broadcasts it. Streamed, but every rank still ends up with a full copy. | `--memory_efficient_replicated_load --use_fp8_gemms` |
+| `repl fp8` | Rank 0 reads each block, quantizes it and broadcasts it. Streamed, but every rank still ends up with a full copy. The broadcast does not need the quantization; this column pairs them because the plan does. | `--memory_efficient_replicated_load --use_fp8_gemms` |
 | `fsdp eager`<br>(`fsdp_eager_fill`) | Built in full on every rank, then sharded — what a naive FSDP load does, and the control for the two columns beside it. | `--fully_shard_degree N` |
 | `fsdp block`<br>(`fsdp_blockwise`) | Built on meta, then filled and sharded one block at a time, so no rank ever holds the component whole. The streamed load. | `--fully_shard_degree N --memory_efficient_sharding` |
 | `block fp8` | `fsdp block`, quantizing each block on the way in. | the above plus `--use_fp8_gemms` |
@@ -143,7 +143,12 @@ a third. Cosmos3-Super is the third, 75s against 42s, which that explanation doe
 transformer in the table; with one run per cell it is a thread to pull rather than a result. **The `block fp8`
 column also fills and quantizes the text encoder** wherever the model declares targets for it, so it is
 not a pure quantization delta, and on FLUX.2-dev, klein-9B and FLUX.1-dev that makes the quantized fill
-dearer than the bf16 one. **`repl fp8` is consistently the dearest of the three** memory-efficient
+dearer than the bf16 one. **The replicated broadcast is not an FP8 path**, and pairing it with FP8 in the
+grid is the screening plan spending one case on two factors rather than a property of the loader: it needs
+more than one rank and a parallelism that does not split weights, and nothing else. The curated Wan2.2-I2V
+pair at four ranks measures it without quantization: 33 GB of host against eager's 247 and 69s against
+110s, for the same load VRAM eager needs — a host-memory path, whatever the dtype.
+**`repl fp8` is consistently the dearest of the three** memory-efficient
 columns, and on Cosmos3-Super dramatically so at 77 GB, because rank 0 holds the component whole before
 broadcasting it. On a 128 GB transformer the choice between the two paths stops being a detail.
 

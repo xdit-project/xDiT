@@ -1241,7 +1241,19 @@ class xFuserModel(abc.ABC):
                 f"({type(vae).__name__}) does not say how far apart it steps its tiles, so there "
                 f"is nothing here to set."
             )
-        plan = vae_tiling.tile_overlap_plan(vae, requested)
+        height = getattr(self.config, "height", None)
+        width = getattr(self.config, "width", None)
+        sample_shape = (
+            (height, width)
+            if all(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+                for value in (height, width)
+            )
+            else None
+        )
+        plan = vae_tiling.tile_overlap_plan(
+            vae, requested, sample_shape=sample_shape
+        )
         if plan is None:
             widest = vae_tiling.widest_tile_overlap(vae)
             raise ValueError(

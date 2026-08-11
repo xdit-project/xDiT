@@ -412,7 +412,7 @@ def test_parallel_setup_adapts_runtime_group_for_distvae():
 
 def test_tile_overlap_is_applied_through_distvae():
     vae = SimpleNamespace()
-    runner = _runner(vae_tile_overlap=0.125)
+    runner = _runner(vae_tile_overlap=0.125, height=320, width=1280)
     overlap_plan = {"tile_overlap_factor": 0.125}
 
     with (
@@ -423,11 +423,14 @@ def test_tile_overlap_is_applied_through_distvae():
             base_model.vae_tiling,
             "tile_overlap_plan",
             return_value=overlap_plan,
-        ),
+        ) as tile_overlap_plan,
         mock.patch.object(base_model.vae_tiling, "apply_tile_plan") as apply,
     ):
         runner._apply_vae_tile_overlap(vae)
 
+    tile_overlap_plan.assert_called_once_with(
+        vae, 0.125, sample_shape=(320, 1280)
+    )
     apply.assert_called_once_with(vae, overlap_plan)
 
 

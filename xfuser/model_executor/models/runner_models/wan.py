@@ -461,12 +461,15 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             "transformer_2",
             self.config.distilled_transformer_2_path,
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self._BASE_MODEL,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
             transformer_2=transformer_2,
             boundary_ratio=self._BOUNDARY_RATIO,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         pipe.scheduler = _DistilledWanScheduler.from_config(pipe.scheduler.config)
         return pipe

@@ -395,27 +395,28 @@ def test_dual_meta_transformers_keep_distinct_checkpoint_requests(monkeypatch):
 # ============================================================================
 
 
-def test_runners_that_bypass_the_meta_seam_declare_it():
-    """A runner claiming meta support must construct through _build_transformer."""
+def load_path_source(cls) -> str:
+    """_load_model, plus the helpers on the runner it hands construction to.
+
+    A runner may reach a seam one call down, as Ideogram 4 does for the FP8
+    checkpoint it has to map on the way in, so reading _load_model alone would
+    report a bypass that is not one.
+    """
     import inspect
     import re
 
+    # _load_model may be inherited; read the source of whichever class defines it
+    source = inspect.getsource(cls._load_model)
+    for name in set(re.findall(r"self\.(_\w+)\(", source)):
+        helper = getattr(cls, name, None)
+        if helper is not None and callable(helper):
+            source += inspect.getsource(helper)
+    return source
+
+
+def test_runners_that_bypass_the_meta_seam_declare_it():
+    """A runner claiming meta support must construct through _build_transformer."""
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
-
-    def load_path_source(cls) -> str:
-        """_load_model, plus the helpers on the runner it hands construction to.
-
-        A runner may reach the seam one call down, as Ideogram 4 does for the FP8
-        checkpoint it has to map on the way in, so reading _load_model alone would
-        report a bypass that is not one.
-        """
-        # _load_model may be inherited; read the source of whichever class defines it
-        source = inspect.getsource(cls._load_model)
-        for name in set(re.findall(r"self\.(_\w+)\(", source)):
-            helper = getattr(cls, name, None)
-            if helper is not None and callable(helper):
-                source += inspect.getsource(helper)
-        return source
 
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
@@ -428,6 +429,87 @@ def test_runners_that_bypass_the_meta_seam_declare_it():
         "these runners load their transformer outside _build_transformer but still declare "
         "meta-load support: " + ", ".join(sorted(mismatched))
     )
+
+
+# A runner whose encoder cannot take the seam, and why. Each of these is a decision about
+# one model, not an oversight; the entry is what keeps it from reading as one.
+TEXT_ENCODER_SEAM_EXEMPT = {
+    "xFuserKrea2RawModel": (
+        "hand-loads Qwen3VL on ROCm to patch its Linears against a bf16 GEMM NaN, and the "
+        "seam wants the same text_encoder slot; needs a GPU run to say how the patch "
+        "survives a blockwise fill"
+    ),
+    "xFuserKrea2TurboModel": "same Qwen3VL ROCm patch as Krea-2-Raw",
+    "xFuserStableDiffusionModel": (
+        "composition-style wrapper with no ConfigMixin.load_config, so it loads real on "
+        "every rank by design and the per-rank AITER walk quantizes afterwards"
+    ),
+}
+
+
+def test_runners_that_declare_a_text_encoder_construct_it_through_the_seam():
+    """A runner whose encoder the load path can help must call _meta_te_kwargs.
+
+    Two declarations put an encoder in reach. Naming it in fsdp_strategy alongside meta
+    transformer support means it can be built on meta and filled a block at a time; naming
+    its FP8 targets means it can be quantized as it streams instead of converted after it
+    has landed in bf16. Either way the pipeline only skips loading a component it was
+    handed, so a runner that never calls the seam quietly loads the whole encoder on every
+    rank -- no error, just the cost its declaration says it avoids. Wan2.2-Distilled did
+    exactly that by overriding a _load_model that called the seam and not carrying it over.
+
+    Reads class-level settings, so an encoder declared only from _customize_settings would
+    be invisible here. None is today.
+    """
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    mismatched = []
+    for cls in dict.fromkeys(MODEL_REGISTRY.values()):
+        settings = cls.settings
+        shards_encoder = bool(cls.load_declaration.meta_transformers) and any(
+            name.startswith("text_encoder") for name in (settings.fsdp_strategy or {})
+        )
+        quantizes_encoder = bool(settings.fp8_text_encoder_module_list)
+        if not (shards_encoder or quantizes_encoder):
+            continue
+        if cls.__name__ in TEXT_ENCODER_SEAM_EXEMPT:
+            continue
+        if "_meta_te_kwargs" not in load_path_source(cls):
+            mismatched.append(f"{cls.__name__} (from {cls._load_model.__qualname__})")
+
+    assert not mismatched, (
+        "these runners declare a text encoder the memory-efficient load can build or "
+        "quantize, but never call _meta_te_kwargs, so the pipeline loads it whole on every "
+        "rank: " + ", ".join(sorted(mismatched))
+    )
+
+
+def test_the_text_encoder_seam_exemptions_are_still_runners_that_need_one():
+    """An exemption outlives the reason for it unless something notices.
+
+    A model that stops declaring an encoder, or starts calling the seam, should lose its
+    entry rather than keep a stale note explaining a constraint that no longer applies.
+    """
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    by_name = {cls.__name__: cls for cls in MODEL_REGISTRY.values()}
+
+    unknown = sorted(set(TEXT_ENCODER_SEAM_EXEMPT) - set(by_name))
+    assert not unknown, f"exempted runners that no longer exist: {', '.join(unknown)}"
+
+    stale = []
+    for name in TEXT_ENCODER_SEAM_EXEMPT:
+        cls = by_name[name]
+        settings = cls.settings
+        shards_encoder = bool(cls.load_declaration.meta_transformers) and any(
+            component.startswith("text_encoder") for component in (settings.fsdp_strategy or {})
+        )
+        if not (shards_encoder or settings.fp8_text_encoder_module_list):
+            stale.append(f"{name} (declares no text encoder)")
+        elif "_meta_te_kwargs" in load_path_source(cls):
+            stale.append(f"{name} (now calls the seam)")
+
+    assert not stale, "drop these from TEXT_ENCODER_SEAM_EXEMPT: " + ", ".join(sorted(stale))
 
 
 def test_runner_load_declarations_match_model_quantization_capabilities():

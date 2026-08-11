@@ -117,6 +117,26 @@ def _probe_torchao_diffusers_streaming() -> tuple[bool, str | None]:
         )
 
 
+def _quantizes_parameter_by_parameter(quantizer_cls) -> bool:
+    """Whether this quantizer can convert one parameter at a time during a load.
+
+    Two surfaces express that, and which one a library exposes is not something to
+    infer from its version. Transformers 5 replaced the pair Transformers 4 had
+    (create_quantized_param with check_if_quantized_param) with an op-based pair
+    (get_quantize_ops with param_needs_quantization), while Diffusers still carries
+    the older one. Requiring only the older pair meant no installed Transformers
+    matched, so every text encoder quietly took the post-load fallback and the
+    streaming path this asks about was never entered.
+    """
+
+    def has(*names: str) -> bool:
+        return all(callable(getattr(quantizer_cls, name, None)) for name in names)
+
+    return has("get_quantize_ops", "param_needs_quantization") or has(
+        "create_quantized_param", "check_if_quantized_param"
+    )
+
+
 def _probe_torchao_text_encoder_streaming() -> tuple[bool, str | None]:
     """Probe granular Diffusers routing to Transformers TorchAO loading."""
 
@@ -143,8 +163,7 @@ def _probe_torchao_text_encoder_streaming() -> tuple[bool, str | None]:
             getattr(transformers, "TorchAoConfig", None)
             and config is not None
             and pipeline_config is not None
-            and callable(getattr(quantizer_cls, "create_quantized_param", None))
-            and callable(getattr(quantizer_cls, "check_if_quantized_param", None))
+            and _quantizes_parameter_by_parameter(quantizer_cls)
         )
         return (
             available,

@@ -115,6 +115,31 @@ def test_text_encoder_probe_does_not_require_diffusers_transformer_quantizer(
     assert "isolated missing API" in reason
 
 
+@pytest.mark.parametrize(
+    ("methods", "streams"),
+    [
+        # Transformers 5's op-based surface
+        (("get_quantize_ops", "param_needs_quantization"), True),
+        # What Transformers 4 and Diffusers carry
+        (("create_quantized_param", "check_if_quantized_param"), True),
+        # Transformers 4.57 has neither pair whole, and must fall back
+        (("create_quantized_param", "param_needs_quantization"), False),
+        ((), False),
+    ],
+)
+def test_either_parameter_quantization_surface_counts_as_streaming(
+    modules, methods, streams
+):
+    """Requiring only the older pair meant no installed Transformers ever matched.
+
+    Every text encoder then took the post-load fallback, silently, which is the
+    memory saving the flag exists for not happening.
+    """
+    quantizer = type("Quantizer", (), {name: lambda self: None for name in methods})
+
+    assert modules.backends._quantizes_parameter_by_parameter(quantizer) is streams
+
+
 def test_supported_rocm_runs_torchao_api_preflight(modules):
     b = modules.backends
     calls = []

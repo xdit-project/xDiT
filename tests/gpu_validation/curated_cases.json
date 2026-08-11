@@ -338,7 +338,40 @@
       "expected": {
         "outcome": "inference_success"
       },
-      "quality_notes": "Confirm the logged Transformers 4 text-encoder fallback is post-load, then compare to the Transformers 5 result. This asked for RDNA4 and an offload mode as well, which confounded three factors: what it tests is a library, feature-detected on whether transformers.core_model_loading imports, and nothing about it is architectural. Pinned here instead, where it records an environment mismatch until a Transformers 4 environment exists, which is the requirement it actually has."
+      "quality_notes": "Confirm the logged Transformers 4 text-encoder fallback is post-load, then compare to the Transformers 5 result. This asked for RDNA4 and an offload mode as well, which confounded three factors: what it tests is a library, feature-detected on whether transformers.core_model_loading imports, and nothing about it is architectural. Pinned here instead, and run in a Transformers 4 environment built on this node rather than booked: the log reports materialization=post_load with fallback=Transformers TorchAO quantize-on-load methods are unavailable, which is the claim. rocm-flux2-fp8-eager-te-tf5 is the same case under Transformers 5, for the comparison."
+    },
+    {
+      "id": "rocm-flux2-fp8-eager-te-tf5",
+      "tags": [
+        "rocm",
+        "torchao",
+        "fp8",
+        "te-fp8",
+        "transformers5",
+        "streaming",
+        "hub"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "eager",
+      "quantization": "fp8",
+      "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 1,
+      "args": [],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "The Transformers 5 half of the pair, which the Transformers 4 case above asks to be compared against and which no case here provided: the only tf5 twin was pinned to RDNA4, where the quantizer is AITER rather than torchao, so it would have compared two things at once. Same node, model, seed and placement, with the library the only difference, so the comparison isolates streaming quantize-on-load against the post-load fallback."
     },
     {
       "id": "rocm-flux1-fp8-eager-sequential-offload",

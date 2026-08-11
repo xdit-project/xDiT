@@ -31,11 +31,13 @@ transformers `5.5.4`, diffusers `0.39.0.dev0` (`21ba39457`, the first sweep on `
 present, ROCm 6.16.2, Python 3.12.3, 288 GB per device, 3 TB host, `HF_HUB_OFFLINE=1`.
 
 Every model at the rank count it is served at, Ulysses across all of them, `torch.compile` on, AITER
-attention. `VRAM` is load-time peak on one device and `host` is peak host anonymous memory, both in GB;
-`load` is seconds; `SSIM` is against the same model's single-rank eager render. `+fp8` is the blockwise
-fill quantizing as it goes and `repl+fp8` the replicated broadcast doing the same:
+attention. Each column names a measurement and the placement it was measured on. `VRAM` is the peak on
+one device while the load is in flight, in GB, and `host` is peak host anonymous memory over the same
+window, also in GB; `load s` is how long that load took. `SSIM` is against the same model's single-rank
+eager render. `+fp8` is the blockwise fill quantizing as it goes and `repl+fp8` the replicated broadcast
+doing the same:
 
-| Model | ranks | VRAM eager | VRAM control | VRAM blockwise | VRAM +fp8 | VRAM repl+fp8 | host eager | host control | host blockwise | load eager | load blockwise | SSIM bf16 | SSIM fp8 |
+| Model | ranks | VRAM eager | VRAM control | VRAM blockwise | VRAM +fp8 | VRAM repl+fp8 | host eager | host control | host blockwise | load s eager | load s blockwise | SSIM bf16 | SSIM fp8 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | FLUX.2-dev | 8 | 109 | 24 | 21 | 34 | 87 | 103 | 173 | 76 | 154 | 83 | 0.998 | 0.901 |
 | Qwen-Image | 8 | 58 | 17 | 19 | 16 | 43 | 68 | 111 | 75 | 79 | 48 | 0.992 | 0.575 |

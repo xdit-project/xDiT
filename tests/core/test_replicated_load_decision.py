@@ -17,7 +17,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from xfuser.model_executor.models.runner_models.loading import meta_load
+from xfuser.model_executor.models.runner_models.loading import (
+    meta_load,
+    text_encoder_plan,
+    transformer_load,
+)
 from xfuser.model_executor.models.runner_models.loading.meta_load import (
     MemoryEfficientLoader,
 )
@@ -25,6 +29,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadDeclaration,
     LoaderAdapter,
     UnsupportedLoadContract,
+)
+from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+    QuantizationLedger,
 )
 from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     CheckpointManifest,
@@ -37,6 +44,58 @@ def single_process_env(monkeypatch):
     """The decision logs, and runner_utils.log reads RANK/WORLD_SIZE straight from the env."""
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
+
+
+def loader_for(runner):
+    """The loader surface the load routes need, backed by a stub runner.
+
+    A test describes the runner it wants and gets the loader that owns it, so the stubs stay a
+    description of one model rather than of two collaborating objects. Anything the route can
+    call is present: a test that leaves out the meta fill wants the case where it is never
+    reached, not an AttributeError from the branch it forgot.
+    """
+    inner = getattr(runner, "_loader", SimpleNamespace())
+
+    def missing_route(name):
+        def fail(*args, **kwargs):
+            raise AssertionError(f"this case should not reach {name}")
+
+        return fail
+
+    if not hasattr(runner, "_transformer_quantization_adapter"):
+        runner._transformer_quantization_adapter = lambda component_name: (
+            runner.fp8_backend,
+            runner.fp8.targets_for(component_name),
+        )
+    # A real runner always has the quantization ledger, so a stub gets it too: the routes record
+    # into it unconditionally, and a test that does not assert on it still has one written.
+    if not hasattr(runner, "quantization_ledger"):
+        runner.quantization_ledger = QuantizationLedger()
+    return SimpleNamespace(
+        model=runner,
+        _checkpoint_request=lambda subfolder=None: runner._checkpoint_request(subfolder),
+        fsdp_meta_load=runner._memory_efficient_fsdp_load,
+        replicated_broadcast_load=runner._replicated_broadcast_load,
+        build_meta_transformer=getattr(
+            inner, "build_meta_transformer", missing_route("build_meta_transformer")
+        ),
+        build_meta_component=getattr(
+            inner, "build_meta_component", missing_route("build_meta_component")
+        ),
+        plan_eager_blockwise_fallback=getattr(
+            inner, "plan_eager_blockwise_fallback", lambda *args, **kwargs: None
+        ),
+        mark_local_blockwise=getattr(
+            inner, "mark_local_blockwise", lambda component: None
+        ),
+        will_fill_blockwise=getattr(inner, "will_fill_blockwise", lambda name: False),
+        meta_te_kwargs=getattr(inner, "meta_te_kwargs", lambda: None),
+        meta_te_kwargs_replicated=getattr(
+            inner,
+            "meta_te_kwargs_replicated",
+            missing_route("meta_te_kwargs_replicated"),
+        ),
+    )
 
 
 def make_loader(
@@ -575,8 +634,7 @@ def test_build_transformer_preserves_request_subfolder_without_override():
         settings=SimpleNamespace(fsdp_strategy={}),
     )
 
-    result = base_model.xFuserModel._build_transformer(
-        runner, Wrapper, checkpoint_request=request
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper, checkpoint_request=request
     )
 
     assert result == "loaded"
@@ -620,8 +678,7 @@ def test_transformer_structure_inspection_keeps_parameters_and_buffers_meta(
 
     monkeypatch.setattr(accelerate, "init_empty_weights", empty_weights)
 
-    result = base_model.xFuserModel._build_transformer_structure(
-        SimpleNamespace(),
+    result = transformer_load.build_transformer_structure(
         Wrapper,
         CheckpointRequest("org/repo", subfolder="transformer"),
         None,
@@ -650,8 +707,7 @@ def test_structure_inspection_reports_old_accelerate_explicitly(monkeypatch):
         RuntimeError,
         match=r"accelerate\.init_empty_weights.*include_buffers",
     ):
-        base_model.xFuserModel._build_transformer_structure(
-            SimpleNamespace(),
+        transformer_load.build_transformer_structure(
             Wrapper,
             CheckpointRequest("org/repo", subfolder="transformer"),
             None,
@@ -686,8 +742,7 @@ def test_structure_inspection_catches_include_buffers_error_on_context_enter(
         RuntimeError,
         match=r"accelerate\.init_empty_weights.*include_buffers",
     ):
-        base_model.xFuserModel._build_transformer_structure(
-            SimpleNamespace(),
+        transformer_load.build_transformer_structure(
             Wrapper,
             CheckpointRequest("org/repo", subfolder="transformer"),
             None,
@@ -743,23 +798,26 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
             get_submodule=lambda name: object(),
         )
 
+    monkeypatch.setattr(
+        transformer_load, "build_transformer_structure", structure_factory
+    )
+    monkeypatch.setattr(
+        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+    )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
         fp8=SimpleNamespace(targets_for=lambda name: ["blocks"]),
         fp8_backend=adapter,
-        _fp8_streaming_targets=set(),
-        _quantization_streaming_targets=set(),
-        _build_transformer_structure=structure_factory,
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result == "streamed"
     assert calls[0]["quantization_config"] is sentinel
-    assert runner._fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
 
 
 def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
@@ -787,19 +845,15 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
         ),
         config=SimpleNamespace(use_fp4_gemms=False),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
-        _quantization_descriptor_components=set(),
-        _quantization_streaming_targets=set(),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
 
-    result = base_model.xFuserModel._build_transformer(runner, SimpleNamespace())
+    result = transformer_load.load_transformer(loader_for(runner), SimpleNamespace())
 
     assert result == "meta"
-    assert runner._fp8_streaming_targets == {"transformer.blocks"}
-    assert runner._quantization_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
 def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
@@ -830,19 +884,15 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
         ),
         config=SimpleNamespace(use_fp4_gemms=True),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
-        _quantization_descriptor_components=set(),
-        _quantization_streaming_targets=set(),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
 
-    result = base_model.xFuserModel._build_transformer(runner, SimpleNamespace())
+    result = transformer_load.load_transformer(loader_for(runner), SimpleNamespace())
 
     assert result == "meta"
-    assert runner._fp8_streaming_targets == {"transformer.blocks"}
-    assert runner._quantization_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.fp8_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
 def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch):
@@ -880,9 +930,9 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
         settings=SimpleNamespace(fsdp_strategy={}),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
-    monkeypatch.setattr(base_model, "log", logs.append)
+    monkeypatch.setattr(transformer_load, "log", logs.append)
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result == "loaded"
     assert calls[0]["quantization_config"] is None
@@ -938,10 +988,12 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
     def structure_factory(*args, **kwargs):
         raise RuntimeError("config shape unavailable")
 
-    runner._build_transformer_structure = structure_factory
-    monkeypatch.setattr(base_model, "log", logs.append)
+    monkeypatch.setattr(
+        transformer_load, "build_transformer_structure", structure_factory
+    )
+    monkeypatch.setattr(transformer_load, "log", logs.append)
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result == "loaded"
     assert calls[0]["quantization_config"] is None
@@ -989,10 +1041,6 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
             ("blocks",),
         ),
         _loader=loader,
-        _fp8_descriptor_components=set(),
-        _quantization_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
-        _quantization_streaming_targets=set(),
         fp8=SimpleNamespace(targets_for=lambda component: ()),
         settings=SimpleNamespace(
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
@@ -1005,13 +1053,13 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
         ),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
-    monkeypatch.setattr(base_model, "log", lambda message: None)
+    monkeypatch.setattr(transformer_load, "log", lambda message: None)
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result is meta_component
     assert marked == [meta_component]
-    assert runner._quantization_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
 def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
@@ -1042,6 +1090,9 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
     )
     sentinel = object()
     monkeypatch.setattr(adapter, "_stream_config_factory", lambda targets: sentinel)
+    monkeypatch.setattr(
+        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+    )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
@@ -1051,7 +1102,7 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result == "loaded"
     assert calls[0]["quantization_config"] is sentinel
@@ -1093,23 +1144,27 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
             calls.append(kwargs)
             return "streamed"
 
-    runner = SimpleNamespace(
-        _memory_efficient_fsdp_load=lambda: False,
-        _replicated_broadcast_load=lambda: False,
-        _transformer_quantization_adapter=lambda component: (
-            adapter,
-            ("blocks",),
-        ),
-        _native_quantization_device_map=lambda: {"": 0},
-        _fp8_streaming_targets=set(),
-        _quantization_streaming_targets=set(),
-        _build_transformer_structure=lambda *args, **kwargs: SimpleNamespace(
+    monkeypatch.setattr(
+        transformer_load,
+        "build_transformer_structure",
+        lambda *args, **kwargs: SimpleNamespace(
             named_modules=lambda: [
                 ("", object()),
                 ("blocks", object()),
                 ("blocks.0.proj", torch.nn.Linear(1024, 1024)),
             ],
             get_submodule=lambda name: object(),
+        ),
+    )
+    monkeypatch.setattr(
+        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+    )
+    runner = SimpleNamespace(
+        _memory_efficient_fsdp_load=lambda: False,
+        _replicated_broadcast_load=lambda: False,
+        _transformer_quantization_adapter=lambda component: (
+            adapter,
+            ("blocks",),
         ),
         settings=SimpleNamespace(
             fsdp_strategy={},
@@ -1120,12 +1175,12 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result == "streamed"
     assert calls[0]["quantization_config"] is sentinel
     assert calls[0]["device_map"] == {"": 0}
-    assert runner._quantization_streaming_targets == {"transformer.blocks"}
+    assert runner.quantization_ledger.streaming_targets == {"transformer.blocks"}
 
 
 def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
@@ -1159,6 +1214,12 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
         ],
         get_submodule=lambda name: object(),
     )
+    monkeypatch.setattr(
+        transformer_load, "build_transformer_structure", lambda *args, **kwargs: structure
+    )
+    monkeypatch.setattr(
+        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+    )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
         _replicated_broadcast_load=lambda: False,
@@ -1166,10 +1227,6 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
             adapter,
             ("blocks",),
         ),
-        _native_quantization_device_map=lambda: {"": 0},
-        _fp8_streaming_targets=set(),
-        _quantization_streaming_targets=set(),
-        _build_transformer_structure=lambda *args, **kwargs: structure,
         settings=SimpleNamespace(
             fsdp_strategy={},
             fp8_precision_overrides=("0.override",),
@@ -1179,10 +1236,10 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
     )
 
-    result = base_model.xFuserModel._build_transformer(runner, Wrapper)
+    result = transformer_load.load_transformer(loader_for(runner), Wrapper)
 
     assert result == "streamed"
-    assert runner._quantization_streaming_targets == {"transformer.blocks.0.keep"}
+    assert runner.quantization_ledger.streaming_targets == {"transformer.blocks.0.keep"}
 
 
 
@@ -1220,8 +1277,6 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         _loader=SimpleNamespace(
             build_meta_component=lambda name, fp8=False: (name, fp8)
         ),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
     )
     prepared = {
         name: SimpleNamespace(
@@ -1265,10 +1320,10 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
             setattr(sentinel, "quant_mapping", dict(mapping)) or sentinel
         ),
     )
-    monkeypatch.setattr(base_model, "log", logs.append)
+    monkeypatch.setattr(text_encoder_plan, "log", logs.append)
 
     _attach_backends(runner)
-    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+    kwargs, config = text_encoder_plan.plan_text_encoders(loader_for(runner))
 
     assert kwargs == {}
     assert calls == [
@@ -1296,7 +1351,7 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
         "text_encoder descriptor",
         "text_encoder_2 descriptor",
     ]
-    assert runner._fp8_streaming_targets == {
+    assert runner.quantization_ledger.fp8_streaming_targets == {
         "text_encoder.encoder.block",
         "text_encoder_2.model.layers",
     }
@@ -1323,8 +1378,6 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
             build_meta_component=lambda name, fp8=False: object(),
             will_fill_blockwise=lambda name: False,
         ),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
     )
     observed = []
 
@@ -1343,10 +1396,10 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
         "prepare_text_encoder_fp8_load",
         prepare,
     )
-    monkeypatch.setattr(base_model, "log", lambda message: None)
+    monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
 
     _attach_backends(runner)
-    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+    kwargs, config = text_encoder_plan.plan_text_encoders(loader_for(runner))
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     assert observed == [sentinel]
@@ -1371,8 +1424,6 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
             build_meta_component=lambda name, fp8=False: object(),
             will_fill_blockwise=lambda name: False,
         ),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
     )
     observed = []
 
@@ -1390,14 +1441,14 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         "xfuser.model_executor.models.runner_models.loading.fp8_backends.prepare_text_encoder_fp8_load",
         prepare,
     )
-    monkeypatch.setattr(base_model, "log", lambda message: None)
+    monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
 
     _attach_backends(runner)
-    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+    kwargs, config = text_encoder_plan.plan_text_encoders(loader_for(runner))
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     assert observed == [(False, False)]
-    assert runner._fp8_streaming_targets == set()
+    assert runner.quantization_ledger.fp8_streaming_targets == set()
 
 
 def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch):
@@ -1431,10 +1482,6 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
             build_meta_component=lambda name, fp8=False: object(),
             will_fill_blockwise=lambda name: True,
         ),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
-        _quantization_streaming_targets=set(),
-        _quantization_descriptor_components=set(),
     )
 
     monkeypatch.setattr(
@@ -1444,15 +1491,15 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
             "a blockwise-filled encoder was routed to the whole-encoder rank0 load"
         ),
     )
-    monkeypatch.setattr(base_model, "log", lambda message: None)
+    monkeypatch.setattr(text_encoder_plan, "log", lambda message: None)
 
     _attach_backends(runner)
-    kwargs, config = base_model.xFuserModel._meta_te_kwargs(runner)
+    kwargs, config = text_encoder_plan.plan_text_encoders(loader_for(runner))
 
     assert (kwargs, config) == ({"text_encoder": "meta"}, None)
     # Recorded as already quantized, so the post-load walk leaves the filled blocks alone.
-    assert "text_encoder" in runner._fp8_descriptor_components
-    assert runner._fp8_streaming_targets
+    assert "text_encoder" in runner.quantization_ledger.fp8_descriptor_components
+    assert runner.quantization_ledger.fp8_streaming_targets
 
 
 def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
@@ -1471,8 +1518,6 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
             build_meta_component=lambda name, fp8=False: object(),
             will_fill_blockwise=lambda name: False,
         ),
-        _fp8_descriptor_components=set(),
-        _fp8_streaming_targets=set(),
     )
 
     def prepare(adapter, **kwargs):
@@ -1487,4 +1532,4 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
 
     _attach_backends(runner)
     with pytest.raises(RuntimeError, match="before allocation"):
-        base_model.xFuserModel._meta_te_kwargs(runner)
+        text_encoder_plan.plan_text_encoders(loader_for(runner))

@@ -7,6 +7,9 @@ import pytest
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 from xfuser.model_executor.models.runner_models.loading import shard
+from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+    QuantizationLedger,
+)
 from xfuser.model_executor.models.runner_models.loading import fp8_backends
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     MaterializationMode,
@@ -440,7 +443,7 @@ def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
         blockwise_fp8_backend=SimpleNamespace(
             convert_module=lambda module, **kwargs: fp8_calls.append((module, kwargs))
         ),
-        _quantization_streaming_targets=set(),
+        quantization_ledger=QuantizationLedger(),
     )
     monkeypatch.setattr(base_model, "log", lambda *_args: None)
 
@@ -814,8 +817,9 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
         ),
         blockwise_fp8_backend=adapter,
         format_backend=format_adapter,
-        _quantization_streaming_targets=set(),
-        _quantization_descriptor_components={"transformer"},
+        quantization_ledger=QuantizationLedger(
+            descriptor_components={"transformer"}
+        ),
     )
     model._setup_fp8_only_gemm_modules = (
         lambda rank: xFuserModel._setup_fp8_only_gemm_modules(model, rank)
@@ -872,8 +876,10 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         ),
         fp8_backend=adapter,
         pipe=pipe,
-        _fp8_streaming_targets={"transformer.blocks"},
-        _fp8_descriptor_components={"transformer"},
+        quantization_ledger=QuantizationLedger(
+            fp8_streaming_targets={"transformer.blocks"},
+            fp8_descriptor_components={"transformer"},
+        ),
         _replicated_broadcast_load=lambda: False,
     )
     monkeypatch.setattr(

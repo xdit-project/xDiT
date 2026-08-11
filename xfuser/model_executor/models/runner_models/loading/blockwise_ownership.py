@@ -17,19 +17,6 @@ from xfuser.core.utils.runner_utils import log
 from .format_backends import module_path_is_covered
 
 
-def component_target_paths(component_name, targets):
-    return {
-        component_name if not target else f"{component_name}.{target}"
-        for target in targets
-    }
-
-
-def record_streaming_targets(model, attribute, component_name, targets):
-    tracked = getattr(model, attribute, None)
-    if tracked is not None:
-        tracked.update(component_target_paths(component_name, targets))
-
-
 def blockwise_owned_targets(targets, wrap_attrs):
     """The shortest paths covering what the block fill quantized.
 
@@ -52,53 +39,35 @@ def blockwise_owned_targets(targets, wrap_attrs):
 
 
 def record_blockwise_ownership(
-    model,
+    ledger,
     adapter,
     component_name,
     targets,
     wrap_attrs,
     descriptor,
+    *,
+    fp4_gemms=False,
+    fp8_targets=(),
 ):
-    """Log the plan and record what it will have quantized by the time the fill finishes."""
+    """Log the plan and record what it will have quantized by the time the fill finishes.
+
+    ``fp8_targets`` are the component's FP8 targets, needed only for the FP4 case below, so a
+    caller that is not running FP4 gemms need not look them up.
+    """
     log(descriptor.log_message())
-    if adapter.format.value == "fp8" and hasattr(model, "_fp8_descriptor_components"):
-        model._fp8_descriptor_components.add(component_name)
-    if hasattr(model, "_quantization_descriptor_components"):
-        model._quantization_descriptor_components.add(component_name)
+    is_fp8 = adapter.format.value == "fp8"
+    ledger.describe(component_name, fp8=is_fp8)
     if descriptor.materialization_mode not in {"streaming", "blockwise"}:
         return
     owned_targets = blockwise_owned_targets(targets, wrap_attrs)
-    record_streaming_targets(
-        model,
-        "_quantization_streaming_targets",
-        component_name,
-        owned_targets,
-    )
+    ledger.record_streamed(component_name, owned_targets, fp8=is_fp8)
     # An fp4 blockwise fill also converts the fp8 remainder its adapter leaves behind, so those
     # targets are owned too even though they are not the ones the descriptor names.
-    if descriptor.materialization_mode == "blockwise" and getattr(
-        model.config, "use_fp4_gemms", False
-    ):
-        fp8_targets = tuple(model.fp8.targets_for(component_name))
-        owned_fp8_targets = blockwise_owned_targets(fp8_targets, wrap_attrs)
-        record_streaming_targets(
-            model,
-            "_quantization_streaming_targets",
+    if descriptor.materialization_mode == "blockwise" and fp4_gemms:
+        ledger.record_streamed(
             component_name,
-            owned_fp8_targets,
-        )
-        record_streaming_targets(
-            model,
-            "_fp8_streaming_targets",
-            component_name,
-            owned_fp8_targets,
-        )
-    if adapter.format.value == "fp8":
-        record_streaming_targets(
-            model,
-            "_fp8_streaming_targets",
-            component_name,
-            owned_targets,
+            blockwise_owned_targets(tuple(fp8_targets), wrap_attrs),
+            fp8=True,
         )
 
 

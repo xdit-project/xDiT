@@ -509,6 +509,20 @@ class MemoryEfficientLoader:
             raise RuntimeError("local blockwise transformer was not built on meta")
         self._local_blockwise_transformers[component] = True
 
+    def load_transformer(self, wrapper_cls, **kwargs):
+        """Route one transformer's weights onto the device (see transformer_load)."""
+
+        from .transformer_load import load_transformer
+
+        return load_transformer(self, wrapper_cls, **kwargs)
+
+    def plan_text_encoders(self, existing_quantization_config=None):
+        """Plan each declared text encoder's quantization and fill (see text_encoder_plan)."""
+
+        from .text_encoder_plan import plan_text_encoders
+
+        return plan_text_encoders(self, existing_quantization_config)
+
     def fill_eager_transformers(self) -> None:
         """Fill all component-level eager blockwise plans before device placement."""
 
@@ -664,7 +678,7 @@ class MemoryEfficientLoader:
 
     def _meta_te_fp8_targets(self, component_name: str) -> tuple:
         """This component's fp8-streamed target paths, component-relative."""
-        streamed_targets = getattr(self.model, "_fp8_streaming_targets", ())
+        streamed_targets = self.model.quantization_ledger.fp8_streaming_targets
         prefix = f"{component_name}."
         return tuple(
             "" if target == component_name else target[len(prefix) :]

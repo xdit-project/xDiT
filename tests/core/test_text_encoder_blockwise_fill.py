@@ -55,6 +55,10 @@ class Encoder:
 
 
 def make_loader(meta_load, *, wrap_attrs=("model.layers",)):
+    from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+        QuantizationLedger,
+    )
+
     model = SimpleNamespace(
         settings=SimpleNamespace(
             model_name="acme/encoder",
@@ -64,7 +68,9 @@ def make_loader(meta_load, *, wrap_attrs=("model.layers",)):
             },
         ),
         load_declaration=SimpleNamespace(exclusion_for=lambda name: None),
-        _fp8_streaming_targets=("text_encoder.model.layers",),
+        quantization_ledger=QuantizationLedger(
+            fp8_streaming_targets={"text_encoder.model.layers"}
+        ),
     )
     loader = object.__new__(meta_load.MemoryEfficientLoader)
     loader.model = model

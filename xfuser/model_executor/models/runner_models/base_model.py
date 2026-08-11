@@ -49,7 +49,6 @@ from xfuser.model_executor.models.runner_models.loading.checkpoint import (
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadDeclaration,
     LoadContract,
-    UnsupportedLoadContract,
     assert_offload_is_compatible_with_format,
     assert_offload_is_compatible_with_sharding,
     assert_requested_materialization_is_honoured,
@@ -57,14 +56,12 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     select_load_contract,
     select_runtime_quantization,
 )
-from xfuser.model_executor.models.runner_models.loading.blockwise_ownership import (
-    blockwise_transformer_descriptor,
-    record_blockwise_ownership,
-    record_streaming_targets,
-)
 from xfuser.model_executor.models.runner_models.loading.format_backends import (
     module_path_is_covered,
     module_paths_overlap,
+)
+from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+    QuantizationLedger,
 )
 
 
@@ -318,10 +315,8 @@ class xFuserModel(abc.ABC):
         self.config = config
         self.pipe = None
         self.load_contract = None
-        self._fp8_descriptor_components = set()
-        self._fp8_streaming_targets = set()
-        self._quantization_descriptor_components = set()
-        self._quantization_streaming_targets = set()
+        # What the load quantized, written by the load routes and read by the post-load walks.
+        self.quantization_ledger = QuantizationLedger()
 
     def _refresh_load_declaration(self) -> None:
         """Re-derive FSDP support from instance-customized settings."""
@@ -533,37 +528,6 @@ class xFuserModel(abc.ABC):
             self.settings.model_name, subfolder=subfolder, **kwargs
         )
 
-    def _build_transformer_structure(
-        self,
-        wrapper_cls,
-        request: CheckpointRequest,
-        init_kwargs: dict | None,
-    ):
-        """Build only meta tensors so FP8 target prefixes can be mapped safely."""
-
-        from accelerate import init_empty_weights
-        from contextlib import ExitStack
-
-        config = wrapper_cls.load_config(
-            request.model_name_or_path, **request.config_kwargs()
-        )
-        with ExitStack() as stack:
-            try:
-                stack.enter_context(
-                    init_empty_weights(include_buffers=True)
-                )
-            except TypeError as exc:
-                raise RuntimeError(
-                    "accelerate.init_empty_weights(include_buffers=True) is "
-                    "required for bounded structure inspection"
-                ) from exc
-            return wrapper_cls.from_config(config, **(init_kwargs or {}))
-
-    def _native_quantization_device_map(self):
-        """Place TorchAO quantize-on-load weights on this rank's accelerator."""
-
-        return {"": get_world_group().local_rank}
-
     def _build_transformer(
         self,
         wrapper_cls,
@@ -573,302 +537,27 @@ class xFuserModel(abc.ABC):
         checkpoint_request: CheckpointRequest | None = None,
         weight_source: CheckpointManifest | None = None,
     ):
-        """Load a transformer through the selected materialization backend.
+        """Load a transformer through the materialization this run asked for.
 
-        FSDP/replicated paths retain the xDiT meta-build and blockwise filler.
-        Ordinary backends pass a native Diffusers quantization config to
-        ``from_pretrained`` only when the format's exact semantics permit it.
-
-        init_kwargs: extra wrapper __init__ args (e.g. wan's attention_kwargs) forwarded on both paths.
-        stream_quant: gates native quantize-on-load for ordinary loading. Meta
-        paths always convert targeted blocks through the backend adapter.
+        The routing, and the quantization each route needs, live in
+        ``loading.transformer_load``; this is the seam runners call.
         """
-        request = checkpoint_request or self._checkpoint_request(
-            subfolder or "transformer"
-        )
-        if subfolder is not None and request.subfolder != subfolder:
-            request = request.with_subfolder(subfolder)
-        elif request.subfolder is None:
-            request = request.with_subfolder("transformer")
-        component_name = request.subfolder
-        adapter_selector = getattr(
-            self, "_transformer_quantization_adapter", None
-        )
-        if adapter_selector is None:
-            adapter = self.fp8_backend
-            targets = tuple(self.fp8.targets_for(component_name))
-        else:
-            adapter, targets = adapter_selector(component_name)
-            targets = tuple(targets)
-        strategy = self.settings.fsdp_strategy.get(component_name, {})
-        wrap_attrs = tuple(strategy.get("wrap_attrs", ()))
-        fsdp_meta = self._memory_efficient_fsdp_load()
-        replicated_meta = (
-            False if fsdp_meta else self._replicated_broadcast_load()
-        )
-        if fsdp_meta or replicated_meta:
-            if adapter is not None:
-                descriptor = blockwise_transformer_descriptor(
-                    adapter,
-                    component_name,
-                    targets,
-                    wrap_attrs,
-                )
-                record_blockwise_ownership(
-                    self,
-                    adapter,
-                    component_name,
-                    targets,
-                    wrap_attrs,
-                    descriptor,
-                )
-            build_kwargs = (
-                {"weight_source": weight_source}
-                if weight_source is not None
-                else {}
-            )
-            return self._loader.build_meta_transformer(
-                wrapper_cls, request, init_kwargs, **build_kwargs
-            )
-        quantization_config = None
-        if adapter is not None:
-            if adapter.format.value == "fp8":
-                from .loading.fp8_backends import (
-                    prepare_native_transformer_fp8_load,
-                )
-
-                prepared = prepare_native_transformer_fp8_load(
-                    adapter,
-                    component_name=component_name,
-                    targets=targets,
-                    stream_quant=stream_quant,
-                    model_factory=lambda: self._build_transformer_structure(
-                        wrapper_cls, request, init_kwargs
-                    ),
-                )
-            else:
-                from .loading.format_backends import (
-                    prepare_native_transformer_format_load,
-                )
-
-                prepared = prepare_native_transformer_format_load(
-                    adapter,
-                    component_name=component_name,
-                    targets=targets,
-                    stream_quant=stream_quant,
-                    precision_prefixes=(
-                        self.settings.fp8_precision_overrides or ()
-                    ),
-                    precision_suffixes=(
-                        self.settings.fp8_precision_override_suffixes or ()
-                    ),
-                    hybrid=self.config.use_hybrid_gemm_schedule,
-                    model_factory=lambda: self._build_transformer_structure(
-                        wrapper_cls, request, init_kwargs
-                    ),
-                )
-            loader = getattr(self, "_loader", None)
-            local_plan_factory = getattr(
-                loader, "plan_eager_blockwise_fallback", None
-            )
-            local_plan = (
-                local_plan_factory(prepared, targets, wrap_attrs)
-                if local_plan_factory is not None
-                else None
-            )
-            if local_plan is not None and local_plan.enabled:
-                descriptor = blockwise_transformer_descriptor(
-                    adapter,
-                    component_name,
-                    targets,
-                    wrap_attrs,
-                    local=True,
-                )
-                record_blockwise_ownership(
-                    self,
-                    adapter,
-                    component_name,
-                    targets,
-                    wrap_attrs,
-                    descriptor,
-                )
-                build_kwargs = (
-                    {"weight_source": weight_source}
-                    if weight_source is not None
-                    else {}
-                )
-                component = loader.build_meta_transformer(
-                    wrapper_cls, request, init_kwargs, **build_kwargs
-                )
-                loader.mark_local_blockwise(component)
-                return component
-            if weight_source is not None:
-                reason = (
-                    local_plan.reason
-                    if local_plan is not None
-                    else "local blockwise loading is unavailable"
-                )
-                raise UnsupportedLoadContract(
-                    f"{component_name} uses a mapped checkpoint source but "
-                    f"cannot enter local blockwise loading: {reason}"
-                )
-            log(prepared.descriptor.log_message())
-            quantization_config = prepared.quantization_config
-            if (
-                adapter.format.value == "fp8"
-                and hasattr(self, "_fp8_descriptor_components")
-            ):
-                self._fp8_descriptor_components.add(component_name)
-            if hasattr(self, "_quantization_descriptor_components"):
-                self._quantization_descriptor_components.add(component_name)
-            if (
-                quantization_config is not None
-            ):
-                streamed_targets = (
-                    getattr(prepared, "streamed_targets", ()) or targets
-                )
-                record_streaming_targets(
-                    self,
-                    "_quantization_streaming_targets",
-                    component_name,
-                    streamed_targets,
-                )
-                if adapter.format.value == "fp8":
-                    record_streaming_targets(
-                        self,
-                        "_fp8_streaming_targets",
-                        component_name,
-                        streamed_targets,
-                    )
-        load_kwargs = request.from_pretrained_kwargs()
-        device_map_factory = getattr(
-            self, "_native_quantization_device_map", None
-        )
-        if quantization_config is not None and device_map_factory is not None:
-            load_kwargs.setdefault("device_map", device_map_factory())
-        return wrapper_cls.from_pretrained(
-            request.model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            quantization_config=quantization_config,
-            **load_kwargs,
-            **(init_kwargs or {}),
+        return self._loader.load_transformer(
+            wrapper_cls,
+            subfolder=subfolder,
+            init_kwargs=init_kwargs,
+            stream_quant=stream_quant,
+            checkpoint_request=checkpoint_request,
+            weight_source=weight_source,
         )
 
     def _meta_te_kwargs(self, existing_quantization_config=None):
-        """Build text-encoder(s) on meta for the memory-efficient FSDP load path.
+        """Plan each declared text encoder's quantization and fill.
 
-        Returns (pipe_component_kwargs, te_quant_config). On the meta path the kwargs carry meta
-        modules to hand to the pipeline's from_pretrained (so it skips loading those components)
-        and te_quant is None — the pipe does not stream the TE; instead the meta module (fp8 when
-        targeted, else bf16) is filled by the rank0-broadcast sharded load, then FSDP-sharded
-        (CPU-offloaded). The transformer is unaffected either way; it keeps its own streaming-fp8
-        from_pretrained path.
-
-        The normal-path config is built last, and only if it is reached: constructing it registers
-        the transformers quantizer process-globally, which the meta paths have no use for.
+        Returns ``(pipe_component_kwargs, te_quant_config)`` for the pipeline's
+        ``from_pretrained``; the planning lives in ``loading.text_encoder_plan``.
         """
-        replicated_meta = self._replicated_broadcast_load()
-        fsdp_meta = (
-            False if replicated_meta else self._memory_efficient_fsdp_load()
-        )
-        adapter = self.backends.fp8_adapter_for_contract()
-        component_configs = {}
-        entries = self.settings.fp8_text_encoder_module_list or ()
-        component_names = tuple(
-            dict.fromkeys(
-                entry.partition(".")[0]
-                for entry in entries
-                if "." in entry
-            )
-        )
-        if adapter is not None:
-            from .loading.fp8_backends import (
-                prepare_text_encoder_fp8_load,
-            )
-
-            for component_name in component_names:
-                targets = tuple(self.fp8.targets_for(component_name))
-                if not targets:
-                    continue
-                # A blockwise-filled encoder is quantized per block on the way in from disk, before
-                # FSDP wraps that block, so it needs neither a streaming config nor a post-load walk.
-                # That is what lets TorchAO quantize a text encoder on the FSDP meta path at all: the
-                # objection below is to converting a layout after wrapping, which this never does.
-                if fsdp_meta and self._loader.will_fill_blockwise(component_name):
-                    wrap_attrs = tuple(
-                        self.settings.fsdp_strategy.get(component_name, {}).get(
-                            "wrap_attrs", ()
-                        )
-                    )
-                    descriptor = blockwise_transformer_descriptor(
-                        adapter,
-                        component_name,
-                        targets,
-                        wrap_attrs,
-                    )
-                    # Same bookkeeping the transformer's blockwise route records, so the post-load
-                    # walk knows these targets were already quantized during the fill.
-                    record_blockwise_ownership(
-                        self,
-                        adapter,
-                        component_name,
-                        targets,
-                        wrap_attrs,
-                        descriptor,
-                    )
-                    continue
-                # Existing meta layouts only mirror AITER's plain fp8+scale
-                # representation. Replicated TorchAO falls back after broadcast;
-                # memory-efficient FSDP rejects that layout-changing fallback.
-                stream_quant = not (replicated_meta or fsdp_meta) or (
-                    adapter.backend.value == "aiter"
-                )
-                prepared = prepare_text_encoder_fp8_load(
-                    adapter,
-                    component_name=component_name,
-                    targets=targets,
-                    stream_quant=stream_quant,
-                    supports_post_load=not fsdp_meta,
-                    model_factory=lambda name=component_name: (
-                        self._loader.build_meta_component(name, fp8=False)
-                    ),
-                )
-                log(prepared.descriptor.log_message())
-                self._fp8_descriptor_components.add(component_name)
-                if prepared.descriptor.materialization_mode == "streaming":
-                    record_streaming_targets(
-                        self,
-                        "_fp8_streaming_targets",
-                        component_name,
-                        targets,
-                    )
-                if prepared.quantization_config is not None:
-                    component_configs[component_name] = (
-                        prepared.quantization_config
-                    )
-        self._text_encoder_quantization_configs = dict(component_configs)
-
-        pipeline_config = existing_quantization_config
-        if component_configs:
-            from .loading.text_encoder_adapter import (
-                TextEncoderFrameworkAdapter,
-            )
-
-            pipeline_config = (
-                TextEncoderFrameworkAdapter()
-                .pipeline_quantization_config(
-                    component_configs,
-                    existing=existing_quantization_config,
-                )
-            )
-
-        if replicated_meta:
-            return self._loader.meta_te_kwargs_replicated(pipeline_config)
-        if fsdp_meta:
-            meta_kwargs = self._loader.meta_te_kwargs()
-            if meta_kwargs is not None:
-                return meta_kwargs
-        return {}, pipeline_config
+        return self._loader.plan_text_encoders(existing_quantization_config)
 
     def _local_onload_device(self) -> torch.device:
         """The device this rank offloads to and from, which is never implicitly cuda:0."""
@@ -1380,7 +1069,7 @@ class xFuserModel(abc.ABC):
                 for module_name in self.fp8.module_list():
                     convert, filter_fn = _conversion_filter(
                         module_name,
-                        getattr(self, "_fp8_streaming_targets", ()),
+                        self.quantization_ledger.fp8_streaming_targets,
                         include_suffixes=self.settings.fp8_gemm_include_suffixes,
                     )
                     if not convert:
@@ -1419,15 +1108,15 @@ class xFuserModel(abc.ABC):
                     component_name = module_name.partition(".")[0]
                     convert, filter_fn = _conversion_filter(
                         module_name,
-                        getattr(self, "_fp8_streaming_targets", ()),
+                        self.quantization_ledger.fp8_streaming_targets,
                         include_suffixes=self.settings.fp8_gemm_include_suffixes,
                     )
                     if not convert:
                         continue
-                    if (
-                        component_name.startswith("transformer")
-                        and component_name
-                        not in self._fp8_descriptor_components
+                    if component_name.startswith(
+                        "transformer"
+                    ) and self.quantization_ledger.claim_description(
+                        component_name, fp8=True
                     ):
                         log(
                             "Transformer quantization: requested=fp8, "
@@ -1436,7 +1125,6 @@ class xFuserModel(abc.ABC):
                             "materialization=post_load; fallback=runner did "
                             "not use the transformer construction seam"
                         )
-                        self._fp8_descriptor_components.add(component_name)
                     convert_kwargs = {}
                     if filter_fn is not None:
                         convert_kwargs["filter_fn"] = filter_fn
@@ -1451,13 +1139,11 @@ class xFuserModel(abc.ABC):
                     component_name = module_name.partition(".")[0]
                     convert, filter_fn = _conversion_filter(
                         module_name,
-                        getattr(
-                            self, "_quantization_streaming_targets", ()
-                        ),
+                        self.quantization_ledger.streaming_targets,
                     )
                     if not convert:
                         continue
-                    if component_name not in self._quantization_descriptor_components:
+                    if self.quantization_ledger.claim_description(component_name):
                         from .loading.format_backends import (
                             prepare_native_transformer_format_load,
                         )
@@ -1469,9 +1155,6 @@ class xFuserModel(abc.ABC):
                             stream_quant=False,
                         ).descriptor
                         log(descriptor.log_message())
-                        self._quantization_descriptor_components.add(
-                            component_name
-                        )
                     convert_kwargs = {}
                     if filter_fn is not None:
                         convert_kwargs["filter_fn"] = filter_fn
@@ -1510,14 +1193,14 @@ class xFuserModel(abc.ABC):
             component_name = module_name.partition(".")[0]
             convert, filter_fn = _conversion_filter(
                 module_name,
-                getattr(self, "_quantization_streaming_targets", ()),
+                self.quantization_ledger.streaming_targets,
             )
             if not convert:
                 continue
             # Certain models benefit from a hybrid quantization strategy: applying FP8 to
             # a number of transformer blocks while using FP4 for others. This mixed-precision
             # approach balances performance and output quality better than uniform quantization.
-            if component_name not in self._quantization_descriptor_components:
+            if self.quantization_ledger.claim_description(component_name):
                 from .loading.format_backends import (
                     prepare_native_transformer_format_load,
                 )
@@ -1536,7 +1219,6 @@ class xFuserModel(abc.ABC):
                     hybrid=self.config.use_hybrid_gemm_schedule,
                 ).descriptor
                 log(descriptor.log_message())
-                self._quantization_descriptor_components.add(component_name)
             module = rgetattr(self.pipe, module_name)
             convert_kwargs = {}
             if filter_fn is not None:
@@ -1569,10 +1251,8 @@ class xFuserModel(abc.ABC):
             return
         adapter = self.blockwise_fp8_backend
         for module_name in fp8_only_modules:
-            excluded_paths = fp4_modules | set(
-                getattr(self, "_quantization_streaming_targets", ())
-            ) | set(
-                getattr(self, "_fp8_streaming_targets", ())
+            excluded_paths = fp4_modules | self.quantization_ledger.already_quantized(
+                fp8=True
             )
             convert, filter_fn = _conversion_filter(
                 module_name,
@@ -1598,11 +1278,11 @@ class xFuserModel(abc.ABC):
             component_name = module_name.partition(".")[0]
             convert, filter_fn = _conversion_filter(
                 module_name,
-                getattr(self, "_quantization_streaming_targets", ()),
+                self.quantization_ledger.streaming_targets,
             )
             if not convert:
                 continue
-            if component_name not in self._quantization_descriptor_components:
+            if self.quantization_ledger.claim_description(component_name):
                 from .loading.format_backends import (
                     prepare_native_transformer_format_load,
                 )
@@ -1621,7 +1301,6 @@ class xFuserModel(abc.ABC):
                     hybrid=self.config.use_hybrid_gemm_schedule,
                 ).descriptor
                 log(descriptor.log_message())
-                self._quantization_descriptor_components.add(component_name)
             module = rgetattr(self.pipe, module_name)
             convert_kwargs = {}
             if filter_fn is not None:

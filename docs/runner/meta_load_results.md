@@ -22,6 +22,44 @@ thirteen models, because one rank reads the checkpoint for all of them. On the i
 and blockwise are indistinguishable: scored against the same single-rank render they agree to every digit
 the comparison reports, on all ten models scored, so the loading strategy costs nothing in quality.
 
+## What the old paths cost
+
+Nothing in this document failed to load, so the case for these paths is not that the alternative crashes
+here. It is that the alternative's bill is a copy of the model per rank, and this node is large enough to
+pay it: 288 GB per device and 3 TB of host. The numbers below say what it would take on a machine that is
+not.
+
+Adding a rank to an eager load adds a copy of the model to the host. Wan2.2-I2V is measured at three rank
+counts, and the host cost is a straight line through them, about 62 GB for every rank added, while the two
+memory-efficient paths pay the process rather than the weights and stay near 10 GB a rank:
+
+| Host anon, Wan2.2-I2V bf16 | 1 rank | 4 ranks | 8 ranks | per rank |
+| --- | --- | --- | --- | --- |
+| `eager` | 65 | 247 | 492 | ~62 |
+| `fsdp eager` (the control) | – | – | 522 | ~65 |
+| `fsdp block` | – | – | 88 | ~11 |
+| `repl bf16` | – | 33 | 78 | ~10 |
+
+That slope is the whole argument. Eight ranks of eager Wan2.2-I2V wants 492 GB of host before it draws
+anything, which a 512 GB machine cannot serve, and the same slope puts sixteen ranks near a terabyte;
+blockwise at eight ranks wants 88 GB and sixteen would want about 176. The
+per-rank figure is the portable one: across the twenty models eager costs 8.5 to 61.7 GB of host a rank,
+tracking the model, while blockwise costs 8.5 to 13.0 and replicated 7.8 to 13.2 almost regardless of which
+model it is. Ideogram-4 is the exception at 31 GB a rank, and it is the model with a component outside the
+path.
+
+Sharding is not the answer to that by itself, which is what the control is in the tables to show: it shards
+the same weights to the same degree and its host peak is *higher* than eager's, 522 GB against 492, because
+every rank still materializes the whole component before anything is cut down. Only filling block by block
+removes the copy, and only the broadcast removes the readers.
+
+On the device the consequence is not a slope but a wall, and it is the largest models that hit it. Eager
+needs the whole component on every device: 109 GB for FLUX.2-dev and 128 GB for Cosmos3-Super, which no
+80 GB or 96 GB device can hold at all, against 21 GB and 29 GB filled block by block. Eighteen of the twenty
+models do fit an 80 GB device eagerly, so this is not yet a wall for most of them — but the two it excludes
+are the two largest, the margin grows with model size everywhere in the table, and the transformer that
+needs 128 GB today is the size of an ordinary one soon enough.
+
 Read this with [the validation handoff](gpu_validation_handoff.md) for how the harness plans, runs and
 scores a case, and [the meta-load handoff](meta_load_handoff.md) for the node's setup.
 

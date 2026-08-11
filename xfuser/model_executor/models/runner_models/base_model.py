@@ -35,7 +35,7 @@ from xfuser.core.utils.runner_utils import (
     rgetattr,
 )
 
-from xfuser.model_executor.cache.presets import ModelCacheConfig
+from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
 from xfuser.core.distributed import (
     get_world_group,
     get_data_parallel_rank,
@@ -359,7 +359,16 @@ class xFuserModel(abc.ABC):
         from xfuser.core.distributed import get_tensor_model_parallel_world_size
         from xfuser.model_executor.cache.adapters import apply_cache
         cache_method = self.config.cache_method
-        if cache_method == "dbcache" and get_pipeline_parallel_world_size() > 1:
+        method_cfg = (self.settings.step_cache_config or {}).get(cache_method)
+        # A configured FBCache entry uses cache-dit's DBCache engine with an
+        # Fn=1 preset. None marks an in-tree FBCache adapter.
+        engine_method = (
+            "dbcache"
+            if cache_method == "fbcache"
+            and isinstance(method_cfg, DBCacheSettings)
+            else cache_method
+        )
+        if engine_method == "dbcache" and get_pipeline_parallel_world_size() > 1:
             raise ValueError(
                 f"dbcache is incompatible with PipeFusion (PP={get_pipeline_parallel_world_size()}): "
                 "the residual-diff skip decision is computed via a collective that only runs on the "
@@ -368,9 +377,8 @@ class xFuserModel(abc.ABC):
             )
         if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
             raise RuntimeError("teacache requires TP=1")
-        method_cfg = (self.settings.step_cache_config or {}).get(cache_method)
         apply_cache(
-            cache_method=cache_method,
+            cache_method=engine_method,
             num_steps=self.config.num_inference_steps,
             pipe=self.pipe,
             preset_kwargs=method_cfg.preset if method_cfg else None,
@@ -378,7 +386,8 @@ class xFuserModel(abc.ABC):
             cache_config=self.config.cache_config,
             transformer_attr=self.settings.transformer_attr_names[0],
         )
-        log(f"Step cache applied: method={cache_method}")
+        log(f"Step cache applied: method={cache_method}"
+            + (f" (engine={engine_method})" if engine_method != cache_method else ""))
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """

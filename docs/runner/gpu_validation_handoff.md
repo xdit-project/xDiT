@@ -6,10 +6,10 @@ The checked-in `validation_status` stays **NOT RUN**, because most of the matrix
 has not been executed anywhere and a result is only evidence once an operator
 attaches its JSONL record, log, and generated output.
 
-What has run: a hundred and sixty-one of the matrix's hundred and eighty-three
+What has run: a hundred and eighty-one of the matrix's two hundred and three
 cases, on 8× MI355X (`gfx950`), covering the memory-efficient load paths in bf16
 and FP8 across twenty models, twelve image and eight video, which is every
-model that node can load through those paths. A hundred and forty-four passed,
+model that node can load through those paths. A hundred and sixty-four passed,
 every still image scored against an unquantized render and every clip checked
 frame by frame, and fifteen more passed by asserting the rejection they
 expected: ROCm INT8, seven refusals from models that withhold the memory-efficient
@@ -36,6 +36,10 @@ brought into the memory-efficient path, which also renamed its two FP8 cases to
 the `fp8-te` form the other quantizing models use. The two eager text-encoder FP8
 cases were re-run again after the streaming probe was corrected, since their
 earlier records measured the fallback rather than the path the flag asks for.
+The screening plan gained an unquantized `replicated` case per model, twenty in
+all, because the broadcast fill had only ever been generated with FP8 on top of
+it: reading its cost meant reading the broadcast and the quantization together,
+and the only unquantized measurement of it was a curated pair at four ranks.
 Those records live on that node and are not checked in.
 
 The artifacts are:

@@ -16,7 +16,9 @@ to 522 GB on Wan2.2-I2V where blockwise holds 88 GB, because every rank holds a 
 to be cut down. Blockwise's host cost is flat across models, 68–104 GB on nineteen of the twenty, which is the
 useful property: it is a cost of the strategy rather than of the model. It is also faster than eager on
 seventeen of the twenty, and faster than the control on nineteen, so none of this is bought with load time.
-On the images, eager, the control
+Replicated is the other half of the claim and a different trade: it leaves every rank a full copy, so it
+costs eager's device memory plus 2 to 5 GB, and it buys the host figure back, lowest of any placement on
+thirteen models, because one rank reads the checkpoint for all of them. On the images, eager, the control
 and blockwise are indistinguishable: scored against the same single-rank render they agree to every digit
 the comparison reports, on all ten models scored, so the loading strategy costs nothing in quality.
 
@@ -25,7 +27,7 @@ scores a case, and [the meta-load handoff](meta_load_handoff.md) for the node's 
 
 ## MI355X (`gfx950`), 8 devices
 
-161 of the matrix's 183 cases have run, all of them on this node: 144 passed, 15 asserted a refusal, 2
+181 of the matrix's 203 cases have run, all of them on this node: 164 passed, 15 asserted a refusal, 2
 report an environment mismatch for wanting `gfx942` alone. torch `2.9.1+gitff65f5b`, torchao `0.18.0+git92dcc9616`,
 transformers `5.5.4`, diffusers `0.39.0.dev0` (`21ba39457`, the first sweep on `447e571ad`), AITER
 present, ROCm 6.16.2, Python 3.12.3, 288 GB per device, 3 TB host, `HF_HUB_OFFLINE=1`.
@@ -36,100 +38,103 @@ placement. The placements, in the order the columns run:
 | Column (placement) | How the weights get to the device | Flags |
 | --- | --- | --- |
 | `eager` | Every component built in full on every rank. The baseline. | none |
-| `repl fp8` | Rank 0 reads each block, quantizes it and broadcasts it. Streamed, but every rank still ends up with a full copy. The broadcast does not need the quantization; this column pairs them because the plan does. | `--memory_efficient_replicated_load --use_fp8_gemms` |
+| `repl bf16`<br>(`replicated`) | Rank 0 reads each block and broadcasts it. Streamed, but every rank still ends up with a full copy, so this saves host memory rather than device memory. | `--memory_efficient_replicated_load` |
+| `repl fp8` | The same broadcast, quantizing each block before it goes out. | the above plus `--use_fp8_gemms` |
 | `fsdp eager`<br>(`fsdp_eager_fill`) | Built in full on every rank, then sharded — what a naive FSDP load does, and the control for the two columns beside it. | `--fully_shard_degree N` |
 | `fsdp block`<br>(`fsdp_blockwise`) | Built on meta, then filled and sharded one block at a time, so no rank ever holds the component whole. The streamed load. | `--fully_shard_degree N --memory_efficient_sharding` |
 | `block fp8` | `fsdp block`, quantizing each block on the way in. | the above plus `--use_fp8_gemms` |
 
-The first two columns leave every rank holding a full copy and the last three shard through FSDP, which is
+The first three columns leave every rank holding a full copy and the last three shard through FSDP, which is
 the order the columns run in. Ulysses across all ranks, `torch.compile` on, AITER attention. Every model at
 eight ranks except Ideogram-4 at six, whose 18 attention heads do not divide eight ways. There is no
 quality table: every placement of a model scores the same, so a per-model number would report on the model
 rather than on the load, as [below](#how-to-read-the-numbers).
 
 **Bold marks the lowest figure in the row**, and it is worth knowing what a win costs before reading it as
-one: `fsdp eager` takes the VRAM row on thirteen models by keeping the full copy on the host instead, which
-the second table charges it for, and the two `fp8` columns buy their figures with quantization error the
-bf16 columns do not carry. Only `fsdp block` against `fsdp eager` is a like-for-like comparison.
+one. `fsdp eager` takes the VRAM row on thirteen models by keeping the full copy on the host instead, which
+the second table charges it for. The two `fp8` columns buy their figures with quantization error the bf16
+columns do not carry. And a placement that shards has less to hold than one that does not, so the three
+FSDP columns are not competing with the first three on equal terms: `fsdp block` against `fsdp eager`, and
+`repl bf16` against `eager`, are the two like-for-like comparisons here.
 
 **Load-time VRAM**, the peak on the busiest device while the load is in flight, in GB. The figure these
 paths exist to move:
 
-| Model | eager | repl fp8 | fsdp eager | fsdp block | block fp8 |
-| --- | --- | --- | --- | --- | --- |
-| Cosmos3-Nano | 37 | 26 | 17 | 18 | **16** |
-| Cosmos3-Super | 128 | 77 | 30 | 29 | **23** |
-| FLUX.1-dev | 36 | 29 | **15** | 16 | 19 |
-| FLUX.1-Kontext-dev | 36 | 29 | **13** | 16 | 15 |
-| FLUX.2-dev | 109 | 87 | 24 | **21** | 34 |
-| FLUX.2-klein-4B | 19 | 20 | **11** | 14 | 14 |
-| FLUX.2-klein-9B | 37 | 33 | **15** | 16 | 18 |
-| HunyuanVideo | 42 | 35 | **14** | 15 | 15 |
-| Ideogram-4 | 55 | 41 | 28 | 30 | **26** |
-| Krea-2-Raw | 37 | 30 | **14** | 15 | 15 |
-| Krea-2-Turbo | 37 | 30 | **15** | **15** | **15** |
-| Qwen-Image | 58 | 43 | 17 | 19 | **16** |
-| Qwen-Image-Edit | 58 | 43 | **16** | 19 | **16** |
-| Wan2.1-I2V | 47 | 36 | **16** | 21 | 21 |
-| Wan2.1-T2V | 42 | 33 | **14** | 21 | 21 |
-| Wan2.2-I2V | 69 | 48 | 18 | 19 | **17** |
-| Wan2.2-T2V | 69 | 48 | 18 | 19 | **17** |
-| Wan2.2-TI2V | 26 | 26 | **13** | 16 | 16 |
-| Z-Image | 24 | 22 | **11** | 14 | 13 |
-| Z-Image-Turbo | 24 | 23 | **11** | 14 | 13 |
+| Model | eager | repl bf16 | repl fp8 | fsdp eager | fsdp block | block fp8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Cosmos3-Nano | 37 | 39 | 26 | 17 | 18 | **16** |
+| Cosmos3-Super | 128 | 131 | 77 | 30 | 29 | **23** |
+| FLUX.1-dev | 36 | 40 | 29 | **15** | 16 | 19 |
+| FLUX.1-Kontext-dev | 36 | 40 | 29 | **13** | 16 | 15 |
+| FLUX.2-dev | 109 | 113 | 87 | 24 | **21** | 34 |
+| FLUX.2-klein-4B | 19 | 23 | 20 | **11** | 14 | 14 |
+| FLUX.2-klein-9B | 37 | 41 | 33 | **15** | 16 | 18 |
+| HunyuanVideo | 42 | 47 | 35 | **14** | 15 | 15 |
+| Ideogram-4 | 55 | 58 | 41 | 28 | 30 | **26** |
+| Krea-2-Raw | 37 | 42 | 30 | **14** | 15 | 15 |
+| Krea-2-Turbo | 37 | 42 | 30 | **15** | **15** | **15** |
+| Qwen-Image | 58 | 63 | 43 | 17 | 19 | **16** |
+| Qwen-Image-Edit | 58 | 63 | 43 | **16** | 19 | **16** |
+| Wan2.1-I2V | 47 | 52 | 36 | **16** | 21 | 21 |
+| Wan2.1-T2V | 42 | 46 | 33 | **14** | 21 | 21 |
+| Wan2.2-I2V | 69 | 73 | 48 | 18 | 19 | **17** |
+| Wan2.2-T2V | 69 | 73 | 48 | 18 | 19 | **17** |
+| Wan2.2-TI2V | 26 | 29 | 26 | **13** | 16 | 16 |
+| Z-Image | 24 | 29 | 22 | **11** | 14 | 13 |
+| Z-Image-Turbo | 24 | 28 | 23 | **11** | 14 | 13 |
 
 **Host anonymous memory**, the peak over the same window, in GB. Where `fsdp eager` pays for the device
-figures it just won:
+figures it just won, and where `repl bf16` collects for the ones it did not:
 
-| Model | eager | repl fp8 | fsdp eager | fsdp block | block fp8 |
-| --- | --- | --- | --- | --- | --- |
-| Cosmos3-Nano | 103 | 107 | 111 | **85** | 96 |
-| Cosmos3-Super | 103 | 115 | 106 | **89** | 95 |
-| FLUX.1-dev | 102 | 91 | 188 | **86** | 87 |
-| FLUX.1-Kontext-dev | 102 | 80 | 184 | **76** | 81 |
-| FLUX.2-dev | 103 | 93 | 173 | **76** | 88 |
-| FLUX.2-klein-4B | 87 | 85 | 102 | **78** | 82 |
-| FLUX.2-klein-9B | 99 | 100 | 170 | **83** | 92 |
-| HunyuanVideo | 146 | 106 | 159 | **102** | 105 |
-| Ideogram-4 | 424 | **182** | 433 | 186 | 194 |
-| Krea-2-Raw | **102** | 106 | 179 | 104 | 104 |
-| Krea-2-Turbo | 104 | 106 | 177 | **103** | 104 |
-| Qwen-Image | **68** | 84 | 111 | 75 | 78 |
-| Qwen-Image-Edit | 84 | 107 | 110 | **83** | 88 |
-| Wan2.1-I2V | 368 | 99 | 372 | **84** | 99 |
-| Wan2.1-T2V | 328 | 99 | 343 | **88** | 105 |
-| Wan2.2-I2V | 492 | 93 | 522 | **88** | 96 |
-| Wan2.2-T2V | 493 | **84** | 523 | **84** | 94 |
-| Wan2.2-TI2V | 151 | 105 | 173 | **90** | 100 |
-| Z-Image | 119 | 79 | 127 | **77** | **77** |
-| Z-Image-Turbo | 148 | 72 | 180 | **68** | 74 |
+| Model | eager | repl bf16 | repl fp8 | fsdp eager | fsdp block | block fp8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Cosmos3-Nano | 103 | 94 | 107 | 111 | **85** | 96 |
+| Cosmos3-Super | 103 | 92 | 115 | 106 | **89** | 95 |
+| FLUX.1-dev | 102 | **72** | 91 | 188 | 86 | 87 |
+| FLUX.1-Kontext-dev | 102 | **75** | 80 | 184 | 76 | 81 |
+| FLUX.2-dev | 103 | **72** | 93 | 173 | 76 | 88 |
+| FLUX.2-klein-4B | 87 | **71** | 85 | 102 | 78 | 82 |
+| FLUX.2-klein-9B | 99 | **71** | 100 | 170 | 83 | 92 |
+| HunyuanVideo | 146 | **98** | 106 | 159 | 102 | 105 |
+| Ideogram-4 | 424 | 190 | **182** | 433 | 186 | 194 |
+| Krea-2-Raw | **102** | 106 | 106 | 179 | 104 | 104 |
+| Krea-2-Turbo | 104 | 106 | 106 | 177 | **103** | 104 |
+| Qwen-Image | **68** | 74 | 84 | 111 | 75 | 78 |
+| Qwen-Image-Edit | 84 | 84 | 107 | 110 | **83** | 88 |
+| Wan2.1-I2V | 368 | **77** | 99 | 372 | 84 | 99 |
+| Wan2.1-T2V | 328 | **76** | 99 | 343 | 88 | 105 |
+| Wan2.2-I2V | 492 | **78** | 93 | 522 | 88 | 96 |
+| Wan2.2-T2V | 493 | **76** | 84 | 523 | 84 | 94 |
+| Wan2.2-TI2V | 151 | **81** | 105 | 173 | 90 | 100 |
+| Z-Image | 119 | **71** | 79 | 127 | 77 | 77 |
+| Z-Image-Turbo | 148 | **62** | 72 | 180 | 68 | 74 |
 
 **Load duration**, in seconds. One run each on a shared node, so read these as indicative:
 
-| Model | eager | repl fp8 | fsdp eager | fsdp block | block fp8 |
-| --- | --- | --- | --- | --- | --- |
-| Cosmos3-Nano | **11** | 25 | 70 | 24 | 22 |
-| Cosmos3-Super | **42** | 73 | 84 | 75 | 67 |
-| FLUX.1-dev | 48 | 36 | 53 | **32** | 35 |
-| FLUX.1-Kontext-dev | 48 | 35 | 51 | **30** | 32 |
-| FLUX.2-dev | 154 | 93 | 152 | 83 | **81** |
-| FLUX.2-klein-4B | **14** | 24 | 17 | 19 | 22 |
-| FLUX.2-klein-9B | 46 | 37 | 51 | **33** | 34 |
-| HunyuanVideo | 54 | **29** | 55 | 36 | 37 |
-| Ideogram-4 | 234 | 177 | 229 | 172 | **170** |
-| Krea-2-Raw | 49 | **38** | 53 | 39 | 39 |
-| Krea-2-Turbo | 49 | **38** | 51 | 39 | 39 |
-| Qwen-Image | 79 | **36** | 83 | 48 | 50 |
-| Qwen-Image-Edit | 81 | 50 | 84 | **45** | **45** |
-| Wan2.1-I2V | 102 | **43** | 105 | 51 | 50 |
-| Wan2.1-T2V | 94 | **45** | 98 | 56 | 57 |
-| Wan2.2-I2V | 152 | 84 | 158 | **80** | 82 |
-| Wan2.2-T2V | 152 | 85 | 154 | **80** | 82 |
-| Wan2.2-TI2V | 41 | 35 | 46 | **33** | **33** |
-| Z-Image | 30 | 27 | 34 | **26** | **26** |
-| Z-Image-Turbo | 37 | 32 | 43 | 34 | **31** |
+| Model | eager | repl bf16 | repl fp8 | fsdp eager | fsdp block | block fp8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Cosmos3-Nano | **11** | 29 | 25 | 70 | 24 | 22 |
+| Cosmos3-Super | **42** | 74 | 73 | 84 | 75 | 67 |
+| FLUX.1-dev | 48 | 33 | 36 | 53 | **32** | 35 |
+| FLUX.1-Kontext-dev | 48 | 33 | 35 | 51 | **30** | 32 |
+| FLUX.2-dev | 154 | 91 | 93 | 152 | 83 | **81** |
+| FLUX.2-klein-4B | **14** | 23 | 24 | 17 | 19 | 22 |
+| FLUX.2-klein-9B | 46 | 35 | 37 | 51 | **33** | 34 |
+| HunyuanVideo | 54 | **28** | 29 | 55 | 36 | 37 |
+| Ideogram-4 | 234 | 178 | 177 | 229 | 172 | **170** |
+| Krea-2-Raw | 49 | **37** | 38 | 53 | 39 | 39 |
+| Krea-2-Turbo | 49 | **37** | 38 | 51 | 39 | 39 |
+| Qwen-Image | 79 | 49 | **36** | 83 | 48 | 50 |
+| Qwen-Image-Edit | 81 | 48 | 50 | 84 | **45** | **45** |
+| Wan2.1-I2V | 102 | **39** | 43 | 105 | 51 | 50 |
+| Wan2.1-T2V | 94 | **44** | 45 | 98 | 56 | 57 |
+| Wan2.2-I2V | 152 | 82 | 84 | 158 | **80** | 82 |
+| Wan2.2-T2V | 152 | 81 | 85 | 154 | **80** | 82 |
+| Wan2.2-TI2V | 41 | **33** | 35 | 46 | **33** | **33** |
+| Z-Image | 30 | **24** | 27 | 34 | 26 | 26 |
+| Z-Image-Turbo | 37 | 32 | 32 | 43 | 34 | **31** |
 
-Five things in those tables need a note rather than a second look. **Ideogram-4** is the only model with a component
+Six things in those tables need a note rather than a second look. **Ideogram-4** is the only model with a component
 outside the path — its text encoder is built through `AutoModel` with `trust_remote_code`, so no
 manifest can know its names ahead of the load — and its 424 GB eager host figure is that encoder on
 every rank; blockwise still cuts it to 186. **The control is the slowest placement**, not just the
@@ -143,14 +148,17 @@ a third. Cosmos3-Super is the third, 75s against 42s, which that explanation doe
 transformer in the table; with one run per cell it is a thread to pull rather than a result. **The `block fp8`
 column also fills and quantizes the text encoder** wherever the model declares targets for it, so it is
 not a pure quantization delta, and on FLUX.2-dev, klein-9B and FLUX.1-dev that makes the quantized fill
-dearer than the bf16 one. **The replicated broadcast is not an FP8 path**, and pairing it with FP8 in the
-grid is the screening plan spending one case on two factors rather than a property of the loader: it needs
-more than one rank and a parallelism that does not split weights, and nothing else. The curated Wan2.2-I2V
-pair at four ranks measures it without quantization: 33 GB of host against eager's 247 and 69s against
-110s, for the same load VRAM eager needs — a host-memory path, whatever the dtype.
-**`repl fp8` is consistently the dearest of the three** memory-efficient
-columns, and on Cosmos3-Super dramatically so at 77 GB, because rank 0 holds the component whole before
-broadcasting it. On a 128 GB transformer the choice between the two paths stops being a detail.
+dearer than the bf16 one. **`repl bf16` costs eager plus 2 to 5 GB of device memory on every one of the
+twenty**, which is the placement doing exactly what it says: every rank still ends up with a full copy, so
+there is no device saving to be had and the small excess is rank 0 staging what it broadcasts. Read the
+replicated columns down the host table instead, where `repl bf16` is the lowest figure on thirteen models
+and at or below blockwise on fourteen, because one rank reads the checkpoint and the rest receive it over
+the interconnect while blockwise has all eight reading their own shards. It is also faster than eager on
+seventeen. **A placement that keeps a full copy per rank is not competing for the VRAM column**, so
+`repl fp8` being the dearest of the three memory-efficient columns there, 77 GB on Cosmos3-Super, is the
+replication rather than the broadcast: its own bf16 column costs 131 GB for the same reason. What the
+broadcast is worth is the host and the wall clock, and quantizing on top of it is what brings its device
+figure under eager's at all.
 
 The other 43 cases cover what the grid does not: quantization formats, offload modes, rank counts, a
 library version, and the refusals.
@@ -275,6 +283,10 @@ now refused before they can waste a load.
 - **Timings are one run each** on a shared node, and ROCm samples VRAM device-globally, so treat the
   memory figures as upper bounds and the times as indicative. The first sweep ran on an older Diffusers
   commit than the rest, so compare within a sweep rather than across.
+- **Give the device time to empty between cases.** Device-global sampling means a predecessor that has not
+  finished releasing lands in the next case's peak, and it does not look like an error: klein-9B's
+  replicated fill read 176 GB starting 21s behind the case before it, and 41 GB on an idle node. Anything
+  far from its neighbours in the same column is worth re-running alone before it is worth explaining.
 - **Each model is sampled the way its own benchmark config or runner declaration samples it**, at seed
   42, which is why the load times are not comparable between models. A test checks each citation against
   what the runner declares, so an entry cannot go stale. Cosmos3 takes its prompt from the checkpoint's
@@ -311,6 +323,7 @@ order the work happened:
 | `curated-backfill`, `repin-gfx950`, `repin-gfx950-fixed`, `offload-multirank`, `offload-sharded` | the curated cases and the offload work |
 | `ideogram-meta`, `ideogram-w6`, `ideogram-replicated-fix` | Ideogram-4 coming onto the path |
 | `te-streaming`, `te-streaming-eager`, `te-path-recorded`, `te-path-recorded-tf4` | the text-encoder streaming fix and its measurement |
+| `repl-bf16-w8`, `repl-bf16-w8-cosmos3`, `repl-bf16-w8-klein-recheck`, `repl-bf16-w8-klein9b-confirm` | the `repl bf16` column, with Cosmos3 needing its prompt assets and the two klein cases re-run alone |
 
 Every case that failed was re-run after the change that fixed it, so no figure here predates the change
 its own model needed. Cosmos3-Super's sweep was interrupted to free the node and its last three cases

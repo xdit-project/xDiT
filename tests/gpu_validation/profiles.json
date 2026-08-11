@@ -58,6 +58,12 @@
           },
           {
             "placement": "replicated",
+            "quantization": "none",
+            "te_fp8": false,
+            "role": "the broadcast fill on its own, so the dense replicated case below splits into what the broadcast costs and what quantizing costs. Its load VRAM is eager's by construction, since every rank still ends up with a full copy; the host figure is what this placement is for, and without this case the only unquantized measurement of it is a four-rank curated pair."
+          },
+          {
+            "placement": "replicated",
             "quantization": "fp8",
             "te_fp8": true,
             "role": "dense: broadcast fill with both quantizations, the path that has no per-block fill"

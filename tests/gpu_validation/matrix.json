@@ -2714,6 +2714,41 @@
       "quality_notes": "Generated from the Cosmos3-Nano load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-cosmos3-nano-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Cosmos3-Nano",
+      "model_family": "cosmos3",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "nvidia/Cosmos3-Nano"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Cosmos3-Nano load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-cosmos3-nano-fp8-replicated-w8",
       "tags": [
         "fp8",
@@ -2924,6 +2959,41 @@
       "quality_notes": "Generated from the Cosmos3-Super load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-cosmos3-super-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Cosmos3-Super",
+      "model_family": "cosmos3",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "nvidia/Cosmos3-Super"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Cosmos3-Super load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-cosmos3-super-fp8-replicated-w8",
       "tags": [
         "fp8",
@@ -3082,6 +3152,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-4B"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the FLUX.2-klein-4B load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-flux-2-klein-4b-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "FLUX.2-klein-4B",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -3312,6 +3417,41 @@
       "quality_notes": "Generated from the FLUX.2-klein-9B load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-flux-2-klein-9b-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "FLUX.2-klein-9B",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-klein-9B"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the FLUX.2-klein-9B load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-flux-2-klein-9b-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -3506,6 +3646,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.2-dev"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the FLUX.2-dev load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-flux-2-dev-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "FLUX.2-dev",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -3736,6 +3911,41 @@
       "quality_notes": "Generated from the FLUX.1-Kontext-dev load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-flux-1-kontext-dev-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "FLUX.1-Kontext-dev",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-Kontext-dev"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the FLUX.1-Kontext-dev load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-flux-1-kontext-dev-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -3930,6 +4140,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "black-forest-labs/FLUX.1-dev"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the FLUX.1-dev load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-flux-1-dev-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "FLUX.1-dev",
+      "model_family": "flux",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -4160,6 +4405,41 @@
       "quality_notes": "Generated from the HunyuanVideo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-hunyuanvideo-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "HunyuanVideo",
+      "model_family": "hunyuan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "tencent/HunyuanVideo"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the HunyuanVideo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-hunyuanvideo-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -4352,6 +4632,41 @@
       },
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "ideogram-ai/ideogram-4-fp8"
+      },
+      "world_size": 6,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Ideogram-4 load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-ideogram-4-bf16-replicated-w6",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Ideogram-4",
+      "model_family": "ideogram4",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
       "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
@@ -4581,6 +4896,41 @@
       "quality_notes": "Generated from the Krea-2-Raw load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-krea-2-raw-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Krea-2-Raw",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-raw"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Krea-2-Raw load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-krea-2-raw-fp8-replicated-w8",
       "tags": [
         "fp8",
@@ -4772,6 +5122,41 @@
       },
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "krea/krea-2-turbo"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Krea-2-Turbo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-krea-2-turbo-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Krea-2-Turbo",
+      "model_family": "krea2",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
       "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
@@ -5002,6 +5387,41 @@
       "quality_notes": "Generated from the Qwen-Image-Edit load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-qwen-image-edit-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Qwen-Image-Edit",
+      "model_family": "qwen",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Qwen/Qwen-Image-Edit"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Qwen-Image-Edit load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-qwen-image-edit-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -5196,6 +5616,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Qwen/Qwen-Image"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Qwen-Image load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-qwen-image-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Qwen-Image",
+      "model_family": "qwen",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -5426,6 +5881,41 @@
       "quality_notes": "Generated from the Wan2.1-I2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-wan2-1-i2v-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Wan2.1-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Wan2.1-I2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-wan2-1-i2v-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -5638,6 +6128,41 @@
       "quality_notes": "Generated from the Wan2.1-T2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-wan2-1-t2v-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Wan2.1-T2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Wan2.1-T2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-wan2-1-t2v-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -5797,6 +6322,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Wan2.2-I2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-wan2-2-i2v-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Wan2.2-I2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -6027,6 +6587,41 @@
       "quality_notes": "Generated from the Wan2.2-T2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-wan2-2-t2v-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Wan2.2-T2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Wan2.2-T2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-wan2-2-t2v-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -6221,6 +6816,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Wan2.2-TI2V load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-wan2-2-ti2v-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Wan2.2-TI2V",
+      "model_family": "wan",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {
@@ -6451,6 +7081,41 @@
       "quality_notes": "Generated from the Z-Image load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
     },
     {
+      "id": "gen-mi3xx-z-image-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Z-Image",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Z-Image load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
       "id": "gen-mi3xx-z-image-fp8-te-replicated-w8",
       "tags": [
         "fp8",
@@ -6645,6 +7310,41 @@
       "placement": "fsdp_blockwise",
       "quantization": "fp8",
       "te_fp8": true,
+      "offload": "none",
+      "transformers": "5.x",
+      "checkpoint": {
+        "source": "hub",
+        "value": "Tongyi-MAI/Z-Image-Turbo"
+      },
+      "world_size": 8,
+      "args": [
+        "--attention_backend",
+        "aiter",
+        "--use_torch_compile"
+      ],
+      "expected": {
+        "outcome": "inference_success"
+      },
+      "quality_notes": "Generated from the Z-Image-Turbo load declaration. Compare the output against the same model's eager bf16 case at the same seed before trusting the quantized or sharded result."
+    },
+    {
+      "id": "gen-mi3xx-z-image-turbo-bf16-replicated-w8",
+      "tags": [
+        "bf16",
+        "generated",
+        "replicated",
+        "rocm",
+        "torchao"
+      ],
+      "model": "Z-Image-Turbo",
+      "model_family": "z-image",
+      "hardware": {
+        "backend": "rocm_torchao",
+        "accelerator": "gfx942_or_gfx950"
+      },
+      "placement": "replicated",
+      "quantization": "none",
+      "te_fp8": false,
       "offload": "none",
       "transformers": "5.x",
       "checkpoint": {

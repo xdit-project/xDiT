@@ -100,7 +100,7 @@ class xFuserVAEWrapper:
 
     def _convert_vae(self, vae: AutoencoderKL):
         """Convert VAE to parallel version"""
-        logger.info("VAE found, paralleling vae...")
+        logger.info("VAE found; enabling parallel VAE decoding...")
         group = get_vae_parallel_group()
         vae_parallel.parallelize_decoder(
             vae, getattr(group, "device_group", group)
@@ -472,7 +472,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         self,
         vae: AutoencoderKL,
     ):
-        logger.info("VAE found, paralleling vae...")
+        logger.info("VAE found; enabling parallel VAE decoding...")
         vae_parallel.parallelize_decoder(vae, None)
         return vae
 

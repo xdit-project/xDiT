@@ -33,8 +33,8 @@ def validate_vae_config(config, capabilities, settings, package_info=None) -> No
             )
         if restore_torch_group_norm_for_distvae():
             log(
-                "AITER GroupNorm cannot be sharded. Reverting to torch GroupNorm so that "
-                "--use_parallel_vae can recognise the norms it has to replace."
+                "AITER GroupNorm cannot be sharded. Restoring torch GroupNorm so DistVAE can "
+                "identify and shard the GroupNorm layers."
             )
 
     height = getattr(config, "vae_tile_size_height", None)
@@ -170,8 +170,8 @@ class VAEManager:
             if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
                 vae_tile_parallel.mark(vae, tile_context)
                 log(
-                    "Parallel VAE will deal whole tiles out to the group on "
-                    f"{type(vae).__name__}, rather than shard the rows within each tile."
+                    "Parallel VAE will assign complete tiles of "
+                    f"{type(vae).__name__} to ranks instead of sharding rows within each tile."
                 )
             else:
                 adapter = vae_parallel.parallelize_decoder(vae, vae_group)
@@ -229,7 +229,7 @@ class VAEManager:
         return height, width
 
     def _apply_vae_tile_shape(self, vae) -> Optional[Tuple[int, int]]:
-        """Apply and return the exact requested shape, or retain the native window."""
+        """Apply and return the exact requested shape, or retain the default tile shape."""
         shape = self._requested_vae_tile_shape()
         if shape is None:
             return None
@@ -238,7 +238,7 @@ class VAEManager:
         if plan is None:
             native = vae_tiling.tile_shape(vae)
             native_shown = (
-                f" Its native window is {native[0]}x{native[1]}."
+                f" The VAE's default tile shape is {native[0]}x{native[1]}."
                 if native is not None
                 else ""
             )
@@ -319,16 +319,16 @@ class VAEManager:
             else "unknown"
         )
         raise ValueError(
-            f"A {shown} VAE tile window leaves {rows} latent rows for the {ranks} ranks "
-            f"--use_parallel_vae splits each tile across"
+            f"A {shown} VAE tile contains {rows} latent rows, but --use_parallel_vae uses "
+            f"{ranks} ranks and requires at least one latent row per rank"
             + (
-                f"; the smallest window with a row per rank is "
+                f"; the smallest tile shape that satisfies this requirement is "
                 f"--vae_tile_size_height {smallest[0]} "
                 f"--vae_tile_size_width {smallest[1]}."
                 if smallest
-                else f", and no shape up to this VAE's native {native_shown} window gives them one "
-                f"each. Decode without tiling, increase --vae_tile_size_height and "
-                f"--vae_tile_size_width, or use fewer VAE ranks."
+                else f". No tile shape up to the VAE's default {native_shown} shape has enough "
+                f"latent rows. Decode without tiling, increase --vae_tile_size_height and "
+                "--vae_tile_size_width, or use fewer VAE ranks."
             )
         )
 
@@ -378,9 +378,9 @@ class VAEManager:
             )
             return
         log(
-            f"VAE tiled decode on {type(vae).__name__}: a tile per call, divided across "
-            f"{context.world_size} ranks, a run of neighbouring tiles each "
-            "to decode and blend where the grid has the tiles to spare them."
+            f"VAE tiled decode on {type(vae).__name__}: assigning contiguous groups of "
+            f"neighboring tiles across {context.world_size} ranks and blending the decoded "
+            "outputs."
         )
 
     def _install_vae_decode_guard(
@@ -406,11 +406,10 @@ class VAEManager:
                     raise
                 shown = f"{shape[0]}x{shape[1]}"
                 raise RuntimeError(
-                    f"VAE tiled decode failed at the {shown}px tile window set by "
-                    "--vae_tile_size_height and --vae_tile_size_width: at this output size the "
-                    "window leaves a tile too thin for the decoder to pad. A larger window can "
-                    "fail where a smaller one works, so try another exact height and width, or "
-                    f"drop both flags to decode at this VAE's native window.\n{e}"
+                    f"VAE tiled decode failed with a {shown}px tile shape. At this output size, "
+                    "an edge tile is too small for decoder padding. Try another exact height and "
+                    "width, or remove --vae_tile_size_height and --vae_tile_size_width to use the "
+                    f"VAE's default tile shape.\n{e}"
                 ) from e
 
         vae.decode = decode_guard
@@ -431,12 +430,12 @@ class VAEManager:
         shape = vae_tiling.tile_shape(vae)
         if shape is None:
             return (
-                "VAE tiled decode ran out of memory. This model's VAE "
-                f"({type(vae).__name__}) does not expose a pixel-space tile shape to resize."
+                f"VAE tiled decode ran out of memory. The {type(vae).__name__} VAE used by "
+                f"{self.settings.model_name} does not expose an adjustable pixel-space tile shape."
             )
         height, width = shape
         return (
-            f"VAE tiled decode ran out of memory at a {height}x{width}px tile window. Shrink it "
-            "by choosing another exact pair with --vae_tile_size_height and "
-            "--vae_tile_size_width, then re-run and compare peak VRAM."
+            f"VAE tiled decode ran out of memory with a {height}x{width}px tile shape. Choose "
+            "smaller exact values for --vae_tile_size_height and --vae_tile_size_width, then "
+            "rerun and compare peak VRAM."
         )

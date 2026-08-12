@@ -26,8 +26,8 @@ from xfuser.config.config import (
 
 logger = init_logger(__name__)
 
-# Written once and passed to both parsers below, which otherwise carry a copy of every help
-# string each and no way to notice when the two stop agreeing.
+# Both parser-construction methods use these constants so their VAE overlap help text remains
+# identical.
 VAE_TILE_OVERLAP_HEIGHT_HELP = (
     "Exact VAE tile overlap along the height axis, in output pixels. Must be used with "
     "--vae_tile_overlap_width and turns tiling on. Height and width may differ; use 0 for an "
@@ -429,8 +429,8 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Making VAE decode one batch item at a time to save GPU memory. No effect at "
-                 "batch size 1.",
+            help="Decode one batch item at a time to reduce GPU memory use. This has no effect "
+                 "when the batch size is 1.",
         )
         runtime_group.add_argument(
             "--vae_tile_size_height",
@@ -678,8 +678,8 @@ class xFuserArgs:
         parser.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Making VAE decode one batch item at a time to save GPU memory. No effect at "
-                 "batch size 1.",
+            help="Decode one batch item at a time to reduce GPU memory use. This has no effect "
+                 "when the batch size is 1.",
         )
         parser.add_argument(
             "--vae_tile_size_height",

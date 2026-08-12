@@ -3,12 +3,21 @@ from unittest.mock import patch
 import torch
 from xfuser import envs
 
-# get_device reads torch.version.cuda and torch.version.hip, not torch.cuda.is_available, so a test
-# describing a machine names those two. Patching availability instead only ever agreed with the
-# machine it ran on: a ROCm build answers to HIP and reported cuda where cpu was asked for.
+# get_device checks torch.version.cuda and torch.version.hip. Patch those checks directly so each
+# test is independent of the PyTorch build used to run it.
 
 
 class TestEnvs(unittest.TestCase):
+
+    @patch(
+        "xfuser.envs.load_distvae_vae",
+        create=True,
+        side_effect=ImportError("incompatible DistVAE"),
+    )
+    def test_check_distvae_rejects_an_incompatible_public_api(self, _load_distvae_vae):
+        checker = object.__new__(envs.PackagesEnvChecker)
+
+        self.assertFalse(checker.check_distvae())
 
     @patch('xfuser.envs._is_hip', return_value=False)
     @patch('xfuser.envs._is_cuda', return_value=True)

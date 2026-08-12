@@ -1,13 +1,8 @@
-"""Structural guards against the VAE setup mistakes that fail quietly.
+"""Structural tests for VAE setup invariants.
 
-Both of the regressions guarded here produce no error and no warning: a run simply does less than
-it was asked to. The first reaches for `self.pipe.vae` and so misses the full-resolution decode of
-a staged model. The second calls `_setup_parallel_vae()` somewhere other than
-`_post_load_and_state_initialization`, and so marks a VAE for tile dealing after the decode that
-reads that mark has already been installed.
-
-Neither is the kind of thing a behavioural test catches, because a single-stage model on one GPU
-does the right thing either way.
+Every stage VAE must be discovered, and parallel VAE setup must run before tiled-decode
+installation. Violating either invariant silently disables requested processing in multi-stage
+or multi-GPU runs.
 """
 
 import ast
@@ -20,12 +15,13 @@ from torch import nn
 
 from xfuser.model_executor.models import runner_models
 from xfuser.model_executor.models.runner_models import base_model
+from xfuser.model_executor.models.runner_models import ltx
 from xfuser.model_executor.models.runner_models import vae_manager
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
 
 
 class TinyVAE(nn.Module):
-    """Enough of a VAE for the channels-last pass: something with a convolution, and a decode"""
+    """Minimal VAE containing a convolution and decode method for channels-last tests."""
 
     def __init__(self):
         super().__init__()
@@ -61,7 +57,7 @@ class Staged:
         )
 
 
-class TestStagedVAEsAreAllReached(unittest.TestCase):
+class TestAllStagedVAEsAreProcessed(unittest.TestCase):
     def test_a_second_stage_vae_is_converted_too(self):
         first, second = TinyVAE(), TinyVAE()
         Staged(first, second)._convert_vae_to_channels_last()
@@ -72,14 +68,13 @@ class TestStagedVAEsAreAllReached(unittest.TestCase):
                 f"the {which} stage's VAE was left unconverted",
             )
 
-    def test_the_one_stage_case_still_works(self):
+    def test_channels_last_conversion_supports_single_stage_pipeline(self):
         only = TinyVAE()
         Staged(only, None)._convert_vae_to_channels_last()
         self.assertTrue(getattr(only, "_xfuser_decode_channels_last", False))
 
     def test_a_vae_shared_by_both_stages_is_wrapped_once(self):
-        # Stages sometimes share one VAE. Wrapping it twice would put a second copy of the same
-        # conversion in front of every decode for the rest of the process.
+        # When two stages share a VAE, conversion must wrap its decode method only once.
         shared = TinyVAE()
         staged = Staged(shared, shared)
         staged._convert_vae_to_channels_last()
@@ -90,36 +85,33 @@ class TestStagedVAEsAreAllReached(unittest.TestCase):
     def test_the_conversion_does_not_change_what_decode_returns(self):
         vae = TinyVAE()
         Staged(vae, None)._convert_vae_to_channels_last()
-        # Random rather than zeros. A wrapper that returned zeros, or doubled what it was given,
-        # or dropped the sign, all agree with the input when the input is zero, so the assertion
-        # held for every way of getting this wrong as well as for getting it right.
+        # Use nonzero signed values so the assertion detects wrappers that zero, scale, or remove
+        # the sign from the input.
         torch.manual_seed(0)
         z = torch.randn(1, 4, 8, 8)
         self.assertTrue(torch.equal(vae.decode(z), z))
 
-    def test_the_decode_is_handed_a_channels_last_tensor(self):
-        # The point of the pass, and the one thing none of the above asked about: they check the
-        # marker attribute and the identity of the wrapper, so a conversion that set the flag,
-        # wrapped the decode and then forgot to convert would satisfy all of them.
+    def test_decode_receives_channels_last_tensor(self):
+        # The marker and wrapper-identity tests do not verify the input memory format. This
+        # assertion confirms that the wrapper converts the tensor before calling decode.
         vae = TinyVAE()
         Staged(vae, None)._convert_vae_to_channels_last()
         vae.decode(torch.randn(1, 4, 8, 8))
         self.assertTrue(
             vae.decoded[-1].is_contiguous(memory_format=torch.channels_last),
-            "decode was given a tensor in the memory format the conversion exists to change",
+            "decode received a tensor that was not converted to channels-last memory format",
         )
 
 
-class TestNothingReachesPastTheList(unittest.TestCase):
-    """The recurrence guard, which is the part worth keeping
+class TestVAEMethodsUseDecodingVAEList(unittest.TestCase):
+    """Prevent VAE-processing methods from accessing only self.pipe.vae.
 
-    Fixing the one method that reached for `self.pipe.vae` fixes today's bug. The next VAE step
-    someone adds will reach for it again, because it is the obvious thing to write and because
-    nothing about a single-stage model ever complains.
+    Direct access would omit VAEs used by later pipeline stages, and single-stage tests would not
+    expose the omission.
     """
 
-    # Methods that legitimately speak about the first pipeline's VAE alone. Empty on purpose: if
-    # a case turns up, it goes here with a reason rather than the guard being dropped.
+    # List methods that may intentionally access only the first pipeline's VAE. Each entry must
+    # include a reason for the exception.
     ALLOWED = set()
 
     def _vae_methods(self):
@@ -148,7 +140,7 @@ class TestNothingReachesPastTheList(unittest.TestCase):
                 return True
         return False
 
-    def test_no_vae_step_reaches_for_the_first_pipeline_alone(self):
+    def test_vae_processing_methods_do_not_access_only_the_first_pipeline(self):
         offenders = [
             method.name
             for method in self._vae_methods()
@@ -157,19 +149,19 @@ class TestNothingReachesPastTheList(unittest.TestCase):
         self.assertEqual(
             offenders,
             [],
-            "these reach for self.pipe.vae instead of walking self._decoding_vaes(), so they "
-            f"miss the full-resolution decode of a staged model: {offenders}",
+            "these methods access self.pipe.vae instead of iterating over "
+            f"self._decoding_vaes(), so they omit later pipeline stages: {offenders}",
         )
 
-    def test_the_walk_finds_the_methods_it_is_meant_to(self):
-        # A guard that has stopped matching anything passes for the wrong reason.
+    def test_ast_scan_finds_expected_vae_methods(self):
+        # Confirm that the AST scan still finds representative VAE methods.
         names = {method.name for method in self._vae_methods()}
         self.assertIn("_convert_vae_to_channels_last", names)
         self.assertIn("_decoding_vaes", names)
 
 
 class TestVAEOrchestrationBoundary(unittest.TestCase):
-    def test_manager_owns_planning_and_guards_while_base_keeps_delegators(self):
+    def test_manager_defines_planning_and_guards_and_base_defines_delegators(self):
         manager_methods = {
             "_apply_vae_tile_shape",
             "_apply_vae_tile_overlap",
@@ -194,25 +186,37 @@ class TestVAEOrchestrationBoundary(unittest.TestCase):
         ):
             self.assertNotIn(implementation_name, base_source)
 
+    def test_ltx_model_loading_does_not_enable_tiling_outside_the_vae_manager(self):
+        source = Path(inspect.getfile(ltx)).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        offenders = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "enable_tiling"
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "LTX model loading enables VAE tiling directly instead of honoring "
+            "config.enable_tiling through VAEManager",
+        )
+
 
 class TestTheParallelVAEIsSetUpBeforeTheOptions(unittest.TestCase):
-    """Marking a VAE for tile dealing has to happen before the tiled decode is installed
+    """Require parallel VAE setup before tiled-decode installation.
 
-    `initialize()` runs `_post_load_and_state_initialization()` and then `_enable_options()`.
-    The first is where every runner calls `_setup_parallel_vae()`, which marks a VAE whose tiles
-    will be dealt out to the group; the second reads that mark and installs the decode that does
-    the dealing.
-
-    Called the other way round, `_enable_options()` sees no mark and leaves upstream's own tiling
-    loop in place, while `_setup_parallel_vae()` goes on to take the marking branch and so never
-    shards the decoder either. Every rank then decodes every tile, identically. The output is
-    correct and the run is silent; --use_parallel_vae has simply bought nothing.
+    `initialize()` calls `_post_load_and_state_initialization()` before `_enable_options()`.
+    Parallel setup marks each VAE for complete-tile assignment, and option setup uses that mark
+    when installing tiled decode. Reversing the order leaves the original tiled decode active,
+    which makes every rank decode every tile without reporting an error.
     """
 
     HOME = "_post_load_and_state_initialization"
 
     def _call_sites(self):
-        """Every `self._setup_parallel_vae()` in the runner models, and the method it sits in"""
+        """Yield each self._setup_parallel_vae() call and its containing runner method."""
         folder = Path(inspect.getfile(runner_models)).parent
         for path in sorted(folder.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -227,7 +231,7 @@ class TestTheParallelVAEIsSetUpBeforeTheOptions(unittest.TestCase):
                     ):
                         yield path.name, node.name, inner.lineno
 
-    def test_every_runner_sets_the_parallel_vae_up_from_the_one_place(self):
+    def test_every_runner_sets_up_parallel_vae_in_post_load_initialization(self):
         strays = [
             f"{name}:{line} in {method}()"
             for name, method, line in self._call_sites()
@@ -236,14 +240,14 @@ class TestTheParallelVAEIsSetUpBeforeTheOptions(unittest.TestCase):
         self.assertEqual(
             strays,
             [],
-            f"these call _setup_parallel_vae() outside {self.HOME}(), so the VAE may be marked "
-            f"for tile dealing after the decode that reads the mark was installed: {strays}",
+            f"these methods call _setup_parallel_vae() outside {self.HOME}(), so tiled decode "
+            f"may be installed before the VAE is marked for complete-tile assignment: {strays}",
         )
 
-    def test_the_walk_finds_the_call_sites_it_is_meant_to(self):
-        # A guard that has stopped matching anything passes for the wrong reason.
+    def test_ast_scan_finds_expected_parallel_vae_call_sites(self):
+        # Confirm that the AST scan still finds representative parallel VAE call sites.
         found = list(self._call_sites())
-        self.assertGreater(len(found), 10, f"only found {len(found)} call sites; the walk broke")
+        self.assertGreater(len(found), 10, f"AST scan found only {len(found)} call sites")
         self.assertIn("wan.py", {name for name, _, _ in found})
 
 

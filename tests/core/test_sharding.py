@@ -182,8 +182,8 @@ def test_shard_component_invalid_attr(setup_distributed, simple_transformer_mode
     """Test error handling for invalid block attribute."""
     model = simple_transformer_model
 
-    # rgetattr walks the name down the module and lets getattr say what is missing, rather than
-    # checking first and raising a ValueError of its own as the older function did.
+    # rgetattr resolves each component of the nested attribute name; the failing getattr raises
+    # AttributeError when nonexistent_blocks is absent.
     with pytest.raises(AttributeError, match="nonexistent_blocks"):
         shard_component(
             model,

@@ -338,7 +338,7 @@ def test_base_model_uses_public_distvae_modules():
     assert vae_manager.vae_tile_parallel is tile_parallel
 
 
-def test_xdit_declares_the_distvae_public_api_version_floor():
+def test_xdit_declares_the_minimum_distvae_public_api_version():
     setup = (Path(__file__).parents[2] / "setup.py").read_text()
     assert '"distvae>=0.0.0beta9"' in setup
 
@@ -745,7 +745,7 @@ def test_rectangular_tile_shape_refuses_a_non_exact_plan_actionably():
     assert "exactly" in message
 
 
-def test_rectangular_tile_shape_reaches_every_staged_vae():
+def test_rectangular_tile_shape_is_applied_to_every_staged_vae():
     first = SimpleNamespace(enable_tiling=mock.Mock(), decode=mock.Mock())
     second = SimpleNamespace(enable_tiling=mock.Mock(), decode=mock.Mock())
     runner = _runner(vae_tile_size_height=320, vae_tile_size_width=512)

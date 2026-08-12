@@ -405,7 +405,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             )
         guidance_scale = input_args.get("guidance_scale")
         if guidance_scale != 1.0:
-            log("Using guidance_scale=1.0. Other guindance scale values are not supported with this model.")
+            log("Using guidance_scale=1.0. Other guidance-scale values are unsupported for this model.")
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps
@@ -579,8 +579,8 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
-        # The i2v task loads the image-to-video pipeline, which encodes the first frame. The t2v
-        # task loads one that encodes nothing, and pays nothing for a sharded encoder.
+        # The image-to-video pipeline encodes the initial frame. The text-to-video pipeline does
+        # not invoke the VAE encoder, so encoder sharding adds no runtime work.
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
@@ -699,8 +699,8 @@ class xFuserWan21VACEModel(xFuserWanModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
-        # VACE encodes the conditioning video, its inactive and reactive halves, and any reference
-        # image, all of which its pipeline holds to a multiple of the VAE ratio.
+        # VACE encodes the conditioning video, both mask-derived video inputs, and any reference
+        # image. The pipeline makes every input dimension divisible by the VAE scale factor.
         use_parallel_vae_encoder=True,
     )
 

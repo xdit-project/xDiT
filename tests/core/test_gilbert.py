@@ -18,10 +18,9 @@ def _tridiagonal(n: int) -> torch.Tensor:
 class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
     """Tests for sliced_gilbert_block_neighbor_mapping with known expected results."""
 
-    # A row of points in identity order, which is the one layout whose neighbours can be written
-    # down by hand: each point touches the one either side of it, so a block touches itself and the
-    # two beside it and nothing else. A 2x2x2 cube cannot show this - every point there is within
-    # one step of every other, so every block neighbours every block.
+    # For eight points in a line, each interior point is adjacent only to its immediate predecessor
+    # and successor. With two points per block, the expected block-neighbor mask is tridiagonal.
+    # A 2x2x2 grid is unsuitable because every block is adjacent to every other block.
     def test_identity_mapping_gives_a_banded_mask(self):
         """Identity linear_to_hilbert and block_m == block_n -> diagonal and its two neighbours."""
         t, h, w = 1, 1, 8
@@ -38,8 +37,8 @@ class TestSlicedGilbertBlockNeighborMapping(unittest.TestCase):
             f"Expected a banded mask, got\n{mask}",
         )
 
-    def test_public_api_identity_mapping_gives_the_same_banded_mask(self):
-        """Public API with identity (lth, htl) yields the same banded mask."""
+    def test_public_api_identity_mapping_returns_tridiagonal_mask(self):
+        """The public API returns a tridiagonal mask for identity mappings."""
         t, h, w = 1, 1, 8
         block_m = block_n = 2
         device = torch.device("cpu")

@@ -9,7 +9,7 @@ try:
 except ModuleNotFoundError:
     pass
 
-from xfuser.compat import declared_floor, version_at_least
+from xfuser.compat import declared_floor, load_distvae_vae, version_at_least
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -382,8 +382,8 @@ class PackagesEnvChecker:
 
     def check_distvae(self):
         try:
-            from distvae.vae import parallelize_decoder
-            return callable(parallelize_decoder)
+            load_distvae_vae()
+            return True
         except ImportError:
             return False
 

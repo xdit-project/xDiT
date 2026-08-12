@@ -109,8 +109,6 @@ class xFuserLTX23VideoModel(xFuserModel):
         )
         upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
 
-        second_pipe.vae.enable_tiling()
-
         self.second_pipe = second_pipe
         self.upsample_pipe = upsample_pipe
 
@@ -217,7 +215,8 @@ class xFuserLTX23VideoModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.upsample_pipe.to(self.pipe.device)
         self.second_pipe.to(self.pipe.device)
-        # After both pipelines land on their device, since sharding a decoder rebuilds it there.
+        # Set up parallel VAE decoding after moving both pipelines to their target devices because
+        # decoder sharding rebuilds each decoder on its current device.
         if self.config.use_parallel_vae:
             self._setup_parallel_vae()
 
@@ -361,6 +360,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.upsample_pipe.to(self.pipe.device)
         self.second_pipe.to(self.pipe.device)
-        # After both pipelines land on their device, since sharding a decoder rebuilds it there.
+        # Set up parallel VAE decoding after moving both pipelines to their target devices because
+        # decoder sharding rebuilds each decoder on its current device.
         if self.config.use_parallel_vae:
             self._setup_parallel_vae()

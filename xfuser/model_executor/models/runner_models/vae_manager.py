@@ -307,7 +307,7 @@ class VAEManager:
         if ranks < 2 or rows is None or rows >= ranks:
             return
         shape = vae_tiling.tile_shape(vae)
-        smallest = self._minimum_square_vae_tile_shape(
+        smallest = self._minimum_vae_tile_shape(
             vae, shape, native_shape, ranks
         )
         shown = (
@@ -322,8 +322,9 @@ class VAEManager:
             f"A {shown} VAE tile window leaves {rows} latent rows for the {ranks} ranks "
             f"--use_parallel_vae splits each tile across"
             + (
-                f"; the smallest square window with a row per rank is "
-                f"--vae_tile_size_height {smallest} --vae_tile_size_width {smallest}."
+                f"; the smallest window with a row per rank is "
+                f"--vae_tile_size_height {smallest[0]} "
+                f"--vae_tile_size_width {smallest[1]}."
                 if smallest
                 else f", and no shape up to this VAE's native {native_shown} window gives them one "
                 f"each. Decode without tiling, increase --vae_tile_size_height and "
@@ -332,26 +333,26 @@ class VAEManager:
         )
 
     @staticmethod
-    def _minimum_square_vae_tile_shape(
+    def _minimum_vae_tile_shape(
         vae,
         shape: Optional[Tuple[int, int]],
         native_shape: Optional[Tuple[int, int]],
         min_latent_rows: int,
-    ) -> Optional[int]:
-        """Find the first exact square plan between current and native shapes."""
+    ) -> Optional[Tuple[int, int]]:
+        """Find the first exact plan with enough rows, preserving tile width."""
         if shape is None or native_shape is None:
             return None
-        floor = max(shape)
-        ceiling = min(native_shape)
-        if floor > ceiling:
+        height, width = shape
+        native_height = native_shape[0]
+        if height > native_height:
             return None
-        for candidate in range(floor, ceiling + 1):
-            plan = vae_tiling.tile_shape_plan(vae, candidate, candidate)
+        for candidate in range(height, native_height + 1):
+            plan = vae_tiling.tile_shape_plan(vae, candidate, width)
             if plan is None:
                 continue
             rows = vae_tiling.latent_rows(vae, plan)
             if rows is not None and rows >= min_latent_rows:
-                return candidate
+                return candidate, width
         return None
 
     def _install_vae_tiled_decode(self, vae) -> None:

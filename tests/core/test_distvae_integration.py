@@ -497,6 +497,24 @@ def test_worker_vae_wrapper_uses_runtime_device_group_with_public_api():
     parallelize_decoder.assert_called_once_with(vae, device_group)
 
 
+def test_worker_vae_wrapper_accepts_a_dedicated_raw_process_group():
+    vae = SimpleNamespace()
+    process_group = object()
+
+    with (
+        mock.patch.object(
+            base_pipeline, "get_vae_parallel_group", return_value=process_group
+        ),
+        mock.patch.object(
+            base_pipeline.vae_parallel, "parallelize_decoder"
+        ) as parallelize_decoder,
+    ):
+        converted = base_pipeline.xFuserVAEWrapper._convert_vae(object(), vae)
+
+    assert converted is vae
+    parallelize_decoder.assert_called_once_with(vae, process_group)
+
+
 def test_pipeline_vae_conversion_uses_public_api_world_group_default():
     vae = SimpleNamespace()
 
@@ -852,12 +870,12 @@ def test_tiled_decode_install_uses_distvae_context_and_sharing():
     assert vae.tiled_decode is installed
 
 
-def test_parallel_vae_rank_hint_searches_exact_square_plans_below_half_native():
+def test_parallel_vae_rank_hint_increases_only_the_sharded_tile_axis():
     vae = SimpleNamespace()
     runner = _runner(use_parallel_vae=True)
 
     def shape_plan(_vae, height, width):
-        if height != width or height % 32:
+        if width != 64 or height % 32:
             return None
         return {"rows": height // 64}
 
@@ -886,7 +904,7 @@ def test_parallel_vae_rank_hint_searches_exact_square_plans_below_half_native():
                 vae, (512, 512)
             )
 
-    assert "--vae_tile_size_height 128 --vae_tile_size_width 128" in str(error.value)
+    assert "--vae_tile_size_height 128 --vae_tile_size_width 64" in str(error.value)
     assert tile_shape_plan.call_args_list[0] == mock.call(vae, 64, 64)
 
 

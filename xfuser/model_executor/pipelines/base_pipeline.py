@@ -101,8 +101,9 @@ class xFuserVAEWrapper:
     def _convert_vae(self, vae: AutoencoderKL):
         """Convert VAE to parallel version"""
         logger.info("VAE found, paralleling vae...")
+        group = get_vae_parallel_group()
         vae_parallel.parallelize_decoder(
-            vae, get_vae_parallel_group().device_group
+            vae, getattr(group, "device_group", group)
         )
         return vae
     

@@ -862,14 +862,7 @@ def _quantize_aiter_fp8_inputs(query, key, value):
     )
 
 
-@torch.library.custom_op("xfuser::aiter_fp8_attention", mutates_args=())
-def _aiter_fp8_attention_kernel(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    softmax_scale: float,
-    is_causal: bool,
-) -> torch.Tensor:
+def _aiter_fp8_dense_attention(query, key, value, softmax_scale, is_causal):
     quant_q, quant_k, quant_v, q_descale, k_descale, v_descale = (
         _quantize_aiter_fp8_inputs(query, key, value)
     )
@@ -888,17 +881,6 @@ def _aiter_fp8_attention_kernel(
         softmax_scale=softmax_scale,
         **kwargs,
     )
-
-
-@_aiter_fp8_attention_kernel.register_fake
-def _aiter_fp8_attention_kernel_fake(
-    query,
-    key,
-    value,
-    softmax_scale,
-    is_causal,
-):
-    return torch.empty_like(query)
 
 
 @torch.library.custom_op("xfuser::aiter_fp8_varlen_attention", mutates_args=())
@@ -998,7 +980,7 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
             is_causal,
         ).reshape(batch_size, sequence_length, num_heads, head_dim)
     else:
-        output = _aiter_fp8_attention_kernel(
+        output = _aiter_fp8_dense_attention(
             query,
             key,
             value,

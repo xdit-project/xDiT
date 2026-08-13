@@ -4,7 +4,7 @@ import functools
 from typing import List, Optional, Tuple
 
 import torch
-from distvae.vae import ParallelContext
+from distvae.vae import ParallelContext, latent_rows, mark
 from distvae.vae import parallel as vae_parallel
 from distvae.vae import tile_parallel as vae_tile_parallel
 from distvae.vae import tiling as vae_tiling
@@ -160,7 +160,7 @@ class VAEManager:
         )
         for vae in vaes:
             if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
-                vae_tile_parallel.mark(vae, tile_context)
+                mark(vae, tile_context)
                 log(
                     "Parallel VAE will assign complete tiles of "
                     f"{type(vae).__name__} to ranks instead of sharding rows within each tile."
@@ -295,7 +295,7 @@ class VAEManager:
         if vae_tile_parallel.context_of(vae) is not None:
             return
         ranks = get_vae_parallel_world_size()
-        rows = vae_tiling.latent_rows(vae)
+        rows = latent_rows(vae)
         if ranks < 2 or rows is None or rows >= ranks:
             return
         shape = vae_tiling.tile_shape(vae)
@@ -342,7 +342,7 @@ class VAEManager:
             plan = vae_tiling.tile_shape_plan(vae, candidate, width)
             if plan is None:
                 continue
-            rows = vae_tiling.latent_rows(vae, plan)
+            rows = latent_rows(vae, plan)
             if rows is not None and rows >= min_latent_rows:
                 return candidate, width
         return None

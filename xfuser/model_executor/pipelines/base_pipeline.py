@@ -67,6 +67,12 @@ except:
 
 logger = init_logger(__name__)
 
+
+def _vae_process_group():
+    group = get_vae_parallel_group()
+    return getattr(group, "device_group", group)
+
+
 class xFuserVAEWrapper:
     def __init__(
         self,
@@ -101,8 +107,7 @@ class xFuserVAEWrapper:
     def _convert_vae(self, vae: AutoencoderKL):
         """Convert VAE to parallel version"""
         logger.info("VAE found; enabling parallel VAE decoding...")
-        group = get_vae_parallel_group()
-        parallelize_decoder(vae, group.device_group)
+        parallelize_decoder(vae, _vae_process_group())
         return vae
     
     def reset_activation_cache(self):
@@ -471,7 +476,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         vae: AutoencoderKL,
     ):
         logger.info("VAE found; enabling parallel VAE decoding...")
-        parallelize_decoder(vae, None)
+        parallelize_decoder(vae, _vae_process_group())
         return vae
 
     @abstractmethod

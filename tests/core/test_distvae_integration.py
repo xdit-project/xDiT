@@ -249,16 +249,41 @@ def test_worker_vae_wrapper_uses_runtime_device_group_with_public_api():
     parallelize_decoder.assert_called_once_with(vae, device_group)
 
 
-def test_pipeline_vae_conversion_uses_public_api_world_group_default():
+def test_worker_vae_wrapper_accepts_dedicated_raw_process_group():
     vae = SimpleNamespace()
+    process_group = object()
 
-    with mock.patch.object(
-        base_pipeline, "parallelize_decoder"
-    ) as parallelize_decoder:
+    with (
+        mock.patch.object(
+            base_pipeline, "get_vae_parallel_group", return_value=process_group
+        ),
+        mock.patch.object(
+            base_pipeline, "parallelize_decoder"
+        ) as parallelize_decoder,
+    ):
+        converted = base_pipeline.xFuserVAEWrapper._convert_vae(object(), vae)
+
+    assert converted is vae
+    parallelize_decoder.assert_called_once_with(vae, process_group)
+
+
+def test_pipeline_vae_conversion_uses_runtime_vae_group():
+    vae = SimpleNamespace()
+    device_group = object()
+    coordinator = SimpleNamespace(device_group=device_group)
+
+    with (
+        mock.patch.object(
+            base_pipeline, "get_vae_parallel_group", return_value=coordinator
+        ),
+        mock.patch.object(
+            base_pipeline, "parallelize_decoder"
+        ) as parallelize_decoder,
+    ):
         converted = base_pipeline.xFuserPipelineBaseWrapper._convert_vae(object(), vae)
 
     assert converted is vae
-    parallelize_decoder.assert_called_once_with(vae, None)
+    parallelize_decoder.assert_called_once_with(vae, device_group)
 
 
 def test_parallel_setup_adapts_runtime_group_for_distvae():
@@ -285,7 +310,7 @@ def test_parallel_setup_adapts_runtime_group_for_distvae():
             "supports_tile_parallel",
             side_effect=[True, False],
         ),
-        mock.patch.object(vae_manager.vae_tile_parallel, "mark") as mark,
+        mock.patch.object(vae_manager, "mark") as mark,
         mock.patch.object(
             vae_manager.vae_parallel,
             "parallelize_decoder",
@@ -540,9 +565,7 @@ def test_parallel_vae_rank_hint_increases_only_the_sharded_tile_axis():
         mock.patch.object(
             vae_manager, "get_vae_parallel_world_size", return_value=2
         ),
-        mock.patch.object(
-            vae_manager.vae_tiling, "latent_rows", side_effect=rows
-        ),
+        mock.patch.object(vae_manager, "latent_rows", side_effect=rows),
         mock.patch.object(
             vae_manager.vae_tiling, "tile_shape", return_value=(64, 64)
         ),

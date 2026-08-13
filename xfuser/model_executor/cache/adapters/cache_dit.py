@@ -100,7 +100,12 @@ def _build_config(
         if p.enable_separate_cfg is not None:
             enable_separate_cfg = p.enable_separate_cfg
         scm_mask = _build_scm_mask(p.scm_policy, num_steps)
-        calibrator_config = _build_calibrator_config(p.enable_encoder_calibrator)
+        # enable_taylorseer=False disables the calibrator entirely (plain Fn-block
+        # residual cache), used for "true" FBCache. None/True keeps default TaylorSeer.
+        if p.enable_taylorseer is False:
+            calibrator_config = None
+        else:
+            calibrator_config = _build_calibrator_config(p.enable_encoder_calibrator)
     else:
         config_kwargs = dict(preset_kwargs or {})
         scm_mask = None

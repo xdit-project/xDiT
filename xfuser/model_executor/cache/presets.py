@@ -34,6 +34,10 @@ class DBCachePreset:
     max_cached_steps: int = -1
     # SCM steps_computation_mask policy: None | "slow" | "medium" | "fast" | "ultra"
     scm_policy: Optional[str] = "fast"
+    # enable_taylorseer: None/True attaches the TaylorSeer calibrator (default DBCache
+    # behavior). Set False to run the plain Fn-block residual cache with no calibrator
+    # (e.g. "true" FBCache when Fn_compute_blocks=1 and scm_policy=None).
+    enable_taylorseer: Optional[bool] = None
     # enable_separate_cfg: True for models with two separate CFG forward passes (Wan, Qwen-Image-Edit).
     # False for fused-CFG or no-CFG models (FLUX, HunyuanVideo, Qwen-Image).
     # None = infer from CacheDitAdapterConfig.enable_separate_cfg.

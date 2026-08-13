@@ -351,15 +351,17 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                     DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
                 ],
             ),
-            # FBCache alias: DBCache first-block (Fn_compute_blocks=1) on both experts.
+            # "True" FBCache: plain first-block residual cache (Fn_compute_blocks=1) on
+            # both experts, with the TaylorSeer calibrator and SCM policy disabled so it
+            # matches FLUX.2-style FBCache rather than full DBCache.
             "fbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
                 ],
                 preset=[
-                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
-                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=2),
                 ],
             ),
         }
@@ -672,15 +674,17 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                     DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
                 ],
             ),
-            # FBCache alias: DBCache first-block (Fn_compute_blocks=1) on both experts.
+            # "True" FBCache: plain first-block residual cache (Fn_compute_blocks=1) on
+            # both experts, with the TaylorSeer calibrator and SCM policy disabled so it
+            # matches FLUX.2-style FBCache rather than full DBCache.
             "fbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
                 ],
                 preset=[
-                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
-                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=2),
                 ],
             ),
         }
@@ -768,13 +772,15 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
                 ),
                 preset=DBCachePreset(Fn_compute_blocks=3, residual_diff_threshold=0.12, scm_policy="ultra"),
             ),
-            # FBCache alias: DBCache first-block (Fn_compute_blocks=1).
+            # "True" FBCache: plain first-block residual cache (Fn_compute_blocks=1) with
+            # the TaylorSeer calibrator and SCM policy disabled so it matches FLUX.2-style
+            # FBCache rather than full DBCache.
             "fbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
                     enable_separate_cfg=True,
                 ),
-                preset=DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy="ultra"),
+                preset=DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False),
             ),
         },
     )

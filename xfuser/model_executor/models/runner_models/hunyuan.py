@@ -121,9 +121,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_tiling=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
-        # The image-to-video task encodes its conditioning frame at the generation size.
-        # mod_value makes each spatial dimension divisible by the VAE scale factor. The
-        # text-to-video task does not invoke the VAE encoder, so encoder sharding adds no work.
         use_parallel_vae_encoder=True,
     )
     default_input_values = DefaultInputValues(
@@ -280,8 +277,6 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         enable_tiling=True,
         supports_sparse_attention_backends=True,
         use_parallel_vae=True,
-        # This model supports only image-to-video generation, so it always encodes a conditioning
-        # frame.
         use_parallel_vae_encoder=True,
     )
 

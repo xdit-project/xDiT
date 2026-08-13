@@ -107,8 +107,6 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         use_hybrid_gemm_schedule=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
-        # The refiner encodes the full base video at final output resolution. _run_refiner uses
-        # the VAE from the pipeline whose encoder has already been sharded.
         use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,

@@ -575,8 +575,6 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
-        # The image-to-video pipeline encodes the initial frame. The text-to-video pipeline does
-        # not invoke the VAE encoder, so encoder sharding adds no runtime work.
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
@@ -695,8 +693,6 @@ class xFuserWan21VACEModel(xFuserWanModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
-        # VACE encodes the conditioning video, both mask-derived video inputs, and any reference
-        # image. The pipeline makes every input dimension divisible by the VAE scale factor.
         use_parallel_vae_encoder=True,
     )
 

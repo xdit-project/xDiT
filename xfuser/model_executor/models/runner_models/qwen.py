@@ -26,7 +26,6 @@ class xFuserQwenImageEditModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_parallel_vae=True,
-        # Editing encodes the image being edited, at the size it will be generated at.
         use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,

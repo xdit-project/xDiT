@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from distvae.utils import ParallelContext
-from distvae.vae import parallel
+from distvae.vae import VAERowSplitError, parallel
 from xfuser import envs
 from xfuser.config import FlexibleArgumentParser, xFuserArgs
 from xfuser.model_executor.pipelines import base_pipeline
@@ -626,6 +626,28 @@ def test_decode_guard_reports_rectangular_window_and_flags():
     assert "--vae_tile_size_height" in message
     assert "--vae_tile_size_width" in message
     is_padding.assert_called_once()
+
+
+def test_decode_guard_suggests_complete_tiles_for_incompatible_row_sharding():
+    vae = SimpleNamespace(
+        config=SimpleNamespace(scale_factor_spatial=16),
+        decode=mock.Mock(side_effect=VAERowSplitError(rows=45, factor=2)),
+    )
+    runner = _runner(use_parallel_vae=True)
+
+    with mock.patch.object(
+        vae_manager.vae_tiling, "supports_tile_parallel", return_value=True
+    ):
+        runner._vae_manager._install_vae_decode_guard(vae)
+        with pytest.raises(ValueError) as error:
+            vae.decode(object())
+
+    assert str(error.value) == (
+        "Cannot row-shard 45 latent rows in the VAE decoder: this VAE processes rows "
+        "in groups of 2, but 45 is not divisible by 2. Use an output height divisible "
+        "by 32, enable --enable_tiling to distribute complete tiles instead, or disable "
+        "--use_parallel_vae."
+    )
 
 
 def test_decode_oom_hint_reports_rectangular_window():

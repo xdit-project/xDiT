@@ -4,7 +4,7 @@ import functools
 from typing import List, Optional, Tuple
 
 import torch
-from distvae.vae import ParallelContext, latent_rows, mark
+from distvae.vae import ParallelContext, VAERowSplitError, latent_rows, mark
 from distvae.vae import parallel as vae_parallel
 from distvae.vae import tile_parallel as vae_tile_parallel
 from distvae.vae import tiling as vae_tiling
@@ -388,6 +388,8 @@ class VAEManager:
         def decode_guard(*args, **kwargs):
             try:
                 return original_decode(*args, **kwargs)
+            except VAERowSplitError as e:
+                raise ValueError(self._vae_row_split_hint(vae, e)) from e
             except torch.cuda.OutOfMemoryError as e:
                 raise torch.cuda.OutOfMemoryError(
                     f"{self._vae_decode_oom_hint(vae)}\n{e}"
@@ -406,6 +408,27 @@ class VAEManager:
 
         vae.decode = decode_guard
         vae._xfuser_decode_guarded = True
+
+    def _vae_row_split_hint(self, vae, error: VAERowSplitError) -> str:
+        message = (
+            f"Cannot row-shard {error.rows} latent rows in the VAE decoder: this VAE "
+            f"processes rows in groups of {error.factor}, but {error.rows} is not divisible "
+            f"by {error.factor}."
+        )
+        scale = getattr(getattr(vae, "config", None), "scale_factor_spatial", None)
+        actions = [
+            (
+                f"Use an output height divisible by {scale * error.factor}"
+                if isinstance(scale, int) and scale > 0
+                else f"Use a latent height divisible by {error.factor}"
+            )
+        ]
+        if self.capabilities.enable_tiling and vae_tiling.supports_tile_parallel(vae):
+            actions.append(
+                "enable --enable_tiling to distribute complete tiles instead"
+            )
+        actions.append("disable --use_parallel_vae")
+        return f"{message} {', '.join(actions[:-1])}, or {actions[-1]}."
 
     def _vae_decode_oom_hint(self, vae) -> str:
         if not getattr(vae, "use_tiling", False):

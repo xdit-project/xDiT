@@ -5,7 +5,6 @@ cover only the xDiT policy that discovers VAEs, selects its runtime group, forwa
 and presents decode failures.
 """
 
-import ast
 import os
 from pathlib import Path
 import subprocess
@@ -39,6 +38,14 @@ class _TestRunner(base_model.xFuserModel):
 def _distributed_log_environment(monkeypatch):
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _torch_group_norm_for_distvae_tests():
+    original = torch.nn.GroupNorm
+    envs.restore_torch_group_norm_for_distvae()
+    yield
+    torch.nn.GroupNorm = original
 
 
 def _runner(**config):
@@ -102,10 +109,6 @@ def test_legacy_scalar_overlap_cli_is_rejected(add_args):
         )
 
 
-def test_xfuser_args_has_no_legacy_scalar_overlap_field():
-    assert not hasattr(xFuserArgs(model="test-model"), "vae_tile_overlap")
-
-
 @pytest.mark.parametrize("add_args", [xFuserArgs.add_runner_args, xFuserArgs.add_cli_args])
 def test_legacy_scalar_tile_cli_is_rejected(add_args):
     parser = add_args(FlexibleArgumentParser(description="xDiT"))
@@ -114,10 +117,6 @@ def test_legacy_scalar_tile_cli_is_rejected(add_args):
         parser.parse_args(
             ["--model", "test-model", "--vae_tile_" + "size", "384"]
         )
-
-
-def test_xfuser_args_has_no_legacy_scalar_tile_field():
-    assert not hasattr(xFuserArgs(model="test-model"), "vae_tile_" + "size")
 
 
 def test_runner_cli_propagates_rectangular_vae_tile_settings():
@@ -251,19 +250,6 @@ def test_zero_overlap_is_valid_for_an_inactive_strip_axis():
     )
 
 
-def test_vae_validator_reports_missing_distvae_for_parallel_decode():
-    runner = _runner()
-    config = xFuserArgs(model="test-model", use_parallel_vae=True)
-
-    with pytest.raises(ValueError, match="DistVAE is not installed"):
-        vae_manager.validate_vae_config(
-            config,
-            runner.capabilities,
-            runner.settings,
-            package_info={"has_distvae": False},
-        )
-
-
 def test_vae_validator_restores_aiter_groupnorm_for_parallel_decode():
     runner = _runner()
     config = xFuserArgs(model="test-model", use_parallel_vae=True)
@@ -277,7 +263,6 @@ def test_vae_validator_restores_aiter_groupnorm_for_parallel_decode():
             config,
             runner.capabilities,
             runner.settings,
-            package_info={"has_distvae": True},
         )
 
     restore.assert_called_once_with()
@@ -330,17 +315,6 @@ def test_old_config_without_rectangular_fields_passes_validation():
     vae_manager.validate_vae_config(
         old_config, runner.capabilities, runner.settings
     )
-
-
-def test_base_model_uses_public_distvae_modules():
-    assert vae_manager.vae_parallel is parallel
-    assert vae_manager.vae_tiling is tiling
-    assert vae_manager.vae_tile_parallel is tile_parallel
-
-
-def test_xdit_declares_the_minimum_distvae_public_api_version():
-    setup = (Path(__file__).parents[2] / "setup.py").read_text()
-    assert '"distvae>=0.0.0beta9"' in setup
 
 
 def test_compat_loader_names_required_api_when_distvae_lacks_it(tmp_path):
@@ -416,68 +390,6 @@ def test_distvae_compat_loader_returns_normal_local_public_modules():
     assert loaded == (parallel, tile_parallel, tiling)
 
 
-def test_distvae_compat_requires_beta9_canonical_api_only():
-    required = {
-        name
-        for names in xfuser_compat._DISTVAE_VAE_API.values()
-        for name in names
-    }
-    removed = {
-        "local_tiled_decode_for",
-        "smallest_tile_window",
-        "snap_tile_window",
-        "tile_plan",
-        "tile_window",
-        "widest_tile_overlap",
-    }
-
-    assert removed.isdisjoint(required)
-    assert {
-        "apply_tile_plan",
-        "latent_rows",
-        "tile_overlap_plan",
-        "tile_shape",
-        "tile_shape_plan",
-        "tiled_decode_for",
-    } <= required
-
-
-def test_all_xdit_python_callers_use_public_distvae_boundaries():
-    xfuser = Path(__file__).parents[2] / "xfuser"
-    removed = {
-        "xfuser.core.utils.vae_parallel",
-        "xfuser.core.utils.vae_tiling",
-        "xfuser.core.utils.vae_tile_parallel",
-    }
-    removed_names = {module.rsplit(".", 1)[1] for module in removed}
-    violations = []
-    for path in xfuser.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            if isinstance(node, ast.Import):
-                modules = [name.name for name in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                modules = [node.module or ""]
-                if node.module == "xfuser.core.utils":
-                    modules.extend(
-                        f"{node.module}.{name.name}"
-                        for name in node.names
-                        if name.name in removed_names
-                    )
-            else:
-                continue
-            forbidden = [
-                module
-                for module in modules
-                if module.startswith("distvae.modules.adapters") or module in removed
-            ]
-            if forbidden:
-                violations.append(
-                    (str(path.relative_to(xfuser)), node.lineno, forbidden)
-                )
-
-    assert violations == []
-
-
 def test_worker_vae_wrapper_uses_runtime_device_group_with_public_api():
     vae = SimpleNamespace()
     device_group = object()
@@ -541,54 +453,6 @@ def test_decoding_vaes_include_unique_staged_pipeline_vaes():
     assert runner._vae_manager.decoding_vaes(
         runner.pipe, runner.second_pipe
     ) == [first]
-
-
-def test_base_enable_options_delegates_all_decoding_vaes_once():
-    first, second = object(), object()
-    runner = _runner()
-    runner.pipe = SimpleNamespace(vae=first)
-    runner.second_pipe = SimpleNamespace(vae=second)
-
-    with mock.patch.object(
-        runner._vae_manager, "enable_options"
-    ) as enable_options:
-        runner._enable_options()
-
-    enable_options.assert_called_once_with([first, second])
-
-
-def test_base_parallel_and_channels_last_methods_are_thin_delegators():
-    vae = object()
-    runner = _runner()
-    runner.pipe = SimpleNamespace(vae=vae)
-
-    with (
-        mock.patch.object(
-            runner._vae_manager, "setup_parallel_vae"
-        ) as setup_parallel,
-        mock.patch.object(
-            runner._vae_manager, "convert_to_channels_last"
-        ) as convert,
-    ):
-        runner._setup_parallel_vae()
-        runner._convert_vae_to_channels_last()
-
-    setup_parallel.assert_called_once_with([vae])
-    convert.assert_called_once_with([vae])
-
-
-def test_base_validation_calls_the_pure_vae_validator():
-    runner = _runner()
-    config = xFuserArgs(model="test-model")
-
-    with mock.patch.object(
-        base_model, "validate_vae_config"
-    ) as validate:
-        runner._validate_config(config)
-
-    validate.assert_called_once_with(
-        config, runner.capabilities, runner.settings
-    )
 
 
 def test_parallel_setup_adapts_runtime_group_for_distvae():

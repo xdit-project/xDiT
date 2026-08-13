@@ -88,11 +88,6 @@ class _Krea2BaseModel(xFuserModel):
         enable_slicing=True,
     )
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
-
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
         if config.use_hybrid_attn_schedule:

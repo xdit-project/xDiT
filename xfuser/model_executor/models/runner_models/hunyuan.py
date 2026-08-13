@@ -15,13 +15,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
 )
-from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
 
 @register_model("tencent/HunyuanVideo")
@@ -76,11 +74,6 @@ class xFuserHunyuanvideoModel(xFuserModel):
         )
         fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision="refs/pr/18")
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(
@@ -175,11 +168,6 @@ class xFuserHunyuanvideo15Model(xFuserModel):
             torch_dtype=torch.bfloat16,
         )
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         kwargs = {

@@ -3,7 +3,6 @@ import torch
 from diffusers import UniPCMultistepScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser import xFuserArgs
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     ModelSettings,
@@ -177,8 +176,6 @@ class xFuserCosmos3SuperModel(xFuserModel):
         if self.config.fully_shard_degree > 1:
             if hasattr(self.pipe.transformer, '_patch_time_embedder_for_fsdp'):
                 self.pipe.transformer._patch_time_embedder_for_fsdp()
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
 
 @register_model("nvidia/Cosmos3-Nano")

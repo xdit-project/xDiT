@@ -14,23 +14,15 @@ from xfuser.core.utils.runner_utils import (
     convert_model_convs_to_channels_last,
     log,
 )
-from xfuser.envs import PACKAGES_CHECKER, restore_torch_group_norm_for_distvae
+from xfuser.envs import restore_torch_group_norm_for_distvae
 
 
 vae_parallel, vae_tile_parallel, vae_tiling = load_distvae_vae()
 ParallelContext = load_distvae_parallel_context()
 
-packages_info = PACKAGES_CHECKER.get_packages_info()
-
-
-def validate_vae_config(config, capabilities, settings, package_info=None) -> None:
+def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""
-    available = packages_info if package_info is None else package_info
     if config.use_parallel_vae:
-        if not available.get("has_distvae", False):
-            raise ValueError(
-                "DistVAE is not installed. Please install it before using parallel VAE."
-            )
         if restore_torch_group_norm_for_distvae():
             log(
                 "AITER GroupNorm cannot be sharded. Restoring torch GroupNorm so DistVAE can "

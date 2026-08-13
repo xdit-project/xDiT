@@ -1,6 +1,6 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
+from xfuser import xFuserStableDiffusion3Pipeline
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -55,11 +55,6 @@ class xFuserStableDiffusionModel(xFuserModel):
             torch_dtype=dtype,
         )
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "text_encoder", "text_encoder_2", "text_encoder_3"]

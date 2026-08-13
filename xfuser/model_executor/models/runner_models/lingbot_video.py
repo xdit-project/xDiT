@@ -169,9 +169,6 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             for block in self.pipe.transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
                     _patch_block_bulk_dtype(block)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
-
         # Cache pre-transposed expert weights to eliminate per-call copies
         self.pipe.transformer.cache_expert_weights()
 
@@ -236,12 +233,6 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             for block in refiner_transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
                     _patch_block_bulk_dtype(block)
-        # Enable VAE tiling/slicing for refiner (1080p needs it)
-        if self.config.enable_tiling:
-            refiner_pipe.vae.enable_tiling()
-        if self.config.enable_slicing:
-            refiner_pipe.vae.enable_slicing()
-
         # FSDP shard the refiner transformer if enabled
         if self.config.fully_shard_degree > 1:
             from xfuser.core.distributed.parallel_state import get_fs_group

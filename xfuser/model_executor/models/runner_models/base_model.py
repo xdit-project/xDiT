@@ -311,6 +311,8 @@ class xFuserModel(abc.ABC):
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
 
         if self.config.use_torch_compile:
@@ -344,10 +346,6 @@ class xFuserModel(abc.ABC):
         return self._vae_manager.decoding_vaes(
             self.pipe, getattr(self, "second_pipe", None)
         )
-
-    def _setup_parallel_vae(self) -> None:
-        """Forward parallel VAE setup for subclass compatibility."""
-        self._vae_manager.setup_parallel_vae(self._decoding_vaes())
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """

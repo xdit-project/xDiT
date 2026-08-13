@@ -195,8 +195,6 @@ class xFuserWan21I2VModel(xFuserWanModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -477,8 +475,6 @@ class xFuserWan21T2VModel(xFuserWanModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -754,11 +750,6 @@ class xFuserWan21VACEModel(xFuserWanModel):
         )
         pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _prepare_video_and_mask(self, first_img: Image, last_img: Image, height: int, width: int, num_frames: int) -> tuple[List[Image.Image], List[Image.Image]]:
         """ Prepare video and mask for Wan VACE model """

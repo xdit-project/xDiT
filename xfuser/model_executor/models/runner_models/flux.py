@@ -13,10 +13,9 @@ from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
-    quantize_linear_layers_to_fp8,
 )
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
-from xfuser import xFuserFluxPipeline, xFuserArgs
+from xfuser import xFuserFluxPipeline
 
 
 @register_model("black-forest-labs/FLUX.1-dev")
@@ -59,11 +58,6 @@ class xFuserFluxModel(xFuserModel):
             },
         },
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _get_compile_mode(self) -> str:
         if PACKAGES_CHECKER._on_rdna4():
@@ -158,11 +152,6 @@ class xFuserFluxKontextModel(xFuserModel):
             },
         },
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline
@@ -286,8 +275,6 @@ class xFuserFlux2Model(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
         if self.config.use_fbcache:
             from xfuser.model_executor.cache.diffusers_adapters.flux2 import (
@@ -429,11 +416,6 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             },
         },
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with FBCache cross-step caching,

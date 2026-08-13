@@ -60,11 +60,6 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.model_name = "Qwen/Qwen-Image-Edit-2509"
             self.settings.output_name = "qwen_image_edit_2509"
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
-
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImageEditPipeline
         from xfuser.model_executor.models.transformers.transformer_qwen import (
@@ -148,11 +143,6 @@ class xFuserQwenImageModel(xFuserModel):
         if "2512" in config.model:
             self.settings.model_name = "Qwen/Qwen-Image-2512"
             self.settings.output_name = "qwen_image_2512"
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import QwenImagePipeline

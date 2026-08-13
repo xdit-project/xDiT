@@ -377,5 +377,3 @@ class xFuserIdeogram4Model(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.pipe.transformer._init_sp_state()
         self.pipe.unconditional_transformer._init_sp_state()
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()

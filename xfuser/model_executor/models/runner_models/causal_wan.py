@@ -1,4 +1,3 @@
-import copy
 import os
 from typing import TYPE_CHECKING
 
@@ -133,11 +132,6 @@ class xFuserCausalWanModel(xFuserModel):
             scheduler=scheduler,
         )
         return pipe
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            self._setup_parallel_vae()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         output = self.pipe(

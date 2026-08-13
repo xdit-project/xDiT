@@ -9,7 +9,7 @@ try:
 except ModuleNotFoundError:
     pass
 
-from xfuser.compat import declared_floor, load_distvae_vae, version_at_least
+from xfuser.compat import declared_floor, version_at_least
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -213,7 +213,6 @@ class PackagesEnvChecker:
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
-        packages_info["has_distvae"] = self.check_distvae()
         self.packages_info = packages_info
 
     def check_aiter(self):
@@ -377,13 +376,6 @@ class PackagesEnvChecker:
         try:
             import torch_npu
             return hasattr(torch_npu, "npu_fused_infer_attention_score")
-        except ImportError:
-            return False
-
-    def check_distvae(self):
-        try:
-            load_distvae_vae()
-            return True
         except ImportError:
             return False
 

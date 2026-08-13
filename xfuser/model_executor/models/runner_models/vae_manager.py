@@ -4,8 +4,11 @@ import functools
 from typing import List, Optional, Tuple
 
 import torch
+from distvae.vae import ParallelContext
+from distvae.vae import parallel as vae_parallel
+from distvae.vae import tile_parallel as vae_tile_parallel
+from distvae.vae import tiling as vae_tiling
 
-from xfuser.compat import load_distvae_parallel_context, load_distvae_vae
 from xfuser.core.distributed.parallel_state import (
     get_vae_parallel_group,
     get_vae_parallel_world_size,
@@ -16,9 +19,6 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import restore_torch_group_norm_for_distvae
 
-
-vae_parallel, vae_tile_parallel, vae_tiling = load_distvae_vae()
-ParallelContext = load_distvae_parallel_context()
 
 def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""

@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
-from xfuser.compat import load_distvae_vae, version_at_least
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from xfuser.compat import version_at_least
+from typing import Dict, List, Optional
 import sys
 import torch
 import torch.distributed
@@ -46,7 +46,7 @@ from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
 
-vae_parallel, _, _ = load_distvae_vae()
+from distvae.vae import parallelize_decoder
 
 PACKAGES_CHECKER.check_diffusers_version()
 
@@ -102,9 +102,7 @@ class xFuserVAEWrapper:
         """Convert VAE to parallel version"""
         logger.info("VAE found; enabling parallel VAE decoding...")
         group = get_vae_parallel_group()
-        vae_parallel.parallelize_decoder(
-            vae, getattr(group, "device_group", group)
-        )
+        parallelize_decoder(vae, group.device_group)
         return vae
     
     def reset_activation_cache(self):
@@ -473,7 +471,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         vae: AutoencoderKL,
     ):
         logger.info("VAE found; enabling parallel VAE decoding...")
-        vae_parallel.parallelize_decoder(vae, None)
+        parallelize_decoder(vae, None)
         return vae
 
     @abstractmethod

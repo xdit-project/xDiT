@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import patch
-import torch
 from xfuser import envs
 
 # get_device checks torch.version.cuda and torch.version.hip. Patch those checks directly so each
@@ -8,16 +7,6 @@ from xfuser import envs
 
 
 class TestEnvs(unittest.TestCase):
-
-    @patch(
-        "xfuser.envs.load_distvae_vae",
-        create=True,
-        side_effect=ImportError("incompatible DistVAE"),
-    )
-    def test_check_distvae_rejects_an_incompatible_public_api(self, _load_distvae_vae):
-        checker = object.__new__(envs.PackagesEnvChecker)
-
-        self.assertFalse(checker.check_distvae())
 
     @patch('xfuser.envs._is_hip', return_value=False)
     @patch('xfuser.envs._is_cuda', return_value=True)

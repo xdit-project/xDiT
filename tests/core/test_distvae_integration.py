@@ -559,6 +559,28 @@ def test_parallel_vae_rank_hint_increases_only_the_sharded_tile_axis():
     assert tile_shape_plan.call_args_list[0] == mock.call(vae, 64, 64)
 
 
+def test_parallel_vae_accepts_rectangular_tile_with_enough_latent_height():
+    vae = SimpleNamespace(
+        tile_sample_min_height=256,
+        tile_sample_min_width=64,
+        tile_latent_min_height=32,
+        tile_latent_min_width=8,
+    )
+    runner = _runner(use_parallel_vae=True)
+
+    with (
+        mock.patch.object(
+            vae_manager.vae_tile_parallel, "context_of", return_value=None
+        ),
+        mock.patch.object(
+            vae_manager, "get_vae_parallel_world_size", return_value=16
+        ),
+    ):
+        runner._vae_manager._check_tiles_against_parallel_vae(
+            vae, native_shape=(512, 512)
+        )
+
+
 def test_decode_guard_reports_rectangular_window_and_flags():
     original = mock.Mock(side_effect=RuntimeError("decoder padding failure"))
     vae = SimpleNamespace(decode=original)

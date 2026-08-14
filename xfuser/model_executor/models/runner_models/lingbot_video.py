@@ -7,9 +7,6 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
-    xFuserLingBotVideoTransformer3DWrapper,
-)
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -22,6 +19,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import log
@@ -106,6 +104,14 @@ def _setup_parallel_vae(vae, use_encoder=False):
 
 @register_model("robbyant/lingbot-video-moe-30b-a3b")
 @register_model("LingBot-Video-MoE")
+@LoadDeclaration.declare(
+    unsupported_reason=(
+        "the pipeline is composed from separately loaded components in _build_pipe "
+        "rather than through a config-only transformer seam, and the runner shards "
+        "with LingBot's own per-block FSDP wrapping that ignores minority-dtype "
+        "fp32 norm and router parameters instead of xDiT's sharding path"
+    )
+)
 class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def save_output(self, output):
@@ -212,6 +218,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def _load_refiner(self, input_args):
         from lingbot_video.scheduling_flow_unipc import FlowUniPCMultistepScheduler
+        from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
+            xFuserLingBotVideoTransformer3DWrapper,
+        )
 
         log("Loading refiner transformer...")
         model_name = self.settings.model_name
@@ -286,6 +295,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def _build_pipe(self, model_name, transformer_subfolder="transformer", use_i2v=False):
         from lingbot_video.scheduling_flow_unipc import FlowUniPCMultistepScheduler
+        from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
+            xFuserLingBotVideoTransformer3DWrapper,
+        )
 
         transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
             model_name, torch_dtype=torch.bfloat16, subfolder=transformer_subfolder,
@@ -479,6 +491,13 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
 @register_model("robbyant/lingbot-video-dense-1.3b")
 @register_model("LingBot-Video-Dense")
+@LoadDeclaration.declare(
+    unsupported_reason=(
+        "shares the MoE runner's composed _build_pipe construction and its own "
+        "per-block FSDP wrapping, so the same config-only collective load remains "
+        "unverified for the dense checkpoint"
+    )
+)
 class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
 
     def __init__(self, config: xFuserArgs) -> None:

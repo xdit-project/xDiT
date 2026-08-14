@@ -20,6 +20,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
 
 
 _SUPPORTED_ATTN_BACKENDS = frozenset({
@@ -114,6 +115,14 @@ class MiniMaxH3DiffusionOutput(DiffusionOutput):
 
 @register_model("MiniMaxAI/MiniMax-H3")
 @register_model("MiniMax-H3")
+@LoadDeclaration.declare(
+    unsupported_reason=(
+        "the pipeline is built by ModularPipeline.from_pretrained for a task workflow "
+        "and its components are loaded afterwards, and fuse_qkv_projections rewrites "
+        "attention into attn.to_qkv, so live tensor names stop matching checkpoint "
+        "keys and no collective-safe mapping is declared"
+    )
+)
 class xFuserMiniMaxH3Model(xFuserModel):
     # Native MiniMax-H3 is on Diffusers main from f53d552, but not in a release yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
@@ -446,6 +455,13 @@ class xFuserMiniMaxH3Model(xFuserModel):
 
 
 @register_model("MiniMax-H3-Ref2VA")
+@LoadDeclaration.declare(
+    unsupported_reason=(
+        "shares the base MiniMax-H3 modular construction and qkv fusion, and loads "
+        "its denoiser as transformer_ref, so config-only collective loading is "
+        "unverified for the reference-to-video workflow as well"
+    )
+)
 class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
     _transformer_component_name = "transformer_ref"
     settings = ModelSettings(

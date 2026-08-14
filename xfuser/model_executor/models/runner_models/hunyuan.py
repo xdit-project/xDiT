@@ -23,9 +23,14 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadDeclaration,
+    LoaderAdapter,
+)
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
+@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserHunyuanvideoModel(xFuserModel):
 
     # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
@@ -39,6 +44,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
+        fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -54,26 +60,67 @@ class xFuserHunyuanvideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        fp8_text_encoder_module_list=["text_encoder.layers"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": [
+                    "transformer_blocks", "single_transformer_blocks"
+                ],
+                "dtype": torch.bfloat16,
+            },
+            # Undeclared, the 14G Llama encoder is this model's host peak: every rank loads it
+            # whole while the transformer fills one block at a time. LlamaModel keeps its decoder
+            # layers at the top level, not under "model" as text-only encoders do.
+            # text_encoder_2, a 0.2G CLIP, is deliberately absent: wrapping it would add a
+            # collective per prompt to save a fraction of a gigabyte.
+            "text_encoder": {
+                "wrap_attrs": ["layers"],
+                # Shards stay on CPU between uses so the encoder's all_gather buffer does not
+                # compete with the sharded transformer during encode_prompt.
+                "offload_policy": "cpu",
+            },
+        },
     )
+
+    # The diffusers-format conversion of this repo lives on a PR branch rather than main.
+    _DIFFUSERS_FORMAT_REVISION = "refs/pr/18"
+
+    def _checkpoint_request(self, subfolder: str | None = None, **kwargs):
+        """Pin the revision for every checkpoint request, not just the pipeline's own load.
+
+        The load paths that build a component from its config and then find its weights --
+        the text encoder's meta construction and its checkpoint mapping -- ask the runner for
+        the checkpoint identity rather than being handed one. Left to default they would
+        resolve main, which for this repo is a different revision that carries no
+        diffusers-format subfolders at all.
+        """
+        kwargs.setdefault("revision", self._DIFFUSERS_FORMAT_REVISION)
+        return super()._checkpoint_request(subfolder, **kwargs)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideoPipeline
         from xfuser.model_executor.models.transformers.transformer_hunyuan_video import (
             xFuserHunyuanVideoTransformer3DWrapper,
         )
-        transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            revision="refs/pr/18",
+
+        request = self._checkpoint_request()
+        transformer_request = request.with_subfolder("transformer")
+        transformer = self._build_transformer(
+            xFuserHunyuanVideoTransformer3DWrapper,
+            checkpoint_request=transformer_request,
         )
+        te_kwargs, te_quant = self._meta_te_kwargs()
         pipe = HunyuanVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
-            revision="refs/pr/18",
+            quantization_config=te_quant,
+            **te_kwargs,
+            **request.from_pretrained_kwargs(include_subfolder=False),
         )
-        fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision="refs/pr/18")
+        fix_llama_tokenizer_pretokenizer(
+            pipe, self.settings.model_name, revision=request.revision
+        )
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -84,7 +131,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             num_frames=input_args["num_frames"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -111,6 +158,14 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
+@LoadDeclaration.declare(
+    loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
+    unsupported_reason=(
+        "HunyuanVideo 1.5 uses a separate wrapper whose config-only "
+        "construction and checkpoint layout have not been verified for the "
+        "standard collective loader"
+    )
+)
 class xFuserHunyuanvideo15Model(xFuserModel):
 
     min_diffusers_version = "0.36.0"
@@ -169,7 +224,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         kwargs = {
             "num_inference_steps": input_args["num_inference_steps"],
             "num_frames": input_args["num_frames"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
             "prompt": input_args["prompt"],
         }
         if self.config.task == "i2v":
@@ -219,6 +274,13 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("Hunyuanvideo-1.5-Distilled")
+@LoadDeclaration.declare(
+    loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
+    unsupported_reason=(
+        "the HunyuanVideo 1.5 distilled checkpoint uses the separate 1.5 "
+        "wrapper and has not been verified for config-only collective loading"
+    )
+)
 class xFuserHunyuanvideo15DistilledModel(xFuserHunyuanvideo15Model):
     
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -267,6 +329,13 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("tencent/HunyuanVideo-1.5-Sparse")
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
+@LoadDeclaration.declare(
+    loader_adapter=LoaderAdapter.HUNYUAN15_VARIANTS,
+    unsupported_reason=(
+        "the sparse HunyuanVideo 1.5 loader composes base non-block weights "
+        "with remapped Tencent sparse blocks outside _build_transformer"
+    ),
+)
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
 
     capabilities = ModelCapabilities(

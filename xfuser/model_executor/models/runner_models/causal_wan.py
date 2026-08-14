@@ -15,6 +15,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadDeclaration,
+    LoaderAdapter,
+)
 
 if TYPE_CHECKING:
     from xfuser.model_executor.models.transformers.transformer_causal_wan import (
@@ -23,6 +27,14 @@ if TYPE_CHECKING:
 
 
 @register_model("CausalWan")
+@LoadDeclaration.declare(
+    loader_adapter=LoaderAdapter.CAUSAL_WAN,
+    unsupported_reason=(
+        "the checkpoint may require a manual single-file fallback after its "
+        "Diffusers index load fails; exact collective-safe key discovery is "
+        "not declared"
+    )
+)
 class xFuserCausalWanModel(xFuserModel):
 
     min_diffusers_version = "0.35.2"
@@ -141,7 +153,7 @@ class xFuserCausalWanModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             num_frames_per_block=self._NUM_FRAMES_PER_BLOCK, # Processes X frames at a time
             sliding_window_num_frames=self._SLIDING_WINDOW_NUM_FRAMES, # Sliding window size
             context_noise=self._CONTEXT_NOISE, # Noise to add to the context as a regularization

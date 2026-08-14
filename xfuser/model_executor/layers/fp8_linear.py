@@ -141,6 +141,20 @@ def _(
     return torch.empty(x.shape[0], n, dtype=torch.bfloat16, device=x.device)
 
 
+def _rehome_sentinel(sentinel: torch.Tensor, fn) -> torch.Tensor:
+    """Put the `weight` sentinel wherever `fn` puts real tensors, without copying it.
+
+    A meta sentinel reaches here whenever a layer is quantized under the replicated meta context:
+    the broadcast fills weight_fp8 and weight_scale with real data but cannot rehome a plain
+    __dict__ attribute, so the pipeline's later move to device is the first thing to touch it, and
+    that move is a copy meta cannot satisfy. The sentinel holds no data to copy — it exists only to
+    advertise dtype and device — so rebuild it on the target instead of moving it.
+    """
+    if sentinel.is_meta:
+        return fn(torch.empty(0, dtype=sentinel.dtype))
+    return fn(sentinel)
+
+
 class xFuserFP8BlockScaleLinear(nn.Module):
     """
     Drop-in nn.Linear replacement, block-128 FP8 w8a8 on AITER.
@@ -305,7 +319,7 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         self.weight_scale = self.weight_scale.to(device)
         sentinel = self.__dict__.get("weight")
         if sentinel is not None:
-            self.__dict__["weight"] = sentinel.to(device)
+            self.__dict__["weight"] = _rehome_sentinel(sentinel, lambda t: t.to(device))
 
     def _apply(self, fn, *args, **kwargs):
         """Carry the `weight` sentinel along with .to()/.cuda()/.cpu().
@@ -317,7 +331,7 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         module = super()._apply(fn, *args, **kwargs)
         sentinel = module.__dict__.get("weight")
         if sentinel is not None:
-            module.__dict__["weight"] = fn(sentinel)
+            module.__dict__["weight"] = _rehome_sentinel(sentinel, fn)
         return module
 
     def extra_repr(self):

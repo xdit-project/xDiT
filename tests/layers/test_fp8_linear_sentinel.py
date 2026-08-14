@@ -39,6 +39,28 @@ def make_quantized_layer(in_features=8, out_features=4, bias=True):
     return layer
 
 
+def make_layer_with_meta_sentinel(in_features=8, out_features=4):
+    """A layer in the shape the replicated broadcast leaves it: quantized tensors filled with real
+    data from rank 0, but the sentinel still on meta because a plain __dict__ attribute is not
+    something the broadcast (which walks parameters and buffers) can rehome.
+    """
+    with torch.device("meta"):
+        layer = xFuserFP8BlockScaleLinear(
+            in_features, out_features, bias=False, dtype=torch.bfloat16, preshuffle=False
+        )
+        layer.weight_fp8 = torch.nn.Parameter(
+            torch.zeros(out_features, in_features, dtype=torch.bfloat16), requires_grad=False
+        )
+        layer.register_buffer("weight_scale", torch.ones(1, 1, dtype=torch.float32))
+        layer._install_weight_sentinel()
+    assert layer.weight.is_meta, "precondition: quantizing under meta leaves a meta sentinel"
+    layer.weight_fp8 = torch.nn.Parameter(
+        torch.zeros(out_features, in_features, dtype=torch.bfloat16), requires_grad=False
+    )
+    layer.weight_scale = torch.ones(1, 1, dtype=torch.float32)
+    return layer
+
+
 def test_sentinel_is_invisible_to_named_parameters_and_buffers():
     """A sentinel counted as a tensor would desync the rank0 broadcast's lockstep walk."""
     layer = make_quantized_layer()
@@ -81,6 +103,27 @@ def test_move_fp8_weights_leaves_other_tensors_alone():
     assert layer.weight_scale.device.type == "meta"
     assert layer.weight.device.type == "meta"
     assert layer.bias.device.type == "cpu"
+
+
+def test_move_off_meta_rebuilds_the_sentinel_rather_than_copying_it():
+    """Regression: the replicated placement quantizes the text encoder under meta, so the move that
+    follows the broadcast fill used to copy a meta sentinel and raise "Cannot copy out of meta
+    tensor". Only the AITER block-scale path has a sentinel, and the contract limits that path to
+    RDNA4, so no gfx950 run could reach this.
+    """
+    layer = make_layer_with_meta_sentinel()
+    layer.to("cpu")
+    assert layer.weight.device.type == "cpu"
+    assert layer.weight.dtype == torch.bfloat16
+    assert layer.weight.numel() == 0
+
+
+def test_move_fp8_weights_off_meta_rebuilds_the_sentinel():
+    """The same hazard by the other route: eviction moves the quantized tensors directly."""
+    layer = make_layer_with_meta_sentinel()
+    layer.move_fp8_weights_to("cpu")
+    assert layer.weight.device.type == "cpu"
+    assert layer.weight.numel() == 0
 
 
 def test_absorb_moves_loader_stored_fp8_out_of_weight():

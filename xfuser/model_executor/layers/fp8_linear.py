@@ -283,9 +283,19 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         self.weight_fp8 = nn.Parameter(w_q, requires_grad=False)
         self.register_buffer("weight_scale", w_scale, persistent=True)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        original_shape = input.shape
-        x = input.reshape(-1, self.in_features)
+    def _gemm_operands(self, x: torch.Tensor):
+        """Resolve the weight and its scale, both on the device the GEMM will launch on.
+
+        The kernel takes each of these as a raw pointer, so one of them on host aborts the launch
+        naming only an argument index. They are different kinds of state and no single mechanism
+        carries all of it: `weight_fp8` is a parameter FSDP2 shards and restores from its own copy,
+        `weight_scale` an ordinary buffer that only a module move carries, and `weight` a plain
+        attribute that neither looks at. A route that touches one and not the others separates them —
+        the scale is what lags behind a sharded component onloaded per forward by
+        --enable_model_cpu_offload. The scale is [ceil(N/128), ceil(K/128)] floats, small enough to
+        rehome here rather than trust the move; a misplaced weight is too big to move under the
+        caller's feet, so say so instead of letting the kernel abort on a pointer number.
+        """
         # DiT streaming path stores fp8 in `weight_fp8` (and nulls `weight`); the transformers
         # HfQuantizer path stores fp8 under `weight` (state-dict fill). Resolve either.
         weight_fp8 = getattr(self, "weight_fp8", None)
@@ -295,14 +305,30 @@ class xFuserFP8BlockScaleLinear(nn.Module):
             raise RuntimeError(
                 "FP8 weight not initialized. Call load_and_quantize_weights() or load a checkpoint first."
             )
+        scale = self.weight_scale
+        if scale.device != x.device:
+            scale = scale.to(x.device)
+            self.weight_scale = scale
+        if weight_fp8.device != x.device:
+            raise RuntimeError(
+                f"FP8 weight is on {weight_fp8.device} but its activation is on {x.device}, so the "
+                "block-scale GEMM has nothing it can launch. The weight was left behind by whatever "
+                "last moved this module."
+            )
+        return weight_fp8, scale
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        original_shape = input.shape
+        x = input.reshape(-1, self.in_features)
+        weight_fp8, weight_scale = self._gemm_operands(x)
         if self.preshuffle:
             k_padded = ((self.in_features + _FP8_BLOCK - 1) // _FP8_BLOCK) * _FP8_BLOCK
             output = torch.ops.xfuser.fp8_blockscale_gemm_preshuffle(
-                x, weight_fp8, self.weight_scale, self.out_features, k_padded,
+                x, weight_fp8, weight_scale, self.out_features, k_padded,
             ).to(input.dtype)
         else:
             output = torch.ops.xfuser.fp8_blockscale_gemm(
-                x, weight_fp8, self.weight_scale,
+                x, weight_fp8, weight_scale,
             ).to(input.dtype)
         if self.bias is not None:
             output = output + self.bias

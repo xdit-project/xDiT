@@ -98,6 +98,17 @@ def _get_fp8_kernel_preference():
     return KernelPreference.AUTO
 
 
+# Smallest value the dynamic activation scale may be derived from. Without it a tensor whose values
+# are all zero gets scale = max_abs / 448 = 0, and quantizing divides by that scale, so the layer
+# returns all NaN instead of the bias. Zeros arrive in normal use: a model that zero-pads its text
+# sequence up to a multiple of the sequence-parallel world size hands whole padding-only chunks to
+# late ranks — Qwen-Image at eight ranks is one — and the NaN then spreads through the attention
+# all-to-all until every render is black. Matches torchao's own EPS on its training
+# path, and only binds when the largest value in the tensor is below it, so nothing else moves:
+# measured bit-identical output on ordinary activations.
+FP8_ACTIVATION_SCALE_FLOOR = 1e-12
+
+
 def _float8_tensor_op_table(float8_cls: type) -> dict:
     """Return the mutable per-class op table (torchao 0.14+ naming varies)."""
     for attr in ("_ATEN_OP_TABLE", "_ATEN_OP_OR_TORCH_FN_TABLE"):
@@ -284,12 +295,39 @@ def _patch_torchao_float8_fsdp2() -> list[str]:
 
 
 _TORCHAO_FLOAT8_FSDP2_PATCHES: list[str] = []
+_REQUIRED_TORCHAO_FLOAT8_FSDP2_PATCHES = frozenset(
+    {
+        "aten.split.Tensor",
+        "aten.new_empty.default",
+        "aten.new_zeros.default",
+        "aten.copy_.default",
+        "aten.view.default",
+        "aten.as_strided.default",
+        "__torch_dispatch__ fallthrough",
+        "fsdp_pre_all_gather",
+        "fsdp_post_all_gather",
+    }
+)
 
 try:
     _TORCHAO_FLOAT8_FSDP2_PATCHES = _patch_torchao_float8_fsdp2()
     logger.debug("torchao Float8Tensor FSDP2 patches applied: %s", _TORCHAO_FLOAT8_FSDP2_PATCHES)
 except Exception as e:
     logger.debug("torchao Float8Tensor FSDP2 patches skipped (%s): %s", type(e).__name__, e)
+
+
+def torchao_float8_fsdp2_patches_available() -> tuple[bool, str | None]:
+    """Report whether every tensor-subclass patch required by FSDP2 applied."""
+
+    missing = _REQUIRED_TORCHAO_FLOAT8_FSDP2_PATCHES.difference(
+        _TORCHAO_FLOAT8_FSDP2_PATCHES
+    )
+    if missing:
+        return (
+            False,
+            "missing TorchAO FSDP patches: " + ", ".join(sorted(missing)),
+        )
+    return True, None
 
 
 def quantize_linear_layers_to_int8(
@@ -306,14 +344,17 @@ def quantize_linear_layers_to_int8(
         _is_linear,
     )
 
-    if filter_fn is None:
-        if min_layer_size > 0:
-            def filter_fn(mod, fqn):
-                if not _is_linear(mod, fqn):
-                    return False
-                return min(mod.out_features, mod.in_features) >= min_layer_size
-        else:
-            filter_fn = _is_linear
+    requested_filter = filter_fn
+
+    def filter_fn(mod, fqn):
+        if not _is_linear(mod, fqn):
+            return False
+        if requested_filter is not None and not requested_filter(mod, fqn):
+            return False
+        return (
+            min_layer_size <= 0
+            or min(mod.out_features, mod.in_features) >= min_layer_size
+        )
 
     config = Int8DynamicActivationInt8WeightConfig(
         granularity=PerRow(),
@@ -340,16 +381,19 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
 
-    if filter_fn is None:
-        if include_suffixes:
-            def filter_fn(module, fqn):
-                return _is_linear(module, fqn) and fqn.endswith(include_suffixes)
-        else:
-            filter_fn = _is_linear
+    requested_filter = filter_fn
+
+    def filter_fn(mod, fqn):
+        if not _is_linear(mod, fqn):
+            return False
+        if requested_filter is not None:
+            return requested_filter(mod, fqn)
+        return not include_suffixes or fqn.endswith(include_suffixes)
     config = Float8DynamicActivationFloat8WeightConfig(
                 granularity=PerTensor(),
                 set_inductor_config=False,
                 kernel_preference=_get_fp8_kernel_preference(),
+                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
         )
     if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
         module_or_module_list_to_quantize = [module_or_module_list_to_quantize]
@@ -367,19 +411,27 @@ def quantize_linear_layers_to_fp8_blockscale(
     parent_name: str = "",
     include_suffixes: Optional[Tuple[str, ...]] = None,
     device: Optional[torch.device] = None,
-) -> None:
+    offload_to_cpu: bool = False,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+) -> int:
     """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
 
     Mirrors quantize_linear_layers_to_fp4 structure: recursive tree walk, in-place
     setattr replacement. Pre-quantizes weights to FP8 block-128 at call time.
+    Returns the number of nn.Linear leaves replaced (0 when leaves are already FP8, e.g.
+    after streaming quantize-on-load).
     """
     from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
 
+    replaced = 0
     for name, module in list(model.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
-        if isinstance(module, torch.nn.Linear) and (
-            not include_suffixes or full_name.endswith(include_suffixes)
-        ):
+        if isinstance(module, torch.nn.Linear):
+            if filter_fn is not None:
+                if not filter_fn(module, full_name):
+                    continue
+            elif include_suffixes and not full_name.endswith(include_suffixes):
+                continue
             weight = module.weight.data
             bias = module.bias.data if module.bias is not None else None
             fp8_layer = xFuserFP8BlockScaleLinear(
@@ -395,14 +447,23 @@ def quantize_linear_layers_to_fp8_blockscale(
                 module.bias = None
             fp8_layer.load_and_quantize_weights(weight, bias, device=device)
             del weight, bias
+            # Under offload, quantize on GPU then evict to CPU immediately so peak VRAM
+            # during quantization stays at one layer, not the whole component. The offload
+            # manager streams these fp8 leaves back on demand.
+            if offload_to_cpu:
+                fp8_layer.to("cpu")
             setattr(model, name, fp8_layer)
+            replaced += 1
         elif next(module.children(), None) is not None:
-            quantize_linear_layers_to_fp8_blockscale(
+            replaced += quantize_linear_layers_to_fp8_blockscale(
                 module,
                 parent_name=full_name,
                 include_suffixes=include_suffixes,
                 device=device,
+                offload_to_cpu=offload_to_cpu,
+                filter_fn=filter_fn,
             )
+    return replaced
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:
@@ -443,6 +504,7 @@ def quantize_linear_layers_to_fp4(
     fp8_suffix_layers: tuple[str] | None = None,
     use_hybrid_schedule: bool = False,
     device: Optional[torch.device] = None,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
 ):
     from torchao.quantization.granularity import PerTensor
     from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
@@ -452,6 +514,8 @@ def quantize_linear_layers_to_fp4(
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
+            if filter_fn is not None and not filter_fn(module, full_name):
+                continue
             if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
                 quantize_(
                       module,
@@ -459,6 +523,7 @@ def quantize_linear_layers_to_fp4(
                           granularity=PerTensor(),
                           set_inductor_config=False,
                           kernel_preference=_get_fp8_kernel_preference(),
+                          activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
                     ),
                     device=device,
                 )
@@ -492,6 +557,7 @@ def quantize_linear_layers_to_fp4(
                             granularity=PerTensor(),
                             set_inductor_config=False,
                             kernel_preference=_get_fp8_kernel_preference(),
+                            activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
                         ),
                         device=device,
                     )
@@ -512,6 +578,7 @@ def quantize_linear_layers_to_fp4(
                 fp8_suffix_layers=fp8_suffix_layers,
                 use_hybrid_schedule=use_hybrid_schedule,
                 device=device,
+                filter_fn=filter_fn,
             )
 
 
@@ -522,6 +589,7 @@ def quantize_linear_layers_to_nvfp4(
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
     use_triton_kernel: bool = True,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
 ) -> None:
     """Quantize linear layers to NVFP4 using torchao on NVIDIA Blackwell GPUs.
 
@@ -555,6 +623,8 @@ def quantize_linear_layers_to_nvfp4(
         for fqn, submodule in module.named_modules():
             if not isinstance(submodule, torch.nn.Linear):
                 continue
+            if filter_fn is not None and not filter_fn(submodule, fqn):
+                continue
 
             if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 skipped_fp8_count += 1
@@ -569,6 +639,8 @@ def quantize_linear_layers_to_nvfp4(
 
         def nvfp4_filter_fn(mod, fqn):
             if not _is_linear(mod, fqn):
+                return False
+            if filter_fn is not None and not filter_fn(mod, fqn):
                 return False
             if _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers):
                 return False
@@ -588,10 +660,13 @@ def quantize_linear_layers_to_nvfp4(
                 granularity=PerTensor(),
                 set_inductor_config=False,
                 kernel_preference=_get_fp8_kernel_preference(),
+                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
             )
 
             def fp8_filter_fn(mod, fqn):
                 if not _is_linear(mod, fqn):
+                    return False
+                if filter_fn is not None and not filter_fn(mod, fqn):
                     return False
                 return _layer_uses_fp8_override(fqn, fp8_layers, fp8_suffix_layers)
 
@@ -599,6 +674,42 @@ def quantize_linear_layers_to_nvfp4(
 
     log(f"  [NVFP4] Summary: {quantized_count} layers quantized to NVFP4, "
         f"{skipped_fp8_count} overridden to FP8, {skipped_small_count} skipped (too small)")
+
+
+def _tokenizer_directory(
+    model_name_or_path, component_name, from_pretrained_kwargs
+) -> str | None:
+    """The directory holding a tokenizer, when its own fast tokenizer file is there to load.
+
+    Reloading by the model's own name makes transformers v5 parse the *root* config.json for an
+    unrelated Mistral regex fix, and it does that for every model once HF_HUB_OFFLINE is set.
+    HunyuanVideo ships a root config.json with a trailing comma, which is not JSON, so the reload
+    raised JSONDecodeError and the model could not load at all. Loading from the tokenizer's own
+    directory leaves that file unread. None means keep the name we were given: without a
+    tokenizer.json beside it the directory is not enough to build a fast tokenizer from.
+    """
+    import os
+
+    from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+        CheckpointRequest,
+        resolve_checkpoint_file,
+    )
+
+    hub_keys = {"revision", "token", "cache_dir", "local_files_only"}
+    request = CheckpointRequest(
+        model_name_or_path,
+        subfolder=component_name,
+        **{
+            key: value
+            for key, value in from_pretrained_kwargs.items()
+            if key in hub_keys
+        },
+    )
+    try:
+        resolved = resolve_checkpoint_file(request, "tokenizer.json")
+    except Exception:
+        return None
+    return None if resolved is None else os.path.dirname(resolved)
 
 
 def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretrained_kwargs) -> None:
@@ -629,9 +740,17 @@ def fix_llama_tokenizer_pretokenizer(pipeline, model_name_or_path, **from_pretra
         log(f"Replacing tokenizer '{component_name}' (type={type(component).__name__}) "
             f"with PreTrainedTokenizerFast...", debug=True)
 
-        fixed = PreTrainedTokenizerFast.from_pretrained(
-            model_name_or_path, subfolder=component_name, **from_pretrained_kwargs
+        source, source_kwargs = model_name_or_path, {
+            "subfolder": component_name,
+            **from_pretrained_kwargs,
+        }
+        local_dir = _tokenizer_directory(
+            model_name_or_path, component_name, from_pretrained_kwargs
         )
+        if local_dir is not None:
+            source, source_kwargs = local_dir, {}
+
+        fixed = PreTrainedTokenizerFast.from_pretrained(source, **source_kwargs)
         setattr(pipeline, component_name, fixed)
 
         log(f"Fixed tokenizer '{component_name}': "

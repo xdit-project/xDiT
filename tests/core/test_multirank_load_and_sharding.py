@@ -592,137 +592,83 @@ def _run_spawned(torch, worker, init_method, *, timeout):
     return processes, hung, results
 
 
-def test_two_rank_layout_mismatch_raises_on_all_ranks_without_hanging(tmp_path):
+def _require_gloo():
     torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
     if (
         not torch.distributed.is_available()
         or not torch.distributed.is_gloo_available()
     ):
         pytest.skip("torch.distributed gloo backend is unavailable")
+    return torch
+
+
+@pytest.mark.parametrize(
+    ("worker", "init_name", "expected"),
+    [
+        pytest.param(
+            _layout_mismatch_worker,
+            "gloo-init",
+            "ordered parameter/buffer layout mismatch",
+            id="transformer_layout_mismatch",
+        ),
+        pytest.param(
+            _source_error_worker,
+            "source-error-init",
+            "OSError: safetensors read failed",
+            id="transformer_source_error",
+        ),
+        pytest.param(
+            _build_error_worker,
+            "build-error-init",
+            "rank 1: ValueError",
+            id="meta_build_error",
+        ),
+        pytest.param(
+            _quantize_error_worker,
+            "quantize-error-init",
+            "rank 1: ValueError",
+            id="quantize_error",
+        ),
+        pytest.param(
+            _te_source_error_worker,
+            "te-source-error-init",
+            "OSError: text encoder state dict failed",
+            id="text_encoder_source_error",
+        ),
+        pytest.param(
+            _replicated_te_persistence_worker,
+            "te-persistence-init",
+            "ordered parameter/buffer layout mismatch",
+            id="replicated_text_encoder_layout_mismatch",
+        ),
+    ],
+)
+def test_two_rank_load_failure_raises_on_every_rank_without_hanging(
+    tmp_path, worker, init_name, expected
+):
+    """Every rank has to leave a failed load by raising. A rank that returns early, or that reports
+    the error and then waits, parks its peer in a collective that never completes."""
+
+    torch = _require_gloo()
 
     processes, hung, results = _run_spawned(
         torch,
-        _layout_mismatch_worker,
-        f"file://{tmp_path / 'gloo-init'}",
+        worker,
+        f"file://{tmp_path / init_name}",
         timeout=20,
     )
 
-    assert not hung, f"collective mismatch hung worker pids: {hung}"
+    assert not hung, f"hung worker pids: {hung}"
     assert [process.exitcode for process in processes] == [0, 0]
     assert sorted(result[:2] for result in results) == [
         ("raised", 0),
         ("raised", 1),
     ], results
-    assert all(
-        "ordered parameter/buffer layout mismatch" in result[2] for result in results
-    )
-
-
-def test_two_rank_source_error_raises_on_all_ranks_without_hanging(tmp_path):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
-
-    processes, hung, results = _run_spawned(
-        torch,
-        _source_error_worker,
-        f"file://{tmp_path / 'source-error-init'}",
-        timeout=20,
-    )
-
-    assert not hung, f"source error hung worker pids: {hung}"
-    assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(result[:2] for result in results) == [
-        ("raised", 0),
-        ("raised", 1),
-    ], results
-    assert all("OSError: safetensors read failed" in result[2] for result in results)
-
-
-def test_two_rank_meta_build_error_raises_on_all_ranks_without_hanging(tmp_path):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
-
-    processes, hung, results = _run_spawned(
-        torch,
-        _build_error_worker,
-        f"file://{tmp_path / 'build-error-init'}",
-        timeout=20,
-    )
-
-    assert not hung, f"meta build error hung worker pids: {hung}"
-    assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(result[:2] for result in results) == [
-        ("raised", 0),
-        ("raised", 1),
-    ], results
-    assert all("rank 1: ValueError" in result[2] for result in results)
-
-
-def test_two_rank_quantize_error_raises_on_all_ranks_without_hanging(tmp_path):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
-
-    processes, hung, results = _run_spawned(
-        torch,
-        _quantize_error_worker,
-        f"file://{tmp_path / 'quantize-error-init'}",
-        timeout=20,
-    )
-
-    assert not hung, f"quantize error hung worker pids: {hung}"
-    assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(result[:2] for result in results) == [
-        ("raised", 0),
-        ("raised", 1),
-    ], results
-    assert all("rank 1: ValueError" in result[2] for result in results)
-
-
-def test_two_rank_text_encoder_source_error_exits_before_scatter(tmp_path):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
-
-    processes, hung, results = _run_spawned(
-        torch,
-        _te_source_error_worker,
-        f"file://{tmp_path / 'te-source-error-init'}",
-        timeout=20,
-    )
-
-    assert not hung, f"text-encoder source error hung worker pids: {hung}"
-    assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(result[:2] for result in results) == [
-        ("raised", 0),
-        ("raised", 1),
-    ], results
-    assert all(
-        "OSError: text encoder state dict failed" in result[2] for result in results
-    )
+    assert all(expected in result[2] for result in results)
 
 
 def test_two_rank_replicated_te_reconciles_specs_without_hanging(tmp_path):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
+    torch = _require_gloo()
 
     processes, hung, results = _run_spawned(
         torch,
@@ -758,12 +704,7 @@ def test_two_rank_replicated_te_reconciles_specs_without_hanging(tmp_path):
 def test_two_rank_replicated_te_matches_source_aliases_without_hanging(
     tmp_path, worker, expected_tied, expected_right, init_name
 ):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
+    torch = _require_gloo()
 
     processes, hung, results = _run_spawned(
         torch,
@@ -779,32 +720,6 @@ def test_two_rank_replicated_te_matches_source_aliases_without_hanging(
     assert all(result[2] is expected_tied for result in results)
     assert all(result[3] == [1.0, 2.0, 3.0] for result in results)
     assert all(result[4] == expected_right for result in results)
-
-
-def test_two_rank_replicated_te_layout_failure_is_collective(tmp_path):
-    torch = pytest.importorskip("torch", reason="PyTorch is required for gloo test")
-    if (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_gloo_available()
-    ):
-        pytest.skip("torch.distributed gloo backend is unavailable")
-
-    processes, hung, results = _run_spawned(
-        torch,
-        _replicated_te_persistence_worker,
-        f"file://{tmp_path / 'te-persistence-init'}",
-        timeout=20,
-    )
-
-    assert not hung, f"text-encoder layout failure hung worker pids: {hung}"
-    assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(result[:2] for result in results) == [
-        ("raised", 0),
-        ("raised", 1),
-    ], results
-    assert all(
-        "ordered parameter/buffer layout mismatch" in result[2] for result in results
-    )
 
 
 def test_sharding_keeps_the_models_fp32_modules_out_of_the_shards(tmp_path):

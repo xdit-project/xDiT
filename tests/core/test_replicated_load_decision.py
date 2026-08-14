@@ -693,7 +693,6 @@ def test_wan22_instance_settings_refresh_both_transformers(monkeypatch):
 
 
 def test_build_transformer_preserves_request_subfolder_without_override():
-    from xfuser.model_executor.models.runner_models import base_model
 
     calls = []
 
@@ -740,7 +739,6 @@ def test_transformer_structure_inspection_keeps_parameters_and_buffers_meta(
     from contextlib import contextmanager
     import accelerate
 
-    from xfuser.model_executor.models.runner_models import base_model
 
     calls = []
 
@@ -773,7 +771,6 @@ def test_transformer_structure_inspection_keeps_parameters_and_buffers_meta(
 def test_structure_inspection_reports_old_accelerate_explicitly(monkeypatch):
     import accelerate
 
-    from xfuser.model_executor.models.runner_models import base_model
 
     def legacy_empty_weights():
         raise AssertionError("must fail before entering context")
@@ -802,7 +799,6 @@ def test_structure_inspection_catches_include_buffers_error_on_context_enter(
     from contextlib import contextmanager
     import accelerate
 
-    from xfuser.model_executor.models.runner_models import base_model
 
     @contextmanager
     def broken_empty_weights(**kwargs):
@@ -834,7 +830,6 @@ def test_structure_inspection_catches_include_buffers_error_on_context_enter(
 def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
@@ -905,7 +900,6 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
 def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading import fp8_backends
 
     adapter = SimpleNamespace(format=SimpleNamespace(value="fp8"))
@@ -941,7 +935,6 @@ def test_blockwise_transformer_marks_only_wrapped_target_as_streamed(
 def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading import format_backends
 
     adapter = SimpleNamespace(format=SimpleNamespace(value="fp4"))
@@ -978,7 +971,6 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
 
 
 def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
@@ -1029,7 +1021,6 @@ def test_build_transformer_logs_explicit_torchao_post_load_fallback(monkeypatch)
 def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
@@ -1088,7 +1079,6 @@ def test_build_transformer_mapping_failure_falls_back_without_streaming_claim(
 
 
 def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading import format_backends
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
@@ -1145,7 +1135,6 @@ def test_eager_post_load_fallback_builds_meta_for_local_block_fill(monkeypatch):
 
 
 def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
@@ -1202,7 +1191,6 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
     format_name,
     adapter_name,
 ):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         QuantizationFormat,
@@ -1266,7 +1254,6 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
 
 
 def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading import format_backends
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
@@ -1335,7 +1322,6 @@ def _attach_backends(runner):
     return runner
 
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
 
     logs = []
     sentinel = SimpleNamespace(quant_mapping={})
@@ -1440,7 +1426,6 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
 
 
 def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
 
     sentinel = SimpleNamespace(backend=SimpleNamespace(value="torchao"))
     runner = SimpleNamespace(
@@ -1490,7 +1475,6 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
 def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
     monkeypatch,
 ):
-    from xfuser.model_executor.models.runner_models import base_model
 
     runner = SimpleNamespace(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),
@@ -1541,7 +1525,6 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
     is the case the blockwise fill exists for, so reaching prepare_text_encoder_fp8_load here would
     mean the encoder had been routed back to the whole-encoder rank0 load.
     """
-    from xfuser.model_executor.models.runner_models import base_model
 
     adapter = SimpleNamespace(
         backend=SimpleNamespace(value="torchao"),
@@ -1585,7 +1568,6 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
 
 
 def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
-    from xfuser.model_executor.models.runner_models import base_model
 
     runner = SimpleNamespace(
         load_contract=SimpleNamespace(requested_format=SimpleNamespace(value="fp8")),

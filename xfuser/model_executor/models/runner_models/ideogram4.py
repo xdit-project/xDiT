@@ -316,6 +316,10 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 class xFuserIdeogram4Model(xFuserModel):
     min_diffusers_version = "0.39.0"
 
+    # The transformer config states this too, and runtime_state re-checks it against the loaded
+    # model. Stated here so a Ulysses degree that cannot work is refused before the download.
+    attention_heads = 18
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -339,7 +343,6 @@ class xFuserIdeogram4Model(xFuserModel):
         model_output_type="image",
         mod_value=16,
         resolution_divisor=16,
-        attention_head_count=18,
         fp8_gemm_module_list=[
             "transformer.layers",
             "unconditional_transformer.layers",
@@ -356,7 +359,7 @@ class xFuserIdeogram4Model(xFuserModel):
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
-        heads = self.settings.attention_head_count
+        heads = self.attention_heads
         if heads % config.ulysses_degree != 0:
             raise ValueError(
                 f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must "

@@ -199,10 +199,6 @@ class ModelSettings:
     })
     valid_tasks: List[str] = field(default_factory=list)
     resolution_divisor: Optional[int] = None
-    # Attention head count, when a runner refuses a Ulysses degree that does not divide
-    # it. Declared so the case matrix can pick a rank count the model accepts, rather
-    # than emitting one the runner rejects during config validation.
-    attention_head_count: Optional[int] = None
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """

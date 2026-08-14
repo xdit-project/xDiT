@@ -257,22 +257,35 @@ fill it from rank 0.
 | LTX-2.3 | Eager load through the shared transformer seam; no quantized GEMM capability declared | None | Rejected before allocation: stage-2 distilled LoRA currently precedes base checkpoint fill on a meta transformer | No |
 | Cosmos3-Super and Cosmos3-Nano | Streaming; transformer targets declared | None | Transformer only | Transformer only |
 | CausalWan | Explicit `causal_wan_custom` adapter exclusion; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
+| Ideogram 4 | Streaming; both the conditional and unconditional transformer declared | None | Both transformers; text encoder loads normally | Yes, for both transformers; the `trust_remote_code` text encoder is filled eagerly because the manifest cannot read its parameter names ahead of the load |
+| MiniMax-H3 and MiniMax-H3-Ref2VA | Modular `ModularPipeline` construction with fused QKV projections; direct load only | None | Rejected before allocation: fusion rewrites attention into `attn.to_qkv`, so live tensor names stop matching checkpoint keys | No |
 
 The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. The named custom adapters above are declarative exclusions: they preserve eager behavior, but a requested meta mode fails before model allocation rather than entering the standard transformer collective path.
 
 #### Per-model FP4 and INT8 Targets
 
-An entry of “No” means the runner capability check rejects the flag, even where the hardware table above would allow the format.
+A listed target is only half the answer: the format still has to survive the hardware table above, so a declared FP4 target is refused in preflight on RDNA4 or on pre-Blackwell CUDA no matter what this table says. “No” is the stronger statement, because the runner's capability check rejects the flag on every device.
 
 | Model family | FP4 targets | INT8 targets |
 |--------------|-------------|--------------|
-| FLUX.2 | Transformer blocks and single-transformer blocks; model quality overrides remain FP8 | No |
-| Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | Declared transformer blocks; on dual-transformer Wan 2.2, the FP4 list covers `transformer` while `transformer_2` remains FP8 | No |
-| Wan 2.2 Distilled I2V | Same declared dual-transformer split as Wan 2.2, applied post-load | No |
-| Krea2-Raw and Krea2-Turbo | Transformer blocks | No |
-| Cosmos3-Super and Cosmos3-Nano | Transformer layers; Cosmos3-Super keeps its declared first/last layer ranges in FP8 | No |
-| Z-Image and Z-Image-Turbo | No | Transformer layers, noise refiner, and context refiner; `context_refiner` is excluded under sequence parallelism |
-| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, Wan VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan | No | No |
+| FLUX.2 | `transformer.transformer_blocks` and `transformer.single_transformer_blocks` | No |
+| Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | `transformer.blocks`; on dual-transformer Wan 2.2 that covers `transformer` while all of `transformer_2` stays FP8 | No |
+| Wan 2.2 Distilled I2V | The same split, inherited from Wan 2.2 I2V and applied post-load | No |
+| Krea2-Raw and Krea2-Turbo | `transformer.transformer_blocks` | No |
+| Ideogram 4 | `transformer.layers` and `unconditional_transformer.layers` | No |
+| MiniMax-H3 | `transformer.transformer_blocks`; the Ref2VA variant declares `transformer_ref.transformer_blocks` | No |
+| Cosmos3-Super and Cosmos3-Nano | `transformer.layers` | No |
+| Z-Image and Z-Image-Turbo | No | `transformer.layers`, `transformer.noise_refiner`, and `transformer.context_refiner`; `context_refiner` drops out under sequence parallelism |
+| FLUX.1, FLUX.1-Kontext, FLUX.2-klein, Wan 2.1 VACE, Qwen-Image variants, Stable Diffusion 3.5, HunyuanVideo variants, LTX variants, CausalWan | No | No |
+
+Several runners hold part of an FP4 target at FP8 where full FP4 costs too much
+quality: Wan 2.1 I2V and T2V keep blocks 0-9 and 30-39, Wan 2.2 TI2V keeps
+blocks 0, 1, 28, and 29 plus the `.net.0.proj` and `.net.2` leaves, Cosmos3-Super
+keeps layers 0-9 and 54-63, and both MiniMax-H3 runners keep the `attn.to_out.0`,
+`ff.net.2`, and `adaln_proj.linear` leaves. Wan 2.2 I2V and T2V declare no block
+overrides at all. `--fp8_precision_override_prefix_patterns` and
+`--fp8_precision_override_suffix_patterns` replace the declared prefix or suffix
+list rather than adding to it.
 
 #### Flag Combinations and Exclusions
 

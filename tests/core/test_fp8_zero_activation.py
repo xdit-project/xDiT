@@ -49,7 +49,7 @@ def test_an_all_zero_activation_gives_the_bias_rather_than_nan():
 
 
 def test_the_floor_is_what_prevents_it():
-    """Without the floor the same input is all NaN, so the floor is load-bearing, not decoration."""
+    """Without the floor the same input returns all NaN, which is what the floor prevents."""
     unfloored = _quantized_linear(activation_value_lb=None)
     zeros = torch.zeros(4, 1024, device="cuda", dtype=torch.bfloat16)
 

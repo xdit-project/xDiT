@@ -87,31 +87,18 @@ class LoadDeclaration:
     ``quantization_contracts`` comes from ``ModelCapabilities`` (its fp8/fp4/int8 flags)
     and ``materialization_modes`` from ``ModelSettings.fsdp_strategy``. The rest —
     ``meta_transformers``, ``loader_adapter``, ``component_exclusions`` and
-    ``unsupported_reason`` — is per-runner information that lives in neither.
+    ``unsupported_reason`` — is per-runner information that lives in neither, and cannot
+    move into either. ``ModelCapabilities`` is a permission table keyed by CLI flag name,
+    which ``_validate_config`` matches field by field against ``xFuserArgs``; none of these
+    are flags a user passes. ``ModelSettings`` fits semantically but is not readable per
+    class, and this has to be: ``declare`` writes ``cls.load_declaration`` onto every
+    runner, while ``cls.settings`` is absent or stale for any runner that builds settings
+    in ``__init__`` or mutates a copy in ``_customize_settings``.
 
-    It is worth knowing why that residue is not simply folded into one of them, because
-    it looks redundant at first glance.
-
-    ``ModelCapabilities`` cannot hold it because it is not a general description of a
-    model but a permission table keyed by CLI flag name: ``_validate_config`` iterates its
-    annotations and matches each field against ``xFuserArgs``. Nothing here is a flag a
-    user can pass, so these fields would be inert in the only code that reads that
-    dataclass generically.
-
-    ``ModelSettings`` could hold it semantically, and does hold comparable per-runner data,
-    but it is not reliably readable per class. The load support report and the runner
-    declaration tests introspect runners without instantiating them, which no config or
-    device allows. ``cls.load_declaration`` is exact for every runner because ``declare``
-    writes it onto each class, whereas ``cls.settings`` is not: the LingBot dense runner
-    builds its settings in ``__init__``, and the Wan2.2 family declares none at class level
-    and only mutates a deep copy in ``_customize_settings``, so statically it reports
-    Wan2.1's values. Folding these fields into settings would first require normalising
-    every runner to declare settings at class level.
-
-    The default is deliberately unsupported. Memory-efficient loading is opt-in twice over:
-    the user passes a flag that defaults to false, and the runner must have declared support.
-    A permissive inherited default would opt a model into the new path behind a flag set for
-    a different model, so ``unsupported_reason`` records verification status rather than a
+    The default is unsupported, because memory-efficient loading is opt-in twice over: the
+    user passes a flag defaulting to false, and the runner must have declared support. An
+    inherited permissive default would opt a model into the path behind a flag set for a
+    different model. ``unsupported_reason`` therefore records verification status, not a
     proven incapability.
     """
 
@@ -354,12 +341,11 @@ def assert_requested_materialization_is_honoured(config, *, world_size: int) -> 
     """Refuse a memory-efficient request that the mode selection would quietly drop.
 
     Replicated meta loading holds one full copy per rank, so it is defined only when nothing else
-    splits the weights. Asking for it alongside a degree that does split them used to return an
-    eager load and no diagnostic, which reads as the feature being enabled and doing nothing.
+    splits the weights. Asking for it alongside a degree that does split them selects an eager
+    load, which without this refusal reads as the feature being enabled and doing nothing.
 
-    A single-rank run is not such a case and is deliberately left alone: there is no peer to fill,
-    so falling back to an eager load is the honest answer, and refusing would stop the same command
-    line from working on one GPU.
+    A single-rank run is not such a case and is left alone: there is no peer to fill, so an eager
+    load is correct, and refusing would stop the same command line working on one GPU.
     """
     if not config.memory_efficient_replicated_load:
         return

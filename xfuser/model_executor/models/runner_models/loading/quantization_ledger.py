@@ -2,9 +2,9 @@
 
 Every route that can quantize a component on the way in writes here, and every post-load
 conversion walk reads here. Getting it wrong is quiet in both directions: an unrecorded path is
-quantized a second time, and an over-recorded one is never quantized at all. That is why the
-ledger is handed to the loading routes as an argument instead of being reached for on the model:
-a route that records nothing is then a visible omission rather than a silent one.
+quantized a second time, and an over-recorded one is never quantized at all. Routes take the
+ledger as an argument rather than reaching for it on the model, so a route that records nothing
+is a visible omission.
 
 Two things are tracked, and they answer different questions. The described components say whose
 plan has already been logged, so a walk that finds an undescribed component knows it is looking
@@ -38,11 +38,10 @@ class QuantizationLedger:
     fp8_streaming_targets: set = field(default_factory=set)
 
     def describe(self, component_name, *, fp8, any_format=True):
-        """Note that this component's quantization plan has been logged.
+        """Record that this component's quantization plan has been logged.
 
-        ``any_format=False`` records only the FP8 half, which is what the FP8 text-encoder route
-        has always done: a text encoder never appears in the FP4 or INT8 module lists that the
-        format-agnostic walks iterate, so it has nothing to say to them.
+        ``any_format=False`` records only the FP8 half, for the text-encoder route: a text encoder
+        never appears in the FP4 or INT8 module lists the format-agnostic walks iterate.
         """
         if any_format:
             self.descriptor_components.add(component_name)
@@ -63,7 +62,7 @@ class QuantizationLedger:
         return True
 
     def record_streamed(self, component_name, targets, *, fp8, any_format=True):
-        """Note the module paths that will hold quantized weights once this route finishes."""
+        """Record the module paths that will hold quantized weights once this route finishes."""
 
         paths = component_target_paths(component_name, targets)
         if any_format:

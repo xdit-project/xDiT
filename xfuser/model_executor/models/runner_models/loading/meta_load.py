@@ -15,7 +15,8 @@ component takes is not decided by what kind of component it is, but by whether i
 can be mapped onto checkpoint keys:
 
 * Self-fill (``_BlockwiseDiskFiller``), the cheaper path. Each block's real weights are read from disk
-  on fs-rank0 ONLY and broadcast GPU->GPU to the group, so no rank ever holds more than a block.
+  on fs-rank0 alone and broadcast device to device across the group, so no rank ever holds more
+  than a block.
   rank0-only read is required because the full block must exist on every rank before block-128 fp8
   quantization (a shard boundary splitting a 128x128 tile invalidates the tile scale, so per-rank slice
   reads are impossible), and if every rank read the full block from disk host anon would scale with N
@@ -231,10 +232,10 @@ def _collective_build_call(group, operation, context):
     except Exception as error:
         local_error = (type(error).__name__, str(error))
 
-    # One all_gather_object rather than a broadcast per rank: the loop cost world_size collectives
-    # per block to carry a failure that is almost always absent, which is eight per block at the rank
-    # count this path is used at. Matches _collective_quantize_call on the FSDP path. The per-rank
-    # loop stays as the fallback so a group without a backing process group still agrees.
+    # One all_gather_object rather than a broadcast per rank, which would cost world_size
+    # collectives per block -- eight at the rank count this path runs at -- to carry a failure that
+    # is almost always absent. Matches _collective_quantize_call on the FSDP path. The per-rank
+    # loop is the fallback, so a group without a backing process group still agrees.
     dist = torch.distributed
     device_group = getattr(group, "device_group", None)
     failures: list = [None] * group.world_size
@@ -878,8 +879,8 @@ class MemoryEfficientLoader:
         one component at a time. Bounds both host and VRAM peak to ~1x the model.
 
         Transformer: built on meta on every rank. Filled per block: rank0 reads one block off disk,
-        broadcasts it over the world group, then ALL ranks fp8-quantize that block (symmetric, since
-        the same bf16 yields the same fp8) before the next block. Peak = accumulating fp8 model + one
+        broadcasts it over the world group, then every rank fp8-quantizes that block (symmetric,
+        since the same bf16 gives the same fp8) before the next block. Peak = accumulating fp8 + one
         transient bf16 block, so it fits a single GPU where the full bf16 model would not (~24 vs
         ~12 GB). No fully_shard: replicated keeps the full quantized block on every rank. Reuses the
         FSDP disk filler (_BlockwiseDiskFiller) and per-block quantize_fn (``shard`` module).
@@ -900,7 +901,7 @@ class MemoryEfficientLoader:
                 continue
             if self._is_meta_denoiser(name):
                 if self._all_ranks_loaded_real(component, world, device):
-                    # Unwired runner: loaded real on EVERY rank (e.g. a composition-wrapper pipeline
+                    # Unwired runner: loaded real on every rank (e.g. a composition-wrapper pipeline
                     # whose _load_model built the whole pipeline real). _fill_transformer_replicated's
                     # to_empty() would wipe those weights; skip the destructive fill and keep the real
                     # all-rank-symmetric weights (the post-load fp8 walk still quantizes them).
@@ -914,8 +915,8 @@ class MemoryEfficientLoader:
                 )
             else:
                 if self._all_ranks_loaded_real(component, world, device):
-                    # Same unwired-runner case: TE loaded real on EVERY rank; skipping avoids
-                    # broadcasting rank0's bytes over each peer's already-correct weights.
+                    # Same unwired-runner case: the encoder loaded real on every rank, so skipping
+                    # avoids broadcasting rank0's bytes over each peer's already-correct weights.
                     log(
                         f"{name} loaded real on all ranks (unwired for replicated meta load); "
                         f"skipping broadcast fill, keeping real weights."
@@ -1084,31 +1085,31 @@ class MemoryEfficientLoader:
     def _fill_te_replicated(
         self, component, device, world, set_module_tensor_to_device
     ) -> None:
-        """Materialize peer meta to real-empty on device (move any real-CPU tensor on-device), then
-        broadcast every param/buffer from world-rank0. Layout already matches (rank0 fp8-streamed,
-        peers meta fp8-swapped), so no re-quantize.
+        """Materialize peer meta to real-empty on device, then broadcast every param and buffer from
+        world-rank0. Layouts already match (rank0 fp8-streamed, peers meta fp8-swapped), so nothing
+        is re-quantized.
 
-        Two hazards, because rank0 builds the TE real via the pipeline's from_pretrained while peers
-        build it on meta via _from_config (build_meta_component):
+        Two hazards follow from rank0 building the encoder real through the pipeline's
+        from_pretrained while peers build it on meta through _from_config:
 
-        1. dtype divergence. The meta build instantiates at the pipeline's compute dtype (bf16),
-           so auto-computed buffers can differ from the real build -- Qwen3 rotary
-           inv_freq / original_inv_freq are fp32 real but bf16 on meta. world.broadcast copies rank0's
-           element bytes into the peer tensor's EXISTING storage, so a bf16 slot receiving fp32 bytes
-           is silently corrupted -> garbage RoPE frequencies -> NaN/black (survived ulysses<=2, broke
-           at ulysses=4 where the SP chunk amplifies the corrupt rotary positions). Broadcast rank0's
-           (shape, dtype) per name and reallocate any mismatched peer tensor before the data broadcast.
+        1. Divergent dtypes. A meta build instantiates at the pipeline's compute dtype, so
+           auto-computed buffers can differ from the real build: Qwen3's rotary inv_freq is fp32
+           when built real and bf16 on meta. Since broadcast copies rank0's element bytes into the
+           peer tensor's existing storage, a bf16 slot receiving fp32 bytes is silently corrupted,
+           which reached inference as garbage rotary frequencies and a black render. It survived
+           ulysses<=2 and broke at 4, where the sequence chunk amplifies the corrupt positions.
+           Rank0's (shape, dtype) per name therefore goes first, and any mismatched peer tensor is
+           reallocated before the data broadcast.
 
-        2. layout divergence. First reconcile peer placeholders to rank0's tensor specs, then compare
-           exact ordered names, kinds, aliases, persistence, and final shape/dtype collectively.
-           This permits legitimate real-vs-meta storage differences while making every rank reject
-           structural divergence before rank0 enters a data broadcast.
+        2. Divergent layout. Peer placeholders are reconciled to rank0's tensor specs, then ordered
+           names, kinds, aliases, persistence and final shape/dtype are compared collectively. That
+           permits legitimate real-versus-meta storage differences while still rejecting structural
+           divergence before rank0 enters a data broadcast.
 
-        Capture the name lists ONCE and drive the materialize pass off them (via rgetattr), mirroring
-        _BlockwiseDiskFiller.finalize. Re-enumerating named_parameters() for the broadcast is unsafe:
-        set_module_tensor_to_device replaces param objects, so a re-enumeration can hand back a
-        different (still-CPU) object than the one the materialize pass moved, and world.broadcast on a
-        CPU tensor aborts the NCCL group.
+        The name lists are captured once and drive the materialize pass through rgetattr, because
+        set_module_tensor_to_device replaces param objects: re-enumerating named_parameters() for
+        the broadcast can hand back a different, still-CPU object than the one the pass moved, and
+        broadcasting a CPU tensor aborts the NCCL group.
 
         remove_duplicate=False exposes every tied name. Materialization preserves each rank's alias
         groups, and the final contract rejects any rank whose tie structure differs from rank0.
@@ -1430,8 +1431,8 @@ class _BlockwiseDiskFiller:
         self.group = (group or get_fs_group()) if collective else None
         self.is_src = self.group is None or _is_bcast_src(self.group)
         # rank0 resolves the checkpoint map and hands it to every rank, rather than each rank
-        # resolving its own: the point of resolving once was to avoid redundant hub revalidation
-        # HEADs, and broadcasting the result keeps that while letting any rank read a block.
+        # resolving its own: resolving once avoids redundant hub revalidation HEADs, and
+        # broadcasting the result keeps that while letting any rank read a block.
         manifest = (
             source
             if isinstance(source, CheckpointManifest)

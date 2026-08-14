@@ -2,8 +2,8 @@
 
 One entry point, ``load_transformer``, which picks between the meta paths this package
 implements and an ordinary ``from_pretrained``, and prepares whatever quantization the chosen
-route needs. It lives here rather than on ``xFuserModel`` so the runner base class holds no
-knowledge of how weights arrive: a runner asks for a transformer and gets one.
+route needs. A runner asks for a transformer and gets one, knowing nothing about how the
+weights arrive.
 
 The order of the checks matters. A sharded or replicated meta build wins over native
 quantize-on-load, because those paths quantize per block during the fill and a native

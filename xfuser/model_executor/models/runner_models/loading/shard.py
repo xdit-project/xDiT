@@ -5,8 +5,8 @@ The last of the three load phases this package covers: ``fp8_plan`` decides what
 FSDP. It reads the fill decisions back off ``MemoryEfficientLoader`` (whether a component is on meta,
 and whether it fills itself from disk) because those select which collective the sharding does.
 
-``build_block_quantize_fn`` lives here rather than on the runner because both callers are in this
-package: the sharded path below, and ``meta_load``'s replicated per-block fill.
+``build_block_quantize_fn`` serves both per-block quantizers: the sharded path below, and
+``meta_load``'s replicated fill.
 """
 
 import torch

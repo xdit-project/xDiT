@@ -444,7 +444,7 @@ def shard_component(
     for i, block in enumerate(wrapped_blocks):
         if load_block_fn is not None:
             # Self-fill per rank: materialize the block empty on device, fill its real weights
-            # from disk on THIS rank, quantize, then shard — the full model never lands anywhere.
+            # from disk on this rank, quantize, then shard — the full model never lands anywhere.
             nonpersistent_buffers = _save_nonpersistent_buffers(block, device_str)
             block.to_empty(device=device_str, recurse=True)
             _restore_nonpersistent_buffers(nonpersistent_buffers)

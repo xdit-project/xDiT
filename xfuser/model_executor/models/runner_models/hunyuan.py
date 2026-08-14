@@ -68,9 +68,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
                 ],
                 "dtype": torch.bfloat16,
             },
-            # The 14G Llama encoder was this model's host peak: every rank loaded it whole
-            # while the transformer was already filling one block at a time. LlamaModel keeps
-            # its decoder layers at the top level, not under "model" as text-only encoders do.
+            # Undeclared, the 14G Llama encoder is this model's host peak: every rank loads it
+            # whole while the transformer fills one block at a time. LlamaModel keeps its decoder
+            # layers at the top level, not under "model" as text-only encoders do.
             # text_encoder_2, a 0.2G CLIP, is deliberately absent: wrapping it would add a
             # collective per prompt to save a fraction of a gigabyte.
             "text_encoder": {

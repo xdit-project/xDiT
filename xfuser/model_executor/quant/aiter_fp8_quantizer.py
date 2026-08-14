@@ -14,9 +14,9 @@ quantize each weight as it streams off disk. So the full bf16 module never mater
 peak ~= one streamed weight + accumulating fp8. This is the load-time complement to the post-load
 walk in ``runner_utils.quantize_linear_layers_to_fp8_blockscale``.
 
-The text-encoder path is what added this: on multi-GPU FP8 FSDP the DiT already streams fp8, but
-the text encoder (e.g. Mistral3 / Qwen3) loaded full bf16 on every node-local rank, which was the
-host-RAM balloon during load. Streaming it to fp8 removes that.
+On multi-GPU FP8 FSDP the encoder is the larger win: the DiT already streams fp8, while a
+Mistral3 or Qwen3 encoder otherwise lands full bf16 on every node-local rank and dominates
+host memory for the duration of the load.
 
 Layout difference between the two framework paths:
   * diffusers (DiT): stores fp8 under ``weight_fp8`` + ``weight_scale`` and nulls the meta
@@ -200,7 +200,7 @@ class AiterFp8BlockScaleQuantizer(DiffusersQuantizer):
         compute_device = f"cuda:{torch.cuda.current_device()}"
         module.load_and_quantize_weights(param_value, bias=None, device=compute_device)
         # load_and_quantize_weights drops the meta `weight` placeholder and installs a 0-element
-        # bf16 sentinel (plain attr); forward uses weight_fp8. Do NOT register_parameter("weight",
+        # bf16 sentinel (plain attr); forward uses weight_fp8. Do not register_parameter("weight",
         # None) here — the sentinel already occupies `weight` and register_parameter would collide.
         # Offload: move only the produced fp8 tensors to host. The meta `bias` is streamed
         # to target_device separately by the normal loader (not a quantized param).

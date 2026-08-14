@@ -381,9 +381,8 @@ class xFuserModel(abc.ABC):
             log(f"--use_fp8_text_encoder has no effect for {type(self).__name__}: it declares no "
                 f"text-encoder FP8 targets.")
         elif te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
-            # Says so out loud because text-encoder FP8 used to ride along with --use_fp8_gemms on
-            # RDNA4, and is now opt-in everywhere; a run that silently kept a bf16 text encoder
-            # would otherwise look like the flag had regressed.
+            # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
+            # indistinguishable from --use_fp8_gemms failing to take effect.
             log(f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
                 f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
                 f"to quantize them too, for less memory at some risk to text conditioning.")
@@ -580,8 +579,8 @@ class xFuserModel(abc.ABC):
             # block_level groups only top-level ModuleLists: fits compiled transformers
             # (blocks are top-level) and avoids the per-block-compile recompile storm that
             # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
-            # model.language_model.layers) where block_level can't reach -> whole component in
-            # one unmatched group -> OOM; they use leaf_level, which recurses.
+            # model.language_model.layers) where block_level cannot reach, leaving the whole
+            # component in one unmatched group and OOMing; they use leaf_level, which recurses.
             from diffusers.hooks import apply_group_offloading
             log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
             onload_device = self._local_onload_device()

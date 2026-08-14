@@ -2,8 +2,8 @@
 
 ``plan_text_encoders`` answers one question per encoder the runner declares FP8 targets for: is
 it quantized on the way in from disk, streamed by the framework's own quantizer, or converted
-after it lands. The answer depends on the materialization the run asked for, so it belongs
-beside the loader that made that decision rather than on ``xFuserModel``.
+after it lands. The answer follows from the materialization the run asked for, which is why the
+decision sits beside the loader that made it.
 
 It returns ``(pipe_component_kwargs, te_quant_config)``. On a meta path the kwargs carry meta
 modules for the pipeline's ``from_pretrained`` to adopt instead of loading those components, and

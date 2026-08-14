@@ -56,7 +56,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # How many checkpoint shards a memory-efficient fill may hold in page cache, which is the read
     # speed against host cache trade. Streaming a shard in before mmap-reading it makes the read
     # bandwidth-bound rather than fault-bound (measured 0.62 -> 3.21 GB/s on local NVMe).
-    #   0 - never stream; the read faults its way through mmap as it used to.
+    #   0 - never stream; the read faults its way through mmap.
     #   1 - stream the shard about to be read, then consume it.
     #   2 - also stream the next shard while consuming this one, hiding that stream under the
     #       quantise and broadcast work, at the cost of a second shard resident.

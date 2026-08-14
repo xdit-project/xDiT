@@ -218,8 +218,8 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
             },
             "text_encoder": {
                 # Qwen3VLModel holds its decoder layers under language_model, beside the vision
-                # tower. "model.layers" is where a text-only encoder keeps them, and naming it here
-                # failed every sharded case with an AttributeError before any of them ran.
+                # tower. "model.layers", where a text-only encoder keeps them, resolves to nothing
+                # here and takes every sharded case down with an AttributeError.
                 "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },

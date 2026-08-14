@@ -92,24 +92,6 @@ def test_central_gemm_validation_owns_int8_conflicts():
     )
 
 
-def test_fp4_owner_prevents_the_later_generic_fp8_walk():
-    path = ROOT / "xfuser/model_executor/models/runner_models/base_model.py"
-    source = path.read_text()
-    tree = ast.parse(source)
-    base_class = _class(tree, "xFuserModel")
-    post_load = next(
-        node
-        for node in base_class.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_post_load_and_state_initialization"
-    )
-    post_load_source = ast.get_source_segment(source, post_load)
-
-    assert "if self.config.use_fp4_gemms:" in post_load_source
-    assert "and not self.config.use_fp4_gemms" in post_load_source
-    assert "_setup_fp8_only_gemm_modules" in source
-
-
 def test_mxfp4_quantized_weight_is_registered_as_parameter():
     path = ROOT / "xfuser/model_executor/layers/mxfp4_linear.py"
     tree = ast.parse(path.read_text())

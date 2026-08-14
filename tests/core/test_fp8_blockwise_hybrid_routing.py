@@ -6,7 +6,7 @@ import pytest
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
-from xfuser.model_executor.models.runner_models.loading import shard
+from xfuser.model_executor.models.runner_models.loading import placement, shard
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
     QuantizationLedger,
 )
@@ -883,11 +883,11 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         _replicated_broadcast_load=lambda: False,
     )
     monkeypatch.setattr(
-        base_model,
+        placement,
         "get_world_group",
         lambda: SimpleNamespace(local_rank=0),
     )
 
-    xFuserModel._post_load_and_state_initialization(model, {})
+    placement.place_pipeline_components(model)
 
     assert fp8_calls == [(post_load_module, {"device": "cuda:0"})]

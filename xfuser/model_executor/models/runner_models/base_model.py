@@ -58,42 +58,14 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 )
 from xfuser.model_executor.models.runner_models.loading.format_backends import (
     module_path_is_covered,
-    module_paths_overlap,
+)
+from xfuser.model_executor.models.runner_models.loading.placement import (
+    conversion_filter,
+    place_pipeline_components,
 )
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
     QuantizationLedger,
 )
-
-
-def _conversion_filter(module_path, excluded_paths, include_suffixes=None):
-    overlapping = tuple(
-        path
-        for path in excluded_paths
-        if module_paths_overlap(module_path, path)
-    )
-    if any(
-        module_path_is_covered(module_path, path)
-        for path in overlapping
-    ):
-        return False, None
-    descendants = tuple(
-        path
-        for path in overlapping
-        if module_path_is_covered(path, module_path)
-    )
-    if not descendants and not include_suffixes:
-        return True, None
-
-    def filter_fn(_module, fqn):
-        full_path = module_path if not fqn else f"{module_path}.{fqn}"
-        if include_suffixes and not full_path.endswith(tuple(include_suffixes)):
-            return False
-        return not any(
-            module_path_is_covered(full_path, path)
-            for path in descendants
-        )
-
-    return True, filter_fn
 
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
@@ -1039,129 +1011,13 @@ class xFuserModel(abc.ABC):
                 self.settings.fp8_precision_overrides,
                 self.settings.fp8_precision_override_suffixes,
             )
-        # FSDP path handles device placement and quantization (per-block for FSDP2).
+        # The sharded path places and quantizes per block as it wraps; the unsharded path moves the
+        # whole pipeline at once.
         if self.config.fully_shard_degree > 1:
             from .loading.shard import shard_pipeline_components
             shard_pipeline_components(self)
         else:
-            offload_requested = (
-                self.config.enable_model_cpu_offload
-                or self.config.enable_sequential_cpu_offload
-                or self.config.enable_group_cpu_offload
-            )
-            fill_eager = getattr(
-                getattr(self, "_loader", None),
-                "fill_eager_transformers",
-                None,
-            )
-            if fill_eager is not None:
-                fill_eager()
-            # Replicated multi-GPU: rank0's real bf16 weights are broadcast to peers' meta components
-            # (GPU->GPU) and fp8-quantized per component in place. Bounds VRAM to one bf16 component.
-            # The AITER walk below then no-ops (components are already fp8).
-            if self._replicated_broadcast_load():
-                self._loader.broadcast_fill_replicated(offload_requested)
-            # AITER converts layer-by-layer CPU→GPU before pipe.to; torchao
-            # converts after placement. Both use the selected backend adapter.
-            adapter = self.fp8_backend
-            if adapter is not None and adapter.converts_before_device_move:
-                for module_name in self.fp8.module_list():
-                    convert, filter_fn = _conversion_filter(
-                        module_name,
-                        self.quantization_ledger.fp8_streaming_targets,
-                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                    )
-                    if not convert:
-                        continue
-                    convert_kwargs = {}
-                    if filter_fn is not None:
-                        convert_kwargs["filter_fn"] = filter_fn
-                    replaced = adapter.convert_module(
-                        rgetattr(self.pipe, module_name),
-                        device=f"cuda:{local_rank}",
-                        offload_to_cpu=offload_requested,
-                        **convert_kwargs,
-                    )
-                    if replaced:
-                        log(
-                            f"Quantized {replaced} layers in {module_name} "
-                            f"to FP8 ({adapter.storage_semantics})."
-                        )
-                    else:
-                        log(f"{module_name} already FP8 (streamed quantize-on-load); post-load walk no-op.")
-            if not offload_requested:
-                self.pipe = self.pipe.to(f"cuda:{local_rank}")
-            if self.config.use_fp4_gemms:
-                if _is_cuda():
-                    self._setup_nvfp4_gemms(local_rank=local_rank)
-                else:
-                    self._setup_mxfp4_gemms(local_rank=local_rank)
-            # FP4 setup also owns its explicit hybrid FP8 path and any declared FP8-only modules.
-            # Running the generic walk afterwards would re-quantize inside the hybrid wrappers.
-            if (
-                adapter is not None
-                and not adapter.converts_before_device_move
-                and not self.config.use_fp4_gemms
-            ):
-                for module_name in self.fp8.module_list():
-                    component_name = module_name.partition(".")[0]
-                    convert, filter_fn = _conversion_filter(
-                        module_name,
-                        self.quantization_ledger.fp8_streaming_targets,
-                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                    )
-                    if not convert:
-                        continue
-                    if component_name.startswith(
-                        "transformer"
-                    ) and self.quantization_ledger.claim_description(
-                        component_name, fp8=True
-                    ):
-                        log(
-                            "Transformer quantization: requested=fp8, "
-                            f"backend={adapter.backend.value}, "
-                            f"storage={adapter.storage_semantics}, "
-                            "materialization=post_load; fallback=runner did "
-                            "not use the transformer construction seam"
-                        )
-                    convert_kwargs = {}
-                    if filter_fn is not None:
-                        convert_kwargs["filter_fn"] = filter_fn
-                    adapter.convert_module(
-                        rgetattr(self.pipe, module_name),
-                        device=f"cuda:{local_rank}",
-                        **convert_kwargs,
-                    )
-            if self.config.use_int8_gemms:
-                adapter = self.format_backend
-                for module_name in self.settings.int8_gemm_module_list:
-                    component_name = module_name.partition(".")[0]
-                    convert, filter_fn = _conversion_filter(
-                        module_name,
-                        self.quantization_ledger.streaming_targets,
-                    )
-                    if not convert:
-                        continue
-                    if self.quantization_ledger.claim_description(component_name):
-                        from .loading.format_backends import (
-                            prepare_native_transformer_format_load,
-                        )
-
-                        descriptor = prepare_native_transformer_format_load(
-                            adapter,
-                            component_name=component_name,
-                            targets=self.backends.format_targets_for(component_name),
-                            stream_quant=False,
-                        ).descriptor
-                        log(descriptor.log_message())
-                    convert_kwargs = {}
-                    if filter_fn is not None:
-                        convert_kwargs["filter_fn"] = filter_fn
-                    adapter.convert_module(
-                        rgetattr(self.pipe, module_name),
-                        device=f"cuda:{local_rank}",
-                        **convert_kwargs,
-                    )
+            place_pipeline_components(self)
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -1190,7 +1046,7 @@ class xFuserModel(abc.ABC):
         adapter = self.format_backend
         for module_name in self.settings.fp4_gemm_module_list:
             component_name = module_name.partition(".")[0]
-            convert, filter_fn = _conversion_filter(
+            convert, filter_fn = conversion_filter(
                 module_name,
                 self.quantization_ledger.streaming_targets,
             )
@@ -1253,7 +1109,7 @@ class xFuserModel(abc.ABC):
             excluded_paths = fp4_modules | self.quantization_ledger.already_quantized(
                 fp8=True
             )
-            convert, filter_fn = _conversion_filter(
+            convert, filter_fn = conversion_filter(
                 module_name,
                 excluded_paths,
                 include_suffixes=self.settings.fp8_gemm_include_suffixes,
@@ -1275,7 +1131,7 @@ class xFuserModel(abc.ABC):
         adapter = self.format_backend
         for module_name in self.settings.fp4_gemm_module_list:
             component_name = module_name.partition(".")[0]
-            convert, filter_fn = _conversion_filter(
+            convert, filter_fn = conversion_filter(
                 module_name,
                 self.quantization_ledger.streaming_targets,
             )

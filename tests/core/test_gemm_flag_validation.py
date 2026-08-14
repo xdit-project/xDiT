@@ -10,6 +10,7 @@ def runtime():
     pytest.importorskip("torch", reason="PyTorch is required for runner validation")
     from xfuser.config.args import xFuserArgs
     from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading import placement
 
     class _StubModel(base_model.xFuserModel):
         """Concrete runner used to exercise base-class flag validation.
@@ -29,6 +30,7 @@ def runtime():
         base=base_model,
         capabilities_cls=base_model.ModelCapabilities,
         model_cls=_StubModel,
+        placement=placement,
     )
 
 
@@ -168,10 +170,11 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
     # the real distributed state.
     monkeypatch.setattr(type(model), "_loader", None, raising=False)
 
-    monkeypatch.setattr(
-        runtime.base, "get_world_group", lambda: SimpleNamespace(local_rank=0)
-    )
-    monkeypatch.setattr(runtime.base, "_is_cuda", lambda: False)
+    for module in (runtime.base, runtime.placement):
+        monkeypatch.setattr(
+            module, "get_world_group", lambda: SimpleNamespace(local_rank=0)
+        )
+        monkeypatch.setattr(module, "_is_cuda", lambda: False)
     monkeypatch.setattr(runtime.base, "_use_aiter_fp8_rdna4", lambda: False)
 
     model._post_load_and_state_initialization({"num_inference_steps": 4})

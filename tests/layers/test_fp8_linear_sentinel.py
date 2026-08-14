@@ -72,8 +72,8 @@ def test_sentinel_is_invisible_to_named_parameters_and_buffers():
 
 
 def test_sentinel_follows_a_module_move():
-    """Regression: _apply only walks params and buffers, so the sentinel used to keep a stale
-    device and could send a `weight`-probing caller (e.g. T5's wo.weight.dtype cast) elsewhere.
+    """_apply only walks params and buffers, so without the override the sentinel keeps a stale
+    device and sends a `weight`-probing caller (e.g. T5's wo.weight.dtype cast) elsewhere.
     """
     layer = make_quantized_layer().to("meta")
     assert layer.weight_fp8.device.type == "meta"

@@ -1,10 +1,9 @@
 """Compiling a component blockwise must tell CUDA Graphs where each step ends.
 
-Every FLUX case in the eight-rank sharded sweep failed with "accessing tensor output of CUDAGraphs
-that has been overwritten by a subsequent run", and none of the FLUX cases at one rank or without
-sharding did. Sharding is what turns one compiled transformer into one compiled graph per block, and
-the FLUX runners ask for reduce-overhead off RDNA4, so the two together produce graph segments that
-read each other's buffers across steps.
+Without a step boundary, inference fails with "accessing tensor output of CUDAGraphs that has been
+overwritten by a subsequent run". It needs both reduce-overhead and sharding to appear: sharding is
+what turns one compiled transformer into one compiled graph per block, so the two together produce
+graph segments that read each other's buffers across steps. One rank, or no sharding, is immune.
 """
 
 from types import SimpleNamespace

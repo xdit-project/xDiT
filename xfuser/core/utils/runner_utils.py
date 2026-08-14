@@ -102,8 +102,8 @@ def _get_fp8_kernel_preference():
 # are all zero gets scale = max_abs / 448 = 0, and quantizing divides by that scale, so the layer
 # returns all NaN instead of the bias. Zeros arrive in normal use: a model that zero-pads its text
 # sequence up to a multiple of the sequence-parallel world size hands whole padding-only chunks to
-# late ranks, and Qwen-Image at eight ranks did exactly that, turning every FP8 render pure black
-# once the NaN spread through the attention all-to-all. Matches torchao's own EPS on its training
+# late ranks — Qwen-Image at eight ranks is one — and the NaN then spreads through the attention
+# all-to-all until every render is black. Matches torchao's own EPS on its training
 # path, and only binds when the largest value in the tensor is below it, so nothing else moves:
 # measured bit-identical output on ordinary activations.
 FP8_ACTIVATION_SCALE_FLOOR = 1e-12

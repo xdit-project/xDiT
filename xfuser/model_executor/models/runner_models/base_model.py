@@ -701,10 +701,9 @@ class xFuserModel(abc.ABC):
         recorded on a later step copies its inputs from the previous block's output buffer. Without a
         step boundary the graph system still considers the earlier step's outputs live and refuses
         the read with "accessing tensor output of CUDAGraphs that has been overwritten by a
-        subsequent run", which is how every FLUX case in the eight-rank sharded sweep failed: the
-        FLUX runners ask for reduce-overhead off RDNA4, and sharding is what turns one compiled
-        transformer into fifty-seven compiled blocks. A pre-hook rather than a wrapper because
-        pre-hooks run before the compiled forward is entered.
+        subsequent run". Reaching it takes both halves: a runner that asks for reduce-overhead, and
+        sharding, which is what turns one compiled transformer into a graph per block. A pre-hook
+        rather than a wrapper because pre-hooks run before the compiled forward is entered.
         """
         if getattr(component, "_xfuser_marks_cudagraph_steps", False):
             return

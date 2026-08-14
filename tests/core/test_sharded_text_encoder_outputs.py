@@ -2,11 +2,11 @@
 
 Transformers resolves which submodule outputs to record by looking the model's class up in a
 registry keyed when the model was constructed, and FSDP2 rebinds ``__class__`` on every module it
-wraps. Wrapping an encoder's root therefore used to make that lookup miss, and a forward asked for
-``output_hidden_states=True`` came back with ``hidden_states=None`` rather than raising — which
-surfaced as a ``TypeError`` deep in a pipeline that subscripts ``hidden_states[-2]``.
+wraps. Wrapping an encoder's root therefore makes that lookup miss, and a forward asked for
+``output_hidden_states=True`` comes back with ``hidden_states=None`` rather than raising — which
+surfaces as a ``TypeError`` deep in a pipeline that subscripts ``hidden_states[-2]``.
 
-These run single-rank: the class rebinding that caused the bug does not depend on world size.
+These run single-rank: the class rebinding does not depend on world size.
 """
 
 import os

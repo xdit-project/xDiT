@@ -173,27 +173,29 @@ Individual model classes that inherit from `xFuserModel`:
 
 The quantization flags select model-declared linear-layer targets; they do not quantize every pipeline component. Unless noted below, the VAE and untargeted text encoders retain the pipeline dtype.
 
-#### Backend and Format Semantics
+#### Backend Selection by Hardware
 
-This matrix records the runner's dispatch and rejection paths. Model capability
-checks and target declarations also apply.
+Two defaults keep the table below short. “torchao FP8” means per-tensor
+dynamic-activation with FP8 weights, streamed through the native
+Diffusers/Transformers loaders where the API, the exact target mapping and the
+placement all permit it, and converted after load where they do not. INT8 is
+rejected on ROCm throughout. Model capability checks and target declarations
+apply on top of whatever a row allows.
 
 | Hardware / available backend | FP8 (`--use_fp8_gemms`) | FP4 (`--use_fp4_gemms`) | INT8 (`--use_int8_gemms`) |
 |------------------------------|--------------------------|--------------------------|-----------------------------|
-| ROCm RDNA4 (`gfx1200`/`gfx1201`) + AITER | AITER block-scale W8A8 FP8 (block size 128); streaming load where the runner is wired for it, otherwise layer-by-layer post-load | Excluded: AITER ships no FP4 kernels for RDNA4, so preflight refuses it before allocation | Excluded: INT8 is rejected on ROCm |
-| ROCm RDNA4 without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER, which has no RDNA4 FP4 kernels either way | Excluded: INT8 is rejected on ROCm |
-| Other ROCm + AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback; AITER FP8 block-scale is RDNA4-only | AITER MXFP4 on `gfx950` and `gfx1250`, the architectures AITER has FP4 kernels for; ordinary loads convert after load, replicated/FSDP meta loads convert blockwise; runtime hybrid FP8/FP4 is supported. Any other architecture, `gfx942` included, is refused in preflight | Excluded: INT8 is rejected on ROCm |
-| Other ROCm without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
-| CUDA capability 10.0+ (Blackwell) | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | torchao NVFP4 with dynamic per-tensor activation scaling; native Diffusers streams NVFP4 leaves while explicit FP8 overrides remain full precision for post-load FP8 conversion; hybrid ownership is excluded | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming preserves target and minimum-size exclusions |
-| CUDA capability 8.9 through 9.x | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming where accepted |
-| CUDA capability below 8.9 | Excluded: TorchAO FP8 is rejected during backend preflight before model allocation | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8; runtime kernel support remains hardware-dependent |
+| ROCm RDNA4 (`gfx1200`/`gfx1201`) + AITER | AITER block-scale W8A8 FP8, block size 128; streams where the runner is wired for it, otherwise converts layer by layer after load | Excluded: AITER ships no FP4 kernels for RDNA4, refused in preflight | Excluded |
+| ROCm RDNA4 without AITER | torchao FP8 | Excluded: ROCm FP4 requires AITER, which has no RDNA4 kernels either way | Excluded |
+| Other ROCm + AITER | torchao FP8; AITER block-scale FP8 is RDNA4-only | AITER MXFP4 on `gfx950` and `gfx1250`, the architectures AITER has FP4 kernels for; ordinary loads convert after load, replicated and FSDP meta loads convert blockwise; runtime hybrid FP8/FP4 is supported. Any other architecture, `gfx942` included, is refused in preflight | Excluded |
+| Other ROCm without AITER | torchao FP8 | Excluded: ROCm FP4 requires AITER | Excluded |
+| CUDA capability 10.0+ (Blackwell) | torchao FP8 | torchao NVFP4 with dynamic per-tensor activation scaling; native Diffusers streams the NVFP4 leaves while explicit FP8 overrides stay full precision for post-load FP8 conversion; hybrid ownership is excluded | torchao W8A8 INT8; native streaming preserves the target and minimum-size exclusions |
+| CUDA capability 8.9 through 9.x | torchao FP8 | Excluded: NVFP4 requires capability 10.0+ | torchao W8A8 INT8; native streaming where accepted |
+| CUDA capability below 8.9 | Excluded: rejected in backend preflight before allocation | Excluded: NVFP4 requires capability 10.0+ | torchao W8A8 INT8; whether the kernels run stays hardware-dependent |
 
 INT8 uses per-row symmetric scaling and skips linear layers smaller than 512 in
-either dimension. Ordinary loading uses Diffusers `TorchAoConfig` per-weight
-streaming when it accepts the exact TorchAO config. xDiT derives
-`modules_to_not_convert` from a config-built meta structure, preserving the
-declared targets and 512 minimum. The descriptor records a post-load fallback
-when streaming is unavailable.
+either dimension. To keep the declared targets and that 512 minimum while
+streaming, xDiT derives `modules_to_not_convert` from a config-built meta
+structure.
 
 Replicated meta-load applies INT8 blockwise. Memory-efficient FSDP requires the
 installed INT8 tensor subclass to expose composable-FSDP gather hooks; xDiT
@@ -201,46 +203,37 @@ rejects the mode before allocation when those hooks are absent. With sequence
 parallelism, Z-Image leaves `context_refiner` unquantized because its local
 sequence can be too short for `torch._int_mm`.
 
-CUDA NVFP4 uses native Diffusers `TorchAoConfig` per-weight streaming. FP8
-prefix/suffix overrides are excluded from the native config; the FP4 adapter
-converts those residual leaves to FP8 after loading. CUDA NVFP4 lacks the ROCm
-runtime high/low precision wrapper. Therefore, xDiT rejects
-`--use_hybrid_gemm_schedule` before model allocation with guidance to disable
-it or use ROCm+AITER.
+FP8 prefix/suffix overrides are excluded from the NVFP4 native config, and the
+FP4 adapter converts those residual leaves to FP8 after loading. CUDA has no
+equivalent of the ROCm runtime high/low precision wrapper, so xDiT rejects
+`--use_hybrid_gemm_schedule` before allocation and points at ROCm+AITER.
 
-ROCm MXFP4 has no native per-weight streaming path. AITER needs the full source
-weight to create and shuffle `xFuserMXFP4Linear` state. Ordinary loads convert
-post-load; replicated and FSDP meta-loads convert each block before placement.
-Preflight checks `aiter.get_hip_quant`, `aiter.QuantType.per_1x32`,
-`aiter.gemm_a4w4`, and `aiter.ops.shuffle.shuffle_weight`, then the architecture:
-AITER exports those symbols everywhere but builds FP4 kernels only for `gfx950`
-and `gfx1250`, and calling them elsewhere aborts the process rather than raising.
-`AITER_FP4x2=0` disables them too, and preflight honours that. The packed MXFP4
-weight is a shardable, non-trainable `Parameter`.
-Its scale is a persistent replicated buffer.
+ROCm MXFP4 converts rather than streams because AITER needs the full source
+weight to create and shuffle `xFuserMXFP4Linear` state. Preflight checks
+`aiter.get_hip_quant`, `aiter.QuantType.per_1x32`, `aiter.gemm_a4w4`, and
+`aiter.ops.shuffle.shuffle_weight`, then the architecture: AITER exports those
+symbols everywhere but builds FP4 kernels only for `gfx950` and `gfx1250`, and
+calling them elsewhere aborts the process rather than raising. `AITER_FP4x2=0`
+disables them too, and preflight honors that. The packed weight is a shardable,
+non-trainable `Parameter` whose scale is a persistent replicated buffer.
 
 All quantized GEMM modes are inference-only. TorchAO serialization requires
 compatible torchao, Diffusers, huggingface-hub, and tensor-subclass support.
 MXFP4 packed state can round-trip in xDiT, but its AITER-specific layout is not
 a portable training checkpoint. Backend descriptors log the requested format,
-selected backend, storage, materialization, trainability, serialization, and
-fallback reason. FP8+FP4 requires explicit hybrid mode, while INT8 is mutually
-exclusive. FP8 precision prefix/suffix overrides remain FP8-owned inside FP4
-targets.
+selected backend, storage, materialization, trainability, serialization, and any
+fallback reason.
 
-#### Model Support Matrix
+#### Per-model Load Paths
 
-“Streaming” means native transformer quantization during ordinary loading:
-AITER for supported FP8 paths, or torchao through supported Diffusers APIs for
-FP8, NVFP4, and INT8. NVFP4 can stream around explicitly owned FP8 residual
-leaves. Torchao records an explicit post-load fallback when its API, exact
-target mapping, hybrid ownership, or placement prevents streaming.
+“Streaming” means the transformer is quantized during ordinary loading rather
+than after it, by AITER or by torchao through the Diffusers APIs.
 
 On a single rank, a standard runner with declared meta construction and
-block-owned targets promotes that post-load fallback to local blockwise
-loading. The loader materializes one checkpoint block, quantizes it, and
-releases the source block before reading the next. Multi-rank and offloaded
-runs retain their existing placement-specific paths.
+block-owned targets promotes a post-load fallback to local blockwise loading:
+the loader materializes one checkpoint block, quantizes it, and releases the
+source block before reading the next. Multi-rank and offloaded runs keep their
+placement-specific paths.
 
 “Memory-efficient FSDP” means `--memory_efficient_sharding` can avoid
 materializing the full transformer before FSDP wraps it. “Replicated meta-load”
@@ -265,11 +258,11 @@ fill it from rank 0.
 | Cosmos3-Super and Cosmos3-Nano | Streaming; transformer targets declared | None | Transformer only | Transformer only |
 | CausalWan | Explicit `causal_wan_custom` adapter exclusion; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
 
-The FLUX PipeFusion loading branches construct their complete pipelines directly. They therefore do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. Named custom adapters are declarative exclusions: they preserve eager behavior, but a requested meta mode fails before model allocation and cannot enter the standard transformer collective path.
+The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. The named custom adapters above are declarative exclusions: they preserve eager behavior, but a requested meta mode fails before model allocation rather than entering the standard transformer collective path.
 
-#### Per-model FP4 and INT8 Coverage
+#### Per-model FP4 and INT8 Targets
 
-An entry of “No” means the runner capability check rejects the flag, even if the hardware matrix would otherwise allow the format.
+An entry of “No” means the runner capability check rejects the flag, even where the hardware table above would allow the format.
 
 | Model family | FP4 targets | INT8 targets |
 |--------------|-------------|--------------|
@@ -287,7 +280,7 @@ An entry of “No” means the runner capability check rejects the flag, even if
 - `--use_fp8_text_encoder` requires `--use_fp8_gemms`. On an FP8-capable runner that declares no text-encoder target, the text-encoder flag has no effect; a runner without FP8 capability rejects the FP8 request during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
 - RDNA4+AITER streaming FP8 for a text encoder requires `transformers>=5.0` with `transformers.core_model_loading`. On Transformers 4.x, xDiT logs the reason and uses AITER post-load conversion where placement permits it; memory-efficient FSDP rejects the fallback before allocation because its sharded meta layout cannot be changed safely. The general `transformers>=4.39.1` package floor remains valid.
 - Native torchao text-encoder loading requires `torchao>=0.15.0`, Diffusers `PipelineQuantizationConfig`, and Transformers `TorchAoConfig` quantize-on-load APIs. Native torchao transformer loading separately requires Diffusers `TorchAoConfig` accepting the exact `AOBaseConfig`; this includes NVFP4 and INT8 when installed APIs support them. These APIs are feature-probed lazily and unavailable paths fall back explicitly where placement permits it.
-- `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`. This exclusion includes explicit hybrid FP8/FP4 mode. INT8 is also rejected on ROCm.
+- `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`, and that exclusion includes explicit hybrid FP8/FP4 mode.
 - Setting `--use_fp8_gemms` and `--use_fp4_gemms` together requires `--use_hybrid_gemm_schedule`; the generic combination is rejected. The hybrid FP4 path owns its FP8 high-precision conversion, so the generic FP8 traversal does not run afterward. Model-selected quality overrides and FP8-only components remain FP8. Use the FP8 precision-override flags only with FP4.
 - `--memory_efficient_sharding` requires `--fully_shard_degree > 1`. It is a sharded load: rank 0 reads one block at a time and broadcasts it within the FSDP group before each rank receives its shard.
 - `--fully_shard_degree` is orthogonal to the parallel degree and does not contribute to it. A multi-rank run must still declare a parallel degree whose product (`data × cfg × sequence × tensor × pipefusion`) equals the DiT parallel size, so pair `--fully_shard_degree N` with, for example, `--ulysses_degree N`. Setting only `--fully_shard_degree` fails config validation before the model is built.
@@ -298,7 +291,7 @@ An entry of “No” means the runner capability check rejects the flag, even if
 - Offload works across ranks: each rank onloads to its own local device, so it combines with a parallel degree and with the replicated meta load.
 - `--enable_group_cpu_offload` and `--enable_sequential_cpu_offload` are rejected with `--fully_shard_degree > 1`, because both reach inside a parameter that sharding has replaced with a DTensor: the group hook asks each parameter whether it is pinned, for which torch registers no sharding strategy, and sequential offload rebuilds each parameter as it moves it, which needs a spec a plain tensor does not carry. `--enable_model_cpu_offload` moves whole components and does work on top of a sharded, blockwise-filled load.
 
-#### Practical Examples
+#### Load and Quantization Examples
 
 RDNA4 transformer-only streaming FP8:
 
@@ -348,7 +341,7 @@ xdit --model FLUX.2-dev \
     --use_fp4_gemms
 ```
 
-These examples show the loading contract, not universal performance recommendations. Quantized output quality, peak memory, kernel availability, and the best override patterns depend on the checkpoint, GPU, torch/torchao/AITER versions, and parallel layout.
+These examples show how the flags are wired, not tuned recommendations: output quality, peak memory, and kernel availability depend on the checkpoint, the GPU, the torch/torchao/AITER versions, and the parallel layout.
 
 ### Model-specific Arguments
 

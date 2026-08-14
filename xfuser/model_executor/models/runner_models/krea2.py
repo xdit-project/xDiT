@@ -18,6 +18,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    KREA2_TEXT_ENCODER_EXCLUSION,
+    LoadDeclaration,
+)
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 
@@ -67,6 +71,11 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
     )
 
 
+@LoadDeclaration.declare(
+    "transformer",
+    replicated=True,
+    component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
+)
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
 
@@ -118,11 +127,7 @@ class _Krea2BaseModel(xFuserModel):
         )
 
         log(f"Loading {self.settings.model_name}")
-        transformer = xFuserKrea2Transformer2DWrapper.from_pretrained(
-            self.settings.model_name,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-        )
+        transformer = self._build_transformer(xFuserKrea2Transformer2DWrapper)
 
         # On ROCm 7.13, Qwen3VL bfloat16 GEMM shapes (with max_sequence_length > 448)
         # may produce non-deterministic NaN via a split-K uninitialized-output issue.
@@ -183,6 +188,11 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("krea/krea-2-raw")
 @register_model("krea/Krea-2-Raw")
 @register_model("Krea-2-Raw")
+@LoadDeclaration.declare(
+    "transformer",
+    replicated=True,
+    component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
+)
 class xFuserKrea2RawModel(_Krea2BaseModel):
     """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
 
@@ -207,7 +217,10 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
                 "dtype": torch.bfloat16,
             },
             "text_encoder": {
-                "wrap_attrs": ["model.layers"],
+                # Qwen3VLModel holds its decoder layers under language_model, beside the vision
+                # tower. "model.layers", where a text-only encoder keeps them, resolves to nothing
+                # here and takes every sharded case down with an AttributeError.
+                "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },
         },
@@ -217,6 +230,11 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("krea/krea-2-turbo")
 @register_model("krea/Krea-2-Turbo")
 @register_model("Krea-2-Turbo")
+@LoadDeclaration.declare(
+    "transformer",
+    replicated=True,
+    component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
+)
 class xFuserKrea2TurboModel(_Krea2BaseModel):
     """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
 
@@ -244,7 +262,7 @@ class xFuserKrea2TurboModel(_Krea2BaseModel):
                 "dtype": torch.bfloat16,
             },
             "text_encoder": {
-                "wrap_attrs": ["model.layers"],
+                "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },
         },

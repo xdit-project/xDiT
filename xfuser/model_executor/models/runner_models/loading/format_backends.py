@@ -13,11 +13,13 @@ MXFP4_STREAMING_FALLBACK = (
     "AITER MXFP4 conversion requires each full-precision weight before creating "
     "xFuserMXFP4Linear packed state; no safe Diffusers per-weight loader exists"
 )
-# AITER only compiles -D__Float4_e2m1fn_x2 when the build arch is not gfx942 and
-# AITER_FP4x2 is enabled (aiter/jit/core.py). Without that define, its FP4 quant
-# entry points reach an AITER_CHECK(false) that aborts the process, so this has
-# to be caught in the probe rather than by try/except at the call site.
-_AITER_FP4_UNSUPPORTED_ARCHS = ("gfx942",)
+# The architectures AITER has FP4 kernels for, per its own arch_info.is_fp4_avail. Its build gate
+# is wider than that (aiter/jit/core.py compiles -D__Float4_e2m1fn_x2 for anything but gfx942 when
+# AITER_FP4x2 is enabled), but the kernels behind the define are narrower: the hand-written A4W4
+# assembly covers gfx942 and gfx950, gemm_a4w4 then raises on gfx942, and only gfx950 carries tuned
+# configs. RDNA4 has FP8 kernels and no FP4 ones. An arch off this list reaches an AITER_CHECK(false)
+# that aborts the process, so it has to be refused here rather than caught at the call site.
+_AITER_FP4_ARCHS = ("gfx950", "gfx1250")
 
 
 def _result(value: _ProbeResult) -> tuple[bool, str | None]:
@@ -121,18 +123,18 @@ def _gcn_arch_name() -> str | None:
 def _probe_aiter_fp4_kernels(
     gcn_arch_probe: Callable[[], str | None] | None = None,
 ) -> tuple[bool, str | None]:
-    """Reject architectures where AITER builds its FP4 kernels out."""
+    """Accept only architectures AITER has FP4 kernels for."""
 
     if int(os.getenv("AITER_FP4x2", "1")) <= 0:
         return False, "AITER FP4 kernels are disabled by AITER_FP4x2=0"
     arch = (gcn_arch_probe or _gcn_arch_name)()
     if arch is None:
         return False, "cannot determine the ROCm architecture for AITER FP4 support"
-    unsupported = [name for name in _AITER_FP4_UNSUPPORTED_ARCHS if name in arch]
-    if unsupported:
+    if not any(name in arch for name in _AITER_FP4_ARCHS):
         return (
             False,
-            f"AITER builds no FP4 (Float4_e2m1fn_x2) kernels for {unsupported[0]}",
+            f"AITER builds no FP4 (Float4_e2m1fn_x2) kernels for {arch}; "
+            f"FP4 on ROCm requires {' or '.join(_AITER_FP4_ARCHS)}",
         )
     return True, None
 

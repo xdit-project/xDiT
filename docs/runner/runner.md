@@ -180,9 +180,9 @@ checks and target declarations also apply.
 
 | Hardware / available backend | FP8 (`--use_fp8_gemms`) | FP4 (`--use_fp4_gemms`) | INT8 (`--use_int8_gemms`) |
 |------------------------------|--------------------------|--------------------------|-----------------------------|
-| ROCm RDNA4 (`gfx1200`/`gfx1201`) + AITER | AITER block-scale W8A8 FP8 (block size 128); streaming load where the runner is wired for it, otherwise layer-by-layer post-load | AITER MXFP4; ordinary loads convert after load, replicated/FSDP meta loads convert blockwise; runtime hybrid FP8/FP4 is supported | Excluded: INT8 is rejected on ROCm |
-| ROCm RDNA4 without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
-| Other ROCm + AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback; AITER FP8 block-scale is RDNA4-only | AITER MXFP4 | Excluded: INT8 is rejected on ROCm |
+| ROCm RDNA4 (`gfx1200`/`gfx1201`) + AITER | AITER block-scale W8A8 FP8 (block size 128); streaming load where the runner is wired for it, otherwise layer-by-layer post-load | Excluded: AITER ships no FP4 kernels for RDNA4, so preflight refuses it before allocation | Excluded: INT8 is rejected on ROCm |
+| ROCm RDNA4 without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER, which has no RDNA4 FP4 kernels either way | Excluded: INT8 is rejected on ROCm |
+| Other ROCm + AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback; AITER FP8 block-scale is RDNA4-only | AITER MXFP4 on `gfx950` and `gfx1250`, the architectures AITER has FP4 kernels for; ordinary loads convert after load, replicated/FSDP meta loads convert blockwise; runtime hybrid FP8/FP4 is supported. Any other architecture, `gfx942` included, is refused in preflight | Excluded: INT8 is rejected on ROCm |
 | Other ROCm without AITER | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: ROCm FP4 requires AITER | Excluded: INT8 is rejected on ROCm |
 | CUDA capability 10.0+ (Blackwell) | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | torchao NVFP4 with dynamic per-tensor activation scaling; native Diffusers streams NVFP4 leaves while explicit FP8 overrides remain full precision for post-load FP8 conversion; hybrid ownership is excluded | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming preserves target and minimum-size exclusions |
 | CUDA capability 8.9 through 9.x | torchao per-tensor dynamic-activation/FP8-weight; native Diffusers/Transformers per-weight streaming where API, exact target mapping, and placement permit, otherwise explicit post-load fallback | Excluded: NVFP4 requires capability 10.0+ | torchao dynamic-activation/dynamic-weight W8A8 INT8; native Diffusers per-weight streaming where accepted |
@@ -212,9 +212,11 @@ ROCm MXFP4 has no native per-weight streaming path. AITER needs the full source
 weight to create and shuffle `xFuserMXFP4Linear` state. Ordinary loads convert
 post-load; replicated and FSDP meta-loads convert each block before placement.
 Preflight checks `aiter.get_hip_quant`, `aiter.QuantType.per_1x32`,
-`aiter.gemm_a4w4`, and `aiter.ops.shuffle.shuffle_weight`. ROCm plus those
-symbols is the capability contract preflight can check; whether the kernels run
-depends on the card. The packed MXFP4 weight is a shardable, non-trainable `Parameter`.
+`aiter.gemm_a4w4`, and `aiter.ops.shuffle.shuffle_weight`, then the architecture:
+AITER exports those symbols everywhere but builds FP4 kernels only for `gfx950`
+and `gfx1250`, and calling them elsewhere aborts the process rather than raising.
+`AITER_FP4x2=0` disables them too, and preflight honours that. The packed MXFP4
+weight is a shardable, non-trainable `Parameter`.
 Its scale is a persistent replicated buffer.
 
 All quantized GEMM modes are inference-only. TorchAO serialization requires

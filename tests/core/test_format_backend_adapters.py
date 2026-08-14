@@ -243,14 +243,19 @@ def test_aiter_mxfp4_probe_rejects_architectures_without_fp4_kernels(
 @pytest.mark.parametrize(
     ("arch", "fp4x2", "expected_available", "expected_reason"),
     [
-        ("gfx1201", None, True, None),
         ("gfx950:sramecc+:xnack-", None, True, None),
+        ("gfx1250", None, True, None),
+        # RDNA4 runs AITER FP8 and has no FP4 kernels, so asking for FP4 there has to be
+        # refused in preflight; reaching AITER aborts the process instead of raising.
+        ("gfx1201", None, False, "gfx1201"),
+        ("gfx1200", None, False, "gfx1200"),
+        ("gfx1100", None, False, "gfx1100"),
         ("gfx942:sramecc+:xnack-", None, False, "gfx942"),
-        ("gfx1201", "0", False, "AITER_FP4x2=0"),
+        ("gfx950", "0", False, "AITER_FP4x2=0"),
         (None, None, False, "cannot determine the ROCm architecture"),
     ],
 )
-def test_aiter_fp4_kernel_probe_mirrors_the_aiter_build_gate(
+def test_aiter_fp4_kernel_probe_accepts_only_archs_with_fp4_kernels(
     modules,
     monkeypatch,
     arch,

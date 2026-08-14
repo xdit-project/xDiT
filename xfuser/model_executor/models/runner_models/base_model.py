@@ -56,11 +56,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     select_load_contract,
     select_runtime_quantization,
 )
-from xfuser.model_executor.models.runner_models.loading.format_backends import (
-    module_path_is_covered,
-)
 from xfuser.model_executor.models.runner_models.loading.placement import (
-    conversion_filter,
     place_pipeline_components,
 )
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
@@ -1040,135 +1036,6 @@ class xFuserModel(abc.ABC):
                 "The following layers will be quantized to FP8, to maintain output quality: "
                 f"{suffixes} (suffix match)"
             )
-
-
-    def _setup_mxfp4_gemms(self, local_rank):
-        adapter = self.format_backend
-        for module_name in self.settings.fp4_gemm_module_list:
-            component_name = module_name.partition(".")[0]
-            convert, filter_fn = conversion_filter(
-                module_name,
-                self.quantization_ledger.streaming_targets,
-            )
-            if not convert:
-                continue
-            # Certain models benefit from a hybrid quantization strategy: applying FP8 to
-            # a number of transformer blocks while using FP4 for others. This mixed-precision
-            # approach balances performance and output quality better than uniform quantization.
-            if self.quantization_ledger.claim_description(component_name):
-                from .loading.format_backends import (
-                    prepare_native_transformer_format_load,
-                )
-
-                descriptor = prepare_native_transformer_format_load(
-                    adapter,
-                    component_name=component_name,
-                    targets=self.backends.format_targets_for(component_name),
-                    stream_quant=True,
-                    precision_prefixes=(
-                        self.settings.fp8_precision_overrides or ()
-                    ),
-                    precision_suffixes=(
-                        self.settings.fp8_precision_override_suffixes or ()
-                    ),
-                    hybrid=self.config.use_hybrid_gemm_schedule,
-                ).descriptor
-                log(descriptor.log_message())
-            module = rgetattr(self.pipe, module_name)
-            convert_kwargs = {}
-            if filter_fn is not None:
-                convert_kwargs["filter_fn"] = filter_fn
-            adapter.convert_module(
-                module,
-                fp8_layers=self.settings.fp8_precision_overrides,
-                fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
-                hybrid=self.config.use_hybrid_gemm_schedule,
-                device=f"cuda:{local_rank}",
-                **convert_kwargs,
-            )
-        self._setup_fp8_only_gemm_modules(local_rank)
-
-    def _setup_fp8_only_gemm_modules(self, local_rank):
-        # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
-        # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
-        # where the low-noise transformer should use FP8 quantization.
-        # This transformer generates fine details and requires higher precision to maintain quality.
-        fp4_modules = set(self.settings.fp4_gemm_module_list or ())
-        fp8_only_modules = [
-            name
-            for name in self.fp8.module_list()
-            if not any(
-                module_path_is_covered(name, fp4_module)
-                for fp4_module in fp4_modules
-            )
-        ]
-        if not fp8_only_modules:
-            return
-        adapter = self.blockwise_fp8_backend
-        for module_name in fp8_only_modules:
-            excluded_paths = fp4_modules | self.quantization_ledger.already_quantized(
-                fp8=True
-            )
-            convert, filter_fn = conversion_filter(
-                module_name,
-                excluded_paths,
-                include_suffixes=self.settings.fp8_gemm_include_suffixes,
-            )
-            if not convert:
-                continue
-            log(f"Quantizing linear layers in {module_name} to FP8...")
-            module = rgetattr(self.pipe, module_name)
-            convert_kwargs = {}
-            if filter_fn is not None:
-                convert_kwargs["filter_fn"] = filter_fn
-            adapter.convert_module(
-                module,
-                device=f"cuda:{local_rank}",
-                **convert_kwargs,
-            )
-
-    def _setup_nvfp4_gemms(self, local_rank):
-        adapter = self.format_backend
-        for module_name in self.settings.fp4_gemm_module_list:
-            component_name = module_name.partition(".")[0]
-            convert, filter_fn = conversion_filter(
-                module_name,
-                self.quantization_ledger.streaming_targets,
-            )
-            if not convert:
-                continue
-            if self.quantization_ledger.claim_description(component_name):
-                from .loading.format_backends import (
-                    prepare_native_transformer_format_load,
-                )
-
-                descriptor = prepare_native_transformer_format_load(
-                    adapter,
-                    component_name=component_name,
-                    targets=self.backends.format_targets_for(component_name),
-                    stream_quant=False,
-                    precision_prefixes=(
-                        self.settings.fp8_precision_overrides or ()
-                    ),
-                    precision_suffixes=(
-                        self.settings.fp8_precision_override_suffixes or ()
-                    ),
-                    hybrid=self.config.use_hybrid_gemm_schedule,
-                ).descriptor
-                log(descriptor.log_message())
-            module = rgetattr(self.pipe, module_name)
-            convert_kwargs = {}
-            if filter_fn is not None:
-                convert_kwargs["filter_fn"] = filter_fn
-            adapter.convert_module(
-                module,
-                fp8_layers=self.settings.fp8_precision_overrides,
-                fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
-                hybrid=self.config.use_hybrid_gemm_schedule,
-                device=f"cuda:{local_rank}",
-                **convert_kwargs,
-            )
-        self._setup_fp8_only_gemm_modules(local_rank)
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

@@ -89,9 +89,9 @@ def place_pipeline_components(model) -> None:
 
     if model.config.use_fp4_gemms:
         if _is_cuda():
-            model._setup_nvfp4_gemms(local_rank=local_rank)
+            setup_nvfp4_gemms(model, local_rank)
         else:
-            model._setup_mxfp4_gemms(local_rank=local_rank)
+            setup_mxfp4_gemms(model, local_rank)
 
     # FP4 setup owns its own hybrid FP8 path and any declared FP8-only modules, so the generic walk
     # would re-quantize inside the hybrid wrappers it just built.
@@ -104,6 +104,96 @@ def place_pipeline_components(model) -> None:
 
     if model.config.use_int8_gemms:
         _convert_int8_on_device(model, local_rank)
+
+
+def setup_mxfp4_gemms(model, local_rank) -> None:
+    """Quantize the FP4 modules to MXFP4, the format ROCm runs."""
+    _setup_fp4_gemms(model, local_rank, stream_quant=True)
+
+
+def setup_nvfp4_gemms(model, local_rank) -> None:
+    """Quantize the FP4 modules to NVFP4, the format CUDA runs."""
+    _setup_fp4_gemms(model, local_rank, stream_quant=False)
+
+
+def _setup_fp4_gemms(model, local_rank, *, stream_quant) -> None:
+    adapter = model.format_backend
+    for module_name in model.settings.fp4_gemm_module_list:
+        component_name = module_name.partition(".")[0]
+        convert, filter_fn = conversion_filter(
+            module_name,
+            model.quantization_ledger.streaming_targets,
+        )
+        if not convert:
+            continue
+        # Some models balance performance against quality better by keeping some blocks at FP8
+        # while the rest go to FP4, rather than quantizing uniformly.
+        if model.quantization_ledger.claim_description(component_name):
+            descriptor = prepare_native_transformer_format_load(
+                adapter,
+                component_name=component_name,
+                targets=model.backends.format_targets_for(component_name),
+                stream_quant=stream_quant,
+                precision_prefixes=(model.settings.fp8_precision_overrides or ()),
+                precision_suffixes=(
+                    model.settings.fp8_precision_override_suffixes or ()
+                ),
+                hybrid=model.config.use_hybrid_gemm_schedule,
+            ).descriptor
+            log(descriptor.log_message())
+        convert_kwargs = {}
+        if filter_fn is not None:
+            convert_kwargs["filter_fn"] = filter_fn
+        adapter.convert_module(
+            rgetattr(model.pipe, module_name),
+            fp8_layers=model.settings.fp8_precision_overrides,
+            fp8_suffix_layers=model.settings.fp8_precision_override_suffixes,
+            hybrid=model.config.use_hybrid_gemm_schedule,
+            device=f"cuda:{local_rank}",
+            **convert_kwargs,
+        )
+    setup_fp8_only_gemm_modules(model, local_rank)
+
+
+def setup_fp8_only_gemm_modules(model, local_rank) -> None:
+    """Quantize to FP8 any module the run names for FP8 but not for FP4.
+
+    MoE models such as Wan2.2 rely on this: the low-noise transformer generates the fine detail and
+    needs FP8's precision, while the rest of the model can take FP4.
+    """
+
+    fp4_modules = set(model.settings.fp4_gemm_module_list or ())
+    fp8_only_modules = [
+        name
+        for name in model.fp8.module_list()
+        if not any(
+            module_path_is_covered(name, fp4_module)
+            for fp4_module in fp4_modules
+        )
+    ]
+    if not fp8_only_modules:
+        return
+    adapter = model.blockwise_fp8_backend
+    for module_name in fp8_only_modules:
+        excluded_paths = fp4_modules | model.quantization_ledger.already_quantized(
+            fp8=True
+        )
+        convert, filter_fn = conversion_filter(
+            module_name,
+            excluded_paths,
+            include_suffixes=model.settings.fp8_gemm_include_suffixes,
+        )
+        if not convert:
+            continue
+        log(f"Quantizing linear layers in {module_name} to FP8...")
+        convert_kwargs = {}
+        if filter_fn is not None:
+            convert_kwargs["filter_fn"] = filter_fn
+        adapter.convert_module(
+            rgetattr(model.pipe, module_name),
+            device=f"cuda:{local_rank}",
+            **convert_kwargs,
+        )
 
 
 def _convert_fp8_on_host(model, adapter, local_rank, offload_requested) -> None:

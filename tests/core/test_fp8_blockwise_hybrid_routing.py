@@ -445,9 +445,9 @@ def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
         ),
         quantization_ledger=QuantizationLedger(),
     )
-    monkeypatch.setattr(base_model, "log", lambda *_args: None)
+    monkeypatch.setattr(placement, "log", lambda *_args: None)
 
-    xFuserModel._setup_fp8_only_gemm_modules(model, local_rank=1)
+    placement.setup_fp8_only_gemm_modules(model, local_rank=1)
 
     module, kwargs = fp8_calls[0]
     filter_fn = kwargs.pop("filter_fn")
@@ -749,21 +749,21 @@ def test_fp4_override_under_fsdp_requires_patches_with_aiter_fp8_backend(
             "cuda",
             QuantizationBackend.TORCHAO,
             False,
-            "_setup_nvfp4_gemms",
+            "setup_nvfp4_gemms",
             QuantizationBackend.TORCHAO,
         ),
         (
             "rdna4_rocm",
             QuantizationBackend.AITER,
             True,
-            "_setup_mxfp4_gemms",
+            "setup_mxfp4_gemms",
             QuantizationBackend.AITER,
         ),
         (
             "other_rocm",
             QuantizationBackend.AITER,
             False,
-            "_setup_mxfp4_gemms",
+            "setup_mxfp4_gemms",
             QuantizationBackend.TORCHAO,
         ),
     ],
@@ -796,7 +796,7 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
         convert_module=lambda module, **kwargs: fp4_calls.append((module, kwargs))
     )
     adapter.convert_module = lambda module, **kwargs: fp8_calls.append((module, kwargs))
-    monkeypatch.setattr(base_model, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(placement, "log", lambda *args, **kwargs: None)
     model = SimpleNamespace(
         settings=SimpleNamespace(
             fp4_gemm_module_list=["transformer.blocks"],
@@ -821,11 +821,7 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
             descriptor_components={"transformer"}
         ),
     )
-    model._setup_fp8_only_gemm_modules = (
-        lambda rank: xFuserModel._setup_fp8_only_gemm_modules(model, rank)
-    )
-
-    getattr(xFuserModel, setup_name)(model, local_rank=2)
+    getattr(placement, setup_name)(model, local_rank=2)
 
     assert adapter.backend is expected_fp8_backend, platform
     assert [call[0] for call in fp4_calls] == [fp4_module]

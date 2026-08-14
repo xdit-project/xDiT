@@ -151,7 +151,6 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
     )
     model.pipe = SimpleNamespace(to=lambda device: model.pipe)
     model._replicated_broadcast_load = lambda: False
-    model._setup_mxfp4_gemms = lambda local_rank: calls.append(("fp4", local_rank))
     model._setup_hybrid_gemm_schedule = lambda input_args: calls.append(
         ("schedule", input_args)
     )
@@ -169,6 +168,12 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
     # No meta loader in this scenario; otherwise the eager fill runs and reaches
     # the real distributed state.
     monkeypatch.setattr(type(model), "_loader", None, raising=False)
+
+    monkeypatch.setattr(
+        runtime.placement,
+        "setup_mxfp4_gemms",
+        lambda _model, local_rank: calls.append(("fp4", local_rank)),
+    )
 
     for module in (runtime.base, runtime.placement):
         monkeypatch.setattr(

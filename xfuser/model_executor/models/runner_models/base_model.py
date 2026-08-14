@@ -6,7 +6,7 @@ import json
 import functools
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from torch.profiler import profile, record_function, ProfilerActivity
 import diffusers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -21,15 +21,9 @@ from xfuser.envs import (
     _is_hip,
     _is_cuda,
 )
-from xfuser.core.distributed.parallel_state import get_fs_group
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
-    quantize_linear_layers_to_int8,
-    quantize_linear_layers_to_fp8,
-    quantize_linear_layers_to_fp8_blockscale,
-    quantize_linear_layers_to_fp4,
-    quantize_linear_layers_to_nvfp4,
     convert_model_convs_to_channels_last,
     _use_aiter_fp8_rdna4,
     rgetattr,
@@ -45,10 +39,29 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     get_runtime_state,
     init_distributed_environment,
-    shard_component,
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    CheckpointManifest,
+    CheckpointRequest,
+)
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadDeclaration,
+    LoadContract,
+    assert_offload_is_compatible_with_format,
+    assert_offload_is_compatible_with_sharding,
+    assert_requested_materialization_is_honoured,
+    select_effective_materialization_mode,
+    select_load_contract,
+    select_runtime_quantization,
+)
+from xfuser.model_executor.models.runner_models.loading.placement import (
+    place_pipeline_components,
+)
+from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+    QuantizationLedger,
+)
 
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
@@ -166,6 +179,7 @@ class ModelSettings:
     fps: Optional[int] = None
     int8_gemm_module_list: List[str] = None
     fp8_gemm_module_list: List[str] = None
+    fp8_text_encoder_module_list: List[str] = None
     fp8_gemm_include_suffixes: Optional[Tuple[str, ...]] = None
     fp4_gemm_module_list: List[str] = None
     fp8_precision_overrides: Tuple[str] = None
@@ -234,10 +248,19 @@ class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
 
     capabilities: ModelCapabilities = ModelCapabilities()
+    load_declaration: LoadDeclaration = LoadDeclaration.for_runner(
+        capabilities,
+        unsupported_reason=(
+            "runner has not declared a compatible meta construction seam"
+        ),
+    )
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
     model_output_type: str = ""
     fps: int = 0
+    # Backend selection reads this before a contract is chosen, so it has to exist on
+    # the class rather than only after __init__ assigns it.
+    load_contract: Optional[LoadContract] = None
 
     # Lowest diffusers release this model is expected to run on, used only to name an
     # upgrade target when a load fails. It never gates a load, so a value above the
@@ -250,10 +273,59 @@ class xFuserModel(abc.ABC):
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
+        self._refresh_load_declaration()
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
         self.pipe = None
+        self.load_contract = None
+        # What the load quantized, written by the load routes and read by the post-load walks.
+        self.quantization_ledger = QuantizationLedger()
+
+    def _refresh_load_declaration(self) -> None:
+        """Re-derive FSDP support from instance-customized settings."""
+        declaration = type(self).load_declaration
+        self.load_declaration = LoadDeclaration.for_runner(
+            self.capabilities,
+            meta_transformers=declaration.meta_transformers,
+            replicated=bool(
+                declaration.replicated_meta_transformers
+            ),
+            fsdp_strategy=self.settings.fsdp_strategy,
+            loader_adapter=declaration.loader_adapter,
+            component_exclusions=declaration.component_exclusions,
+            unsupported_reason=declaration.unsupported_reason,
+        )
+
+    def _select_preload_contract(self, *, world_size: int):
+        """Resolve and validate loading before model allocation or load collectives."""
+        assert_requested_materialization_is_honoured(
+            self.config, world_size=world_size
+        )
+        assert_offload_is_compatible_with_sharding(self.config)
+        mode = select_effective_materialization_mode(
+            self.config, world_size=world_size
+        )
+        requested_format, backend = select_runtime_quantization(
+            self.config,
+            aiter_fp8_active=bool(
+                self.config.use_fp8_gemms and _use_aiter_fp8_rdna4()
+            ),
+            cuda_active=_is_cuda(),
+        )
+        assert_offload_is_compatible_with_format(
+            self.config,
+            requested_format=requested_format,
+            selected_backend=backend,
+        )
+        return select_load_contract(
+            requested_format=requested_format,
+            selected_backend=backend,
+            materialization_mode=mode,
+            declaration=self.load_declaration,
+            fsdp_strategy=self.settings.fsdp_strategy,
+            runner_name=type(self).__name__,
+        )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         """Hook for subclasses to mutate self.settings before validation and CLI overrides.
@@ -268,6 +340,16 @@ class xFuserModel(abc.ABC):
     def _update_model_settings(self, config: xFuserArgs) -> None:
         if config.use_fp4_gemms:
             self._apply_fp8_override_cli_from_config(config)
+        te_targets = self.settings.fp8_text_encoder_module_list
+        if config.use_fp8_text_encoder and not te_targets:
+            log(f"--use_fp8_text_encoder has no effect for {type(self).__name__}: it declares no "
+                f"text-encoder FP8 targets.")
+        elif te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
+            # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
+            # indistinguishable from --use_fp8_gemms failing to take effect.
+            log(f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
+                f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
+                f"to quantize them too, for less memory at some risk to text conditioning.")
 
     def _load_model_checked(self) -> DiffusionPipeline:
         """Load the pipeline, reporting a missing diffusers symbol as a version problem.
@@ -304,6 +386,15 @@ class xFuserModel(abc.ABC):
             log("Initializing distributed environment...")
             init_distributed_environment()
 
+        self.load_contract = self._select_preload_contract(
+            world_size=get_world_group().world_size
+        )
+        # Capability/backend mismatches fail here, before _load_model allocates
+        # transformer weights.
+        _ = self.fp8_backend
+        _ = self.format_backend
+        if self.backends.uses_blockwise_fp8():
+            _ = self.blockwise_fp8_backend
         self.engine_config, _ = self.config.create_config()
         log("Loading model pipeline...")
         self.pipe = self._load_model_checked()
@@ -322,6 +413,119 @@ class xFuserModel(abc.ABC):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)
 
+    @property
+    def fp8(self):
+        """This run's FP8 coverage and the loader configs that apply it (see fp8_plan.Fp8Plan)."""
+        from xfuser.model_executor.models.runner_models.loading.fp8_plan import Fp8Plan
+        return Fp8Plan(self)
+
+    def _transformer_quantization_adapter(self, component_name: str):
+        """The adapter and component-relative targets owning one transformer.
+
+        Kept as a method rather than read off ``backends`` directly because runners override it to
+        route a component elsewhere (see wan's distilled path), and ``_build_transformer`` looks it
+        up by name to find those overrides.
+        """
+        return self.backends.transformer_adapter(component_name)
+
+    @functools.cached_property
+    def backends(self):
+        """The quantization implementations this run uses (see backend_selection).
+
+        Cached because selecting an adapter probes the environment, and every consumer has to get
+        the same answer. The three adapters below are exposed directly because they read as
+        properties of the model at every call site; the rest of the surface stays behind this.
+        """
+        from .loading.backend_selection import QuantizationBackends
+
+        return QuantizationBackends(self)
+
+    @property
+    def fp8_backend(self):
+        """The selected FP8 implementation, validated before allocation."""
+        return self.backends.fp8
+
+    @property
+    def format_backend(self):
+        """Primary FP4/INT8 implementation, validated before allocation."""
+        return self.backends.format
+
+    @property
+    def blockwise_fp8_backend(self):
+        """FP8 converter for pure FP8 and FP8-only portions of hybrid loads."""
+        return self.backends.blockwise_fp8
+
+    def _memory_efficient_fsdp_load(self) -> bool:
+        """True when the memory-efficient sharded (meta-init + rank0-broadcast) load path is on."""
+        return self._loader.fsdp_meta_load()
+
+    def _replicated_broadcast_load(self) -> bool:
+        """True when replicated components load once on rank0 and broadcast to peers
+        (see MemoryEfficientLoader.replicated_broadcast_load)."""
+        return self._loader.replicated_broadcast_load()
+
+    @functools.cached_property
+    def _loader(self):
+        """Lazy MemoryEfficientLoader bound to this model (meta-init + rank0-broadcast load).
+
+        Must stay cached, unlike ``fp8``: the loader records which transformers it built on meta, so
+        a fresh instance per access would report none of them and silently route every component to
+        the wrong fill path.
+        """
+        from xfuser.model_executor.models.runner_models.loading.meta_load import MemoryEfficientLoader
+        return MemoryEfficientLoader(self)
+
+    def _checkpoint_request(self, subfolder: str | None = None, **kwargs) -> CheckpointRequest:
+        """Checkpoint identity shared by discovery and from_pretrained calls.
+
+        HF_HUB_OFFLINE decides local_files_only unless a caller has already said. Without this, a
+        sharded checkpoint that is fully present on disk still fails when the hub cannot be reached:
+        Diffusers only skips its "does the repo have these shards" metadata call when
+        local_files_only is true, so setting the standard offline variable was not enough, and a
+        model whose weights are cached but whose repo refuses downloads could not be loaded at all.
+        """
+        from huggingface_hub.constants import HF_HUB_OFFLINE
+
+        kwargs.setdefault("local_files_only", HF_HUB_OFFLINE)
+        return CheckpointRequest(
+            self.settings.model_name, subfolder=subfolder, **kwargs
+        )
+
+    def _build_transformer(
+        self,
+        wrapper_cls,
+        subfolder: str | None = None,
+        init_kwargs: dict | None = None,
+        stream_quant: bool = True,
+        checkpoint_request: CheckpointRequest | None = None,
+        weight_source: CheckpointManifest | None = None,
+    ):
+        """Load a transformer through the materialization this run asked for.
+
+        The routing, and the quantization each route needs, live in
+        ``loading.transformer_load``; this is the seam runners call.
+        """
+        return self._loader.load_transformer(
+            wrapper_cls,
+            subfolder=subfolder,
+            init_kwargs=init_kwargs,
+            stream_quant=stream_quant,
+            checkpoint_request=checkpoint_request,
+            weight_source=weight_source,
+        )
+
+    def _meta_te_kwargs(self, existing_quantization_config=None):
+        """Plan each declared text encoder's quantization and fill.
+
+        Returns ``(pipe_component_kwargs, te_quant_config)`` for the pipeline's
+        ``from_pretrained``; the planning lives in ``loading.text_encoder_plan``.
+        """
+        return self._loader.plan_text_encoders(existing_quantization_config)
+
+    def _local_onload_device(self) -> torch.device:
+        """The device this rank offloads to and from, which is never implicitly cuda:0."""
+        return torch.device(f"cuda:{get_world_group().local_rank}")
+
     def _enable_options(self) -> None:
         """ Enable model options based on config"""
         if getattr(self.config, "use_spargeattn_head_balance", False):
@@ -335,12 +539,46 @@ class xFuserModel(abc.ABC):
             log("Enabling VAE tiling...")
             self.pipe.vae.enable_tiling()
 
-        if self.config.enable_sequential_cpu_offload:
+        if self.config.enable_group_cpu_offload:
+            # block_level groups only top-level ModuleLists: fits compiled transformers
+            # (blocks are top-level) and avoids the per-block-compile recompile storm that
+            # leaf-level hooks trigger. Eager components nest their layers (e.g. Mistral-3 at
+            # model.language_model.layers) where block_level cannot reach, leaving the whole
+            # component in one unmatched group and OOMing; they use leaf_level, which recurses.
+            from diffusers.hooks import apply_group_offloading
+            log("Enabling group CPU offload (transformer block-level, others leaf-level, streamed)...")
+            onload_device = self._local_onload_device()
+            block_level_names = set(self._get_compiled_pipe_components())
+            for name, component in self.pipe.components.items():
+                if not isinstance(component, torch.nn.Module):
+                    continue
+                offload_type = "block_level" if name in block_level_names else "leaf_level"
+                kwargs = dict(
+                    onload_device=onload_device,
+                    offload_type=offload_type,
+                    use_stream=True,
+                    record_stream=True,
+                    # Pin each tensor as it is offloaded instead of pre-pinning the whole component:
+                    # host RAM stays flat where it is the binding constraint, at some of the
+                    # streaming win. Opt-in because it costs latency where host RAM is plentiful.
+                    low_cpu_mem_usage=self.config.group_offload_low_cpu_mem,
+                    non_blocking=True,
+                )
+                if offload_type == "block_level":
+                    kwargs["num_blocks_per_group"] = 1
+                if hasattr(component, "enable_group_offload"):
+                    component.enable_group_offload(**kwargs)
+                else:
+                    apply_group_offloading(module=component, **kwargs)
+        elif self.config.enable_sequential_cpu_offload:
             log("Enabling sequential CPU offload...")
-            self.pipe.enable_sequential_cpu_offload()
+            # Diffusers defaults the onload device to cuda:0, which every rank would
+            # then share, so the first collective fails with a duplicate GPU. The
+            # group offload above already names the local device; these must too.
+            self.pipe.enable_sequential_cpu_offload(device=self._local_onload_device())
         elif self.config.enable_model_cpu_offload:
             log("Enabling model CPU offload...")
-            self.pipe.enable_model_cpu_offload()
+            self.pipe.enable_model_cpu_offload(device=self._local_onload_device())
 
     def _get_runtime_state_pipeline(self):
         return self.pipe
@@ -348,6 +586,7 @@ class xFuserModel(abc.ABC):
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
+        config._validate_gemm_quantization_flags()
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int):
@@ -418,11 +657,8 @@ class xFuserModel(abc.ABC):
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
-        if config.use_int8_gemms:
-            if config.use_fp8_gemms or config.use_fp4_gemms:
-                raise ValueError("Cannot use int8 gemms with fp8 or fp4 gemms.")
-            if _is_hip():
-                raise ValueError("Int8 GEMMs on ROCm are not supported.")
+        if config.use_int8_gemms and _is_hip():
+            raise ValueError("Int8 GEMMs on ROCm are not supported.")
             
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
@@ -446,6 +682,10 @@ class xFuserModel(abc.ABC):
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
 
 
+    # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed buffer
+    # pool and are therefore only valid until the next replay.
+    CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
+
     def _get_compile_mode(self) -> str:
         # Overrides should return "default" when PACKAGES_CHECKER._on_rdna4():
         # CUDA graphs are slow on RDNA4.
@@ -453,6 +693,28 @@ class xFuserModel(abc.ABC):
 
     def _get_compile_dynamic(self) -> Optional[bool]:
         return None  # torch default (auto)
+
+    def _mark_cudagraph_steps(self, component: torch.nn.Module) -> None:
+        """Tell CUDA Graphs where one inference step ends, so the next may reuse its buffers.
+
+        Compiling a component blockwise makes every block its own graph segment, and a segment
+        recorded on a later step copies its inputs from the previous block's output buffer. Without a
+        step boundary the graph system still considers the earlier step's outputs live and refuses
+        the read with "accessing tensor output of CUDAGraphs that has been overwritten by a
+        subsequent run". Reaching it takes both halves: a runner that asks for reduce-overhead, and
+        sharding, which is what turns one compiled transformer into a graph per block. A pre-hook
+        rather than a wrapper because pre-hooks run before the compiled forward is entered.
+        """
+        if getattr(component, "_xfuser_marks_cudagraph_steps", False):
+            return
+        if not hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            return
+
+        def _mark(module, args, kwargs):
+            torch.compiler.cudagraph_mark_step_begin()
+
+        component.register_forward_pre_hook(_mark, with_kwargs=True, prepend=True)
+        component._xfuser_marks_cudagraph_steps = True
 
     def _get_compiled_pipe_components(self) -> List[str]:
         return ["transformer"]
@@ -504,6 +766,8 @@ class xFuserModel(abc.ABC):
                         for i in range(len(block_list)):
                             block_list[i] = torch.compile(block_list[i], mode=mode, dynamic=dynamic)
                         compiled_any = True
+                if compiled_any and mode in self.CUDAGRAPH_COMPILE_MODES:
+                    self._mark_cudagraph_steps(component)
                 if not compiled_any:
                     setattr(self.pipe, component_name, torch.compile(component, mode=mode, dynamic=dynamic))
             else:
@@ -738,45 +1002,13 @@ class xFuserModel(abc.ABC):
                 self.settings.fp8_precision_overrides,
                 self.settings.fp8_precision_override_suffixes,
             )
-        # FSDP path handles device placement and quantization (per-block for FSDP2).
+        # The sharded path places and quantizes per block as it wraps; the unsharded path moves the
+        # whole pipeline at once.
         if self.config.fully_shard_degree > 1:
-            self._shard_model_with_fsdp()
+            from .loading.shard import shard_pipeline_components
+            shard_pipeline_components(self)
         else:
-            offload_requested = (
-                self.config.enable_model_cpu_offload or self.config.enable_sequential_cpu_offload
-            )
-            # AITER FP8: quantizes layer-by-layer CPU→GPU individually before pipe.to(cuda).
-            # All other quant paths (FP4, torchao FP8) need weights on GPU first.
-            if self.config.use_fp8_gemms and _use_aiter_fp8_rdna4():
-                for module_name in self.settings.fp8_gemm_module_list:
-                    log(f"Quantizing {module_name} to FP8 block-scale (AITER)...")
-                    quantize_linear_layers_to_fp8_blockscale(
-                        rgetattr(self.pipe, module_name),
-                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                        device=f"cuda:{local_rank}",
-                    )
-            if not offload_requested:
-                self.pipe = self.pipe.to(f"cuda:{local_rank}")
-            if self.config.use_fp4_gemms:
-                if _is_cuda():
-                    self._setup_nvfp4_gemms(local_rank=local_rank)
-                else:
-                    self._setup_mxfp4_gemms(local_rank=local_rank)
-            if self.config.use_fp8_gemms and not _use_aiter_fp8_rdna4():
-                for module_name in self.settings.fp8_gemm_module_list:
-                    log(f"Quantizing {module_name} to FP8 (torchao)...")
-                    quantize_linear_layers_to_fp8(
-                        rgetattr(self.pipe, module_name),
-                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                        device=f"cuda:{local_rank}",
-                    )
-            if self.config.use_int8_gemms:
-                for module_name in self.settings.int8_gemm_module_list:
-                    log(f"Quantizing {module_name} to W8A8 INT8 (torchao)...")
-                    quantize_linear_layers_to_int8(
-                        rgetattr(self.pipe, module_name), device=f"cuda:{local_rank}",
-                        min_layer_size=512,
-                    )
+            place_pipeline_components(self)
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -786,74 +1018,6 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
-
-
-    def _shard_model_with_fsdp(self) -> None:
-        """ Shard the model with FSDP based on settings """
-        if self.config.use_fp8_gemms and _is_cuda():
-            from xfuser.core.utils.runner_utils import _TORCHAO_FLOAT8_FSDP2_PATCHES
-            assert _TORCHAO_FLOAT8_FSDP2_PATCHES, (
-                "FSDP2 + FP8 requires torchao Float8Tensor patches but they failed to apply at "
-                "import time. Check for torchao import errors in runner_utils."
-            )
-        local_rank = get_world_group().local_rank
-        fs_local_rank = get_fs_group().local_rank
-        device_group = get_fs_group().device_group
-        for component_name, component in self.pipe.components.items():
-            if component_name in self.settings.fsdp_strategy:
-                log(f"Sharding {component_name} with FSDP... "
-                    f"(VRAM before: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
-                strategy = self.settings.fsdp_strategy[component_name]
-                wrap_attrs = strategy.get("wrap_attrs", [])
-                dtype = strategy.get("dtype", None)
-                offload_policy = strategy.get("offload_policy", None)
-                quantize_fn = self._build_fsdp_quantize_fn(component_name, wrap_attrs, fs_local_rank)
-                reshard_after_forward = self.config.reshard_after_forward
-                fsdp_object = shard_component(
-                    component, wrap_attrs, device_group, fs_local_rank, dtype,
-                    quantize_fn=quantize_fn,
-                    reshard_after_forward=reshard_after_forward,
-                    memory_efficient_init=self.config.memory_efficient_sharding,
-                    offload_policy=offload_policy,
-                    # All ranks load from the same checkpoint so states are already
-                    # identical. No broadcast needed regardless of offload policy.
-                    sync_module_states=False,
-                )
-                setattr(self.pipe, component_name, fsdp_object)
-                torch.cuda.empty_cache()
-                log(f"Sharded {component_name}. "
-                    f"(VRAM after: {torch.cuda.memory_allocated(local_rank)/1e9:.2f}GB)")
-            else:
-                log(f"Skipping FSDP wrapping for {component_name}...")
-                if hasattr(component, "to"):
-                    component.to(f"cuda:{local_rank}")
-                else:
-                    log(f"Component {component_name} has no .to() method, skipping device move.")
-                    pass
-
-        # diffusers' _execution_device short-circuits on the first nn.Module component
-        # that lacks _hf_hook, returning self.device (= first module's .device).
-        # With CPUOffloadPolicy, text_encoder.device = cpu, breaking latent generation.
-        # Fix: give every nn.Module component a minimal _hf_hook so _execution_device
-        # continues past them, with cpu-offloaded components advertising cuda.
-        cpu_offloaded = {
-            name for name, s in self.settings.fsdp_strategy.items()
-            if s.get("offload_policy") == "cpu"
-        }
-        if cpu_offloaded:
-            cuda_device = f"cuda:{local_rank}"
-
-            class _ExecDeviceHook:
-                def __init__(self, execution_device):
-                    self.execution_device = execution_device
-
-            for name, component in self.pipe.components.items():
-                if not isinstance(component, torch.nn.Module):
-                    continue
-                if not hasattr(component, "_hf_hook"):
-                    component._hf_hook = _ExecDeviceHook(
-                        cuda_device if name in cpu_offloaded else None
-                    )
 
     def _log_fp8_overrides(self, prefixes, suffixes) -> None:
         """Log the FP8 precision-override patterns (prefix and suffix) consistently."""
@@ -866,135 +1030,6 @@ class xFuserModel(abc.ABC):
             log(
                 "The following layers will be quantized to FP8, to maintain output quality: "
                 f"{suffixes} (suffix match)"
-            )
-
-    def _build_fsdp_quantize_fn(
-        self, component_name: str, wrap_attrs: list, local_rank: int
-    ):
-        """
-        Return a per-block quantize callable (block, block_idx) -> None for this
-        component, or None if no quantization is configured for it.
-
-        fp8_precision_overrides entries like "5." apply to block index 5. We strip
-        the block-index prefix before passing to the quantize functions so they see
-        the same local FQN paths they would in the non-FSDP path.
-
-        Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed
-        through unchanged on every block; only prefix patterns are stripped.
-        """
-        if not (self.config.use_fp4_gemms or self.config.use_fp8_gemms or self.config.use_int8_gemms):
-            return None
-
-        device = f"cuda:{local_rank}"
-        fp4_list = set(self.settings.fp4_gemm_module_list or [])
-        fp8_list = set(self.settings.fp8_gemm_module_list or [])
-        fp8_overrides = self.settings.fp8_precision_overrides or ()
-        fp8_suffix_overrides = self.settings.fp8_precision_override_suffixes
-        int8_list = set(self.settings.int8_gemm_module_list or [])
-
-        paths = [f"{component_name}.{a}" for a in wrap_attrs]
-
-        use_fp4_here = self.config.use_fp4_gemms and any(p in fp4_list for p in paths)
-        # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
-        use_fp8_here = (
-            self.config.use_fp8_gemms and any(p in fp8_list for p in paths)
-        ) or (
-            self.config.use_fp4_gemms and any(p in fp8_list and p not in fp4_list for p in paths)
-        )
-        use_int8_here = self.config.use_int8_gemms and any(p in int8_list for p in paths)
-
-        if not use_fp4_here and not use_fp8_here and not use_int8_here:
-            return None
-
-        def quantize_fn(block, block_idx: int) -> None:
-            block_prefix = f"{block_idx}."
-            # Strip the block-index prefix so the quantize functions see local FQN paths.
-            local_fp8 = tuple(
-                o[len(block_prefix):] for o in fp8_overrides if o.startswith(block_prefix)
-            ) or None
-            if use_fp4_here:
-                if _is_cuda():
-                    quantize_linear_layers_to_nvfp4(
-                        block,
-                        fp8_layers=local_fp8,
-                        fp8_suffix_layers=fp8_suffix_overrides,
-                        device=device,
-                    )
-                else:
-                    quantize_linear_layers_to_fp4(
-                        block,
-                        fp8_layers=local_fp8,
-                        fp8_suffix_layers=fp8_suffix_overrides,
-                        use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
-                        device=device,
-                    )
-            elif use_fp8_here:
-                if _use_aiter_fp8_rdna4():
-                    quantize_linear_layers_to_fp8_blockscale(
-                        block,
-                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                        device=device,
-                    )
-                else:
-                    quantize_linear_layers_to_fp8(
-                        block,
-                        include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                        device=device,
-                    )
-            else:
-                # use_int8_here
-                quantize_linear_layers_to_int8(block, device=device, min_layer_size=512)
-
-        return quantize_fn
-
-    def _setup_mxfp4_gemms(self, local_rank):
-        for module_name in self.settings.fp4_gemm_module_list:
-            # Certain models benefit from a hybrid quantization strategy: applying FP8 to
-            # a number of transformer blocks while using FP4 for others. This mixed-precision
-            # approach balances performance and output quality better than uniform quantization.
-            log(f"Quantizing linear layers in {module_name} to FP4...")
-            module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp4(
-                module,
-                fp8_layers=self.settings.fp8_precision_overrides,
-                fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
-                use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
-                device=f"cuda:{local_rank}",
-            )
-        # Any module specified in fp8 gemms modules list and not specified in fp4 gemms module list,
-        # will be quantized to fp8, this is specially beneficial for MoE models like Wan2.2,
-        # where the low-noise transformer should use FP8 quantization.
-        # This transformer generates fine details and requires higher precision to maintain quality.
-        for module_name in self.settings.fp8_gemm_module_list:
-            if module_name in self.settings.fp4_gemm_module_list:
-                continue
-            log(f"Quantizing linear layers in {module_name} to FP8...")
-            module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp8(
-                module,
-                include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                device=f"cuda:{local_rank}",
-            )
-
-    def _setup_nvfp4_gemms(self, local_rank):
-        for module_name in self.settings.fp4_gemm_module_list:
-            log(f"Quantizing linear layers in {module_name} to NVFP4 (torchao)...")
-            module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_nvfp4(
-                module,
-                fp8_layers=self.settings.fp8_precision_overrides,
-                fp8_suffix_layers=self.settings.fp8_precision_override_suffixes,
-                device=f"cuda:{local_rank}",
-            )
-        for module_name in self.settings.fp8_gemm_module_list:
-            if module_name in self.settings.fp4_gemm_module_list:
-                continue
-            log(f"Quantizing linear layers in {module_name} to FP8...")
-            module = rgetattr(self.pipe, module_name)
-            quantize_linear_layers_to_fp8(
-                module,
-                include_suffixes=self.settings.fp8_gemm_include_suffixes,
-                device=f"cuda:{local_rank}",
             )
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -1067,6 +1102,14 @@ class xFuserModel(abc.ABC):
             return output
 
         self.pipe.vae.decode = decode_wrapper
+
+    def _make_generator(self, seed: int) -> torch.Generator:
+        """Generator on the pipe's execution device (cuda normally, cpu under offload).
+
+        randn_tensor requires the generator device to match the tensor's; hardcoding cuda
+        breaks when CPU offload runs the pipeline on cpu.
+        """
+        return torch.Generator(device=self.pipe._execution_device).manual_seed(seed)
 
     @abc.abstractmethod
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

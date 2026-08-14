@@ -175,9 +175,7 @@ The quantization flags select model-declared linear-layer targets; they do not q
 
 #### Backend and Format Semantics
 
-This matrix records the runner's implemented dispatch and rejection paths. GPU
-end-to-end validation is still pending for every listed hardware/model
-combination; see [Validation Status](#validation-status). Model capability
+This matrix records the runner's dispatch and rejection paths. Model capability
 checks and target declarations also apply.
 
 | Hardware / available backend | FP8 (`--use_fp8_gemms`) | FP4 (`--use_fp4_gemms`) | INT8 (`--use_int8_gemms`) |
@@ -215,8 +213,8 @@ weight to create and shuffle `xFuserMXFP4Linear` state. Ordinary loads convert
 post-load; replicated and FSDP meta-loads convert each block before placement.
 Preflight checks `aiter.get_hip_quant`, `aiter.QuantType.per_1x32`,
 `aiter.gemm_a4w4`, and `aiter.ops.shuffle.shuffle_weight`. ROCm plus those
-symbols is the static capability contract; kernel execution still requires GPU
-validation. The packed MXFP4 weight is a shardable, non-trainable `Parameter`.
+symbols is the capability contract preflight can check; whether the kernels run
+depends on the card. The packed MXFP4 weight is a shardable, non-trainable `Parameter`.
 Its scale is a persistent replicated buffer.
 
 All quantized GEMM modes are inference-only. TorchAO serialization requires
@@ -283,7 +281,7 @@ An entry of “No” means the runner capability check rejects the flag, even if
 
 #### Flag Combinations and Exclusions
 
-- `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 used to be implicit on supported RDNA4 runs; it is now opt-in everywhere. Add `--use_fp8_text_encoder` explicitly when wanted.
+- `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 is opt-in everywhere: add `--use_fp8_text_encoder` when you want it.
 - `--use_fp8_text_encoder` requires `--use_fp8_gemms`. On an FP8-capable runner that declares no text-encoder target, the text-encoder flag has no effect; a runner without FP8 capability rejects the FP8 request during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
 - RDNA4+AITER streaming FP8 for a text encoder requires `transformers>=5.0` with `transformers.core_model_loading`. On Transformers 4.x, xDiT logs the reason and uses AITER post-load conversion where placement permits it; memory-efficient FSDP rejects the fallback before allocation because its sharded meta layout cannot be changed safely. The general `transformers>=4.39.1` package floor remains valid.
 - Native torchao text-encoder loading requires `torchao>=0.15.0`, Diffusers `PipelineQuantizationConfig`, and Transformers `TorchAoConfig` quantize-on-load APIs. Native torchao transformer loading separately requires Diffusers `TorchAoConfig` accepting the exact `AOBaseConfig`; this includes NVFP4 and INT8 when installed APIs support them. These APIs are feature-probed lazily and unavailable paths fall back explicitly where placement permits it.
@@ -349,30 +347,6 @@ xdit --model FLUX.2-dev \
 ```
 
 These examples show the loading contract, not universal performance recommendations. Quantized output quality, peak memory, kernel availability, and the best override patterns depend on the checkpoint, GPU, torch/torchao/AITER versions, and parallel layout.
-
-#### Validation Status
-
-The reproducible external execution matrix, recorder, result schema, and
-operator workflow are in [External GPU validation](gpu_validation_handoff.md).
-Its checked-in status is **NOT RUN**; dry-runs and repository tests are not GPU
-end-to-end evidence.
-
-Part of the matrix has been executed on 8× MI355X (`gfx950`), covering the
-memory-efficient load paths in bf16 and FP8. What ran, what passed and what it
-found are reported in [Memory-efficient load results](meta_load_results.md),
-which the rows below are marked against; everything outside the paths, models
-and quantizations it names remains GPU-unvalidated here.
-
-| Contract area | Implementation status | Static / unit-test evidence in the repository | GPU end-to-end status |
-|---------------|-----------------------|----------------------------------------------|-----------------------|
-| FP8 target selection and explicit `--use_fp8_text_encoder` opt-in | Implemented | Unit tests directly exercise target inclusion/exclusion and component-prefix routing. CLI validation and each runner's exact target declarations are verified by static inspection; the registry test only guards against text-encoder targets leaking into the always-on transformer list. | Validated with the text encoder quantized alongside the transformer on fifteen models at 8 ranks on gfx950, image and video, on both the sharded and replicated placements. HunyuanVideo is the only Llama encoder among them, and FLUX.2-klein-4B the most recent. Cosmos3 is not among them and cannot be: its pipeline has no text encoder. The two models that do not declare text-encoder targets, both Krea-2 variants, ran with the transformer alone. Unvalidated on the other documented GPU/model combinations |
-| AITER diffusers/Transformers streaming adapters and FP8 layer layout | Implemented | Unit tests directly cover quantizer registration/packaging and sentinel FP8 parameter/buffer layouts without invoking kernels. Streaming adapter execution is verified only by static inspection. | Streaming checkpoint load and AITER kernels are GPU-unvalidated here |
-| Replicated meta-load policy | Implemented | Unit tests directly exercise the pure opt-in decision and exclusions for single rank, weight-splitting parallelism, and unwired runners. Collective fill behavior is verified only by static inspection. | Validated at 8 ranks with FP8 on nineteen models on gfx950, eleven image and eight video: broadcast fill and complete inference, each still image scored against an unquantized render and each clip checked frame by frame. Also validated in bf16 and FP4 at 4 ranks and bf16 at 2 ranks by the curated Wan2.2-I2V, Krea-2 and klein-4B cases. Offload combinations and the remaining quantizations remain unvalidated |
-| Memory-efficient FSDP policy and meta construction | Implemented | Unit tests directly exercise the FSDP gate and bf16 meta-transformer construction. Per-block fill and quantize routing are verified only by static inspection. | Validated at 8 ranks on nineteen models on gfx950, eleven image and eight video, bf16 and FP8, against both an eager load at the same rank count and a shard-after-materialize control: same image to four decimals, at 1.1-2.0x the load speed and 1.6-5.7x less load-time device memory. Host memory is where the video models matter: eager peaks at 492G of anonymous pages on Wan2.2-I2V against 88G blockwise, and blockwise holds every model between 68G and 104G. Load-time VRAM improves most on Cosmos3-Super, 137.7G eager against 31.0G blockwise and 24.2G in FP8. Three 4-rank spot checks. Offload combinations, INT8, and FP4 beyond the three curated Krea-2 cases remain unvalidated |
-| FP4/INT8 adapters, hardware gates, targets, and placement | Implemented | Dependency-light tests cover injected hardware routing, exact native-config acceptance, target/minimum-size exclusions, hybrid fallback, descriptors, FSDP preflight, and MXFP4 parameter/buffer layout. Guarded integration tests require installed Diffusers/torchao and skip unsupported accelerators. | MXFP4, NVFP4, INT8, mixed FP4/FP8, and model-specific quality combinations are GPU-unvalidated here |
-| Registry/model construction declarations | Implemented | Dependency-light AST tests require every registered runner to declare its load contract, extract actual `ModelSettings.fsdp_strategy` and instance strategy assignments for meta declarations, and keep named custom adapters out of standard collective modes. Guarded model tests check the Hunyuan/LTX wrapper config APIs when Diffusers is installed. | HunyuanVideo meta loading is validated at 8 ranks on gfx950, bf16 and FP8, sharded and replicated. The withheld declarations are validated as refusals on gfx950 for six of the seven models whose weights are on that node — both LingBot Video runners, both MiniMax-H3 runners, LTX-2.3 and HunyuanVideo-1.5-Sparse — each refusing before allocation with the reason it declares, and HunyuanVideo 1.5 also refusing the sharding flag for lack of the capability. What those cases do not show is that the withheld path would work if enabled; they show the refusal happens. The seventh, Ideogram-4, no longer withholds it: its FP8 checkpoint's conversions are carried as derived tensors in the checkpoint manifest, so both denoisers build on meta and fill per block, with the text encoder declared as an exclusion and filled eagerly. LTX-2/2.3 eager/native loading remains GPU-unvalidated here |
-
-Where a row claims no GPU result, the label describes code and repository test coverage only. Where a row names one, it points at the recorded sweep above, and its scope is exactly what that row states: another model, rank count, quantization or accelerator is not covered by it.
 
 ### Model-specific Arguments
 

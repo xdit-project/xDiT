@@ -268,12 +268,7 @@ class xFuserArgs:
             type=str,
             default=None,
             choices=["teacache", "fbcache", "dbcache"],
-            help=(
-                "Step caching method. "
-                "teacache: xDiT in-tree (Flux1 only). "
-                "fbcache: xDiT in-tree FBCache (Flux2/Klein). "
-                "dbcache: cache-dit DBCache, requires `pip install cache-dit` (all dbcache-eligible models; excludes cosmos3)."
-            ),
+            help="Step caching method.",
         )
         runtime_group.add_argument(
             "--cache_config",
@@ -947,12 +942,7 @@ class xFuserArgs:
             type=str,
             default=None,
             choices=["teacache", "fbcache", "dbcache"],
-            help=(
-                "Step caching method. "
-                "teacache: xDiT in-tree (Flux1 only). "
-                "fbcache: xDiT in-tree FBCache (Flux2/Klein). "
-                "dbcache: cache-dit DBCache, requires `pip install cache-dit` (all dbcache-eligible models; excludes cosmos3)."
-            ),
+            help="Step caching method.",
         )
         parser.add_argument(
             "--cache_config",

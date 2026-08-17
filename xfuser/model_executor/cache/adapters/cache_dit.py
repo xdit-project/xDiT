@@ -120,9 +120,9 @@ def _build_config(
     valid_fields = {f.name for f in dataclasses.fields(DBCacheConfig)}
     unknown = set(config_kwargs) - valid_fields
     if unknown:
-        if _is_rank0():
-            logger.warning(
-                f"--cache_config keys not recognized by DBCacheConfig and will be ignored: {sorted(unknown)}")
+        raise ValueError(
+            f"Unknown --cache_config keys for DBCacheConfig: {sorted(unknown)}"
+        )
     config_kwargs = {k: v for k, v in config_kwargs.items()
                      if k in valid_fields}
 

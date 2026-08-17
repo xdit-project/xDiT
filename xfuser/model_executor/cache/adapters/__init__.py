@@ -38,6 +38,11 @@ def _resolve_threshold(
                 raise TypeError("cache_config must be a JSON object")
         except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"--cache_config is not valid JSON: {e}") from e
+        unknown = set(override) - {"residual_diff_threshold"}
+        if unknown:
+            raise ValueError(
+                f"Unknown --cache_config keys for in-tree caching: {sorted(unknown)}"
+            )
         threshold = override.get("residual_diff_threshold", threshold)
     return threshold
 

@@ -65,13 +65,11 @@ class xFuserLTX2PerturbedAttnProcessor:
             ]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
+            # Only forward attn_mask. The varlen fields (indices_k etc.) are for
+            # self-attention where Q and K share the same sequence length; here the
+            # mask covers text encoder tokens (K) while Q is video tokens, so the
+            # varlen pack path in _varlen_pack_keys would mis-reshape the key tensor.
             attn_kw = {"attn_mask": attention_mask.attn_mask}
-            if attention_mask.indices_k is not None:
-                attn_kw.update(
-                    indices_k=attention_mask.indices_k,
-                    cu_seqlens_k=attention_mask.cu_seqlens_k,
-                    max_seqlen_k=attention_mask.max_seqlen_k,
-                )
         elif attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(
                 attention_mask, sequence_length, batch_size
@@ -186,13 +184,11 @@ class xFuserLTX2AudioVideoAttnProcessor:
             ]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
+            # Only forward attn_mask. The varlen fields (indices_k etc.) are for
+            # self-attention where Q and K share the same sequence length; here the
+            # mask covers text encoder tokens (K) while Q is video tokens, so the
+            # varlen pack path in _varlen_pack_keys would mis-reshape the key tensor.
             attn_kw = {"attn_mask": attention_mask.attn_mask}
-            if attention_mask.indices_k is not None:
-                attn_kw.update(
-                    indices_k=attention_mask.indices_k,
-                    cu_seqlens_k=attention_mask.cu_seqlens_k,
-                    max_seqlen_k=attention_mask.max_seqlen_k,
-                )
         elif attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(
                 attention_mask, sequence_length, batch_size

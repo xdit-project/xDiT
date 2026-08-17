@@ -429,6 +429,9 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
+        use_fp4_gemms=True,
+        use_hybrid_attn_schedule=True,
+        use_hybrid_gemm_schedule=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -505,7 +508,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
             diff_decoder.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
             log("Diffusion decoder: using NATTEN attention processor.")
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError, FileNotFoundError):
             # NATTEN is not available
             # Fall back to tiled PyTorch SDPA
             # Works on CUDA, ROCm and CPU. Ported from LTX-2 EagerSdpaAttention.
@@ -751,6 +754,7 @@ class xFuserLTX25DistilledVideoModel(_xFuserLTX25VideoModelBase):
         resolution_divisor=64,
         valid_tasks=["t2v", "i2v"],
         fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp4_gemm_module_list=["transformer.transformer_blocks"],
     )
 
 
@@ -794,4 +798,5 @@ class xFuserLTX25FullVideoModel(_xFuserLTX25VideoModelBase):
         resolution_divisor=64,
         valid_tasks=["t2v", "i2v"],
         fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp4_gemm_module_list=["transformer.transformer_blocks"],
     )

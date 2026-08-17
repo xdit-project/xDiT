@@ -80,10 +80,10 @@ class VAEManager:
         self.capabilities = capabilities
         self.settings = settings
 
-    def decoding_vaes(self, pipe, second_pipe=None) -> List:
+    def decoding_vaes(self, pipes) -> List:
         """Return every unique VAE decoded by the supplied pipeline stages."""
         vaes = []
-        for candidate in (pipe, second_pipe):
+        for candidate in pipes:
             vae = getattr(candidate, "vae", None)
             if vae is not None and not any(vae is seen for seen in vaes):
                 vaes.append(vae)

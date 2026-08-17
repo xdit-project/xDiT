@@ -39,6 +39,21 @@ class Staged:
         )
 
 
+def test_decoding_vaes_accepts_any_number_of_pipeline_stages():
+    manager = VAEManager(
+        config=object(),
+        capabilities=object(),
+        settings=SimpleNamespace(model_output_type="image"),
+    )
+    first, second, third = TinyVAE(), TinyVAE(), TinyVAE()
+
+    vaes = manager.decoding_vaes(
+        [Pipe(first), Pipe(second), Pipe(third), Pipe(first)]
+    )
+
+    assert vaes == [first, second, third]
+
+
 def test_channels_last_conversion_preserves_decode_output_for_every_stage():
     first, second = TinyVAE(), TinyVAE()
     staged = Staged(first, second)
@@ -66,7 +81,7 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
             )
             self._vae_manager = mock.Mock()
             self._vae_manager.decoding_vaes.side_effect = (
-                lambda pipe, second_pipe: [pipe.vae, second_pipe.vae]
+                lambda pipes: [pipe.vae for pipe in pipes]
             )
 
         def _load_model_checked(self):

@@ -344,7 +344,7 @@ class xFuserModel(abc.ABC):
     def _decoding_vaes(self) -> List:
         """Forward staged VAE discovery to the VAE manager."""
         return self._vae_manager.decoding_vaes(
-            self.pipe, getattr(self, "second_pipe", None)
+            [self.pipe, getattr(self, "second_pipe", None)]
         )
 
     def _validate_config(self, config: xFuserArgs) -> None:

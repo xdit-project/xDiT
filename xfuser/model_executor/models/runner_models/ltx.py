@@ -625,11 +625,6 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
                 **stage2_shared,
             )
         else:
-            from diffusers.pipelines.ltx2.utils import DEFAULT_NEGATIVE_PROMPT
-
-            shared["negative_prompt"] = input_args.get(
-                "negative_prompt", DEFAULT_NEGATIVE_PROMPT
-            )
             # Full model: single-stage with full guidance (STG, modality, CFG).
             shared["guidance_scale"] = input_args["guidance_scale"]
             shared["guidance_rescale"] = self._GUIDANCE_RESCALE

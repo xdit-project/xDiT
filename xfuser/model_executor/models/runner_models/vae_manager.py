@@ -20,6 +20,31 @@ from xfuser.core.utils.runner_utils import (
 from xfuser.envs import restore_torch_group_norm_for_distvae
 
 
+def _validate_vae_tile_pair(
+    config, capabilities, settings, kind, minimum, constraint
+) -> None:
+    names = tuple(f"vae_tile_{kind}_{axis}" for axis in ("height", "width"))
+    flags = tuple(f"--{name}" for name in names)
+    values = tuple(getattr(config, name, None) for name in names)
+    asked = tuple(value is not None for value in values)
+    joined_flags = " and ".join(flags)
+
+    if asked[0] != asked[1]:
+        raise ValueError(f"{joined_flags} must be provided together.")
+    for value, flag in zip(values, flags):
+        if value is not None and value < minimum:
+            raise ValueError(f"{flag} must be {constraint}, got {value}.")
+    if not asked[0]:
+        return
+    if not config.enable_tiling:
+        raise ValueError(f"{joined_flags} require --enable_tiling.")
+    if not capabilities.enable_tiling:
+        raise ValueError(
+            f"{joined_flags} configure tiled VAE decoding, "
+            f"which model {settings.model_name} does not support."
+        )
+
+
 def validate_vae_config(config, capabilities, settings) -> None:
     """Validate VAE-specific runner configuration without runner state."""
     if config.use_parallel_vae:
@@ -29,47 +54,12 @@ def validate_vae_config(config, capabilities, settings) -> None:
                 "identify and shard the GroupNorm layers."
             )
 
-    height = getattr(config, "vae_tile_size_height", None)
-    width = getattr(config, "vae_tile_size_width", None)
-    height_asked = height is not None
-    width_asked = width is not None
-    if height_asked != width_asked:
-        raise ValueError(
-            "--vae_tile_size_height and --vae_tile_size_width must be provided together."
-        )
-    for value, flag in (
-        (height, "--vae_tile_size_height"),
-        (width, "--vae_tile_size_width"),
-    ):
-        if value is not None and value <= 0:
-            raise ValueError(f"{flag} must be positive, got {value}.")
-    if height_asked and not capabilities.enable_tiling:
-        raise ValueError(
-            "--vae_tile_size_height and --vae_tile_size_width decode the VAE in tiles, "
-            f"which model {settings.model_name} does not support."
-        )
-
-    overlap_height = getattr(config, "vae_tile_overlap_height", None)
-    overlap_width = getattr(config, "vae_tile_overlap_width", None)
-    overlap_height_asked = overlap_height is not None
-    overlap_width_asked = overlap_width is not None
-    if overlap_height_asked != overlap_width_asked:
-        raise ValueError(
-            "--vae_tile_overlap_height and --vae_tile_overlap_width must be provided "
-            "together."
-        )
-    for value, flag in (
-        (overlap_height, "--vae_tile_overlap_height"),
-        (overlap_width, "--vae_tile_overlap_width"),
-    ):
-        if value is not None and value < 0:
-            raise ValueError(f"{flag} must be non-negative, got {value}.")
-    if overlap_height_asked and not capabilities.enable_tiling:
-        raise ValueError(
-            "--vae_tile_overlap_height and --vae_tile_overlap_width set the exact "
-            "output-pixel overlap of a tiled VAE decode, "
-            f"which model {settings.model_name} does not support."
-        )
+    _validate_vae_tile_pair(
+        config, capabilities, settings, "size", 1, "positive"
+    )
+    _validate_vae_tile_pair(
+        config, capabilities, settings, "overlap", 0, "non-negative"
+    )
 
 
 class VAEManager:
@@ -114,29 +104,8 @@ class VAEManager:
             self._install_vae_decode_guard(vae, applied_shape)
 
     def _tiling_flag(self) -> Optional[str]:
-        """Return the first flag asking this run to tile its VAE decode."""
-        for asked, flag in (
-            (self.config.enable_tiling, "--enable_tiling"),
-            (
-                getattr(self.config, "vae_tile_size_height", None) is not None,
-                "--vae_tile_size_height",
-            ),
-            (
-                getattr(self.config, "vae_tile_size_width", None) is not None,
-                "--vae_tile_size_width",
-            ),
-            (
-                getattr(self.config, "vae_tile_overlap_height", None) is not None,
-                "--vae_tile_overlap_height",
-            ),
-            (
-                getattr(self.config, "vae_tile_overlap_width", None) is not None,
-                "--vae_tile_overlap_width",
-            ),
-        ):
-            if asked:
-                return flag
-        return None
+        """Return the flag asking this run to tile its VAE decode."""
+        return "--enable_tiling" if self.config.enable_tiling else None
 
     def _tiles(self, vae) -> bool:
         """Return whether this VAE's decode will be cut into tiles."""

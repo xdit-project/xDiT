@@ -423,31 +423,31 @@ class xFuserArgs:
             "--vae_tile_size_height",
             type=int,
             default=None,
-            help="Exact output-pixel height of each VAE tile. Must be used with "
-                 "--vae_tile_size_width.",
+            help="Exact output-pixel height of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_width.",
         )
         runtime_group.add_argument(
             "--vae_tile_size_width",
             type=int,
             default=None,
-            help="Exact output-pixel width of each VAE tile. Must be used with "
-                 "--vae_tile_size_height.",
+            help="Exact output-pixel width of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_height.",
         )
         runtime_group.add_argument(
             "--vae_tile_overlap_height",
             type=int,
             default=None,
-            help="Exact VAE tile overlap along the height axis, in output pixels. Must be used with "
-                 "--vae_tile_overlap_width and turns tiling on. Height and width may differ; use 0 for an "
-                 "inactive strip axis.",
+            help="Exact VAE tile overlap along the height axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_width. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
         )
         runtime_group.add_argument(
             "--vae_tile_overlap_width",
             type=int,
             default=None,
-            help="Exact VAE tile overlap along the width axis, in output pixels. Must be used with "
-                 "--vae_tile_overlap_height and turns tiling on. Height and width may differ; use 0 for an "
-                 "inactive strip axis.",
+            help="Exact VAE tile overlap along the width axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_height. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
         )
         runtime_group.add_argument(
             "--use_fp8_t5_encoder",
@@ -676,31 +676,31 @@ class xFuserArgs:
             "--vae_tile_size_height",
             type=int,
             default=None,
-            help="Exact output-pixel height of each VAE tile. Must be used with "
-                 "--vae_tile_size_width.",
+            help="Exact output-pixel height of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_width.",
         )
         parser.add_argument(
             "--vae_tile_size_width",
             type=int,
             default=None,
-            help="Exact output-pixel width of each VAE tile. Must be used with "
-                 "--vae_tile_size_height.",
+            help="Exact output-pixel width of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_height.",
         )
         parser.add_argument(
             "--vae_tile_overlap_height",
             type=int,
             default=None,
-            help="Exact VAE tile overlap along the height axis, in output pixels. Must be used with "
-                 "--vae_tile_overlap_width and turns tiling on. Height and width may differ; use 0 for an "
-                 "inactive strip axis.",
+            help="Exact VAE tile overlap along the height axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_width. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
         )
         parser.add_argument(
             "--vae_tile_overlap_width",
             type=int,
             default=None,
-            help="Exact VAE tile overlap along the width axis, in output pixels. Must be used with "
-                 "--vae_tile_overlap_height and turns tiling on. Height and width may differ; use 0 for an "
-                 "inactive strip axis.",
+            help="Exact VAE tile overlap along the width axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_height. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
         )
         parser.add_argument(
             "--use_int8_gemms",

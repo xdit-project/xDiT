@@ -79,6 +79,7 @@ def test_cli_propagates_vae_settings(add_args):
             "--model",
             "test-model",
             "--use-parallel-vae",
+            "--enable_tiling",
             "--vae_tile_size_height",
             "320",
             "--vae_tile_size_width",
@@ -93,10 +94,24 @@ def test_cli_propagates_vae_settings(add_args):
     config = xFuserArgs.from_cli_args(parsed)
 
     assert config.use_parallel_vae is True
+    assert config.enable_tiling is True
     assert config.vae_tile_size_height == 320
     assert config.vae_tile_size_width == 512
     assert config.vae_tile_overlap_height == 32
     assert config.vae_tile_overlap_width == 64
+
+
+@pytest.mark.parametrize("add_args", [xFuserArgs.add_runner_args, xFuserArgs.add_cli_args])
+def test_vae_tile_settings_document_tiling_requirement(add_args):
+    parser = add_args(FlexibleArgumentParser(description="xDiT"))
+    tile_settings = [
+        action
+        for action in parser._actions
+        if action.dest.startswith("vae_tile_")
+    ]
+
+    assert len(tile_settings) == 4
+    assert all("Requires --enable_tiling." in action.help for action in tile_settings)
 
 
 @pytest.mark.parametrize(
@@ -131,16 +146,34 @@ def test_rectangular_vae_tile_settings_are_validated(config, message):
         )
 
 
-def test_rectangular_vae_tile_flag_implies_tiling():
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"vae_tile_size_height": 320, "vae_tile_size_width": 512},
+        {"vae_tile_overlap_height": 32, "vae_tile_overlap_width": 64},
+    ],
+)
+def test_vae_tile_settings_require_tiling(config):
+    runner = _runner()
+
+    with pytest.raises(ValueError, match="require --enable_tiling"):
+        vae_manager.validate_vae_config(
+            xFuserArgs(model="test-model", **config),
+            runner.capabilities,
+            runner.settings,
+        )
+
+
+def test_rectangular_vae_tile_flag_does_not_enable_tiling():
     runner = _runner(vae_tile_size_height=320, vae_tile_size_width=None)
 
-    assert runner._vae_manager._tiling_flag() == "--vae_tile_size_height"
+    assert runner._vae_manager._tiling_flag() is None
 
 
-def test_tile_overlap_flag_implies_tiling():
+def test_tile_overlap_flag_does_not_enable_tiling():
     runner = _runner(vae_tile_overlap_height=32, vae_tile_overlap_width=64)
 
-    assert runner._vae_manager._tiling_flag() == "--vae_tile_overlap_height"
+    assert runner._vae_manager._tiling_flag() is None
 
 
 @pytest.mark.parametrize(
@@ -179,6 +212,7 @@ def test_zero_overlap_is_valid_for_an_inactive_strip_axis():
     runner = _runner()
     config = xFuserArgs(
         model="test-model",
+        enable_tiling=True,
         vae_tile_overlap_height=0,
         vae_tile_overlap_width=64,
     )
@@ -443,7 +477,11 @@ def test_rectangular_tile_shape_refuses_a_non_exact_plan_actionably():
 def test_rectangular_tile_shape_is_applied_to_every_staged_vae():
     first = SimpleNamespace(enable_tiling=mock.Mock(), decode=mock.Mock())
     second = SimpleNamespace(enable_tiling=mock.Mock(), decode=mock.Mock())
-    runner = _runner(vae_tile_size_height=320, vae_tile_size_width=512)
+    runner = _runner(
+        enable_tiling=True,
+        vae_tile_size_height=320,
+        vae_tile_size_width=512,
+    )
     runner.pipe = SimpleNamespace(vae=first)
     runner.second_pipe = SimpleNamespace(vae=second)
 

@@ -109,6 +109,9 @@ class xFuserLTX23VideoModel(xFuserModel):
         )
         upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
 
+        log("Enabling VAE tiling for LTX-2.3's full-resolution second-stage decode.")
+        second_pipe.vae.enable_tiling()
+
         self.second_pipe = second_pipe
         self.upsample_pipe = upsample_pipe
 

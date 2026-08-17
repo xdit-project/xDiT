@@ -436,14 +436,14 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
                 if rel_l1_thresh is not None and preset_kwargs is None:
                     preset_kwargs = {"residual_diff_threshold": rel_l1_thresh}
                 cache_config = cache_args.pop("cache_config", None)
-                apply_cache(
+                transformer = apply_cache(
                     cache_method=cache_method,
                     num_steps=num_steps,
                     pipe=pipe,
+                    transformer=transformer,
                     preset_kwargs=preset_kwargs,
                     cache_config=cache_config,
                 )
-                transformer = pipe.transformer
         self.original_transformer = transformer
         if enable_torch_compile or enable_onediff:
             if getattr(transformer, "forward") is not None:

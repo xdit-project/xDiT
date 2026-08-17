@@ -46,41 +46,46 @@ def apply_cache(
     cache_method: str,
     num_steps: int,
     pipe: Any,
+    transformer: Optional[Any] = None,
     preset_kwargs: Optional[Any] = None,
     cache_config: Optional[str] = None,
     # CacheDitAdapterConfig or List[CacheDitAdapterConfig], dbcache only
     adapter_config: Optional[Any] = None,
     # Transformer attribute name on pipe, used for teacache/fbcache
     transformer_attr: str = "transformer",
-) -> None:
-    """Apply a step-caching method in place on pipe.
+) -> Optional[Any]:
+    """Apply a step-caching method and return the patched transformer.
 
     For multi-transformer dbcache (list adapter_config), both transformers
-    are patched via a single coordinated enable_cache() call.
+    are patched via a single coordinated enable_cache() call and no single
+    transformer is returned. When transformer is omitted, the patched module
+    is also assigned back to pipe.
     """
     if cache_method == "teacache":
         from xfuser.model_executor.cache.adapters.flux import apply_teacache
-        transformer = getattr(pipe, transformer_attr)
+        target = transformer if transformer is not None else getattr(pipe, transformer_attr)
         patched = apply_teacache(
-            transformer,
+            target,
             rel_l1_thresh=_resolve_threshold(preset_kwargs, cache_config),
             num_steps=num_steps,
         )
-        setattr(pipe, transformer_attr, patched)
-        return
+        if transformer is None:
+            setattr(pipe, transformer_attr, patched)
+        return patched
 
     if cache_method == "fbcache":
         from xfuser.model_executor.cache.adapters.flux2 import apply_fbcache
-        transformer = getattr(pipe, transformer_attr)
+        target = transformer if transformer is not None else getattr(pipe, transformer_attr)
         patched = apply_fbcache(
-            transformer,
+            target,
             use_cache="Fb",
             rel_l1_thresh=_resolve_threshold(preset_kwargs, cache_config),
             return_hidden_states_first=False,
             num_steps=num_steps,
         )
-        setattr(pipe, transformer_attr, patched)
-        return
+        if transformer is None:
+            setattr(pipe, transformer_attr, patched)
+        return patched
 
     if cache_method == "dbcache":
         from xfuser.model_executor.cache.adapters.cache_dit import (
@@ -97,22 +102,23 @@ def apply_cache(
             )
             return
         attr = adapter_config.transformer_attr if adapter_config else transformer_attr
-        transformer = getattr(pipe, attr, None)
-        if transformer is None:
+        target = transformer if transformer is not None else getattr(pipe, attr, None)
+        if target is None:
             raise RuntimeError(
                 f"apply_cache (dbcache): pipe {type(pipe).__name__!r} has no attribute {attr!r}. "
                 "Set adapter_config.transformer_attr to the correct pipe attribute."
             )
         patched = apply_cache_dit_cache(
-            transformer,
+            target,
             num_steps=num_steps,
             pipe=pipe,
             preset_kwargs=preset_kwargs,
             cache_config=cache_config,
             adapter_config=adapter_config,
         )
-        setattr(pipe, attr, patched)
-        return
+        if transformer is None:
+            setattr(pipe, attr, patched)
+        return patched
 
     raise ValueError(
         f"Unknown cache_method: {cache_method!r}. "

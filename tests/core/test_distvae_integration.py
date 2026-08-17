@@ -400,12 +400,38 @@ def test_tile_overlap_is_applied_through_distvae():
         ) as tile_overlap_plan,
         mock.patch.object(vae_manager.vae_tiling, "apply_tile_plan") as apply,
     ):
-        runner._vae_manager._apply_vae_tile_overlap(vae)
+        runner._vae_manager._apply_vae_tile_overlap(vae, (320, 1280))
 
     tile_overlap_plan.assert_called_once_with(
         vae, 32, 64, sample_shape=(320, 1280)
     )
     apply.assert_called_once_with(vae, overlap_plan)
+
+
+def test_tile_overlap_tracks_each_run_sample_shape():
+    vae = SimpleNamespace()
+    runner = _runner(
+        vae_tile_overlap_height=32,
+        vae_tile_overlap_width=64,
+    )
+
+    with mock.patch.object(
+        runner._vae_manager, "_apply_vae_tile_overlap"
+    ) as apply:
+        runner._vae_manager.prepare_run(
+            [vae], {"height": 320, "width": 1280}
+        )
+        runner._vae_manager.prepare_run(
+            [vae], {"height": 320, "width": 1280}
+        )
+        runner._vae_manager.prepare_run(
+            [vae], {"height": 640, "width": 960}
+        )
+
+    assert apply.call_args_list == [
+        mock.call(vae, (320, 1280)),
+        mock.call(vae, (640, 960)),
+    ]
 
 
 def test_tile_overlap_refuses_an_inexact_plan_without_mutating_the_vae():
@@ -429,7 +455,7 @@ def test_tile_overlap_refuses_an_inexact_plan_without_mutating_the_vae():
         mock.patch.object(vae_manager.vae_tiling, "apply_tile_plan") as apply,
     ):
         with pytest.raises(ValueError) as error:
-            runner._vae_manager._apply_vae_tile_overlap(vae)
+            runner._vae_manager._apply_vae_tile_overlap(vae, (1024, 1024))
 
     assert "33x65 pixels" in str(error.value)
     assert "512x768" in str(error.value)

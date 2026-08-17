@@ -679,6 +679,7 @@ class xFuserModel(abc.ABC):
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
+        self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
         self._prepare_inference_run(input_args)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)

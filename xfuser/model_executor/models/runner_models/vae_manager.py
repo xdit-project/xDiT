@@ -69,6 +69,7 @@ class VAEManager:
         self.config = config
         self.capabilities = capabilities
         self.settings = settings
+        self._overlap_sample_shapes = {}
 
     def decoding_vaes(self, pipes) -> List:
         """Return every unique VAE decoded by the supplied pipeline stages."""
@@ -98,10 +99,21 @@ class VAEManager:
                     log(f"Enabling VAE tiling on {type(vae).__name__}...")
                     vae.enable_tiling()
                 applied_shape = self._apply_vae_tile_shape(vae)
-                self._apply_vae_tile_overlap(vae)
                 self._check_tiles_against_parallel_vae(vae, native_shape)
                 self._install_vae_tiled_decode(vae)
             self._install_vae_decode_guard(vae, applied_shape)
+
+    def prepare_run(self, vaes, input_args) -> None:
+        """Apply shape-dependent VAE options for the current invocation."""
+        if self._requested_vae_tile_overlap() is None:
+            return
+        sample_shape = (input_args["height"], input_args["width"])
+        for vae in vaes:
+            key = id(vae)
+            if self._overlap_sample_shapes.get(key) == sample_shape:
+                continue
+            self._apply_vae_tile_overlap(vae, sample_shape)
+            self._overlap_sample_shapes[key] = sample_shape
 
     def _tiling_flag(self) -> Optional[str]:
         """Return the flag asking this run to tile its VAE decode."""
@@ -216,7 +228,9 @@ class VAEManager:
         )
         return shape
 
-    def _apply_vae_tile_overlap(self, vae) -> None:
+    def _apply_vae_tile_overlap(
+        self, vae, sample_shape: Tuple[int, int]
+    ) -> None:
         """Apply exact per-axis output-pixel tile overlap when requested."""
         requested = self._requested_vae_tile_overlap()
         if requested is None:
@@ -226,7 +240,7 @@ class VAEManager:
             vae,
             overlap_height,
             overlap_width,
-            sample_shape=(self.config.height, self.config.width),
+            sample_shape=sample_shape,
         )
         if plan is None:
             shape = vae_tiling.tile_shape(vae)

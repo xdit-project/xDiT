@@ -4,7 +4,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -85,7 +85,7 @@ class xFuserFluxModel(xFuserModel):
             },
         },
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
                 ),
@@ -191,7 +191,7 @@ class xFuserFluxKontextModel(xFuserModel):
             },
         },
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
                 ),
@@ -320,7 +320,7 @@ class xFuserFlux2Model(xFuserModel):
             },
         },
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_2")),
                 ),

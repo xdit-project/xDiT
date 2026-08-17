@@ -18,7 +18,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 
 if TYPE_CHECKING:
@@ -73,7 +73,7 @@ class xFuserCausalWanModel(xFuserModel):
         },
         # DMD 8-step: no CFG (guidance_scale=0.0). Short warmup.
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"),

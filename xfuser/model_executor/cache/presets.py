@@ -8,13 +8,13 @@ CacheDitAdapterConfig: block layout for one transformer in a cache-dit BlockAdap
     blocks: (block_attr, ForwardPattern_name) pairs to try on the transformer.
     enable_separate_cfg: True for two-pass CFG models.
 
-DBCacheConfig: bundles adapter + preset for one model.
+DBCacheSettings: bundles adapter + preset for one model.
     adapter: CacheDitAdapterConfig (single transformer) or List[CacheDitAdapterConfig]
              (multi-transformer, e.g. Wan2.2). Must map 1:1 with preset list.
     preset: DBCachePreset or List[DBCachePreset] mapping 1:1 with adapter list.
 
 ModelCacheConfig: dict[str, method_config] keyed by cache method name,
-    e.g. {"dbcache": DBCacheConfig(...)}. .get(cache_method) returns None for
+    e.g. {"dbcache": DBCacheSettings(...)}. .get(cache_method) returns None for
     methods the model doesn't support.
 """
 import dataclasses
@@ -68,7 +68,7 @@ PresetValue = Union[DBCachePreset, List[DBCachePreset]]
 
 
 @dataclasses.dataclass
-class DBCacheConfig:
+class DBCacheSettings:
     """Bundles CacheDitAdapterConfig(s) and DBCachePreset(s) for a model.
 
     Single transformer: adapter=CacheDitAdapterConfig(...), preset=DBCachePreset(...)
@@ -79,5 +79,5 @@ class DBCacheConfig:
     preset: Optional[PresetValue] = None
 
 
-# dict keyed by cache method name, e.g. {"dbcache": DBCacheConfig(...)}.
+# dict keyed by cache method name, e.g. {"dbcache": DBCacheSettings(...)}.
 ModelCacheConfig = Dict[str, object]

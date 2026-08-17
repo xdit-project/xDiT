@@ -3,7 +3,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
@@ -85,7 +85,7 @@ class xFuserZImageModel(xFuserModel):
             "transformer.context_refiner"
         ],
         cache_config={
-            "dbcache":DBCacheConfig(
+            "dbcache":DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("layers", "Pattern_3"),),
                 ),

@@ -26,7 +26,7 @@ from xfuser.compile import install_inductor_passes
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 
 @register_model("tencent/HunyuanVideo")
@@ -62,7 +62,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
         # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"), ("single_transformer_blocks", "Pattern_0")),
                     enable_separate_cfg=False,
@@ -153,7 +153,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"),),
                     enable_separate_cfg=True,

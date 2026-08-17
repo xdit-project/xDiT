@@ -7,9 +7,9 @@ cache-dit adapter (dbcache):         xfuser.model_executor.cache.adapters
 from xfuser.model_executor.cache.presets import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
     ModelCacheConfig,
 )
 from xfuser.model_executor.cache.adapters import apply_cache
 
-__all__ = ["DBCachePreset", "CacheDitAdapterConfig", "DBCacheConfig", "ModelCacheConfig", "apply_cache"]
+__all__ = ["DBCachePreset", "CacheDitAdapterConfig", "DBCacheSettings", "ModelCacheConfig", "apply_cache"]

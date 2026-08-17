@@ -164,7 +164,7 @@ def _build_adapter(transformer, pipe, adapter_cfg, BlockAdapter, ForwardPattern)
     if not found:
         raise RuntimeError(
             f"CacheDitAdapterConfig specifies blocks {[a for a, _ in adapter_cfg.blocks]!r} "
-            f"but none exist on {type(transformer).__name__}. Check DBCacheConfig.adapter."
+            f"but none exist on {type(transformer).__name__}. Check DBCacheSettings.adapter."
         )
     attrs, patterns = zip(*found)
     if len(attrs) == 1:
@@ -283,7 +283,7 @@ def apply_cache_dit_cache(
         if _is_rank0():
             logger.warning(
                 f"No CacheDitAdapterConfig for {type(routing_transformer).__name__}; "
-                "falling back to auto=True. Set DBCacheConfig.adapter in the model runner."
+                "falling back to auto=True. Set DBCacheSettings.adapter in the model runner."
             )
         adapter = BlockAdapter(pipe=pipe, auto=True)
         enable_separate_cfg = False

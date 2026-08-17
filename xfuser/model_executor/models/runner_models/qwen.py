@@ -3,7 +3,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
@@ -53,7 +53,7 @@ class xFuserQwenImageEditModel(xFuserModel):
         },
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"),),
                     enable_separate_cfg=True,
@@ -147,7 +147,7 @@ class xFuserQwenImageModel(xFuserModel):
             },
         },
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"),),
                     enable_separate_cfg=False,

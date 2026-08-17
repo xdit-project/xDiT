@@ -15,7 +15,7 @@ from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
@@ -245,7 +245,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
                     enable_separate_cfg=True,
@@ -338,7 +338,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         # Dual-transformer: t1=high-noise denoiser, t2=low-noise refiner (shorter warmup).
         self.settings.cache_config = {
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
@@ -431,7 +431,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         self.settings.output_name = "wan2.2_distilled_i2v"
         # 4-step distilled: guidance baked in (guidance_scale=1.0 → no CFG).
         self.settings.cache_config = {
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"),
@@ -578,7 +578,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
                     enable_separate_cfg=True,
@@ -648,7 +648,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.fp8_precision_overrides=None
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         self.settings.cache_config = {
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
@@ -736,7 +736,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
                     enable_separate_cfg=True,
@@ -868,7 +868,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
             self.settings.output_name = "wan.2.1_vace_1.3b"
         # Only cache `blocks`; vace_blocks have a different forward pattern not supported by cache-dit.
         self.settings.cache_config = {
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
                     enable_separate_cfg=True,

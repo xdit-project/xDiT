@@ -19,7 +19,7 @@ from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
-    DBCacheConfig,
+    DBCacheSettings,
 )
 
 DEFAULT_NEGATIVE_PROMPT = "" \
@@ -57,7 +57,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         fps=24,
         resolution_divisor=64,
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"),),
                     enable_separate_cfg=True,
@@ -260,7 +260,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         fps=24,
         resolution_divisor=64,
         cache_config={
-            "dbcache": DBCacheConfig(
+            "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"),),
                     enable_separate_cfg=True,

@@ -317,6 +317,10 @@ class xFuserModel(abc.ABC):
         self._post_load_and_state_initialization(input_args)
         self._enable_options()
 
+        # Compile and warm the original blocks before cache adapters replace or
+        # patch them, keeping stateful cross-step cache logic out of traced graphs.
+        # Adapters use declared forward patterns because compiled block signatures
+        # are no longer introspectable.
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
             compile_input_args = copy.deepcopy(input_args)

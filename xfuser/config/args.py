@@ -199,14 +199,14 @@ class xFuserArgs:
             if self.use_fbcache:
                 warnings.warn(
                     "--use_fbcache is deprecated, use --cache_method fbcache",
-                    DeprecationWarning,
+                    FutureWarning,
                     stacklevel=2,
                 )
                 self.cache_method = "fbcache"
             elif self.use_teacache:
                 warnings.warn(
                     "--use_teacache is deprecated, use --cache_method teacache",
-                    DeprecationWarning,
+                    FutureWarning,
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"

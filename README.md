@@ -119,6 +119,7 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🎬 Wan2.2-Distilled (LightX2V 4-step)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 CausalWan2.2](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) | ❎ | ❎ | ❎ | ❎ | ✔️ | NA |
 | [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuandit.md) |
 | [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |

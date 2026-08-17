@@ -210,12 +210,21 @@ def _install_sp_can_cache_sync() -> None:
     Idempotent; patched once.
     """
     global _SP_SYNC_PATCHED
+    if (
+        not dist.is_available()
+        or not dist.is_initialized()
+        or dist.get_world_size() <= 1
+    ):
+        return
     if _SP_SYNC_PATCHED:
         return
     try:
         from cache_dit.caching.cache_contexts.cache_manager import CachedContextManager
-    except ImportError:
-        return
+    except ImportError as e:
+        raise ImportError(
+            "Distributed dbcache requires cache-dit 1.5.x: "
+            "the CachedContextManager synchronization hook is unavailable."
+        ) from e
     from xfuser.core.distributed import get_world_group
 
     orig_can_cache = CachedContextManager.can_cache

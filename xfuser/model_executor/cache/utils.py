@@ -4,6 +4,8 @@ adapted from https://github.com/chengzeyi/ParaAttention.git
 """
 import dataclasses
 from typing import Dict, Optional, List
+import diffusers
+from xfuser.compat import version_at_least
 from xfuser.core.distributed import (
     get_sp_group,
     get_sequence_parallel_world_size,
@@ -132,8 +134,17 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
             hidden, encoder = (hidden, encoder) if self.return_hidden_states_first else (encoder, hidden)
 
         if self.single_transformer_blocks:
-            for block in self.single_transformer_blocks:
-                encoder, hidden = block(hidden, encoder, *args, **kwargs)
+            if version_at_least(diffusers.__version__, "0.35.0"):
+                for block in self.single_transformer_blocks:
+                    encoder, hidden = block(hidden, encoder, *args, **kwargs)
+            else:
+                hidden = torch.cat([encoder, hidden], dim=1)
+                for block in self.single_transformer_blocks:
+                    hidden = block(hidden, *args, **kwargs)
+                encoder, hidden = hidden.split(
+                    [encoder.shape[1], hidden.shape[1] - encoder.shape[1]],
+                    dim=1,
+                )
 
         self.cache_context.hidden_states_residual = hidden - self.cache_context.original_hidden_states
         self.cache_context.encoder_hidden_states_residual = encoder - self.cache_context.original_encoder_hidden_states

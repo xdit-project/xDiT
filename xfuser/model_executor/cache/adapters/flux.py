@@ -18,7 +18,6 @@ def apply_teacache(
     cached_blocks = utils.TeaCachedTransformerBlocks(
         transformer.transformer_blocks,
         transformer.single_transformer_blocks,
-        transformer=transformer,
         rel_l1_thresh=rel_l1_thresh,
         return_hidden_states_first=return_hidden_states_first,
         num_steps=num_steps,
@@ -26,6 +25,30 @@ def apply_teacache(
     )
     # Permanently replace block lists; same pattern as flux2.py.
     # Original blocks are captured inside TeaCachedTransformerBlocks.
+    transformer.transformer_blocks = nn.ModuleList([cached_blocks])
+    transformer.single_transformer_blocks = nn.ModuleList()
+    return transformer
+
+
+def apply_fbcache(
+    transformer,
+    *,
+    rel_l1_thresh=0.12,
+    return_hidden_states_first=False,
+    num_steps=8,
+    use_cache="Fb",
+):
+    """Apply FBCache to a Flux1 transformer."""
+    if use_cache != "Fb":
+        raise ValueError(f"Flux1 FBCache requires use_cache='Fb', got {use_cache!r}.")
+    cached_blocks = utils.FBCachedTransformerBlocks(
+        transformer.transformer_blocks,
+        transformer.single_transformer_blocks,
+        rel_l1_thresh=rel_l1_thresh,
+        return_hidden_states_first=return_hidden_states_first,
+        num_steps=num_steps,
+        name="flux",
+    )
     transformer.transformer_blocks = nn.ModuleList([cached_blocks])
     transformer.single_transformer_blocks = nn.ModuleList()
     return transformer

@@ -74,10 +74,8 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
            correctly sees the updated data.
 
     Device compatibility:
-      The base class initialises rel_l1_thresh with get_device(0) = cuda:0 for
-      ALL ranks. In Ulysses SP with 8 ranks using cuda:0..cuda:7, the l1_distance
-      result on rank N (cuda:N) cannot be compared to a threshold on cuda:0.
-      are_two_tensor_similar is overridden to move threshold to t1's device.
+      rel_l1_thresh is registered without assuming a rank-local device.
+      are_two_tensor_similar moves it to t1's device before comparison.
     """
 
     def __init__(self, *args, **kwargs):
@@ -266,7 +264,6 @@ def apply_fbcache(
     cached_blocks = Flux2FBCachedTransformerBlocks(
         transformer.transformer_blocks,
         transformer.single_transformer_blocks,
-        transformer=transformer,
         rel_l1_thresh=rel_l1_thresh,
         return_hidden_states_first=return_hidden_states_first,
         num_steps=num_steps,

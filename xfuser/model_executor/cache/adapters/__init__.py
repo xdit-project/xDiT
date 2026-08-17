@@ -8,6 +8,16 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_fsdp(transformer):
+    """Return the module wrapped by FSDP1, or the input module otherwise."""
+    inner = getattr(transformer, "_fsdp_wrapped_module", None)
+    if inner is not None:
+        return inner
+    if type(transformer).__name__ == "FullyShardedDataParallel":
+        return getattr(transformer, "module", transformer)
+    return transformer
+
+
 def _resolve_threshold(
     preset_kwargs: Optional[Dict],
     cache_config: Optional[str],
@@ -57,27 +67,32 @@ def apply_cache(
     if cache_method == "teacache":
         from xfuser.model_executor.cache.adapters.flux import apply_teacache
         target = transformer if transformer is not None else getattr(pipe, transformer_attr)
-        patched = apply_teacache(
-            target,
+        patch_target = _unwrap_fsdp(target)
+        apply_teacache(
+            patch_target,
             rel_l1_thresh=_resolve_threshold(preset_kwargs, cache_config),
             num_steps=num_steps,
         )
         if transformer is None:
-            setattr(pipe, transformer_attr, patched)
-        return patched
+            setattr(pipe, transformer_attr, target)
+        return target
 
     if cache_method == "fbcache":
-        from xfuser.model_executor.cache.adapters.flux2 import apply_fbcache
         from xfuser.envs import XDIT_FBCACHE_THRESH
 
         target = transformer if transformer is not None else getattr(pipe, transformer_attr)
+        patch_target = _unwrap_fsdp(target)
         default_threshold = (
             float(XDIT_FBCACHE_THRESH)
             if XDIT_FBCACHE_THRESH
             else 0.12
         )
-        patched = apply_fbcache(
-            target,
+        if hasattr(patch_target, "single_stream_modulation"):
+            from xfuser.model_executor.cache.adapters.flux2 import apply_fbcache
+        else:
+            from xfuser.model_executor.cache.adapters.flux import apply_fbcache
+        apply_fbcache(
+            patch_target,
             use_cache="Fb",
             rel_l1_thresh=_resolve_threshold(
                 preset_kwargs,
@@ -88,8 +103,8 @@ def apply_cache(
             num_steps=num_steps,
         )
         if transformer is None:
-            setattr(pipe, transformer_attr, patched)
-        return patched
+            setattr(pipe, transformer_attr, target)
+        return target
 
     if cache_method == "dbcache":
         from xfuser.model_executor.cache.adapters.cache_dit import (

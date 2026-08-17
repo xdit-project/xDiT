@@ -368,12 +368,24 @@ class xFuserModel(abc.ABC):
             and isinstance(method_cfg, DBCacheSettings)
             else cache_method
         )
-        if engine_method == "dbcache" and get_pipeline_parallel_world_size() > 1:
+        pp_size = get_pipeline_parallel_world_size()
+        if engine_method == "dbcache" and pp_size > 1:
             raise ValueError(
-                f"dbcache is incompatible with PipeFusion (PP={get_pipeline_parallel_world_size()}): "
+                f"dbcache is incompatible with PipeFusion (PP={pp_size}): "
                 "the residual-diff skip decision is computed via a collective that only runs on the "
                 "stage holding the cached block, so the world collective deadlocks. Disable dbcache "
                 "or set --pipefusion_parallel_degree 1."
+            )
+        if engine_method == "dbcache" and get_data_parallel_world_size() > 1:
+            raise ValueError(
+                "dbcache is incompatible with data parallelism because its cache "
+                "decision is synchronized across the world group. Set "
+                "--data_parallel_degree 1."
+            )
+        if engine_method in ("teacache", "fbcache") and pp_size > 1:
+            raise ValueError(
+                f"{engine_method} is incompatible with PipeFusion (PP={pp_size}). "
+                "Set --pipefusion_parallel_degree 1."
             )
         if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
             raise RuntimeError("teacache requires TP=1")

@@ -17,12 +17,14 @@ from torch.nn import functional
 
 # Element budget for one tile's [Nq, Nk] attention mask (bounds the mask
 # allocation and, on CPU, the math-backend score materialization).
-_NA_SCORE_BUDGET = 2 ** 25
+_NA_SCORE_BUDGET = 2**25
 # Element budget for the stacked K/V copies of one batched SDPA call on CUDA.
-_NA_KV_STACK_BUDGET = 2 ** 28
+_NA_KV_STACK_BUDGET = 2**28
 
 
-def _window_bounds(length: int, kernel: int, causal: bool) -> tuple[list[int], list[int]]:
+def _window_bounds(
+    length: int, kernel: int, causal: bool
+) -> tuple[list[int], list[int]]:
     """Per-index (start, end) of the attended window along one axis."""
     starts: list[int] = []
     ends: list[int] = []
@@ -47,7 +49,9 @@ def _pick_tiles(dims: tuple[int, int, int], kernels: list[int]) -> list[int]:
 
     def cost(ts: list[int]) -> int:
         nq = math.prod(ts)
-        nk = math.prod(min(d, t + k - 1) for t, k, d in zip(ts, kernels, dims, strict=True))
+        nk = math.prod(
+            min(d, t + k - 1) for t, k, d in zip(ts, kernels, dims, strict=True)
+        )
         return nq * nk
 
     while cost(tiles) > _NA_SCORE_BUDGET and max(tiles) > 1:
@@ -100,14 +104,19 @@ def _eager_na3d(
     batch, t, h, w, nh, hd = q.shape
     dims = (t, h, w)
     causal = [False, False, False] if is_causal is None else list(is_causal)
-    kernels = [k_ if c else min(k_, d) for k_, c, d in zip(kernel_size, causal, dims, strict=True)]
+    kernels = [
+        k_ if c else min(k_, d)
+        for k_, c, d in zip(kernel_size, causal, dims, strict=True)
+    ]
     if scale is None:
-        scale = hd ** -0.5
+        scale = hd**-0.5
     device = q.device
     if scale != 1.0:
         q = q * scale
 
-    bounds = [_window_bounds(d, k_, c) for d, k_, c in zip(dims, kernels, causal, strict=True)]
+    bounds = [
+        _window_bounds(d, k_, c) for d, k_, c in zip(dims, kernels, causal, strict=True)
+    ]
     tile_t, tile_h, tile_w = _pick_tiles(
         dims, [min(k_, d) for k_, d in zip(kernels, dims, strict=True)]
     )
@@ -163,7 +172,9 @@ def _eager_na3d(
             q_s = q_s.permute(0, 1, 5, 2, 3, 4, 6).reshape(g * batch, nh, nq, hd)
             k_s = k_s.permute(0, 1, 5, 2, 3, 4, 6).reshape(g * batch, nh, nk, hd)
             v_s = v_s.permute(0, 1, 5, 2, 3, 4, 6).reshape(g * batch, nh, nk, hd)
-            o = functional.scaled_dot_product_attention(q_s, k_s, v_s, attn_mask=mask, scale=1.0)
+            o = functional.scaled_dot_product_attention(
+                q_s, k_s, v_s, attn_mask=mask, scale=1.0
+            )
             o = o.view(g, batch, nh, tq, th, tw, hd).permute(0, 1, 3, 4, 5, 2, 6)
             for i, (qs, _) in enumerate(chunk):
                 out[:, qs[0], qs[1], qs[2]] = o[i]
@@ -182,24 +193,38 @@ class LTX2VideoVaeEagerSdpaAttnProcessor:
     comfy-kitchen / ltx-core).
     """
 
-    def __call__(self, attn: object, hidden_states: torch.Tensor, block_mask=None) -> torch.Tensor:
+    def __call__(
+        self, attn: object, hidden_states: torch.Tensor, block_mask=None
+    ) -> torch.Tensor:
         batch_size, num_frames, height, width, _ = hidden_states.shape
         query, key, value = attn.project_qkv(hidden_states)  # type: ignore[union-attr]
 
         # Reshape from (B, T*H*W, NH*HD) to (B, T, H, W, NH, HD) for _eager_na3d.
-        query = query.reshape(batch_size, num_frames, height, width, attn.heads, attn.head_dim)  # type: ignore[union-attr]
-        key = key.reshape(batch_size, num_frames, height, width, attn.heads, attn.head_dim)  # type: ignore[union-attr]
-        value = value.reshape(batch_size, num_frames, height, width, attn.heads, attn.head_dim)  # type: ignore[union-attr]
+        query = query.reshape(
+            batch_size, num_frames, height, width, attn.heads, attn.head_dim
+        )  # type: ignore[union-attr]
+        key = key.reshape(
+            batch_size, num_frames, height, width, attn.heads, attn.head_dim
+        )  # type: ignore[union-attr]
+        value = value.reshape(
+            batch_size, num_frames, height, width, attn.heads, attn.head_dim
+        )  # type: ignore[union-attr]
 
         # Q is already scaled in project_qkv (same convention as the NATTEN and
         # FlexAttention processors), so pass scale=1.0 to avoid double-scaling.
         hidden_states = _eager_na3d(
-            query, key, value,
+            query,
+            key,
+            value,
             kernel_size=list(attn.kernel_size),  # type: ignore[union-attr]
             scale=1.0,
         )
 
         hidden_states = hidden_states.reshape(
-            batch_size, num_frames, height, width, attn.heads * attn.head_dim  # type: ignore[union-attr]
+            batch_size,
+            num_frames,
+            height,
+            width,
+            attn.heads * attn.head_dim,  # type: ignore[union-attr]
         )
         return attn.to_out[0](hidden_states)  # type: ignore[union-attr]

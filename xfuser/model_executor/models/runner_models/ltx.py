@@ -1,41 +1,43 @@
-import torch
 import copy
+from types import SimpleNamespace
+from typing import ClassVar
+
+import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from types import SimpleNamespace
+
+from xfuser.core.utils.runner_utils import log
+from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.base_model import (
-    xFuserModel,
-    register_model,
+    DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
     DiffusionOutput,
-    ModelSettings,
     ModelCapabilities,
-    DIFFUSERS_FROM_SOURCE,
+    ModelSettings,
+    register_model,
+    xFuserModel,
 )
 
-from xfuser.core.utils.runner_utils import (
-    log,
+DEFAULT_NEGATIVE_PROMPT = (
+    ""
+    "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, "
+    "grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, "
+    "deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, "
+    "wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of "
+    "field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent "
+    "lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny "
+    "valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, "
+    "mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, "
+    "off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward "
+    "pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, "
+    "inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts."
 )
-from xfuser.core.utils.video_utils import encode_video_with_audio
 
-DEFAULT_NEGATIVE_PROMPT = "" \
-"blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, " \
-"grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, " \
-"deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, " \
-"wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of " \
-"field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent " \
-"lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny " \
-"valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, " \
-"mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, " \
-"off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward " \
-"pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, " \
-"inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts."
 
 @register_model("dg845/LTX-2.3-Diffusers")
 @register_model("LTX-2.3")
 class xFuserLTX23VideoModel(xFuserModel):
-
     min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
@@ -63,7 +65,7 @@ class xFuserLTX23VideoModel(xFuserModel):
     )
 
     _STG_SCALE = 1.0
-    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS = [28]
+    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS: ClassVar[list[int]] = [28]
     _MODALITY_SCALE = 3.0
     _GUIDANCE_RESCALE = 0.7
     _AUDIO_GUIDANCE_SCALE = 7.0
@@ -72,11 +74,13 @@ class xFuserLTX23VideoModel(xFuserModel):
     _AUDIO_GUIDANCE_RESCALE = 0.7
 
     def _load_model(self) -> DiffusionPipeline:
-        from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
+        from diffusers import LTX2LatentUpsamplePipeline, LTX2Pipeline
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+
         from xfuser.model_executor.models.transformers.transformer_ltx2 import (
             xFuserLTX2VideoTransformer3DWrapper,
         )
+
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -108,7 +112,9 @@ class xFuserLTX23VideoModel(xFuserModel):
             subfolder="latent_upsampler",
             torch_dtype=torch.bfloat16,
         )
-        upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
+        upsample_pipe = LTX2LatentUpsamplePipeline(
+            vae=pipe.vae, latent_upsampler=latent_upsampler
+        )
 
         second_pipe.vae.enable_tiling()
 
@@ -124,6 +130,7 @@ class xFuserLTX23VideoModel(xFuserModel):
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
+
         generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
 
         # self.pipe and self.second_pipe share the same transformer object, so the
@@ -154,7 +161,9 @@ class xFuserLTX23VideoModel(xFuserModel):
             return_dict=False,
         )
 
-        video_latent = self.upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
+        video_latent = self.upsample_pipe(
+            latents=video_latent, output_type="latent", return_dict=False
+        )[0]
 
         self.second_pipe.transformer.enable_adapters()
 
@@ -197,7 +206,9 @@ class xFuserLTX23VideoModel(xFuserModel):
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        compile_args["num_inference_steps"] = (
+            2  # Reduce steps for warmup # TODO: make this more generic
+        )
         self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
@@ -228,7 +239,6 @@ class xFuserLTX23VideoModel(xFuserModel):
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
 class xFuserLTX2VideoModel(xFuserModel):
-
     min_diffusers_version = "0.37.0"
 
     default_input_values = DefaultInputValues(
@@ -256,11 +266,13 @@ class xFuserLTX2VideoModel(xFuserModel):
     )
 
     def _load_model(self) -> DiffusionPipeline:
-        from diffusers import LTX2Pipeline, LTX2LatentUpsamplePipeline
+        from diffusers import LTX2LatentUpsamplePipeline, LTX2Pipeline
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+
         from xfuser.model_executor.models.transformers.transformer_ltx2 import (
             xFuserLTX2VideoTransformer3DWrapper,
         )
+
         transformer = xFuserLTX2VideoTransformer3DWrapper.from_pretrained(
             self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -277,17 +289,23 @@ class xFuserLTX2VideoModel(xFuserModel):
             torch_dtype=torch.bfloat16,
         )
         second_pipe.load_lora_weights(
-            self.settings.model_name, adapter_name="stage_2_distilled", weight_name="ltx-2-19b-distilled-lora-384.safetensors"
+            self.settings.model_name,
+            adapter_name="stage_2_distilled",
+            weight_name="ltx-2-19b-distilled-lora-384.safetensors",
         )
         latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
             self.settings.model_name,
             subfolder="latent_upsampler",
             torch_dtype=torch.bfloat16,
         )
-        upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
+        upsample_pipe = LTX2LatentUpsamplePipeline(
+            vae=pipe.vae, latent_upsampler=latent_upsampler
+        )
 
-        second_pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config( # Scheduler for the 2nd stage
-            pipe.scheduler.config, use_dynamic_shifting=False, shift_terminal=None
+        second_pipe.scheduler = (
+            FlowMatchEulerDiscreteScheduler.from_config(  # Scheduler for the 2nd stage
+                pipe.scheduler.config, use_dynamic_shifting=False, shift_terminal=None
+            )
         )
         self.second_pipe = second_pipe
         self.upsample_pipe = upsample_pipe
@@ -303,6 +321,7 @@ class xFuserLTX2VideoModel(xFuserModel):
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
+
         video_latent, audio_latent = self.pipe(
             prompt=input_args["prompt"],
             negative_prompt=input_args["negative_prompt"],
@@ -318,7 +337,9 @@ class xFuserLTX2VideoModel(xFuserModel):
             generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
         )
 
-        video_latent = self.upsample_pipe(latents=video_latent, output_type="latent", return_dict=False)[0]
+        video_latent = self.upsample_pipe(
+            latents=video_latent, output_type="latent", return_dict=False
+        )[0]
 
         output = self.second_pipe(
             latents=video_latent,
@@ -345,7 +366,9 @@ class xFuserLTX2VideoModel(xFuserModel):
 
         # two steps to warmup the torch compiler
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 2  # Reduce steps for warmup # TODO: make this more generic
+        compile_args["num_inference_steps"] = (
+            2  # Reduce steps for warmup # TODO: make this more generic
+        )
         self._run_timed_pipe(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
@@ -390,7 +413,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
     # Guidance defaults for the distilled path (no CFG / STG / modality boost).
     # xFuserLTX25FullVideoModel overrides these with LTX-2.4/2.5 params.
     _STG_SCALE: float = 0.0
-    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS = None
+    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS: ClassVar[list[int] | None] = None
     _MODALITY_SCALE: float = 1.0
     _GUIDANCE_RESCALE: float = 0.0
     _AUDIO_GUIDANCE_SCALE: float = 1.0
@@ -410,9 +433,9 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import (
-            LTX2Pipeline,
             LTX2ImageToVideoPipeline,
             LTX2LatentUpsamplePipeline,
+            LTX2Pipeline,
         )
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
 
@@ -421,9 +444,13 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             from xfuser.model_executor.models.transformers.transformer_ltx2 import (
                 xFuserLTX2VideoTransformer3DWrapper,
             )
+
             transformer_cls = xFuserLTX2VideoTransformer3DWrapper
         else:
-            from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
+            from diffusers.models.transformers.transformer_ltx2 import (
+                LTX2VideoTransformer3DModel,
+            )
+
             transformer_cls = LTX2VideoTransformer3DModel
 
         transformer = transformer_cls.from_pretrained(
@@ -432,7 +459,9 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             subfolder=self._TRANSFORMER_SUBFOLDER,
         )
 
-        pipe_cls = LTX2ImageToVideoPipeline if self.config.task == "i2v" else LTX2Pipeline
+        pipe_cls = (
+            LTX2ImageToVideoPipeline if self.config.task == "i2v" else LTX2Pipeline
+        )
         pipe = pipe_cls.from_pretrained(
             self.settings.model_name,
             transformer=transformer,
@@ -456,9 +485,6 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             self.upsample_pipe = LTX2LatentUpsamplePipeline(
                 vae=pipe.vae, latent_upsampler=latent_upsampler
             )
-            # Stage 2 always decodes at 2× spatial/temporal scale; tiling is
-            # required for correct results at normal output resolutions.
-            #pipe.vae.enable_tiling()
 
         # Diffusion decoder — replaces convolutional VAE decode for both distilled
         # and full model pipelines.
@@ -476,17 +502,21 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
                 LTX2VideoVaeNeighborhoodNattenProcessor,
             )
+
             diff_decoder.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
             log("Diffusion decoder: using NATTEN attention processor.")
-        except Exception:
+        except (ImportError, RuntimeError):
             # NATTEN is not available
             # Fall back to tiled PyTorch SDPA
             # Works on CUDA, ROCm and CPU. Ported from LTX-2 EagerSdpaAttention.
             from xfuser.model_executor.layers.ltx2_na3d_eager_attn import (
                 LTX2VideoVaeEagerSdpaAttnProcessor,
             )
+
             diff_decoder.set_attn_processor(LTX2VideoVaeEagerSdpaAttnProcessor())
-            log("Diffusion decoder: NATTEN unavailable; using Triton na3d attention fallback.")
+            log(
+                "Diffusion decoder: NATTEN unavailable; using Triton na3d attention fallback."
+            )
         self.decode_pipe = LTX2VideoDiffusionDecodePipeline(
             diffusion_decoder=diff_decoder,
             scheduler=pipe.scheduler,
@@ -526,7 +556,9 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
                 )
             guidance_scale = input_args.get("guidance_scale")
             if guidance_scale != 1.0:
-                log(f"Using guidance_scale=1.0. Other guindance scale values are not supported with this model.")
+                log(
+                    "Using guidance_scale=1.0. Other guindance scale values are not supported with this model."
+                )
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import (
@@ -537,16 +569,16 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         is_i2v = self.config.task == "i2v"
         generator = torch.Generator(device="cuda").manual_seed(input_args["seed"])
 
-        shared = dict(
-            prompt=input_args["prompt"],
-            frame_rate=self.settings.fps,
-            stg_scale=self._STG_SCALE,
-            modality_scale=self._MODALITY_SCALE,
-            audio_guidance_scale=self._AUDIO_GUIDANCE_SCALE,
-            audio_stg_scale=self._AUDIO_STG_SCALE,
-            audio_modality_scale=self._AUDIO_MODALITY_SCALE,
-            generator=generator,
-        )
+        shared = {
+            "prompt": input_args["prompt"],
+            "frame_rate": self.settings.fps,
+            "stg_scale": self._STG_SCALE,
+            "modality_scale": self._MODALITY_SCALE,
+            "audio_guidance_scale": self._AUDIO_GUIDANCE_SCALE,
+            "audio_stg_scale": self._AUDIO_STG_SCALE,
+            "audio_modality_scale": self._AUDIO_MODALITY_SCALE,
+            "generator": generator,
+        }
         if is_i2v:
             shared["image"] = input_args["image"]
 
@@ -568,20 +600,20 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             )[0]
 
             # Stage-2: guidance disabled.
-            stage2_shared = dict(
-                prompt=input_args["prompt"],
-                frame_rate=self.settings.fps,
-                guidance_scale=1.0,
-                stg_scale=0.0,
-                modality_scale=1.0,
-                audio_guidance_scale=1.0,
-                audio_stg_scale=0.0,
-                audio_modality_scale=1.0,
-                generator=generator,
-            )
+            stage2_shared = {
+                "prompt": input_args["prompt"],
+                "frame_rate": self.settings.fps,
+                "guidance_scale": 1.0,
+                "stg_scale": 0.0,
+                "modality_scale": 1.0,
+                "audio_guidance_scale": 1.0,
+                "audio_stg_scale": 0.0,
+                "audio_modality_scale": 1.0,
+                "generator": generator,
+            }
             if is_i2v:
                 stage2_shared["image"] = input_args["image"]
-            
+
             video_latents, audio_latents = self.pipe(
                 num_frames=input_args["num_frames"],
                 sigmas=STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -594,14 +626,19 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             )
         else:
             from diffusers.pipelines.ltx2.utils import DEFAULT_NEGATIVE_PROMPT
-            shared["negative_prompt"] = input_args.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT)
+
+            shared["negative_prompt"] = input_args.get(
+                "negative_prompt", DEFAULT_NEGATIVE_PROMPT
+            )
             # Full model: single-stage with full guidance (STG, modality, CFG).
             shared["guidance_scale"] = input_args["guidance_scale"]
             shared["guidance_rescale"] = self._GUIDANCE_RESCALE
             shared["audio_guidance_rescale"] = self._AUDIO_GUIDANCE_RESCALE
             shared["use_cross_timestep"] = True
             if self._SPATIO_TEMPORAL_GUIDANCE_BLOCKS is not None:
-                shared["spatio_temporal_guidance_blocks"] = self._SPATIO_TEMPORAL_GUIDANCE_BLOCKS
+                shared["spatio_temporal_guidance_blocks"] = (
+                    self._SPATIO_TEMPORAL_GUIDANCE_BLOCKS
+                )
             video_latents, audio_latents = self.pipe(
                 height=input_args["height"],
                 width=input_args["width"],
@@ -650,8 +687,10 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             # with guidance), so the hook must fire per-invocation.
             # Mirrors diffusers_adapters/flux2.py
             if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+
                 def _mark_cudagraph_step(module, args, kwargs):
                     torch.compiler.cudagraph_mark_step_begin()
+
                 self.pipe.transformer.register_forward_pre_hook(
                     _mark_cudagraph_step, with_kwargs=True, prepend=True
                 )
@@ -729,13 +768,13 @@ class xFuserLTX25FullVideoModel(_xFuserLTX25VideoModelBase):
     """
 
     _TRANSFORMER_SUBFOLDER = "transformer_full"
-    _DISTILLED = False   # single-stage, no upsampler
+    _DISTILLED = False  # single-stage, no upsampler
 
     # Full-model guidance parameters - LTX-2.4/2.5 params:
     # video:  cfg_scale=3.0, stg_scale=1.0, rescale_scale=0.7, modality_scale=3.0, stg_blocks=[28]
     # audio:  cfg_scale=7.0, stg_scale=1.0, rescale_scale=0.7, modality_scale=3.0, stg_blocks=[28]
     _STG_SCALE = 1.0
-    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS = [28]
+    _SPATIO_TEMPORAL_GUIDANCE_BLOCKS: ClassVar[list[int]] = [28]
     _MODALITY_SCALE = 3.0
     _GUIDANCE_RESCALE = 0.7
     _AUDIO_GUIDANCE_SCALE = 7.0

@@ -100,7 +100,11 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         self.cache_context = CacheContext()
         self.callback_handler = CallbackHandler(callbacks)
 
-        self.register_buffer("rel_l1_thresh", torch.tensor(rel_l1_thresh))
+        self.register_buffer(
+            "rel_l1_thresh",
+            torch.tensor(rel_l1_thresh),
+            persistent=False,
+        )
         self.return_hidden_states_first = return_hidden_states_first
         self.num_steps = num_steps
         self.name = name

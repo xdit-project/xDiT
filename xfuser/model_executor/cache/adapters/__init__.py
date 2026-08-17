@@ -75,11 +75,22 @@ def apply_cache(
 
     if cache_method == "fbcache":
         from xfuser.model_executor.cache.adapters.flux2 import apply_fbcache
+        from xfuser.envs import XDIT_FBCACHE_THRESH
+
         target = transformer if transformer is not None else getattr(pipe, transformer_attr)
+        default_threshold = (
+            float(XDIT_FBCACHE_THRESH)
+            if XDIT_FBCACHE_THRESH
+            else 0.12
+        )
         patched = apply_fbcache(
             target,
             use_cache="Fb",
-            rel_l1_thresh=_resolve_threshold(preset_kwargs, cache_config),
+            rel_l1_thresh=_resolve_threshold(
+                preset_kwargs,
+                cache_config,
+                default=default_threshold,
+            ),
             return_hidden_states_first=False,
             num_steps=num_steps,
         )

@@ -134,7 +134,6 @@ class xFuserArgs:
     use_teacache: bool = False
     use_fbcache: bool = False
     cache_method: Optional[str] = None
-    cache_threshold: Optional[float] = None
     cache_config: Optional[str] = None
     # Other arguments
     use_fp8_t5_encoder: bool = False
@@ -211,29 +210,6 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
-
-        if self.cache_threshold is not None:
-            import json as _json
-            warnings.warn(
-                "--cache_threshold is deprecated; use "
-                f'--cache_config \'{{"residual_diff_threshold": {self.cache_threshold}}}\' instead.',
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            try:
-                existing = _json.loads(self.cache_config) if self.cache_config else {}
-                if not isinstance(existing, dict):
-                    raise TypeError("cache_config must be a JSON object")
-            except (_json.JSONDecodeError, TypeError):
-                warnings.warn(
-                    f"--cache_config is not valid JSON and will be ignored: {self.cache_config!r}",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                existing = {}
-            existing.setdefault("residual_diff_threshold", self.cache_threshold)
-            self.cache_config = _json.dumps(existing)
-            self.cache_threshold = None
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -977,12 +953,6 @@ class xFuserArgs:
                 "fbcache: xDiT in-tree FBCache (Flux2/Klein). "
                 "dbcache: cache-dit DBCache, requires `pip install cache-dit` (all dbcache-eligible models; excludes cosmos3)."
             ),
-        )
-        parser.add_argument(
-            "--cache_threshold",
-            type=float,
-            default=None,
-            help="[Deprecated] Use --cache_config '{\"residual_diff_threshold\": X}' instead.",
         )
         parser.add_argument(
             "--cache_config",

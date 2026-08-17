@@ -429,7 +429,6 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         super()._customize_settings(config)
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
-        # 4-step distilled: guidance baked in (guidance_scale=1.0 → no CFG).
         self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
                 adapter=[

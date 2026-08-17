@@ -59,7 +59,7 @@ class xFuserFluxModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
-        supported_cache_methods=("teacache", "dbcache"),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -84,7 +84,8 @@ class xFuserFluxModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        cache_config={
+        step_cache_config={
+            "teacache": None,
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
@@ -164,7 +165,7 @@ class xFuserFluxKontextModel(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
         fully_shard_degree=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -190,7 +191,7 @@ class xFuserFluxKontextModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_1")),
@@ -288,7 +289,7 @@ class xFuserFlux2Model(xFuserModel):
         enable_slicing=True,
         use_parallel_vae=True,
         pipefusion_parallel_degree=True,
-        supported_cache_methods=("fbcache", "dbcache"),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -319,7 +320,8 @@ class xFuserFlux2Model(xFuserModel):
                 "offload_policy": "cpu",
             },
         },
-        cache_config={
+        step_cache_config={
+            "fbcache": None,
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"), ("single_transformer_blocks", "Pattern_2")),
@@ -422,7 +424,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         use_parallel_vae=True,
         fully_shard_degree=True,
         pipefusion_parallel_degree=True,
-        supported_cache_methods=("fbcache",),
+        supports_step_caching=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -447,6 +449,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
                 "wrap_attrs": ["model.layers"],
             },
         },
+        step_cache_config={"fbcache": None},
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -545,4 +548,5 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
                 "wrap_attrs": ["model.layers"],
             },
         },
+        step_cache_config={"fbcache": None},
     )

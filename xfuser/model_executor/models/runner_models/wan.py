@@ -218,7 +218,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
         supports_sparge_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -244,7 +244,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
                                  "30.", "31.", "32.", "33.", "34.",
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
@@ -337,7 +337,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         self.settings.fp8_precision_overrides = None
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         # Dual-transformer: t1=high-noise denoiser, t2=low-noise refiner (shorter warmup).
-        self.settings.cache_config = {
+        self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
@@ -412,7 +412,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
         supports_distilled_weights=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -430,7 +430,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
         # 4-step distilled: guidance baked in (guidance_scale=1.0 → no CFG).
-        self.settings.cache_config = {
+        self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
@@ -562,7 +562,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         supports_sparge_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     settings = ModelSettings(
         mod_value=8,
@@ -577,7 +577,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
                                  "30.", "31.", "32.", "33.", "34.",
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
@@ -647,7 +647,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
         self.settings.fp8_precision_overrides=None
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
-        self.settings.cache_config = {
+        self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
@@ -709,7 +709,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         supports_sparge_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=736,
@@ -735,7 +735,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),
@@ -831,7 +831,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
 
     default_input_values = DefaultInputValues(
@@ -867,7 +867,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
             self.settings.model_name = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
             self.settings.output_name = "wan.2.1_vace_1.3b"
         # Only cache `blocks`; vace_blocks have a different forward pattern not supported by cache-dit.
-        self.settings.cache_config = {
+        self.settings.step_cache_config = {
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("blocks", "Pattern_2"),),

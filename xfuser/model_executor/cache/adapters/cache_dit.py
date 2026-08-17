@@ -2,7 +2,7 @@
 cache-dit adapter (optional dependency).
 Provides DBCache step-caching via cache-dit's enable_cache() + BlockAdapter.
 
-Model block layout is declared in ModelSettings.cache_config.adapter (CacheDitAdapterConfig)
+Model block layouts come from DBCacheSettings entries in ModelSettings.step_cache_config.
 No model-specific dispatch in this file.
 """
 import dataclasses

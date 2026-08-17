@@ -32,7 +32,7 @@ class xFuserQwenImageEditModel(xFuserModel):
         use_fp8_gemms=True,
         enable_tiling=True,
         enable_slicing=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         num_inference_steps=50,
@@ -52,7 +52,7 @@ class xFuserQwenImageEditModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.transformer_blocks"],
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"),),
@@ -125,7 +125,7 @@ class xFuserQwenImageModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=928,
@@ -146,7 +146,7 @@ class xFuserQwenImageModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"),),

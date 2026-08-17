@@ -56,7 +56,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"),),
@@ -72,7 +72,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
 
     _STG_SCALE = 1.0
@@ -259,7 +259,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fps=24,
         resolution_divisor=64,
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"),),
@@ -275,7 +275,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:

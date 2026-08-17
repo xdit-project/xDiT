@@ -13,9 +13,9 @@ DBCacheSettings: bundles adapter + preset for one model.
              (multi-transformer, e.g. Wan2.2). Must map 1:1 with preset list.
     preset: DBCachePreset or List[DBCachePreset] mapping 1:1 with adapter list.
 
-ModelCacheConfig: dict[str, method_config] keyed by cache method name,
+ModelCacheConfig: dict[str, optional method_config] keyed by cache method name,
     e.g. {"dbcache": DBCacheSettings(...)}. .get(cache_method) returns None for
-    methods the model doesn't support.
+    in-tree methods that need no model-specific configuration.
 """
 import dataclasses
 from typing import Dict, List, Optional, Tuple, Union
@@ -79,5 +79,6 @@ class DBCacheSettings:
     preset: Optional[PresetValue] = None
 
 
-# dict keyed by cache method name, e.g. {"dbcache": DBCacheSettings(...)}.
-ModelCacheConfig = Dict[str, object]
+# Dict keys declare supported methods; None marks an in-tree method with no
+# model-specific configuration.
+ModelCacheConfig = Dict[str, Optional[object]]

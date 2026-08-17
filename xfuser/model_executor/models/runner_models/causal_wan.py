@@ -40,7 +40,7 @@ class xFuserCausalWanModel(xFuserModel):
         use_parallel_vae=False,
         enable_tiling=True,
         enable_slicing=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=512,
@@ -71,8 +71,7 @@ class xFuserCausalWanModel(xFuserModel):
                 "wrap_attrs": ["encoder.block"],
             },
         },
-        # DMD 8-step: no CFG (guidance_scale=0.0). Short warmup.
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=[
                     CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),

@@ -64,7 +64,7 @@ class xFuserZImageModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_int8_gemms=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -84,7 +84,7 @@ class xFuserZImageModel(xFuserModel):
             "transformer.noise_refiner", 
             "transformer.context_refiner"
         ],
-        cache_config={
+        step_cache_config={
             "dbcache":DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("layers", "Pattern_3"),),

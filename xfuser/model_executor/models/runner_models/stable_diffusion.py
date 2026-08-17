@@ -29,7 +29,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -50,7 +50,7 @@ class xFuserStableDiffusionModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.transformer_blocks"],
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_1"),),

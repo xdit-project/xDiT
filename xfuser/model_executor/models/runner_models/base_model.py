@@ -133,7 +133,7 @@ class ModelCapabilities:
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp4_gemms: bool = False
-    supported_cache_methods: Tuple[str, ...] = ()
+    supports_step_caching: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -172,7 +172,7 @@ class ModelSettings:
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_suffixes: Tuple[str] = None
     fbcache_thresh: float = 0.12
-    cache_config: Optional[ModelCacheConfig] = None
+    step_cache_config: Optional[ModelCacheConfig] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
@@ -368,7 +368,7 @@ class xFuserModel(abc.ABC):
             )
         if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
             raise RuntimeError("teacache requires TP=1")
-        method_cfg = (self.settings.cache_config or {}).get(cache_method)
+        method_cfg = (self.settings.step_cache_config or {}).get(cache_method)
         apply_cache(
             cache_method=cache_method,
             num_steps=self.config.num_inference_steps,
@@ -383,8 +383,6 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         for key in ModelCapabilities.__annotations__.keys():
-            if key == "supported_cache_methods":
-                continue  # handled separately below
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int):
                 if not getattr(self.capabilities, key) and config_value > 1:
@@ -394,14 +392,15 @@ class xFuserModel(abc.ABC):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
 
         if config.cache_method:
-            if not self.capabilities.supported_cache_methods:
+            if not self.capabilities.supports_step_caching:
                 raise ValueError(
-                    f"Model {self.settings.model_name} does not support step caching (no supported_cache_methods declared)."
+                    f"Model {self.settings.model_name} does not support step caching."
                 )
-            if config.cache_method not in self.capabilities.supported_cache_methods:
+            supported_methods = self.settings.step_cache_config or {}
+            if config.cache_method not in supported_methods:
                 raise ValueError(
                     f"Model {self.settings.model_name} does not support --cache_method {config.cache_method}. "
-                    f"Supported: {', '.join(self.capabilities.supported_cache_methods)}"
+                    f"Supported: {', '.join(supported_methods)}"
                 )
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")

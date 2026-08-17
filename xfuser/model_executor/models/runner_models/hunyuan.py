@@ -44,7 +44,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -61,7 +61,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
         # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"), ("single_transformer_blocks", "Pattern_0")),
@@ -137,7 +137,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
         use_fp8_gemms=True,
-        supported_cache_methods=("dbcache",),
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -152,7 +152,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
-        cache_config={
+        step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
                     blocks=(("transformer_blocks", "Pattern_0"),),

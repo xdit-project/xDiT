@@ -1,16 +1,4 @@
-"""
-xDiT step-caching unified entry point.
-
-Implementation files:
-  flux.py:      Flux1 xDiT in-tree TeaCache (USP-native via all_reduce)
-  flux2.py:     Flux2 xDiT in-tree FBCache (USP-native via all_reduce)
-  cache_dit.py: cache-dit hooks: dbcache (optional dep: pip install cache-dit)
-
-Routing:
-  teacache  → flux.apply_teacache
-  fbcache   → flux2.apply_fbcache
-  dbcache   → cache_dit.apply_cache_dit_cache / apply_cache_dit_cache_multi
-"""
+"""Unified entry point for xDiT step-caching adapters."""
 import json
 import logging
 from typing import Any, Dict, Optional

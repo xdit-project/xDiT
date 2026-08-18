@@ -439,19 +439,10 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         )
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
 
-        use_sp = self.config.ulysses_degree > 1 or self.config.ring_degree > 1
-        if use_sp:
-            from xfuser.model_executor.models.transformers.transformer_ltx2 import (
-                xFuserLTX2VideoTransformer3DWrapper,
-            )
-
-            transformer_cls = xFuserLTX2VideoTransformer3DWrapper
-        else:
-            from diffusers.models.transformers.transformer_ltx2 import (
-                LTX2VideoTransformer3DModel,
-            )
-
-            transformer_cls = LTX2VideoTransformer3DModel
+        from xfuser.model_executor.models.transformers.transformer_ltx2 import (
+            xFuserLTX2VideoTransformer3DWrapper,
+        )
+        transformer_cls = xFuserLTX2VideoTransformer3DWrapper
 
         transformer = transformer_cls.from_pretrained(
             self.settings.model_name,

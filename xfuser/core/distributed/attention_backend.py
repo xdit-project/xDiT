@@ -597,6 +597,8 @@ def _sdpa_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=No
     Allows Pytorch to decide which SDPA backend to use.
     """
     attn_mask = attention_kwargs.get("attn_mask") if attention_kwargs else None
+    if attn_mask is not None and attn_mask.dtype != query.dtype:
+        attn_mask = attn_mask.to(query.dtype)
     output = F.scaled_dot_product_attention(
         query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
     )

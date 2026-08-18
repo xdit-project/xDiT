@@ -427,11 +427,8 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         enable_tiling=True,
-        enable_slicing=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
-        use_hybrid_attn_schedule=True,
-        use_hybrid_gemm_schedule=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -532,9 +529,6 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         if self.config.enable_tiling:
             self.pipe.vae.enable_tiling()
             self.decode_pipe.diffusion_decoder.enable_tiling()
-        if self.config.enable_slicing:
-            self.pipe.vae.enable_slicing()
-            self.decode_pipe.diffusion_decoder.enable_slicing()
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)

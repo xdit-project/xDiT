@@ -293,9 +293,9 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         rope_type: str = "interleaved",
         use_prompt_embeddings: bool = True,
         perturbed_attn: bool = False,
-        ff_bias: bool = False,
-        audio_ff_bias: bool = False,
-        use_prompt_adaln_single: bool = False,
+        ff_bias: bool = True,
+        audio_ff_bias: bool = True,
+        use_prompt_adaln_single: bool = True,
         use_keyframes_abs_pos_embedding: bool = False,
     ):
         super().__init__(

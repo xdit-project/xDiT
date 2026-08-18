@@ -266,11 +266,11 @@ class xFuserWan21I2VModel(xFuserWanModel):
             xFuserWanTransformer3DWrapper,
         )
 
-        transformer = self._build_transformer(
+        transformer = self.loader.load_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
@@ -352,11 +352,11 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         )
 
         attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
-        transformer = self._build_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
-        transformer_2 = self._build_transformer(
+        transformer = self.loader.load_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
+        transformer_2 = self.loader.load_transformer(
             xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
         )
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
@@ -470,7 +470,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             "transformer_2",
             self.config.distilled_transformer_2_path,
         )
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self._BASE_MODEL,
             torch_dtype=torch.bfloat16,
@@ -592,11 +592,11 @@ class xFuserWan21T2VModel(xFuserWanModel):
             xFuserWanTransformer3DWrapper,
         )
 
-        transformer = self._build_transformer(
+        transformer = self.loader.load_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -655,11 +655,11 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         )
 
         attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
-        transformer = self._build_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
-        transformer_2 = self._build_transformer(
+        transformer = self.loader.load_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
+        transformer_2 = self.loader.load_transformer(
             xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
         )
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -732,13 +732,13 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        transformer = self._build_transformer(
+        transformer = self.loader.load_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
         from diffusers import WanPipeline
         pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = pipe_class.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
@@ -861,8 +861,8 @@ class xFuserWan21VACEModel(xFuserWanModel):
             xFuserWanVACETransformer3DWrapper,
         )
 
-        transformer = self._build_transformer(xFuserWanVACETransformer3DWrapper)
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        transformer = self.loader.load_transformer(xFuserWanVACETransformer3DWrapper)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanVACEPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,

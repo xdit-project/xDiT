@@ -112,9 +112,9 @@ class xFuserZImageModel(xFuserModel):
             xFuserZImageTransformer2DWrapper,
         )
 
-        transformer = self._build_transformer(xFuserZImageTransformer2DWrapper)
+        transformer = self.loader.load_transformer(xFuserZImageTransformer2DWrapper)
         _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
@@ -198,9 +198,9 @@ class xFuserZImageTurboModel(xFuserModel):
             xFuserZImageTransformer2DWrapper,
         )
 
-        transformer = self._build_transformer(xFuserZImageTransformer2DWrapper)
+        transformer = self.loader.load_transformer(xFuserZImageTransformer2DWrapper)
         _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,

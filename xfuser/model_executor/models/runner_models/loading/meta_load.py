@@ -586,6 +586,19 @@ class ModelLoader:
 
         return plan_text_encoders(self, existing_quantization_config)
 
+    def materialize_pipeline(self) -> None:
+        """Place or shard the loaded pipeline according to the current run config."""
+        if self.model.config.use_fp4_gemms:
+            self.quantization_plan.log_fp8_overrides()
+        if self.model.config.fully_shard_degree > 1:
+            from .shard import shard_pipeline_components
+
+            shard_pipeline_components(self)
+        else:
+            from .placement import place_pipeline_components
+
+            place_pipeline_components(self)
+
     def fill_eager_transformers(self) -> None:
         """Fill all component-level eager blockwise plans before device placement."""
 

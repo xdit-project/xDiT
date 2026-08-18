@@ -1,5 +1,28 @@
 """Backend-neutral quantization target planning for one model run."""
 
+from typing import Optional
+
+from xfuser.core.utils.runner_utils import log
+
+
+def apply_fp8_override_cli_to_settings(config, settings) -> None:
+    """Apply optional CLI FP8 override patterns (per-slot) to model settings."""
+
+    def _parse_csv_patterns(raw: Optional[str]) -> Optional[tuple[str, ...]]:
+        if raw is None or not raw.strip():
+            return None
+        patterns = tuple(p.strip() for p in raw.split(",") if p.strip())
+        return patterns or None
+
+    if config.fp8_precision_override_prefix_patterns is not None:
+        settings.fp8_precision_overrides = _parse_csv_patterns(
+            config.fp8_precision_override_prefix_patterns
+        )
+    if config.fp8_precision_override_suffix_patterns is not None:
+        settings.fp8_precision_override_suffixes = _parse_csv_patterns(
+            config.fp8_precision_override_suffix_patterns
+        )
+
 
 class QuantizationPlan:
     """Resolve declared FP8, FP4, and INT8 targets from one runner."""
@@ -27,3 +50,19 @@ class QuantizationPlan:
             for target in self.module_list(format_name)
             if target == component_name or target.startswith(prefix)
         ]
+
+    def log_fp8_overrides(self) -> None:
+        """Log FP8 precision overrides once when the FP4 plan is materialized."""
+        settings = self.model.settings
+        prefixes = settings.fp8_precision_overrides
+        suffixes = settings.fp8_precision_override_suffixes
+        if prefixes:
+            log(
+                "The following layers will be quantized to FP8, to maintain output quality: "
+                f"{prefixes} (prefix match)"
+            )
+        if suffixes:
+            log(
+                "The following layers will be quantized to FP8, to maintain output quality: "
+                f"{suffixes} (suffix match)"
+            )

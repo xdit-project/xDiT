@@ -74,8 +74,8 @@ class xFuserQwenImageEditModel(xFuserModel):
             xFuserQwenImageTransformerWrapper,
         )
 
-        transformer = self._build_transformer(xFuserQwenImageTransformerWrapper)
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        transformer = self.loader.load_transformer(xFuserQwenImageTransformerWrapper)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = QwenImageEditPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
@@ -162,8 +162,8 @@ class xFuserQwenImageModel(xFuserModel):
             xFuserQwenImageTransformerWrapper,
         )
 
-        transformer = self._build_transformer(xFuserQwenImageTransformerWrapper)
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        transformer = self.loader.load_transformer(xFuserQwenImageTransformerWrapper)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = QwenImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,

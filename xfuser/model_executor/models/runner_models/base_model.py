@@ -41,16 +41,12 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
-from xfuser.model_executor.models.runner_models.loading.checkpoint import (
-    CheckpointManifest,
-    CheckpointRequest,
-)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
 )
-from xfuser.model_executor.models.runner_models.loading.placement import (
-    place_pipeline_components,
+from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
+    apply_fp8_override_cli_to_settings,
 )
 
 
@@ -287,7 +283,7 @@ class xFuserModel(abc.ABC):
 
     def _update_model_settings(self, config: xFuserArgs) -> None:
         if config.use_fp4_gemms:
-            self._apply_fp8_override_cli_from_config(config)
+            apply_fp8_override_cli_to_settings(config, self.settings)
         te_targets = self.settings.fp8_text_encoder_module_list
         if te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
             # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
@@ -349,37 +345,6 @@ class xFuserModel(abc.ABC):
             if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)
-
-    def _build_transformer(
-        self,
-        wrapper_cls,
-        subfolder: str | None = None,
-        init_kwargs: dict | None = None,
-        stream_quant: bool = True,
-        checkpoint_request: CheckpointRequest | None = None,
-        weight_source: CheckpointManifest | None = None,
-    ):
-        """Load a transformer through the materialization this run asked for.
-
-        The routing, and the quantization each route needs, live in
-        ``loading.transformer_load``; this is the seam runners call.
-        """
-        return self.loader.load_transformer(
-            wrapper_cls,
-            subfolder=subfolder,
-            init_kwargs=init_kwargs,
-            stream_quant=stream_quant,
-            checkpoint_request=checkpoint_request,
-            weight_source=weight_source,
-        )
-
-    def _meta_te_kwargs(self, existing_quantization_config=None):
-        """Plan each declared text encoder's quantization and fill.
-
-        Returns ``(pipe_component_kwargs, te_quant_config)`` for the pipeline's
-        ``from_pretrained``; the planning lives in ``loading.text_encoder_plan``.
-        """
-        return self.loader.plan_text_encoders(existing_quantization_config)
 
     def _local_onload_device(self) -> torch.device:
         """The device this rank offloads to and from, which is never implicitly cuda:0."""
@@ -828,42 +793,10 @@ class xFuserModel(abc.ABC):
             name += f"_{self.config.task}"
         return name
 
-    def _apply_fp8_override_cli_from_config(self, config: xFuserArgs) -> None:
-        """Apply optional CLI FP8 override patterns (per-slot) into ModelSettings."""
-
-        def _parse_csv_patterns(raw: Optional[str]) -> Optional[Tuple[str, ...]]:
-            if raw is None or not raw.strip():
-                return None
-            patterns = tuple(p.strip() for p in raw.split(",") if p.strip())
-            return patterns or None
-
-        if config.fp8_precision_override_prefix_patterns is not None:
-            self.settings.fp8_precision_overrides = _parse_csv_patterns(
-                config.fp8_precision_override_prefix_patterns
-            )
-        if config.fp8_precision_override_suffix_patterns is not None:
-            self.settings.fp8_precision_override_suffixes = _parse_csv_patterns(
-                config.fp8_precision_override_suffix_patterns
-            )
-
     def _post_load_and_state_initialization(self, input_args: dict) -> None: ##TODO: should this be renamed?
         """ Hook for any post model-load and state initialization """
 
-        local_rank = get_world_group().local_rank
-        # Log FP8 precision overrides once here rather than per module/block in the
-        # quantization and FSDP-sharding loops below (avoids duplicate log spam).
-        if self.config.use_fp4_gemms:
-            self._log_fp8_overrides(
-                self.settings.fp8_precision_overrides,
-                self.settings.fp8_precision_override_suffixes,
-            )
-        # The sharded path places and quantizes per block as it wraps; the unsharded path moves the
-        # whole pipeline at once.
-        if self.config.fully_shard_degree > 1:
-            from .loading.shard import shard_pipeline_components
-            shard_pipeline_components(self.loader)
-        else:
-            place_pipeline_components(self.loader)
+        self.loader.materialize_pipeline()
 
         if self.config.use_hybrid_attn_schedule:
             self._setup_hybrid_attn_schedule(input_args)
@@ -873,19 +806,6 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
-
-    def _log_fp8_overrides(self, prefixes, suffixes) -> None:
-        """Log the FP8 precision-override patterns (prefix and suffix) consistently."""
-        if prefixes:
-            log(
-                "The following layers will be quantized to FP8, to maintain output quality: "
-                f"{prefixes} (prefix match)"
-            )
-        if suffixes:
-            log(
-                "The following layers will be quantized to FP8, to maintain output quality: "
-                f"{suffixes} (suffix match)"
-            )
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

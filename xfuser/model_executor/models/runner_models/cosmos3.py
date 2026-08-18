@@ -156,7 +156,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
 
         xFuserCosmos3OmniTransformerWrapper = get_cosmos3_transformer_wrapper_class()
 
-        transformer = self._build_transformer(xFuserCosmos3OmniTransformerWrapper)
+        transformer = self.loader.load_transformer(xFuserCosmos3OmniTransformerWrapper)
 
         xFuserCosmos3OmniPipeline = get_cosmos3_pipeline_class()
 

@@ -93,7 +93,7 @@ class xFuserLTX23VideoModel(xFuserModel):
             xFuserLTX2VideoTransformer3DWrapper,
         )
 
-        transformer = self._build_transformer(
+        transformer = self.loader.load_transformer(
             xFuserLTX2VideoTransformer3DWrapper
         )
 
@@ -290,7 +290,7 @@ class xFuserLTX2VideoModel(xFuserModel):
             xFuserLTX2VideoTransformer3DWrapper,
         )
 
-        transformer = self._build_transformer(
+        transformer = self.loader.load_transformer(
             xFuserLTX2VideoTransformer3DWrapper
         )
         pipe = LTX2Pipeline.from_pretrained(

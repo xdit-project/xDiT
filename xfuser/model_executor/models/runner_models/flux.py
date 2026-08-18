@@ -116,8 +116,8 @@ class xFuserFluxModel(xFuserModel):
                 xFuserFlux1Transformer2DWrapper,
             )
 
-            transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
-            te_kwargs, te_quant = self._meta_te_kwargs()
+            transformer = self.loader.load_transformer(xFuserFlux1Transformer2DWrapper)
+            te_kwargs, te_quant = self.loader.plan_text_encoders()
             pipe = FluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
@@ -210,8 +210,8 @@ class xFuserFluxKontextModel(xFuserModel):
             xFuserFlux1Transformer2DWrapper,
         )
 
-        transformer = self._build_transformer(xFuserFlux1Transformer2DWrapper)
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        transformer = self.loader.load_transformer(xFuserFlux1Transformer2DWrapper)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = FluxKontextPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
@@ -386,8 +386,8 @@ class xFuserFlux2Model(xFuserModel):
             )
             from diffusers import Flux2Pipeline
 
-            transformer = self._build_transformer(xFuserFlux2Transformer2DWrapper)
-            te_kwargs, te_quant = self._meta_te_kwargs()
+            transformer = self.loader.load_transformer(xFuserFlux2Transformer2DWrapper)
+            te_kwargs, te_quant = self.loader.plan_text_encoders()
             pipe = Flux2Pipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
@@ -515,8 +515,8 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             )
             from diffusers import Flux2KleinPipeline
 
-            transformer = self._build_transformer(xFuserFlux2Transformer2DWrapper)
-            te_kwargs, te_quant = self._meta_te_kwargs()
+            transformer = self.loader.load_transformer(xFuserFlux2Transformer2DWrapper)
+            te_kwargs, te_quant = self.loader.plan_text_encoders()
             pipe = Flux2KleinPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,

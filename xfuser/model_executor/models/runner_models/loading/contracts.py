@@ -26,7 +26,7 @@ class MaterializationMode(str, Enum):
 
 
 class ConstructionSeam(str, Enum):
-    BUILD_TRANSFORMER = "_build_transformer"
+    LOAD_TRANSFORMER = "loader.load_transformer"
 
 
 class LoadRoute(Flag):
@@ -139,7 +139,7 @@ class LoadDeclaration:
             replicated_meta_transformers=(tuple(transformers) if replicated else ()),
             local_meta_transformers=tuple(transformers),
             materialization_modes=frozenset(modes),
-            construction_seam=ConstructionSeam.BUILD_TRANSFORMER,
+            construction_seam=ConstructionSeam.LOAD_TRANSFORMER,
             quantization_formats=formats,
             quantization_backends=backends,
             quantization_contracts=frozenset(contracts),
@@ -221,7 +221,7 @@ class LoadDeclaration:
         if fsdp_transformers:
             modes.add(MaterializationMode.FSDP_META)
         if fsdp_transformers or replicated_transformers:
-            seam = ConstructionSeam.BUILD_TRANSFORMER
+            seam = ConstructionSeam.LOAD_TRANSFORMER
         if replicated_transformers:
             modes.add(MaterializationMode.REPLICATED_META)
         formats = frozenset(format_ for format_, _ in contracts)

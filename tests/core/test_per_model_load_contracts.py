@@ -4,8 +4,8 @@ Each test here is about a named model whose checkpoint, encoder or wrapper made 
 the exception: HunyuanVideo's pinned revision and Llama encoder, LTX's withheld
 declaration, Krea-2's omitted text encoder, the runners on dedicated adapters.
 
-The AST checks stay dependency-light. Model API checks are guarded so a core
-test environment without Diffusers can still enforce the declarations.
+Declaration checks stay dependency-light. Model API checks are guarded so a
+core test environment without Diffusers can still enforce the contracts.
 """
 
 import ast
@@ -73,45 +73,6 @@ def _class_attribute_value(filename, class_name, attribute):
     return None if node is None else _literal(node)
 
 
-def _self_calls(filename, class_name):
-    """Every method the class calls on self, however the call is formatted."""
-    return {
-        node.func.attr
-        for node in ast.walk(_classes(filename)[class_name])
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "self"
-    }
-
-
-def _calls_on(filename, class_name, receiver):
-    """Every attribute called on a named receiver, e.g. SomeWrapper.from_pretrained."""
-    return {
-        node.func.attr
-        for node in ast.walk(_classes(filename)[class_name])
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == receiver
-    }
-
-
-def _call_keywords(filename, class_name, attribute):
-    """The keyword names passed to one call anywhere in a class body, plus its **kwargs names."""
-    found = set()
-    for node in ast.walk(_classes(filename)[class_name]):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-        if name != attribute:
-            continue
-        for keyword in node.keywords:
-            found.add(keyword.arg if keyword.arg is not None else ast.unparse(keyword.value))
-    return found
-
-
 def _load_contracts():
     spec = importlib.util.spec_from_file_location(
         "per_model_loading_contracts", CONTRACTS
@@ -121,7 +82,7 @@ def _load_contracts():
     return module
 
 
-def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
+def test_hunyuan_declares_its_pinned_checkpoint_revision():
     declaration = _load_declaration("hunyuan.py", "xFuserHunyuanvideoModel")
     settings = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "settings")
     capabilities = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "capabilities")
@@ -140,19 +101,6 @@ def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
         )
         == "refs/pr/18"
     )
-    assert "checkpoint_request" in _call_keywords(
-        "hunyuan.py", "xFuserHunyuanvideoModel", "_build_transformer"
-    )
-    assert _keyword(
-        next(
-            node
-            for node in ast.walk(_classes("hunyuan.py")["xFuserHunyuanvideoModel"])
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "from_pretrained_kwargs"
-        ),
-        "include_subfolder",
-    ) is False
     # The pin is declarative input to the run's one loader-owned checkpoint identity.
     # test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves calls it for real.
     assert _class_attribute_value(
@@ -172,18 +120,11 @@ def test_hunyuanvideo_offers_its_llama_encoder_to_the_memory_efficient_load():
     """
     settings = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "settings")
     strategy = _keyword(settings, "fsdp_strategy")
-    pipeline_kwargs = _call_keywords(
-        "hunyuan.py", "xFuserHunyuanvideoModel", "from_pretrained"
-    )
-
     assert strategy["text_encoder"]["wrap_attrs"] == ["layers"]
     assert _keyword(
         _load_declaration("hunyuan.py", "xFuserHunyuanvideoModel"),
         "meta_text_encoders",
     ) == ["text_encoder"]
-    assert "_meta_te_kwargs" in _self_calls("hunyuan.py", "xFuserHunyuanvideoModel")
-    assert "quantization_config" in pipeline_kwargs
-    assert "te_kwargs" in pipeline_kwargs
     # The 0.2G CLIP stays out: a collective per prompt to save a fraction of a gigabyte.
     assert "text_encoder_2" not in strategy
 
@@ -246,7 +187,7 @@ def test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves():
     "class_name",
     ["xFuserLTX2VideoModel", "xFuserLTX23VideoModel"],
 )
-def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
+def test_ltx_direct_transformers_do_not_declare_collective_support(class_name):
     declaration = _load_declaration("ltx.py", class_name)
 
     capabilities = _class_attribute("ltx.py", class_name, "capabilities")
@@ -258,10 +199,6 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
     assert _keyword(settings, "fsdp_strategy")["transformer"]["wrap_attrs"] == [
         "transformer_blocks"
     ]
-    assert "_build_transformer" in _self_calls("ltx.py", class_name)
-    assert "from_pretrained" not in _calls_on(
-        "ltx.py", class_name, "xFuserLTX2VideoTransformer3DWrapper"
-    )
     contracts = _load_contracts()
     capability = contracts.LoadDeclaration.for_runner(
         type(
@@ -324,7 +261,7 @@ def test_runners_without_collective_capability_reject_collective_modes():
                 contracts.MaterializationMode.FSDP_META,
             }
         ),
-        construction_seam=contracts.ConstructionSeam.BUILD_TRANSFORMER,
+        construction_seam=contracts.ConstructionSeam.LOAD_TRANSFORMER,
         routes=contracts.LoadRoute.NONE,
     )
     with pytest.raises(

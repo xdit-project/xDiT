@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     QuantizationPlan,
+    apply_fp8_override_cli_to_settings,
 )
 
 
@@ -92,6 +93,81 @@ def test_backend_neutral_targets_cover_fp4_and_int8(monkeypatch):
 
     assert plan.targets_for("transformer", "fp4") == ["fp4_blocks"]
     assert plan.targets_for("transformer", "int8") == ["int8_blocks"]
+
+
+def test_fp8_override_cli_patterns_update_settings_per_slot():
+    settings = SimpleNamespace(
+        fp8_precision_overrides=("declared-prefix",),
+        fp8_precision_override_suffixes=("declared-suffix",),
+    )
+    config = SimpleNamespace(
+        fp8_precision_override_prefix_patterns=" blocks.0, ,blocks.2 ",
+        fp8_precision_override_suffix_patterns=None,
+    )
+
+    apply_fp8_override_cli_to_settings(config, settings)
+
+    assert settings.fp8_precision_overrides == ("blocks.0", "blocks.2")
+    assert settings.fp8_precision_override_suffixes == ("declared-suffix",)
+
+
+def test_model_loader_materialization_logs_fp4_overrides_and_places(monkeypatch):
+    from xfuser.model_executor.models.runner_models.loading import (
+        placement,
+        quantization_plan,
+    )
+    from xfuser.model_executor.models.runner_models.loading.meta_load import ModelLoader
+
+    messages = []
+    placed = []
+    model = SimpleNamespace(
+        config=SimpleNamespace(use_fp4_gemms=True, fully_shard_degree=1),
+        settings=SimpleNamespace(
+            fp8_precision_overrides=("blocks.0",),
+            fp8_precision_override_suffixes=(".proj",),
+        ),
+    )
+    loader = SimpleNamespace(
+        model=model,
+        quantization_plan=QuantizationPlan(model),
+    )
+    monkeypatch.setattr(quantization_plan, "log", messages.append)
+    monkeypatch.setattr(placement, "place_pipeline_components", placed.append)
+
+    ModelLoader.materialize_pipeline(loader)
+
+    assert placed == [loader]
+    assert messages == [
+        "The following layers will be quantized to FP8, to maintain output quality: "
+        "('blocks.0',) (prefix match)",
+        "The following layers will be quantized to FP8, to maintain output quality: "
+        "('.proj',) (suffix match)",
+    ]
+
+
+def test_model_loader_materialization_uses_current_shard_degree(monkeypatch):
+    from xfuser.model_executor.models.runner_models.loading import placement, shard
+    from xfuser.model_executor.models.runner_models.loading.meta_load import ModelLoader
+
+    calls = []
+    model = SimpleNamespace(
+        config=SimpleNamespace(use_fp4_gemms=False, fully_shard_degree=2)
+    )
+    loader = SimpleNamespace(model=model)
+    monkeypatch.setattr(
+        shard, "shard_pipeline_components", lambda value: calls.append(("shard", value))
+    )
+    monkeypatch.setattr(
+        placement,
+        "place_pipeline_components",
+        lambda value: calls.append(("place", value)),
+    )
+
+    ModelLoader.materialize_pipeline(loader)
+    model.config.fully_shard_degree = 1
+    ModelLoader.materialize_pipeline(loader)
+
+    assert calls == [("shard", loader), ("place", loader)]
 
 
 # ============================================================================

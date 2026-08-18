@@ -102,11 +102,11 @@ class xFuserHunyuanvideoModel(xFuserModel):
 
         request = self.loader.checkpoint_request()
         transformer_request = request.with_subfolder("transformer")
-        transformer = self._build_transformer(
+        transformer = self.loader.load_transformer(
             xFuserHunyuanVideoTransformer3DWrapper,
             checkpoint_request=transformer_request,
         )
-        te_kwargs, te_quant = self._meta_te_kwargs()
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = HunyuanVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
@@ -325,7 +325,7 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
-    # Sparse weights are composed and remapped outside _build_transformer.
+    # Sparse weights are composed and remapped outside loader.load_transformer.
     load_support = LoadSupport(
         meta_transformers=(),
         meta_text_encoders=(),

@@ -1,6 +1,6 @@
 """Regression tests for mutually-owned generic FP8/FP4 GEMM modes."""
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -11,6 +11,10 @@ def runtime():
     from xfuser.config.args import xFuserArgs
     from xfuser.model_executor.models.runner_models import base_model
     from xfuser.model_executor.models.runner_models.loading import placement
+    from xfuser.model_executor.models.runner_models.loading.meta_load import ModelLoader
+    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
+        QuantizationPlan,
+    )
 
     class _StubModel(base_model.xFuserModel):
         """Concrete runner used to exercise base-class flag validation.
@@ -31,6 +35,8 @@ def runtime():
         capabilities_cls=base_model.ModelCapabilities,
         model_cls=_StubModel,
         placement=placement,
+        loader_cls=ModelLoader,
+        plan_cls=QuantizationPlan,
     )
 
 
@@ -192,6 +198,10 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
         fill_eager_transformers=lambda: None,
         replicated_broadcast_load=lambda: False,
         backends=SimpleNamespace(fp8=fp8_backend),
+        quantization_plan=runtime.plan_cls(model),
+    )
+    model.loader.materialize_pipeline = MethodType(
+        runtime.loader_cls.materialize_pipeline, model.loader
     )
 
     monkeypatch.setattr(

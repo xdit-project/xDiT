@@ -379,9 +379,13 @@ if env_info["has_aiter"]:
             mha_v4 as _aiter_mha_v4,
             native_fp8_format as _aiter_native_fp8_format,
         )
+        _aiter_arch_name = (
+            torch.cuda.get_device_properties(0).gcnArchName
+            if torch.cuda.is_available()
+            else ""
+        )
         _AITER_MHA_V4_AVAILABLE = (
-            torch.cuda.is_available()
-            and "gfx950" in torch.cuda.get_device_properties(0).gcnArchName
+            "gfx942" in _aiter_arch_name or "gfx950" in _aiter_arch_name
         )
     except ImportError:
         _AITER_MHA_V4_AVAILABLE = False
@@ -1010,6 +1014,15 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal):
         raise NotImplementedError("MHA v4 does not support causal masking")
 
 
+def _use_aiter_mha_v4_fp8(query, is_causal):
+    return (
+        _AITER_MHA_V4_AVAILABLE
+        and query.is_cuda
+        and query.shape[-1] == 128
+        and not is_causal
+    )
+
+
 @register_attention_function(AttentionBackendType.AITER_FP8)
 def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
@@ -1021,43 +1034,10 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
 
-    # Hadamard-rotate Q,K before quant: QK-preserving (kernel unchanged), cuts fp8 quant error.
-    R = _get_fp8_hadamard_matrix(query.shape[-1], query.device)
-    query = _fp8_hadamard_rotate(query, R).contiguous()
-    key = _fp8_hadamard_rotate(key, R).contiguous()
-
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
-    if packed is not None:
-        (
-            query,
-            key,
-            value,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_k,
-            batch_size,
-            sequence_length,
-            num_heads,
-            head_dim,
-        ) = packed
-        output = _aiter_fp8_varlen_attention_kernel(
-            query,
-            key,
-            value,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            sequence_length,
-            max_seqlen_k,
-            head_dim**-0.5,
-            is_causal,
-        ).reshape(batch_size, sequence_length, num_heads, head_dim)
-    elif (
-        _AITER_MHA_V4_AVAILABLE
-        and query.is_cuda
-        and query.shape[-1] == 128
-        and not is_causal
-    ):
-        # The native FP8 MHA v4 recipe quantizes Q/K as-is; keep the shared rotation.
+    use_mha_v4 = packed is None and _use_aiter_mha_v4_fp8(query, is_causal)
+    if use_mha_v4:
+        # The raw MHA v4 API owns canonical Q/K rotation and FP8 quantization.
         fp8_format = _aiter_native_fp8_format()
         output = _aiter_mha_v4(
             query,
@@ -1068,13 +1048,45 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
             fp8_format,
         )
     else:
-        output = _aiter_fp8_dense_attention(
-            query,
-            key,
-            value,
-            query.shape[-1] ** -0.5,
-            is_causal,
-        )
+        if packed is not None:
+            (
+                query,
+                key,
+                value,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_k,
+                batch_size,
+                sequence_length,
+                num_heads,
+                head_dim,
+            ) = packed
+
+        # Varlen and legacy FP8 attention expect pre-rotated Q/K.
+        R = _get_fp8_hadamard_matrix(query.shape[-1], query.device)
+        query = _fp8_hadamard_rotate(query, R).contiguous()
+        key = _fp8_hadamard_rotate(key, R).contiguous()
+
+        if packed is not None:
+            output = _aiter_fp8_varlen_attention_kernel(
+                query,
+                key,
+                value,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                sequence_length,
+                max_seqlen_k,
+                head_dim**-0.5,
+                is_causal,
+            ).reshape(batch_size, sequence_length, num_heads, head_dim)
+        else:
+            output = _aiter_fp8_dense_attention(
+                query,
+                key,
+                value,
+                query.shape[-1] ** -0.5,
+                is_causal,
+            )
 
     output = torch.permute(output, [0, 2, 1, 3])
     return output, None

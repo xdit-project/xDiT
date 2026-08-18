@@ -5,13 +5,16 @@ import torch
 import torch.nn.functional as F
 
 
-def _require_gfx950_mixed_aiter(backend_name):
+def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
     if not torch.cuda.is_available() or torch.version.hip is None:
         pytest.skip("AITER mixed-precision attention requires a ROCm GPU.")
 
     arch_name = getattr(torch.cuda.get_device_properties(0), "gcnArchName", "")
-    if "gfx950" not in arch_name:
-        pytest.skip(f"AITER mixed-format attention requires gfx950, got {arch_name}.")
+    arch = next((name for name in supported_arches if name in arch_name), None)
+    if arch is None:
+        pytest.skip(
+            f"AITER {backend_name} attention requires {supported_arches}, got {arch_name}."
+        )
 
     try:
         import aiter
@@ -21,11 +24,11 @@ def _require_gfx950_mixed_aiter(backend_name):
 
     del mha_v4
     kernel_dir = (
-        Path(aiter.__file__).resolve().parent.parent / "hsa" / "gfx950" / "fmha_v4_fwd"
+        Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
     )
     kernel_name = backend_name.removeprefix("AITER_").lower()
     if not (kernel_dir / f"fwd_hd128_{kernel_name}.co").exists():
-        pytest.skip(f"AITER does not include the gfx950 {kernel_name} FMHA kernel.")
+        pytest.skip(f"AITER does not include the {arch} {kernel_name} FMHA kernel.")
 
 
 @pytest.mark.parametrize(
@@ -34,7 +37,7 @@ def _require_gfx950_mixed_aiter(backend_name):
 )
 @pytest.mark.parametrize("sequence_length", [128, 257])
 def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
-    _require_gfx950_mixed_aiter(backend_name)
+    _require_mha_v4_aiter(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -70,7 +73,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
     ["AITER_MXFP8", "AITER_F8F6", "AITER_F6F4", "AITER_MXFP4", "AITER_F4F4"],
 )
 def test_aiter_mixed_attention_compiles_fullgraph(backend_name):
-    _require_gfx950_mixed_aiter(backend_name)
+    _require_mha_v4_aiter(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -96,7 +99,7 @@ def test_aiter_mixed_attention_compiles_fullgraph(backend_name):
     ["AITER_MXFP8", "AITER_F8F6", "AITER_F6F4", "AITER_MXFP4", "AITER_F4F4"],
 )
 def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
-    _require_gfx950_mixed_aiter(backend_name)
+    _require_mha_v4_aiter(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -118,7 +121,7 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     "backend_name", ["AITER_MXFP8", "AITER_F8F6", "AITER_MXFP6", "AITER_MXFP4"]
 )
 def test_aiter_mixed_cross_attention_compiles_fullgraph(backend_name):
-    _require_gfx950_mixed_aiter(backend_name)
+    _require_mha_v4_aiter(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -139,7 +142,7 @@ def test_aiter_mixed_cross_attention_compiles_fullgraph(backend_name):
 
 
 def test_aiter_i8fp8_attention_compiles_fullgraph():
-    _require_gfx950_mixed_aiter("AITER_I8FP8")
+    _require_mha_v4_aiter("AITER_I8FP8")
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -162,7 +165,7 @@ def test_aiter_i8fp8_attention_compiles_fullgraph():
 
 
 def test_aiter_fp8_attention_compiles_fullgraph_with_mha_v4():
-    _require_gfx950_mixed_aiter("AITER_FP8")
+    _require_mha_v4_aiter("AITER_FP8", supported_arches=("gfx942", "gfx950"))
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -196,7 +199,7 @@ def test_aiter_mha_v4_rejects_causal_attention():
 
     tensor = torch.empty((1, 1, 1, 128), device="cuda", dtype=torch.bfloat16)
     for backend in AITER_MHA_V4_ONLY_BACKENDS:
-        _require_gfx950_mixed_aiter(backend.name)
+        _require_mha_v4_aiter(backend.name)
         with pytest.raises(
             NotImplementedError,
             match="does not support causal masking",
@@ -214,7 +217,7 @@ def test_aiter_low_precision_attention_rejects_dropout():
 
     tensor = torch.empty((1, 1, 1, 128), device="cuda", dtype=torch.bfloat16)
     for backend in AITER_LOW_PRECISION_BACKENDS:
-        _require_gfx950_mixed_aiter(backend.name)
+        _require_mha_v4_aiter(backend.name)
         with pytest.raises(NotImplementedError, match="does not support dropout"):
             ATTENTION_FUNCTION_REGISTRY[backend](
                 tensor, tensor, tensor, dropout_p=0.1, is_causal=False

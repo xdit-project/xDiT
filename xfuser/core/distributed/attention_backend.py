@@ -373,6 +373,27 @@ if env_info["has_aiter"]:
     except ImportError:
         pass # Error is rasied in runtime_state.py if AITER_SPARSE_SAGE is not available.
 
+    try:
+        from aiter.ops.mha_v4 import (
+            AttentionFormat as _AiterAttentionFormat,
+            mha_v4 as _aiter_mha_v4,
+            native_fp8_format as _aiter_native_fp8_format,
+        )
+        _AITER_MHA_V4_AVAILABLE = (
+            torch.cuda.is_available()
+            and "gfx950" in torch.cuda.get_device_properties(0).gcnArchName
+        )
+    except ImportError:
+        _AITER_MHA_V4_AVAILABLE = False
+        pass # Error is raised in runtime_state.py when an MHA v4 backend is selected.
+
+    try:
+        from aiter.ops.mha_v4 import (
+            mha_v4_mxfp8 as _aiter_mha_v4_mxfp8,
+        )
+    except ImportError:
+        pass # Error is raised in runtime_state.py when AITER_MXFP8 is selected.
+
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
     AITER_FP8_HAS_DESCALE = _check_aiter_fp8_has_descale()
@@ -553,8 +574,15 @@ class AttentionBackendType(Enum):
     SAGE = "Sage Attention"
     FLEX_BLOCK_ATTN = "Flex Block Attention"
     AITER = "AITER"
+    AITER_MLA = "AITER MLA" # deprecated, use AITER_FP8
+    AITER_I8FP8 = "AITER I8FP8"
     AITER_FP8 = "AITER FP8"
-    AITER_MLA = "AITER MLA"
+    AITER_MXFP8 = "AITER MXFP8"
+    AITER_F8F6 = "AITER F8F6"
+    AITER_MXFP6 = "AITER MXFP6"
+    AITER_F6F4 = "AITER F6F4"
+    AITER_MXFP4 = "AITER MXFP4"
+    AITER_F4F4 = "AITER F4F4"
     AITER_SAGE = "AITER Sage"
     AITER_SPARSE_SAGE = "AITER Sparse Sage"
     AITER_SAGE_V2 = "AITER Sage V2"
@@ -566,6 +594,24 @@ class AttentionBackendType(Enum):
     AITER_FLYDSL = "AITER FlyDSL"
     AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
     NPU = "NPU"
+
+
+AITER_LOW_PRECISION_BACKENDS = (
+    AttentionBackendType.AITER_I8FP8,
+    AttentionBackendType.AITER_FP8,
+    AttentionBackendType.AITER_MXFP8,
+    AttentionBackendType.AITER_F8F6,
+    AttentionBackendType.AITER_MXFP6,
+    AttentionBackendType.AITER_F6F4,
+    AttentionBackendType.AITER_MXFP4,
+    AttentionBackendType.AITER_F4F4,
+)
+AITER_MHA_V4_ONLY_BACKENDS = tuple(
+    backend
+    for backend in AITER_LOW_PRECISION_BACKENDS
+    if backend != AttentionBackendType.AITER_FP8
+)
+AITER_MHA_V4_ONLY_BACKEND_SET = frozenset(AITER_MHA_V4_ONLY_BACKENDS)
 
 def register_attention_function(backend_type):
     """
@@ -953,12 +999,24 @@ def _aiter_fp8_varlen_attention_kernel_fake(
     return torch.empty_like(query)
 
 
+def _validate_aiter_low_precision_dropout(dropout_p):
+    if dropout_p != 0.0:
+        raise NotImplementedError("AITER low-precision attention does not support dropout")
+
+
+def _validate_aiter_mha_v4_request(dropout_p, is_causal):
+    _validate_aiter_low_precision_dropout(dropout_p)
+    if is_causal:
+        raise NotImplementedError("MHA v4 does not support causal masking")
+
+
 @register_attention_function(AttentionBackendType.AITER_FP8)
 def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
     Performs the necessary tensor permutes and
     then calls attention through AITER
     """
+    _validate_aiter_low_precision_dropout(dropout_p)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -993,6 +1051,22 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
             head_dim**-0.5,
             is_causal,
         ).reshape(batch_size, sequence_length, num_heads, head_dim)
+    elif (
+        _AITER_MHA_V4_AVAILABLE
+        and query.is_cuda
+        and query.shape[-1] == 128
+        and not is_causal
+    ):
+        # The native FP8 MHA v4 recipe quantizes Q/K as-is; keep the shared rotation.
+        fp8_format = _aiter_native_fp8_format()
+        output = _aiter_mha_v4(
+            query,
+            key,
+            value,
+            fp8_format,
+            fp8_format,
+            fp8_format,
+        )
     else:
         output = _aiter_fp8_dense_attention(
             query,
@@ -1004,6 +1078,123 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
 
     output = torch.permute(output, [0, 2, 1, 3])
     return output, None
+
+
+def _aiter_mixed_attn_call(
+    query, key, value, qk_format, v_format, dropout_p, is_causal
+):
+    _validate_aiter_mha_v4_request(dropout_p, is_causal)
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+
+    output = _aiter_mha_v4(
+        query,
+        key,
+        value,
+        qk_format,
+        qk_format,
+        v_format,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, None
+
+
+@register_attention_function(AttentionBackendType.AITER_I8FP8)
+def _aiter_i8fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER INT8 Q/K and FP8 V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.INT8,
+        _aiter_native_fp8_format(),
+        dropout_p,
+        is_causal,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_MXFP8)
+def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MXFP8 Q/K and per-tensor FP8 V recipe."""
+    _validate_aiter_mha_v4_request(dropout_p, is_causal)
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output = _aiter_mha_v4_mxfp8(query, key, value)
+    return torch.permute(output, [0, 2, 1, 3]), None
+
+
+@register_attention_function(AttentionBackendType.AITER_F8F6)
+def _aiter_f8f6_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER per-tensor FP8 Q/K and MXFP6 V recipe."""
+    fp8_format = _aiter_native_fp8_format()
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        fp8_format,
+        _AiterAttentionFormat.MXFP6,
+        dropout_p,
+        is_causal,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_MXFP4)
+def _aiter_mxfp4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MXFP4 Q/K and FP8 V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.MXFP4,
+        _aiter_native_fp8_format(),
+        dropout_p,
+        is_causal,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_F4F4)
+def _aiter_f4f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MXFP4 Q/K/V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.MXFP4,
+        _AiterAttentionFormat.MXFP4,
+        dropout_p,
+        is_causal,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_MXFP6)
+def _aiter_mxfp6_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MXFP6 Q/K and FP8 V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.MXFP6,
+        _aiter_native_fp8_format(),
+        dropout_p,
+        is_causal,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_F6F4)
+def _aiter_f6f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MXFP6 Q/K and MXFP4 V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.MXFP6,
+        _AiterAttentionFormat.MXFP4,
+        dropout_p,
+        is_causal,
+    )
+
 
 @register_attention_function(AttentionBackendType.AITER)
 def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
@@ -1280,7 +1471,7 @@ def _aiter_sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
 
 @register_attention_function(AttentionBackendType.AITER_SAGE_V2)
 def _aiter_sage_v2_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    # Contiguous is needed for Sage v2 in older AITER versions. 
+    # Contiguous is needed for Sage v2 in older AITER versions.
     # This has been fixed in newer version of AITER, meaning the
     # contiguous calls can be removed in the future.
     query = query.contiguous()

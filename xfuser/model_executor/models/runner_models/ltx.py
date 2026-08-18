@@ -633,6 +633,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             shared["guidance_rescale"] = self._GUIDANCE_RESCALE
             shared["audio_guidance_rescale"] = self._AUDIO_GUIDANCE_RESCALE
             shared["use_cross_timestep"] = True
+            shared["negative_prompt"] = input_args["negative_prompt"]
             if self._SPATIO_TEMPORAL_GUIDANCE_BLOCKS is not None:
                 shared["spatio_temporal_guidance_blocks"] = (
                     self._SPATIO_TEMPORAL_GUIDANCE_BLOCKS

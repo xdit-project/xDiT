@@ -206,7 +206,7 @@ def _te_source_error_worker(rank, world_size, init_method, result_queue):
                 raise OSError("text encoder state dict failed")
 
         meta_load.get_fs_group = lambda: Group()
-        loader = object.__new__(meta_load.MemoryEfficientLoader)
+        loader = object.__new__(meta_load.ModelLoader)
         loader.model = SimpleNamespace(
             settings=SimpleNamespace(fsdp_strategy={"text_encoder": {"wrap_attrs": []}})
         )
@@ -318,7 +318,7 @@ def _run_replicated_te_validation_worker(
             else:
                 owner._buffers[local_name] = value
 
-        loader = object.__new__(meta_load.MemoryEfficientLoader)
+        loader = object.__new__(meta_load.ModelLoader)
         try:
             loader._fill_te_replicated(
                 component,

@@ -58,9 +58,10 @@ def conversion_filter(module_path, excluded_paths, include_suffixes=None):
     return True, filter_fn
 
 
-def place_pipeline_components(model) -> None:
+def place_pipeline_components(loader) -> None:
     """Fill, quantize and move an unsharded pipeline to this rank's device."""
 
+    model = loader.model
     local_rank = get_world_group().local_rank
     offload_requested = (
         model.config.enable_model_cpu_offload
@@ -68,30 +69,24 @@ def place_pipeline_components(model) -> None:
         or model.config.enable_group_cpu_offload
     )
 
-    fill_eager = getattr(
-        getattr(model, "_loader", None),
-        "fill_eager_transformers",
-        None,
-    )
-    if fill_eager is not None:
-        fill_eager()
+    loader.fill_eager_transformers()
     # Rank 0's real bf16 weights land on the peers' meta components over GPU->GPU and are
     # quantized per component in place, so VRAM holds one bf16 component rather than the pipeline.
-    if model._replicated_broadcast_load():
-        model._loader.broadcast_fill_replicated(offload_requested)
+    if loader.replicated_broadcast_load():
+        loader.broadcast_fill_replicated(offload_requested)
 
-    adapter = model.fp8_backend
+    adapter = loader.backends.fp8
     if adapter is not None and adapter.converts_before_device_move:
-        _convert_fp8_on_host(model, adapter, local_rank, offload_requested)
+        _convert_fp8_on_host(loader, adapter, local_rank, offload_requested)
 
     if not offload_requested:
         model.pipe = model.pipe.to(f"cuda:{local_rank}")
 
     if model.config.use_fp4_gemms:
         if _is_cuda():
-            setup_nvfp4_gemms(model, local_rank)
+            setup_nvfp4_gemms(loader, local_rank)
         else:
-            setup_mxfp4_gemms(model, local_rank)
+            setup_mxfp4_gemms(loader, local_rank)
 
     # FP4 setup owns its own hybrid FP8 path and any declared FP8-only modules, so the generic walk
     # would re-quantize inside the hybrid wrappers it just built.
@@ -100,39 +95,40 @@ def place_pipeline_components(model) -> None:
         and not adapter.converts_before_device_move
         and not model.config.use_fp4_gemms
     ):
-        _convert_fp8_on_device(model, adapter, local_rank)
+        _convert_fp8_on_device(loader, adapter, local_rank)
 
     if model.config.use_int8_gemms:
-        _convert_int8_on_device(model, local_rank)
+        _convert_int8_on_device(loader, local_rank)
 
 
-def setup_mxfp4_gemms(model, local_rank) -> None:
+def setup_mxfp4_gemms(loader, local_rank) -> None:
     """Quantize the FP4 modules to MXFP4, the format ROCm runs."""
-    _setup_fp4_gemms(model, local_rank, stream_quant=True)
+    _setup_fp4_gemms(loader, local_rank, stream_quant=True)
 
 
-def setup_nvfp4_gemms(model, local_rank) -> None:
+def setup_nvfp4_gemms(loader, local_rank) -> None:
     """Quantize the FP4 modules to NVFP4, the format CUDA runs."""
-    _setup_fp4_gemms(model, local_rank, stream_quant=False)
+    _setup_fp4_gemms(loader, local_rank, stream_quant=False)
 
 
-def _setup_fp4_gemms(model, local_rank, *, stream_quant) -> None:
-    adapter = model.format_backend
+def _setup_fp4_gemms(loader, local_rank, *, stream_quant) -> None:
+    model = loader.model
+    adapter = loader.backends.format
     for module_name in model.settings.fp4_gemm_module_list:
         component_name = module_name.partition(".")[0]
         convert, filter_fn = conversion_filter(
             module_name,
-            model.quantization_ledger.streaming_targets,
+            loader.quantization_ledger.streaming_targets,
         )
         if not convert:
             continue
         # Some models balance performance against quality better by keeping some blocks at FP8
         # while the rest go to FP4, rather than quantizing uniformly.
-        if model.quantization_ledger.claim_description(component_name):
+        if loader.quantization_ledger.claim_description(component_name):
             descriptor = prepare_native_transformer_format_load(
                 adapter,
                 component_name=component_name,
-                targets=model.backends.format_targets_for(component_name),
+                targets=loader.backends.format_targets_for(component_name),
                 stream_quant=stream_quant,
                 precision_prefixes=(model.settings.fp8_precision_overrides or ()),
                 precision_suffixes=(
@@ -152,20 +148,21 @@ def _setup_fp4_gemms(model, local_rank, *, stream_quant) -> None:
             device=f"cuda:{local_rank}",
             **convert_kwargs,
         )
-    setup_fp8_only_gemm_modules(model, local_rank)
+    setup_fp8_only_gemm_modules(loader, local_rank)
 
 
-def setup_fp8_only_gemm_modules(model, local_rank) -> None:
+def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
     """Quantize to FP8 any module the run names for FP8 but not for FP4.
 
     MoE models such as Wan2.2 rely on this: the low-noise transformer generates the fine detail and
     needs FP8's precision, while the rest of the model can take FP4.
     """
 
-    fp4_modules = set(model.settings.fp4_gemm_module_list or ())
+    model = loader.model
+    fp4_modules = set(loader.quantization_plan.module_list("fp4"))
     fp8_only_modules = [
         name
-        for name in model.fp8.module_list()
+        for name in loader.quantization_plan.module_list()
         if not any(
             module_path_is_covered(name, fp4_module)
             for fp4_module in fp4_modules
@@ -173,9 +170,9 @@ def setup_fp8_only_gemm_modules(model, local_rank) -> None:
     ]
     if not fp8_only_modules:
         return
-    adapter = model.blockwise_fp8_backend
+    adapter = loader.backends.blockwise_fp8
     for module_name in fp8_only_modules:
-        excluded_paths = fp4_modules | model.quantization_ledger.already_quantized(
+        excluded_paths = fp4_modules | loader.quantization_ledger.already_quantized(
             fp8=True
         )
         convert, filter_fn = conversion_filter(
@@ -196,11 +193,12 @@ def setup_fp8_only_gemm_modules(model, local_rank) -> None:
         )
 
 
-def _convert_fp8_on_host(model, adapter, local_rank, offload_requested) -> None:
-    for module_name in model.fp8.module_list():
+def _convert_fp8_on_host(loader, adapter, local_rank, offload_requested) -> None:
+    model = loader.model
+    for module_name in loader.quantization_plan.module_list():
         convert, filter_fn = conversion_filter(
             module_name,
-            model.quantization_ledger.fp8_streaming_targets,
+            loader.quantization_ledger.fp8_streaming_targets,
             include_suffixes=model.settings.fp8_gemm_include_suffixes,
         )
         if not convert:
@@ -226,19 +224,20 @@ def _convert_fp8_on_host(model, adapter, local_rank, offload_requested) -> None:
             )
 
 
-def _convert_fp8_on_device(model, adapter, local_rank) -> None:
-    for module_name in model.fp8.module_list():
+def _convert_fp8_on_device(loader, adapter, local_rank) -> None:
+    model = loader.model
+    for module_name in loader.quantization_plan.module_list():
         component_name = module_name.partition(".")[0]
         convert, filter_fn = conversion_filter(
             module_name,
-            model.quantization_ledger.fp8_streaming_targets,
+            loader.quantization_ledger.fp8_streaming_targets,
             include_suffixes=model.settings.fp8_gemm_include_suffixes,
         )
         if not convert:
             continue
         if component_name.startswith(
             "transformer"
-        ) and model.quantization_ledger.claim_description(component_name, fp8=True):
+        ) and loader.quantization_ledger.claim_description(component_name, fp8=True):
             log(
                 "Transformer quantization: requested=fp8, "
                 f"backend={adapter.backend.value}, "
@@ -256,21 +255,22 @@ def _convert_fp8_on_device(model, adapter, local_rank) -> None:
         )
 
 
-def _convert_int8_on_device(model, local_rank) -> None:
-    adapter = model.format_backend
+def _convert_int8_on_device(loader, local_rank) -> None:
+    model = loader.model
+    adapter = loader.backends.format
     for module_name in model.settings.int8_gemm_module_list:
         component_name = module_name.partition(".")[0]
         convert, filter_fn = conversion_filter(
             module_name,
-            model.quantization_ledger.streaming_targets,
+            loader.quantization_ledger.streaming_targets,
         )
         if not convert:
             continue
-        if model.quantization_ledger.claim_description(component_name):
+        if loader.quantization_ledger.claim_description(component_name):
             descriptor = prepare_native_transformer_format_load(
                 adapter,
                 component_name=component_name,
-                targets=model.backends.format_targets_for(component_name),
+                targets=loader.backends.format_targets_for(component_name),
                 stream_quant=False,
             ).descriptor
             log(descriptor.log_message())

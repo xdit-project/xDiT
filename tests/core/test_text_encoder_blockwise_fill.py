@@ -54,7 +54,12 @@ class Encoder:
         self.swapped = []
 
 
-def make_loader(meta_load, *, wrap_attrs=("model.layers",)):
+def make_loader(
+    meta_load,
+    *,
+    wrap_attrs=("model.layers",),
+    meta_text_encoders=("text_encoder",),
+):
     from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
         QuantizationLedger,
     )
@@ -67,16 +72,26 @@ def make_loader(meta_load, *, wrap_attrs=("model.layers",)):
                 "text_encoder": {"wrap_attrs": list(wrap_attrs)},
             },
         ),
-        load_declaration=SimpleNamespace(exclusion_for=lambda name: None),
+        load_declaration=SimpleNamespace(
+            meta_text_encoders=tuple(meta_text_encoders)
+        ),
         quantization_ledger=QuantizationLedger(
             fp8_streaming_targets={"text_encoder.model.layers"}
         ),
     )
-    loader = object.__new__(meta_load.MemoryEfficientLoader)
+    loader = object.__new__(meta_load.ModelLoader)
     loader.model = model
+    loader.load_declaration = model.load_declaration
+    loader.quantization_ledger = model.quantization_ledger
     loader._blockwise_sources = weakref.WeakKeyDictionary()
     loader._te_routes = None
     return loader
+
+
+def test_fsdp_strategy_does_not_auto_enroll_an_undeclared_encoder(meta_load):
+    loader = make_loader(meta_load, meta_text_encoders=())
+
+    assert loader._te_component_names() == []
 
 
 def install(
@@ -94,7 +109,7 @@ def install(
     )
     built = component if component is not None else Encoder()
     monkeypatch.setattr(
-        meta_load.MemoryEfficientLoader,
+        meta_load.ModelLoader,
         "build_meta_component",
         lambda self, name, fp8=True: built,
     )
@@ -110,7 +125,7 @@ def install(
         resolve,
     )
     monkeypatch.setattr(
-        meta_load.MemoryEfficientLoader,
+        meta_load.ModelLoader,
         "apply_meta_te_fp8",
         lambda self, component, name: component.swapped.append(name) or True,
     )
@@ -272,7 +287,7 @@ def test_an_encoder_that_cannot_be_rebuilt_leaves_the_caller_its_normal_load(
     loader = make_loader(meta_load)
     install(monkeypatch, meta_load, manifest=object(), refusal=None)
     monkeypatch.setattr(
-        meta_load.MemoryEfficientLoader,
+        meta_load.ModelLoader,
         "build_meta_component",
         lambda self, name, fp8=True: None,
     )

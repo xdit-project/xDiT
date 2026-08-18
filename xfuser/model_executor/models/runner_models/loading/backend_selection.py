@@ -1,8 +1,7 @@
 """Which quantization implementation a run uses, and whether FSDP placement permits it.
 
 Selection is a question about the run, not about being a diffusion model, so it lives here rather
-than on the runner base -- the same reason ``fp8_plan`` does, and reached through one entry point
-(``xFuserModel.backends``) for the same reason.
+than on the runner base. ``ModelLoader`` owns the one cached selection for the run.
 
 Two questions, and they are not independent. Which adapter owns a format is decided by the load
 contract; whether that adapter is *allowed* is decided by where FSDP will put its tensors, because
@@ -28,13 +27,21 @@ class QuantizationBackends:
     loading.
     """
 
-    def __init__(self, model) -> None:
-        self.model = model
+    def __init__(self, loader) -> None:
+        self.loader = loader
+        self.model = loader.model
+
+    def preflight(self) -> None:
+        """Resolve and validate only the adapters required by this run."""
+        _ = self.fp8
+        _ = self.format
+        if self.uses_blockwise_fp8():
+            _ = self.blockwise_fp8
 
     @functools.cached_property
     def fp8(self):
         """The selected FP8 implementation, validated before allocation."""
-        contract = self.model.load_contract
+        contract = self.loader.load_contract
         if contract is None or contract.requested_format.value != "fp8":
             return None
         from .fp8_backends import (
@@ -50,7 +57,7 @@ class QuantizationBackends:
     @functools.cached_property
     def format(self):
         """Primary FP4/INT8 implementation, validated before allocation."""
-        contract = self.model.load_contract
+        contract = self.loader.load_contract
         if contract is None or contract.requested_format.value not in {
             "fp4",
             "fp8_fp4",
@@ -80,7 +87,7 @@ class QuantizationBackends:
     @functools.cached_property
     def blockwise_fp8(self):
         """FP8 converter for pure FP8 and FP8-only portions of hybrid loads."""
-        contract = self.model.load_contract
+        contract = self.loader.load_contract
         if contract is None:
             return None
         from .fp8_backends import (
@@ -105,14 +112,14 @@ class QuantizationBackends:
         through the fp8 adapter, while an fp4 run quantizes its fp8-only remainder through the
         blockwise one.
         """
-        contract = self.model.load_contract
+        contract = self.loader.load_contract
         if contract is None:
             return None
         format_value = contract.requested_format.value
         if format_value == "fp8":
-            return self.model.fp8_backend
+            return self.fp8
         if format_value in {"fp4", "fp8_fp4"}:
-            return self.model.blockwise_fp8_backend
+            return self.blockwise_fp8
         return None
 
     def _fsdp_target_paths(self) -> set:
@@ -146,7 +153,7 @@ class QuantizationBackends:
         fp4_targets = set(settings.fp4_gemm_module_list or ())
         fp8_only_targets = {
             target
-            for target in self.model.fp8.module_list()
+            for target in self.loader.quantization_plan.module_list()
             if not any(
                 module_path_is_covered(target, fp4_target)
                 for fp4_target in fp4_targets
@@ -200,11 +207,11 @@ class QuantizationBackends:
                 module_path_is_covered(target, fp4_target)
                 for fp4_target in fp4_targets
             )
-            for target in self.model.fp8.module_list()
+            for target in self.loader.quantization_plan.module_list()
         )
 
     def uses_blockwise_fp8(self) -> bool:
-        contract = self.model.load_contract
+        contract = self.loader.load_contract
         if self.requires_blockwise_fp8():
             return True
         if self.places_torchao_tensor_subclass_under_fsdp2(None):
@@ -222,11 +229,11 @@ class QuantizationBackends:
 
     def _format_entries(self):
         """This run's FP4/INT8 target list, whichever format the contract asked for."""
-        format_value = self.model.load_contract.requested_format.value
+        format_value = self.loader.load_contract.requested_format.value
         if format_value in {"fp4", "fp8_fp4"}:
-            return self.model.settings.fp4_gemm_module_list or ()
+            return self.loader.quantization_plan.module_list("fp4")
         if format_value == "int8":
-            return self.model.settings.int8_gemm_module_list or ()
+            return self.loader.quantization_plan.module_list("int8")
         return ()
 
     def format_targets_for(self, component_name: str) -> tuple:
@@ -246,8 +253,10 @@ class QuantizationBackends:
         """
         format_targets = self.format_targets_for(component_name)
         if format_targets:
-            return self.model.format_backend, format_targets
-        fp8_targets = tuple(self.model.fp8.targets_for(component_name))
+            return self.format, format_targets
+        fp8_targets = tuple(
+            self.loader.quantization_plan.targets_for(component_name)
+        )
         if not fp8_targets:
             return None, ()
         return self.fp8_adapter_for_contract(), fp8_targets

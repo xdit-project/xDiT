@@ -116,6 +116,42 @@ def test_base_model_uses_central_int8_conflict_validation(runtime):
         model._validate_config(config)
 
 
+def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
+    runtime,
+):
+    model = object.__new__(runtime.model_cls)
+    model.settings = SimpleNamespace(model_name="test/model", valid_tasks=[])
+    model.capabilities = runtime.capabilities_cls(use_fp8_gemms=True)
+    config = _args(
+        runtime,
+        use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="does not support use_fp8_text_encoder",
+    ):
+        model._validate_config(config)
+
+
+def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(
+    runtime, monkeypatch
+):
+    messages = []
+    model = object.__new__(runtime.model_cls)
+    model.settings = SimpleNamespace(
+        fp8_text_encoder_module_list=["text_encoder.layers"],
+    )
+    config = _args(runtime, use_fp8_gemms=True)
+    monkeypatch.setattr(runtime.base, "log", messages.append)
+
+    model._update_model_settings(config)
+
+    assert len(messages) == 1
+    assert "text-encoder target(s) stay bf16" in messages[0]
+
+
 def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
     runtime, monkeypatch
 ):
@@ -139,35 +175,24 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
         fp8_precision_override_suffixes=None,
         int8_gemm_module_list=None,
     )
-    # fp8 is a read-only property on the base runner, so stub it on the class.
-    monkeypatch.setattr(
-        type(model),
-        "fp8",
-        property(
-            lambda _self: SimpleNamespace(
-                aiter_active=False, module_list=lambda: ["transformer"]
-            )
-        ),
-    )
     model.pipe = SimpleNamespace(to=lambda device: model.pipe)
-    model._replicated_broadcast_load = lambda: False
     model._setup_hybrid_gemm_schedule = lambda input_args: calls.append(
         ("schedule", input_args)
     )
 
-    # The generic FP8 walk now runs through the selected backend adapter, which
-    # the FP4 path must not reach; fp8_backend is a cached_property, so seed its
-    # cache rather than assigning to the attribute.
-    model.__dict__["fp8_backend"] = SimpleNamespace(
+    fp8_backend = SimpleNamespace(
         converts_before_device_move=False,
         backend=SimpleNamespace(value="torchao"),
         storage_semantics="torchao_fp8",
         convert_module=lambda module, **kwargs: calls.append(("generic-fp8", kwargs)),
     )
 
-    # No meta loader in this scenario; otherwise the eager fill runs and reaches
-    # the real distributed state.
-    monkeypatch.setattr(type(model), "_loader", None, raising=False)
+    model.loader = SimpleNamespace(
+        model=model,
+        fill_eager_transformers=lambda: None,
+        replicated_broadcast_load=lambda: False,
+        backends=SimpleNamespace(fp8=fp8_backend),
+    )
 
     monkeypatch.setattr(
         runtime.placement,
@@ -180,8 +205,6 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
             module, "get_world_group", lambda: SimpleNamespace(local_rank=0)
         )
         monkeypatch.setattr(module, "_is_cuda", lambda: False)
-    monkeypatch.setattr(runtime.base, "_use_aiter_fp8_rdna4", lambda: False)
-
     model._post_load_and_state_initialization({"num_inference_steps": 4})
 
     assert calls == [

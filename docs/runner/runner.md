@@ -245,22 +245,22 @@ fill it from rank 0.
 | FLUX.1-dev, FLUX.1-Kontext | Streaming; transformer targets declared | `text_encoder_2` | Transformer + targeted text encoder | Yes |
 | FLUX.2, FLUX.2-klein (4B/9B) | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Wan 2.1/2.2 I2V and T2V, Wan 2.2 TI2V | Streaming; both Wan 2.2 transformers are covered | `text_encoder` | Transformer(s) + targeted text encoder | Yes |
-| Wan 2.2 Distilled I2V | Explicit `distilled_wan_remap` adapter exclusion; external LightX2V state dicts replace both transformers | Declared, post-load only | Rejected before allocation: strict remapping is not collective-safe | No |
+| Wan 2.2 Distilled I2V | Local blockwise loading is declared for external LightX2V state dicts; standard collectives are not | Declared, post-load only | Rejected before allocation: strict remapping is not collective-safe | No |
 | Wan 2.1 VACE | Streaming; main and VACE blocks covered | `text_encoder` | Not exposed by this runner | Yes |
 | Qwen-Image and Qwen-Image-Edit variants | Streaming; transformer targets declared | `text_encoder` | Transformer + targeted text encoder | Yes |
 | Z-Image and Z-Image-Turbo | Streaming; transformer, noise refiner, and context refiner covered | `text_encoder` | Transformer + targeted text encoder | Yes |
-| Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | Explicitly excluded: the Qwen3VL ROCm float32-Linear workaround has no exact quantization target/API contract | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
-| Stable Diffusion 3.5 | Explicit `sd35_composition` adapter exclusion; direct/post-load only | `text_encoder_3`, post-load only | Rejected before allocation: the composition wrapper has no config-only transformer seam | No |
+| Krea2-Raw and Krea2-Turbo | Streaming; transformer targets declared | Not declared for shared loading: the Qwen3VL ROCm float32-Linear workaround has no exact quantization target/API contract | Transformer only; text encoder loads normally | Transformer only; text encoder loads per rank |
+| Stable Diffusion 3.5 | No shared load route declared; direct/post-load only | `text_encoder_3`, post-load only | Rejected before allocation: the composition wrapper has no config-only transformer seam | No |
 | HunyuanVideo | Streaming from pinned revision `refs/pr/18`; both transformer block lists declared | `text_encoder`, the Llama encoder; the CLIP encoder is left at pipeline dtype | Transformer + targeted text encoder | Yes |
-| HunyuanVideo-1.5, distilled, and sparse/remapped variants | Explicit `hunyuan_video_15_variants` adapter exclusion; direct/remapped loading only | None | Rejected before allocation: separate wrapper/config and remapped sparse composition are not verified against the standard seam | No |
+| HunyuanVideo-1.5, distilled, and sparse/remapped variants | No shared load route declared; direct/remapped loading only | None | Rejected before allocation: separate wrapper/config and remapped sparse composition are not verified against the standard seam | No |
 | LTX-2 | Eager/native streaming through the shared transformer seam; transformer targets declared | None | Rejected before allocation: stage-2 distilled LoRA currently precedes base checkpoint fill on a meta transformer | No |
 | LTX-2.3 | Eager load through the shared transformer seam; no quantized GEMM capability declared | None | Rejected before allocation: stage-2 distilled LoRA currently precedes base checkpoint fill on a meta transformer | No |
 | Cosmos3-Super and Cosmos3-Nano | Streaming; transformer targets declared | None | Transformer only | Transformer only |
-| CausalWan | Explicit `causal_wan_custom` adapter exclusion; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
+| CausalWan | No shared load route declared; direct load with manual single-file fallback | None | Rejected before allocation: fallback discovery is not collective-safe | No |
 | Ideogram 4 | Streaming; both the conditional and unconditional transformer declared | None | Both transformers; text encoder loads normally | Yes, for both transformers; the `trust_remote_code` text encoder is filled eagerly because the manifest cannot read its parameter names ahead of the load |
 | MiniMax-H3 and MiniMax-H3-Ref2VA | Modular `ModularPipeline` construction with fused QKV projections; direct load only | None | Rejected before allocation: fusion rewrites attention into `attn.to_qkv`, so live tensor names stop matching checkpoint keys | No |
 
-The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. The named custom adapters above are declarative exclusions: they preserve eager behavior, but a requested meta mode fails before model allocation rather than entering the standard transformer collective path.
+The FLUX PipeFusion loading branches construct their complete pipelines directly, so they do not use transformer streaming, and replicated meta-load is excluded whenever PipeFusion is active. Each runner keeps class-level `load_support` beside its capabilities and settings. The declaration positively names eligible meta transformers and text encoders and records standard-collective and local-blockwise routes independently; a requested unsupported meta mode fails before model allocation.
 
 #### Per-model FP4 and INT8 Targets
 
@@ -290,7 +290,7 @@ list rather than adding to it.
 #### Flag Combinations and Exclusions
 
 - `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 is opt-in everywhere: add `--use_fp8_text_encoder` when you want it.
-- `--use_fp8_text_encoder` requires `--use_fp8_gemms`. On an FP8-capable runner that declares no text-encoder target, the text-encoder flag has no effect; a runner without FP8 capability rejects the FP8 request during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
+- `--use_fp8_text_encoder` requires `--use_fp8_gemms` and a runner that explicitly declares text-encoder FP8 capability and targets. Other runners reject the text-encoder flag during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
 - RDNA4+AITER streaming FP8 for a text encoder requires `transformers>=5.0` with `transformers.core_model_loading`. On Transformers 4.x, xDiT logs the reason and uses AITER post-load conversion where placement permits it; memory-efficient FSDP rejects the fallback before allocation because its sharded meta layout cannot be changed safely. The general `transformers>=4.39.1` package floor remains valid.
 - Native torchao text-encoder loading requires `torchao>=0.15.0`, Diffusers `PipelineQuantizationConfig`, and Transformers `TorchAoConfig` quantize-on-load APIs. Native torchao transformer loading separately requires Diffusers `TorchAoConfig` accepting the exact `AOBaseConfig`; this includes NVFP4 and INT8 when installed APIs support them. These APIs are feature-probed lazily and unavailable paths fall back explicitly where placement permits it.
 - `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`, and that exclusion includes explicit hybrid FP8/FP4 mode.

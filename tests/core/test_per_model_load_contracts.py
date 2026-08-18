@@ -2,7 +2,7 @@
 
 Each test here is about a named model whose checkpoint, encoder or wrapper made it
 the exception: HunyuanVideo's pinned revision and Llama encoder, LTX's withheld
-declaration, Krea-2's excluded text encoder, the runners on dedicated adapters.
+declaration, Krea-2's omitted text encoder, the runners on dedicated adapters.
 
 The AST checks stay dependency-light. Model API checks are guarded so a core
 test environment without Diffusers can still enforce the declarations.
@@ -31,13 +31,7 @@ def _classes(filename):
 
 
 def _load_declaration(filename, class_name):
-    return next(
-        decorator
-        for decorator in _classes(filename)[class_name].decorator_list
-        if isinstance(decorator, ast.Call)
-        and isinstance(decorator.func, ast.Attribute)
-        and decorator.func.attr == "declare"
-    )
+    return _class_attribute(filename, class_name, "load_support")
 
 
 def _literal(node):
@@ -132,8 +126,9 @@ def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
     settings = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "settings")
     capabilities = _class_attribute("hunyuan.py", "xFuserHunyuanvideoModel", "capabilities")
 
-    assert [ast.literal_eval(arg) for arg in declaration.args] == ["transformer"]
-    assert _keyword(declaration, "replicated") is True
+    assert _keyword(declaration, "meta_transformers") == ["transformer"]
+    assert _keyword(declaration, "meta_text_encoders") == ["text_encoder"]
+    assert _keyword(declaration, "replicated_meta") is True
     assert _keyword(capabilities, "fully_shard_degree") is True
     assert _keyword(settings, "fsdp_strategy")["transformer"]["wrap_attrs"] == [
         "transformer_blocks",
@@ -158,14 +153,13 @@ def test_hunyuan_pinned_revision_uses_one_checkpoint_request():
         ),
         "include_subfolder",
     ) is False
-    # The pin belongs to the runner's checkpoint identity, not to the one call site that used to
-    # pass it: the text encoder's meta construction and its checkpoint mapping ask the runner.
+    # The pin is declarative input to the run's one loader-owned checkpoint identity.
     # test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves calls it for real.
-    assert "_checkpoint_request" in {
-        node.name
-        for node in _classes("hunyuan.py")["xFuserHunyuanvideoModel"].body
-        if isinstance(node, ast.FunctionDef)
-    }
+    assert _class_attribute_value(
+        "hunyuan.py",
+        "xFuserHunyuanvideoModel",
+        "checkpoint_request_defaults",
+    ) == {"revision": "_DIFFUSERS_FORMAT_REVISION"}
 
 
 def test_hunyuanvideo_offers_its_llama_encoder_to_the_memory_efficient_load():
@@ -183,6 +177,10 @@ def test_hunyuanvideo_offers_its_llama_encoder_to_the_memory_efficient_load():
     )
 
     assert strategy["text_encoder"]["wrap_attrs"] == ["layers"]
+    assert _keyword(
+        _load_declaration("hunyuan.py", "xFuserHunyuanvideoModel"),
+        "meta_text_encoders",
+    ) == ["text_encoder"]
     assert "_meta_te_kwargs" in _self_calls("hunyuan.py", "xFuserHunyuanvideoModel")
     assert "quantization_config" in pipeline_kwargs
     assert "te_kwargs" in pipeline_kwargs
@@ -228,17 +226,20 @@ def test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves():
     from xfuser.model_executor.models.runner_models.hunyuan import (
         xFuserHunyuanvideoModel,
     )
+    from xfuser.model_executor.models.runner_models.loading.meta_load import ModelLoader
 
     # No __init__: the request only reads the class's settings, and a runner needs a config and a
     # device this test has neither of.
     runner = object.__new__(xFuserHunyuanvideoModel)
+    loader = object.__new__(ModelLoader)
+    loader.model = runner
 
     for subfolder in (None, "transformer", "text_encoder"):
-        request = runner._checkpoint_request(subfolder)
+        request = loader.checkpoint_request(subfolder)
         assert request.revision == "refs/pr/18"
         assert request.subfolder == subfolder
     # A caller that has already decided still wins, as on the base runner.
-    assert runner._checkpoint_request(revision="main").revision == "main"
+    assert loader.checkpoint_request(revision="main").revision == "main"
 
 
 @pytest.mark.parametrize(
@@ -247,19 +248,12 @@ def test_hunyuanvideo_pins_its_revision_for_every_component_it_resolves():
 )
 def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
     declaration = _load_declaration("ltx.py", class_name)
-    reason = ast.literal_eval(
-        next(
-            keyword.value
-            for keyword in declaration.keywords
-            if keyword.arg == "unsupported_reason"
-        )
-    )
 
     capabilities = _class_attribute("ltx.py", class_name, "capabilities")
     settings = _class_attribute("ltx.py", class_name, "settings")
 
     assert declaration.args == []
-    assert not any(keyword.arg == "replicated" for keyword in declaration.keywords)
+    assert _keyword(declaration, "routes") == "LoadRoute.NONE"
     assert _keyword(capabilities, "fully_shard_degree") is True
     assert _keyword(settings, "fsdp_strategy")["transformer"]["wrap_attrs"] == [
         "transformer_blocks"
@@ -268,8 +262,6 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
     assert "from_pretrained" not in _calls_on(
         "ltx.py", class_name, "xFuserLTX2VideoTransformer3DWrapper"
     )
-    assert "stage 2 distilled LoRA" in reason
-
     contracts = _load_contracts()
     capability = contracts.LoadDeclaration.for_runner(
         type(
@@ -282,8 +274,8 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
                 "fully_shard_degree": True,
             },
         )(),
+        load_support=contracts.LoadSupport(),
         fsdp_strategy={"transformer": {"wrap_attrs": ["transformer_blocks"]}},
-        unsupported_reason=reason,
     )
     for mode in (
         contracts.MaterializationMode.FSDP_META,
@@ -291,7 +283,7 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
     ):
         with pytest.raises(
             contracts.UnsupportedLoadContract,
-            match="stage 2 distilled LoRA",
+            match=rf"{class_name} does not support {mode.value} materialization",
         ):
             contracts.validate_materialization_contract(
                 capability,
@@ -301,63 +293,54 @@ def test_ltx_direct_transformers_use_standard_construction_seam(class_name):
             )
 
 
-def test_named_custom_adapters_reject_standard_collective_modes():
+def test_runners_without_collective_capability_reject_collective_modes():
     contracts = _load_contracts()
-    custom = (
-        contracts.LoaderAdapter.DISTILLED_WAN,
-        contracts.LoaderAdapter.SD35_COMPOSITION,
-        contracts.LoaderAdapter.CAUSAL_WAN,
-        contracts.LoaderAdapter.HUNYUAN15_VARIANTS,
+    capability = contracts.LoadDeclaration.for_runner(
+        type(
+            "Capabilities",
+            (),
+            {
+                "use_fp8_gemms": False,
+                "use_fp4_gemms": False,
+                "use_int8_gemms": False,
+                "fully_shard_degree": True,
+            },
+        )(),
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer",),
+            replicated_meta=True,
+            routes=contracts.LoadRoute.NONE,
+        ),
+        fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
     )
 
-    for adapter in custom:
-        capability = contracts.LoadDeclaration.for_runner(
-            type(
-                "Capabilities",
-                (),
-                {
-                    "use_fp8_gemms": False,
-                    "use_fp4_gemms": False,
-                    "use_int8_gemms": False,
-                    "fully_shard_degree": True,
-                },
-            )(),
-            meta_transformers=("transformer",),
-            replicated=True,
-            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
-            loader_adapter=adapter,
-            unsupported_reason="custom checkpoint semantics",
-        )
-
-        assert capability.meta_transformers == ()
-        assert capability.construction_seam is None
-        malformed = contracts.LoadDeclaration(
-            fsdp_meta_transformers=("transformer",),
-            materialization_modes=frozenset(
-                {
-                    contracts.MaterializationMode.EAGER,
-                    contracts.MaterializationMode.FSDP_META,
-                }
-            ),
-            construction_seam=contracts.ConstructionSeam.BUILD_TRANSFORMER,
-            loader_adapter=adapter,
-            unsupported_reason="custom checkpoint semantics",
-        )
-        with pytest.raises(
-            contracts.UnsupportedLoadContract,
-            match="custom checkpoint semantics",
-        ):
-            contracts.validate_materialization_contract(
-                malformed,
+    assert capability.meta_transformers == ()
+    assert capability.construction_seam is None
+    malformed = contracts.LoadDeclaration(
+        fsdp_meta_transformers=("transformer",),
+        materialization_modes=frozenset(
+            {
+                contracts.MaterializationMode.EAGER,
                 contracts.MaterializationMode.FSDP_META,
-                {"transformer": {"wrap_attrs": ["blocks"]}},
-                runner_name="CustomRunner",
-            )
+            }
+        ),
+        construction_seam=contracts.ConstructionSeam.BUILD_TRANSFORMER,
+        routes=contracts.LoadRoute.NONE,
+    )
+    with pytest.raises(
+        contracts.UnsupportedLoadContract,
+        match="does not declare the standard collective load route",
+    ):
+        contracts.validate_materialization_contract(
+            malformed,
+            contracts.MaterializationMode.FSDP_META,
+            {"transformer": {"wrap_attrs": ["blocks"]}},
+            runner_name="CustomRunner",
+        )
 
 
 def test_distilled_wan_declares_local_meta_without_collective_support():
     contracts = _load_contracts()
-    adapter = contracts.LoaderAdapter.DISTILLED_WAN
     capability = contracts.LoadDeclaration.for_runner(
         type(
             "Capabilities",
@@ -369,17 +352,25 @@ def test_distilled_wan_declares_local_meta_without_collective_support():
                 "fully_shard_degree": True,
             },
         )(),
-        meta_transformers=("transformer", "transformer_2"),
-        replicated=True,
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer", "transformer_2"),
+            replicated_meta=True,
+            routes=contracts.LoadRoute.LOCAL_BLOCKWISE,
+        ),
         fsdp_strategy={
             "transformer": {"wrap_attrs": ["blocks"]},
             "transformer_2": {"wrap_attrs": ["blocks"]},
         },
-        loader_adapter=adapter,
     )
 
-    assert adapter.supports_local_blockwise is True
-    assert adapter.supports_standard_collectives is False
+    assert (
+        capability.routes
+        & contracts.LoadRoute.LOCAL_BLOCKWISE
+    )
+    assert not (
+        capability.routes
+        & contracts.LoadRoute.STANDARD_COLLECTIVES
+    )
     assert capability.local_meta_transformers == (
         "transformer",
         "transformer_2",
@@ -389,46 +380,40 @@ def test_distilled_wan_declares_local_meta_without_collective_support():
 
 
 @pytest.mark.parametrize(
-    ("filename", "class_name", "adapter"),
+    ("filename", "class_name", "capability"),
     [
-        ("wan.py", "xFuserWan22DistilledI2VModel", "DISTILLED_WAN"),
-        ("stable_diffusion.py", "xFuserStableDiffusionModel", "SD35_COMPOSITION"),
-        ("causal_wan.py", "xFuserCausalWanModel", "CAUSAL_WAN"),
-        ("hunyuan.py", "xFuserHunyuanvideo15Model", "HUNYUAN15_VARIANTS"),
+        ("wan.py", "xFuserWan22DistilledI2VModel", "LOCAL_BLOCKWISE"),
+        ("stable_diffusion.py", "xFuserStableDiffusionModel", "NONE"),
+        ("causal_wan.py", "xFuserCausalWanModel", "NONE"),
+        ("hunyuan.py", "xFuserHunyuanvideo15Model", "NONE"),
         (
             "hunyuan.py",
             "xFuserHunyuanvideo15DistilledModel",
-            "HUNYUAN15_VARIANTS",
+            "NONE",
         ),
         (
             "hunyuan.py",
             "xFuserHunyuanvideo15SparseModel",
-            "HUNYUAN15_VARIANTS",
+            "NONE",
         ),
     ],
 )
-def test_custom_runners_declare_their_dedicated_adapter(filename, class_name, adapter):
+def test_custom_runners_declare_routes(filename, class_name, capability):
     declaration = _load_declaration(filename, class_name)
 
-    assert _keyword(declaration, "loader_adapter") == f"LoaderAdapter.{adapter}"
-    assert _keyword(declaration, "unsupported_reason")
+    assert _keyword(declaration, "routes") == f"LoadRoute.{capability}"
 
 
-def test_krea2_text_encoder_is_declaratively_excluded():
-    """The exclusion carries the reason, so reading the declaration explains the omission.
-
-    Asserting on the class source instead would accept the words appearing in a comment,
-    which is where "ROCm" appears in this file anyway.
-    """
+def test_krea2_text_encoder_is_not_declared_for_shared_meta_loading():
     declaration = _load_declaration("krea2.py", "_Krea2BaseModel")
 
-    assert _keyword(declaration, "component_exclusions") == ["KREA2_TEXT_ENCODER_EXCLUSION"]
+    assert _keyword(declaration, "meta_text_encoders") == []
 
-    exclusion = _load_contracts().KREA2_TEXT_ENCODER_EXCLUSION
 
-    assert exclusion.component == "text_encoder"
-    assert "Qwen3VL" in exclusion.reason
-    assert "ROCm" in exclusion.reason
+def test_ideogram4_text_encoder_is_not_declared_for_shared_meta_loading():
+    declaration = _load_declaration("ideogram4.py", "xFuserIdeogram4Model")
+
+    assert _keyword(declaration, "meta_text_encoders") == []
 
 
 def test_tokenizer_reload_reads_the_tokenizer_directory_not_the_repo_root(
@@ -512,15 +497,32 @@ def test_krea2_text_encoder_shard_path_exists_on_the_encoder_it_loads():
             assert len(layers) == 2, f"{attr} does not reach the decoder layers"
 
 
-def test_component_exclusions_are_queryable_by_loading_adapters():
+def test_undeclared_fsdp_strategy_text_encoders_are_not_auto_enrolled():
     contracts = _load_contracts()
-    capability = contracts.LoadDeclaration(
-        component_exclusions=(contracts.KREA2_TEXT_ENCODER_EXCLUSION,)
+    capability = contracts.LoadDeclaration.for_runner(
+        type(
+            "Capabilities",
+            (),
+            {
+                "use_fp8_gemms": False,
+                "use_fp4_gemms": False,
+                "use_int8_gemms": False,
+                "fully_shard_degree": True,
+            },
+        )(),
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer",),
+            meta_text_encoders=(),
+            replicated_meta=True,
+            routes=contracts.STANDARD_LOAD_ROUTES,
+        ),
+        fsdp_strategy={
+            "transformer": {"wrap_attrs": ["blocks"]},
+            "text_encoder": {"wrap_attrs": ["layers"]},
+        },
     )
 
-    exclusion = capability.exclusion_for("text_encoder")
-    assert exclusion is contracts.KREA2_TEXT_ENCODER_EXCLUSION
-    assert capability.exclusion_for("transformer") is None
+    assert capability.meta_text_encoders == ()
 
 
 def test_hunyuan_wrapper_keeps_the_parent_config_signature():

@@ -10,23 +10,21 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadDeclaration,
-    LoaderAdapter,
+    LoadSupport,
+    LoadRoute,
 )
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
-@LoadDeclaration.declare(
-    loader_adapter=LoaderAdapter.SD35_COMPOSITION,
-    unsupported_reason=(
-        "xFuserStableDiffusion3Pipeline is a composition wrapper around a "
-        "fully loaded Diffusers pipeline and has no config-only transformer "
-        "construction seam"
-    )
-)
 class xFuserStableDiffusionModel(xFuserModel):
-
+    # The composition wrapper has no config-only transformer construction seam.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -36,6 +34,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,

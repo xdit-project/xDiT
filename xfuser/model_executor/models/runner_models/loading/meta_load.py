@@ -27,13 +27,12 @@ can be mapped onto checkpoint keys:
   checkpoint keys. Text encoders qualify when Transformers' renaming rules can be reproduced and
   proven exactly (``text_encoder_adapter.resolve_transformers_manifest``).
 
-* Broadcast fill (``MemoryEfficientLoader.broadcast_load``), the fallback for text encoders whose keys
+* Broadcast fill (``ModelLoader.broadcast_load``), the fallback for text encoders whose keys
   could not be mapped. rank0 loads the whole component via from_pretrained (resolving tied weights),
   then scatters one wrapped block at a time via broadcast_from_rank0, so peers never receive the whole
   model at once even though rank0 held it. fp8-targeted components stream rank0 straight to fp8.
 
-``MemoryEfficientLoader`` holds the ``xFuserModel`` so it can reuse the run's FP8 plan
-(``model.fp8``, see ``fp8_plan``) and settings without duplicating them.
+``ModelLoader`` owns the run's contract, quantization plan, backend selection, and route state.
 """
 
 import collections
@@ -54,14 +53,25 @@ from xfuser.core.utils.checkpoint_io import (
     component_shard_paths,
 )
 from xfuser.core.utils.dtype_policy import cast_preserving_fp32_modules
-from xfuser.core.utils.runner_utils import log, rgetattr
+from xfuser.core.utils.runner_utils import log, rgetattr, _use_aiter_fp8_rdna4
+from xfuser.envs import _is_cuda
 from .checkpoint import CheckpointManifest, CheckpointRequest
 from .contracts import (
+    LoadDeclaration,
+    LoadRoute,
     MaterializationMode,
     UnsupportedLoadContract,
+    assert_offload_is_compatible_with_format,
+    assert_offload_is_compatible_with_sharding,
+    assert_requested_materialization_is_honoured,
     select_effective_materialization_mode,
+    select_load_contract,
+    select_runtime_quantization,
     validate_materialization_contract,
 )
+from .backend_selection import QuantizationBackends
+from .quantization_ledger import QuantizationLedger
+from .quantization_plan import QuantizationPlan
 
 
 def _is_bcast_src(group) -> bool:
@@ -360,16 +370,25 @@ def _persistent_named_buffers(module):
     return persistent
 
 
-class MemoryEfficientLoader:
-    """Builds pipeline components on meta and fills their real weights without a full host copy.
+class ModelLoader:
+    """Own one run's loading decisions, routes, and memory-efficient fill state.
 
     Fills FSDP shards from disk on the sharded path, and broadcasts rank0's weights to replicated
-    peers on the unsharded one; ``fsdp_meta_load`` and ``replicated_broadcast_load`` say which
-    applies. Owns the ``xFuserModel`` (``model``) to reuse its settings and fp8 predicates.
+    peers on the unsharded one. The resolved declaration and contract, quantization targets,
+    backend adapters, checkpoint identity, and route bookkeeping all live on this single object.
     """
 
     def __init__(self, model) -> None:
         self.model = model
+        self.load_declaration = LoadDeclaration.for_runner(
+            model.capabilities,
+            load_support=model.load_support,
+            fsdp_strategy=model.settings.fsdp_strategy,
+        )
+        self.load_contract = None
+        self.quantization_ledger = QuantizationLedger()
+        self.quantization_plan = QuantizationPlan(model)
+        self.backends = QuantizationBackends(self)
         # Meta components that can fill themselves per block, mapped to where their weights come
         # from: a CheckpointRequest for transformers this loader built, a CheckpointManifest for text
         # encoders whose keys had to be resolved. Keyed by identity rather than by name, so the shard
@@ -384,15 +403,55 @@ class MemoryEfficientLoader:
         # load both read them, and must not reach different answers.
         self._te_routes = None
 
-    def _checkpoint_request(self, subfolder: str | None = None) -> CheckpointRequest:
-        factory = getattr(self.model, "_checkpoint_request", None)
-        if factory is not None:
-            return factory(subfolder)
-        return CheckpointRequest(self.model.settings.model_name, subfolder=subfolder)
+    def checkpoint_request(
+        self, subfolder: str | None = None, **kwargs
+    ) -> CheckpointRequest:
+        """Build the run's checkpoint identity, preserving explicit caller choices."""
+        from huggingface_hub.constants import HF_HUB_OFFLINE
+
+        defaults = dict(
+            getattr(type(self.model), "checkpoint_request_defaults", {}) or {}
+        )
+        defaults.setdefault("local_files_only", HF_HUB_OFFLINE)
+        defaults.update(kwargs)
+        return CheckpointRequest(
+            self.model.settings.model_name, subfolder=subfolder, **defaults
+        )
+
+    def preflight(self, *, world_size: int) -> None:
+        """Resolve and validate all load decisions before model allocation."""
+        config = self.model.config
+        assert_requested_materialization_is_honoured(config, world_size=world_size)
+        assert_offload_is_compatible_with_sharding(config)
+        mode = select_effective_materialization_mode(config, world_size=world_size)
+        requested_format, backend = select_runtime_quantization(
+            config,
+            aiter_fp8_active=bool(
+                config.use_fp8_gemms and _use_aiter_fp8_rdna4()
+            ),
+            cuda_active=_is_cuda(),
+        )
+        assert_offload_is_compatible_with_format(
+            config,
+            requested_format=requested_format,
+            selected_backend=backend,
+        )
+        self.load_contract = select_load_contract(
+            requested_format=requested_format,
+            selected_backend=backend,
+            materialization_mode=mode,
+            declaration=self.load_declaration,
+            fsdp_strategy=self.model.settings.fsdp_strategy,
+            runner_name=type(self.model).__name__,
+        )
+        self.backends.preflight()
+
+    def transformer_quantization_adapter(self, component_name: str):
+        return self.backends.transformer_adapter(component_name)
 
     def _validate_mode(self, mode: MaterializationMode) -> None:
         validate_materialization_contract(
-            self.model.load_declaration,
+            self.load_declaration,
             mode,
             self.model.settings.fsdp_strategy,
             runner_name=type(self.model).__name__,
@@ -492,15 +551,18 @@ class MemoryEfficientLoader:
             )
         )
         component_name = prepared.descriptor.component_name
-        capability = self.model.load_declaration
+        declaration = self.load_declaration
         return plan_eager_blockwise_fallback(
             prepared=prepared,
             targets=targets,
             wrap_attrs=wrap_attrs,
             world_size=get_world_group().world_size,
             standard_loader=(
-                capability.loader_adapter.supports_local_blockwise
-                and component_name in capability.local_meta_transformers
+                bool(
+                    declaration.routes
+                    & LoadRoute.LOCAL_BLOCKWISE
+                )
+                and component_name in declaration.local_meta_transformers
             ),
             offload_requested=offload_requested,
         )
@@ -565,25 +627,25 @@ class MemoryEfficientLoader:
         config; forwarded to from_config so the meta model matches the from_pretrained path.
         """
         if isinstance(request, str):
-            request = self._checkpoint_request(subfolder or request)
+            request = self.checkpoint_request(subfolder or request)
         elif subfolder is not None and request.subfolder != subfolder:
             request = request.with_subfolder(subfolder)
-        capability = self.model.load_declaration
-        adapter = capability.loader_adapter
+        declaration = self.load_declaration
+        routes = declaration.routes
         local_custom_load = (
             weight_source is not None
-            and adapter.supports_local_blockwise
+            and bool(routes & LoadRoute.LOCAL_BLOCKWISE)
             and get_world_group().world_size == 1
         )
-        if not adapter.supports_standard_collectives and not local_custom_load:
+        if not (
+            routes & LoadRoute.STANDARD_COLLECTIVES
+        ) and not local_custom_load:
             raise UnsupportedLoadContract(
-                f"{type(self.model).__name__} uses "
-                f"{adapter.value}; custom "
-                "loader adapters cannot enter the standard transformer "
-                "collective path"
+                f"{type(self.model).__name__} does not declare standard "
+                "collective loading"
             )
         component_name = request.subfolder or "transformer"
-        if component_name not in capability.all_meta_transformers:
+        if component_name not in declaration.all_meta_transformers:
             raise UnsupportedLoadContract(
                 f"{type(self.model).__name__} attempted meta construction of "
                 f"'{component_name}' without declaring it in load_declaration"
@@ -634,11 +696,11 @@ class MemoryEfficientLoader:
         Note the fallback is rank-local, so a rank that takes it while its peers build meta
         diverges; ``agreed_is_meta`` catches that downstream and fails every rank.
         """
-        exclusion = self.model.load_declaration.exclusion_for(component_name)
-        if exclusion is not None:
+        if component_name not in self.load_declaration.meta_text_encoders:
             raise UnsupportedLoadContract(
-                f"{type(self.model).__name__} excludes meta construction of "
-                f"'{component_name}': {exclusion.reason}"
+                f"{type(self.model).__name__} attempted meta construction of "
+                f"'{component_name}' without declaring it in "
+                "load_declaration.meta_text_encoders"
             )
 
         from diffusers import DiffusionPipeline
@@ -650,7 +712,7 @@ class MemoryEfficientLoader:
         # either surfaces instead of degrading every rank to a normal load behind one log line
         # (symmetrically, so agreed_is_meta would not catch it either).
         try:
-            request = self._checkpoint_request()
+            request = self.checkpoint_request()
             model_name = request.model_name_or_path
             resolved = resolve_transformers_component(
                 DiffusionPipeline,
@@ -679,7 +741,7 @@ class MemoryEfficientLoader:
 
     def _meta_te_fp8_targets(self, component_name: str) -> tuple:
         """This component's fp8-streamed target paths, component-relative."""
-        streamed_targets = self.model.quantization_ledger.fp8_streaming_targets
+        streamed_targets = self.quantization_ledger.fp8_streaming_targets
         prefix = f"{component_name}."
         return tuple(
             "" if target == component_name else target[len(prefix) :]
@@ -701,14 +763,8 @@ class MemoryEfficientLoader:
         return True
 
     def _te_component_names(self) -> list[str]:
-        """The pipeline's non-transformer sharded components, i.e. its text encoders."""
-        return [
-            name
-            for name in self.model.settings.fsdp_strategy
-            if name != "transformer"
-            and not name.startswith("transformer_")
-            and self.model.load_declaration.exclusion_for(name) is None
-        ]
+        """Text encoders explicitly opted into shared meta loading."""
+        return list(self.load_declaration.meta_text_encoders)
 
     def meta_te_kwargs(self):
         """Build text-encoder(s) on meta for the pipeline's from_pretrained (meta FSDP load path).
@@ -791,7 +847,7 @@ class MemoryEfficientLoader:
                 refusal = "no wrap_attrs declared, so it has no blocks to fill one at a time"
             else:
                 manifest, refusal = resolve_transformers_manifest(
-                    component, self._checkpoint_request(name)
+                    component, self.checkpoint_request(name)
                 )
             routes[name] = (
                 component,
@@ -852,15 +908,8 @@ class MemoryEfficientLoader:
         def build():
             if _is_bcast_src(world):
                 return {}, te_quant_config
-            te_components = [
-                name
-                for name in self.model.settings.fsdp_strategy
-                if name != "transformer"
-                and not name.startswith("transformer_")
-                and self.model.load_declaration.exclusion_for(name) is None
-            ]
             kwargs = {}
-            for name in te_components:
+            for name in self._te_component_names():
                 meta = self.build_meta_component(name, fp8=True)
                 if meta is None:
                     raise RuntimeError(
@@ -914,6 +963,8 @@ class MemoryEfficientLoader:
                     component, name, strategy[name], device, world
                 )
             else:
+                if name not in self.load_declaration.meta_text_encoders:
+                    continue
                 if self._all_ranks_loaded_real(component, world, device):
                     # Same unwired-runner case: the encoder loaded real on every rank, so skipping
                     # avoids broadcasting rank0's bytes over each peer's already-correct weights.
@@ -941,7 +992,7 @@ class MemoryEfficientLoader:
         was itself still on meta. That produced a black image rather than an error.
         """
 
-        if name in self.model.load_declaration.all_meta_transformers:
+        if name in self.load_declaration.all_meta_transformers:
             return True
         return name == "transformer" or name.startswith("transformer_")
 
@@ -990,7 +1041,7 @@ class MemoryEfficientLoader:
         from .shard import build_block_quantize_fn
 
         quantize_fn = build_block_quantize_fn(
-            self.model,
+            self,
             name,
             strategy.get("wrap_attrs", []),
             world.local_rank,
@@ -1020,7 +1071,7 @@ class MemoryEfficientLoader:
             from .shard import build_block_quantize_fn
 
             quantize_fn = build_block_quantize_fn(
-                self.model,
+                self,
                 name,
                 strategy.get("wrap_attrs", []),
                 get_world_group().local_rank,
@@ -1285,7 +1336,7 @@ class MemoryEfficientLoader:
         from_pretrained resolves tied weights; the fp8 HfQuantizer streams straight to fp8 so the
         source is fp8-sized, not bf16-sized, on rank0.
         """
-        request = self._checkpoint_request(component_name)
+        request = self.checkpoint_request(component_name)
         quantization_config = getattr(
             self.model, "_text_encoder_quantization_configs", {}
         ).get(component_name)
@@ -1385,7 +1436,7 @@ class MemoryEfficientLoader:
             paths = set()
             for basename in ("model", "diffusion_pytorch_model"):
                 paths |= component_shard_paths(
-                    self._checkpoint_request(component_name),
+                    self.checkpoint_request(component_name),
                     basename=basename,
                 )
             drop_file_page_cache(paths)

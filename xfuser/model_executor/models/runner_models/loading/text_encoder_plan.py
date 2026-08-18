@@ -36,17 +36,17 @@ def plan_text_encoders(loader, existing_quantization_config=None):
     have no use for that.
     """
     model = loader.model
-    ledger = model.quantization_ledger
+    ledger = loader.quantization_ledger
     replicated_meta = loader.replicated_broadcast_load()
     fsdp_meta = False if replicated_meta else loader.fsdp_meta_load()
-    adapter = model.backends.fp8_adapter_for_contract()
+    adapter = loader.backends.fp8_adapter_for_contract()
 
     component_configs = {}
     if adapter is not None:
         from .fp8_backends import prepare_text_encoder_fp8_load
 
         for component_name in _declared_components(model):
-            targets = tuple(model.fp8.targets_for(component_name))
+            targets = tuple(loader.quantization_plan.targets_for(component_name))
             if not targets:
                 continue
             # A blockwise-filled encoder is quantized per block on the way in from disk, before

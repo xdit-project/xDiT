@@ -27,12 +27,20 @@ def test_declaration_defaults_are_explicitly_unsupported(contracts):
     declaration = contracts.LoadDeclaration()
 
     assert declaration.meta_transformers == ()
+    assert declaration.meta_text_encoders == ()
     assert declaration.materialization_modes == frozenset(
         {contracts.MaterializationMode.EAGER}
     )
     assert declaration.quantization_backends == frozenset(
         {contracts.QuantizationBackend.NONE}
     )
+
+
+def test_load_support_is_frozen_static_intent(contracts):
+    spec = contracts.LoadSupport(replicated_meta=True)
+
+    with pytest.raises(AttributeError):
+        spec.replicated_meta = False
 
 
 def test_declared_meta_mode_requires_every_transformer_in_strategy(contracts):
@@ -135,8 +143,12 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
 
     declaration = contracts.LoadDeclaration.for_runner(
         model_capabilities,
-        meta_transformers=("transformer",),
-        replicated=True,
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer",),
+            meta_text_encoders=("text_encoder",),
+            replicated_meta=True,
+            routes=contracts.STANDARD_LOAD_ROUTES,
+        ),
         fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
     )
 
@@ -160,6 +172,7 @@ def test_runner_declaration_derives_quantization_contracts(contracts):
             ),
         }
     )
+    assert declaration.meta_text_encoders == ("text_encoder",)
 
 
 def test_runner_declaration_does_not_allow_cross_product_backend_pairs(contracts):
@@ -256,14 +269,20 @@ def test_fsdp_and_replicated_meta_support_are_derived_separately(contracts):
 
     both = contracts.LoadDeclaration.for_runner(
         capable,
-        meta_transformers=("transformer",),
-        replicated=True,
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer",),
+            replicated_meta=True,
+            routes=contracts.STANDARD_LOAD_ROUTES,
+        ),
         fsdp_strategy=strategy,
     )
     only_replicated = contracts.LoadDeclaration.for_runner(
         replicated_only,
-        meta_transformers=("transformer",),
-        replicated=True,
+        load_support=contracts.LoadSupport(
+            meta_transformers=("transformer",),
+            replicated_meta=True,
+            routes=contracts.STANDARD_LOAD_ROUTES,
+        ),
         fsdp_strategy=strategy,
     )
 

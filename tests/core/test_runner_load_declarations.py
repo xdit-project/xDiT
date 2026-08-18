@@ -113,24 +113,24 @@ def _assigned_names(class_node):
     }
 
 
-def _has_own_load_declaration(class_node):
-    if "load_declaration" in _assigned_names(class_node):
-        return True
-    return any(
-        isinstance(decorator, ast.Call)
-        and isinstance(decorator.func, ast.Attribute)
-        and decorator.func.attr == "declare"
-        for decorator in class_node.decorator_list
+def _has_own_load_support(class_node):
+    return "load_support" in _assigned_names(class_node)
+
+
+def _load_support(class_node):
+    return next(
+        statement.value
+        for statement in class_node.body
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "load_support"
+            for target in (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+        )
     )
-
-
-def test_base_runner_defaults_to_an_explicit_unsupported_declaration():
-    classes = _classes(RUNNERS / "base_model.py")
-    base = classes["xFuserModel"]
-
-    assert "load_declaration" in _assigned_names(base)
-    methods = {node.name for node in base.body if isinstance(node, ast.FunctionDef)}
-    assert "_supports_replicated_meta_load" not in methods
 
 
 def test_supported_runner_families_declare_the_meta_construction_seam():
@@ -160,13 +160,13 @@ def test_supported_runner_families_declare_the_meta_construction_seam():
     for filename, names in expected.items():
         classes = _classes(RUNNERS / filename)
         for name in names:
-            if not _has_own_load_declaration(classes[name]):
+            if not _has_own_load_support(classes[name]):
                 missing.append(f"{filename}:{name}")
 
     assert not missing, "missing load declaration: " + ", ".join(missing)
 
 
-def test_custom_runner_exclusions_remain_explicit():
+def test_unsupported_runner_capabilities_remain_explicit():
     expected = {
         "stable_diffusion.py": {"xFuserStableDiffusionModel"},
         "hunyuan.py": {
@@ -183,13 +183,13 @@ def test_custom_runner_exclusions_remain_explicit():
     for filename, names in expected.items():
         classes = _classes(RUNNERS / filename)
         for name in names:
-            if not _has_own_load_declaration(classes[name]):
+            if not _has_own_load_support(classes[name]):
                 missing.append(f"{filename}:{name}")
 
-    assert not missing, "missing explicit exclusion: " + ", ".join(missing)
+    assert not missing, "missing explicit unsupported declaration: " + ", ".join(missing)
 
 
-def test_every_registered_runner_has_its_own_load_declaration():
+def test_every_registered_runner_has_its_own_load_support():
     missing = []
     for path in sorted(RUNNERS.glob("*.py")):
         for name, class_node in _classes(path).items():
@@ -199,7 +199,7 @@ def test_every_registered_runner_has_its_own_load_declaration():
                 and decorator.func.id == "register_model"
                 for decorator in class_node.decorator_list
             )
-            if registered and not _has_own_load_declaration(class_node):
+            if registered and not _has_own_load_support(class_node):
                 missing.append(f"{path.name}:{name}")
 
     assert (
@@ -253,22 +253,16 @@ def test_every_meta_declaration_matches_a_build_seam_and_strategy():
         )
         if not registered:
             continue
-        declaration = next(
-            (
-                decorator
-                for decorator in class_node.decorator_list
-                if isinstance(decorator, ast.Call)
-                and isinstance(decorator.func, ast.Attribute)
-                and decorator.func.attr == "declare"
-            ),
-            None,
-        )
-        if declaration is None:
+        if not _has_own_load_support(class_node):
             continue
+        declaration = _load_support(class_node)
         components = tuple(
-            arg.value
-            for arg in declaration.args
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            item.value
+            for keyword in declaration.keywords
+            if keyword.arg == "meta_transformers"
+            and isinstance(keyword.value, (ast.Tuple, ast.List))
+            for item in keyword.value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
         )
         if not components:
             continue
@@ -277,7 +271,7 @@ def test_every_meta_declaration_matches_a_build_seam_and_strategy():
         uses_build_seam = any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_build_transformer"
+            and node.func.attr in {"_build_transformer", "load_transformer"}
             for owner in nodes
             for node in ast.walk(owner)
         )

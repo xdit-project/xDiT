@@ -1,8 +1,8 @@
 """FSDP-shard a loaded pipeline, quantizing each block as it is wrapped.
 
-The last of the three load phases this package covers: ``fp8_plan`` decides what a run quantizes,
+The last of the three load phases this package covers: ``quantization_plan`` decides what a run quantizes,
 ``meta_load`` builds components on meta and fills their real weights, and this wraps the result in
-FSDP. It reads the fill decisions back off ``MemoryEfficientLoader`` (whether a component is on meta,
+FSDP. It reads the fill decisions back off ``ModelLoader`` (whether a component is on meta,
 and whether it fills itself from disk) because those select which collective the sharding does.
 
 ``build_block_quantize_fn`` serves both per-block quantizers: the sharded path below, and
@@ -21,9 +21,9 @@ from xfuser.core.utils.runner_utils import (
 from .format_backends import module_path_is_covered, module_paths_overlap
 
 
-def shard_pipeline_components(model) -> None:
+def shard_pipeline_components(loader) -> None:
     """Shard every component the run's fsdp_strategy names, and move the rest to the local device."""
-    loader = model._loader
+    model = loader.model
     local_rank = get_world_group().local_rank
     fs_local_rank = get_fs_group().local_rank
     device_group = get_fs_group().device_group
@@ -53,7 +53,7 @@ def shard_pipeline_components(model) -> None:
             load_block_fn = load_epilogue_fn = None
             if is_selffill:
                 quantize_fn = build_block_quantize_fn(
-                    model,
+                    loader,
                     component_name,
                     wrap_attrs,
                     fs_local_rank,
@@ -67,7 +67,7 @@ def shard_pipeline_components(model) -> None:
                     None
                     if is_meta
                     else build_block_quantize_fn(
-                        model,
+                        loader,
                         component_name,
                         wrap_attrs,
                         fs_local_rank,
@@ -164,11 +164,15 @@ def _block_local_targets(targets, block_path):
     return tuple(dict.fromkeys(local)) or None
 
 
-def _target_filter(targets, excluded_targets=()):
+def _target_filter(targets, excluded_targets=(), include_suffixes=None):
     return lambda _module, fqn: any(
         not target or fqn == target or fqn.startswith(f"{target}.")
         for target in targets
-    ) and not any(module_path_is_covered(fqn, target) for target in excluded_targets)
+    ) and not any(
+        module_path_is_covered(fqn, target) for target in excluded_targets
+    ) and (
+        not include_suffixes or fqn.endswith(tuple(include_suffixes))
+    )
 
 
 def _has_unowned_target(targets, owners):
@@ -179,7 +183,7 @@ def _has_unowned_target(targets, owners):
 
 
 def build_block_quantize_fn(
-    model,
+    loader,
     component_name: str,
     wrap_attrs: list,
     local_rank: int,
@@ -197,16 +201,17 @@ def build_block_quantize_fn(
     Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed through unchanged on
     every block; only prefix patterns are stripped.
     """
+    model = loader.model
     config, settings = model.config, model.settings
     if not (config.use_fp4_gemms or config.use_fp8_gemms or config.use_int8_gemms):
         return None
 
     device = f"cuda:{local_rank}"
-    fp4_list = set(settings.fp4_gemm_module_list or [])
-    fp8_list = set(model.fp8.module_list())
+    fp4_list = set(loader.quantization_plan.module_list("fp4"))
+    fp8_list = set(loader.quantization_plan.module_list())
     fp8_overrides = settings.fp8_precision_overrides or ()
     fp8_suffix_overrides = settings.fp8_precision_override_suffixes
-    int8_list = set(settings.int8_gemm_module_list or [])
+    int8_list = set(loader.quantization_plan.module_list("int8"))
 
     paths = [f"{component_name}.{a}" for a in wrap_attrs]
 
@@ -269,7 +274,7 @@ def build_block_quantize_fn(
             or None
         )
         if use_fp4_block:
-            adapter = model.format_backend
+            adapter = loader.backends.format
             if adapter is None:
                 raise RuntimeError(
                     "FP4 block conversion requested without a selected backend"
@@ -283,7 +288,7 @@ def build_block_quantize_fn(
                 filter_fn=_target_filter(local_fp4_targets),
             )
         if use_fp8_block:
-            adapter = model.blockwise_fp8_backend
+            adapter = loader.backends.blockwise_fp8
             if adapter is None:
                 raise RuntimeError(
                     "FP8 block conversion requested without a selected backend"
@@ -294,10 +299,11 @@ def build_block_quantize_fn(
                 filter_fn=_target_filter(
                     local_fp8_targets,
                     (local_fp4_targets if use_fp4_block else ()),
+                    getattr(settings, "fp8_gemm_include_suffixes", None),
                 ),
             )
         elif use_int8_block:
-            adapter = model.format_backend
+            adapter = loader.backends.format
             if adapter is None:
                 raise RuntimeError(
                     "INT8 block conversion requested without a selected backend"

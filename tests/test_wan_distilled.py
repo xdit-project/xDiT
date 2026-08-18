@@ -184,10 +184,12 @@ class TestDistilledTransformerLoading:
 
         model = object.__new__(wan.xFuserWan22DistilledI2VModel)
         model.config = SimpleNamespace()
-        model._transformer_quantization_adapter = MagicMock(
-            return_value=(object(), ("blocks",))
+        model.loader = SimpleNamespace(
+            transformer_quantization_adapter=MagicMock(
+                return_value=(object(), ("blocks",))
+            ),
+            load_transformer=MagicMock(return_value=object()),
         )
-        model._build_transformer = MagicMock(return_value=object())
         manifest = object()
         attention_kwargs = object()
 
@@ -201,12 +203,12 @@ class TestDistilledTransformerLoading:
                 "transformer", "/weights/high.safetensors"
             )
 
-        assert result is model._build_transformer.return_value
+        assert result is model.loader.load_transformer.return_value
         resolve.assert_called_once_with(
             "/weights/high.safetensors",
             live_key=wan._remap_lightx2v_to_diffusers,
         )
-        model._build_transformer.assert_called_once_with(
+        model.loader.load_transformer.assert_called_once_with(
             xFuserWanTransformer3DWrapper,
             subfolder="transformer",
             init_kwargs={"attention_kwargs": attention_kwargs},

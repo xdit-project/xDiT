@@ -6,7 +6,11 @@ import pytest
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
-from xfuser.model_executor.models.runner_models.loading import placement, shard
+from xfuser.model_executor.models.runner_models.loading import (
+    placement,
+    shard,
+    transformer_load,
+)
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
     QuantizationLedger,
 )
@@ -28,7 +32,65 @@ def backends(model):
         QuantizationBackends,
     )
 
-    return QuantizationBackends(model)
+    loader = runtime(model)
+    selected = QuantizationBackends(loader)
+    for runtime_name, fixture_name in (
+        ("fp8", "fp8_backend"),
+        ("format", "format_backend"),
+        ("blockwise_fp8", "blockwise_fp8_backend"),
+    ):
+        if hasattr(model, fixture_name):
+            selected.__dict__[runtime_name] = getattr(model, fixture_name)
+    return selected
+
+
+class _StubPlan:
+    def __init__(self, model):
+        self.model = model
+
+    def module_list(self, format_name="fp8"):
+        if format_name == "fp8":
+            return list(self.model.fp8.module_list())
+        return list(
+            getattr(
+                self.model.settings,
+                f"{format_name}_gemm_module_list",
+                (),
+            )
+            or ()
+        )
+
+    def targets_for(self, component_name, format_name="fp8"):
+        if format_name == "fp8" and hasattr(self.model.fp8, "targets_for"):
+            return self.model.fp8.targets_for(component_name)
+        prefix = f"{component_name}."
+        return [
+            "" if target == component_name else target[len(prefix) :]
+            for target in self.module_list(format_name)
+            if target == component_name or target.startswith(prefix)
+        ]
+
+
+def runtime(model):
+    """Wrap a legacy-shaped test fixture in the loader-owned runtime surface."""
+    plan = _StubPlan(model)
+    return SimpleNamespace(
+        model=model,
+        load_contract=getattr(model, "load_contract", None),
+        quantization_plan=plan,
+        quantization_ledger=getattr(model, "quantization_ledger", QuantizationLedger()),
+        backends=SimpleNamespace(
+            fp8=getattr(model, "fp8_backend", None),
+            format=getattr(model, "format_backend", None),
+            blockwise_fp8=getattr(model, "blockwise_fp8_backend", None),
+            format_targets_for=lambda name: plan.targets_for(name, "fp4"),
+        ),
+        fill_eager_transformers=lambda: None,
+        replicated_broadcast_load=getattr(
+            model, "_replicated_broadcast_load", lambda: False
+        ),
+        broadcast_fill_replicated=lambda offload: None,
+    )
 
 class RecordingAdapter:
     def __init__(self):
@@ -56,7 +118,14 @@ class FilterRecordingFp8Adapter:
         self.calls.append((block, device, filter_fn))
 
 
-def _hybrid_model(*, adapter, format_adapter=None, overrides=(), suffixes=None):
+def _hybrid_model(
+    *,
+    adapter,
+    format_adapter=None,
+    overrides=(),
+    suffixes=None,
+    fp8_include_suffixes=None,
+):
     return SimpleNamespace(
         config=SimpleNamespace(
             use_fp4_gemms=True,
@@ -68,6 +137,7 @@ def _hybrid_model(*, adapter, format_adapter=None, overrides=(), suffixes=None):
             fp4_gemm_module_list=["transformer.blocks"],
             fp8_precision_overrides=overrides,
             fp8_precision_override_suffixes=suffixes,
+            fp8_gemm_include_suffixes=fp8_include_suffixes,
             int8_gemm_module_list=None,
         ),
         fp8=SimpleNamespace(
@@ -86,13 +156,93 @@ def test_wan_fp8_only_second_transformer_uses_blockwise_backend(monkeypatch):
     model = _hybrid_model(adapter=adapter)
 
     quantize = shard.build_block_quantize_fn(
-        model, "transformer_2", ["blocks"], local_rank=3
+        runtime(model), "transformer_2", ["blocks"], local_rank=3
     )
     block = object()
     quantize(block, 0)
 
     assert adapter.calls == [(block, "cuda:3")]
     assert model.format_backend.calls == []
+
+
+def test_blockwise_fp8_only_target_honors_include_suffixes():
+    adapter = FilterRecordingFp8Adapter()
+    model = _hybrid_model(
+        adapter=adapter,
+        fp8_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
+    )
+
+    quantize = shard.build_block_quantize_fn(
+        runtime(model), "transformer_2", ["blocks"], local_rank=0
+    )
+    quantize(object(), 0)
+    filter_fn = adapter.calls[0][2]
+
+    assert filter_fn(object(), "attn.to_qkv")
+    assert filter_fn(object(), "ff.net.0.proj")
+    assert not filter_fn(object(), "attn.to_out.0")
+
+
+def test_native_fp8_streaming_is_disabled_for_suffix_restricted_targets(
+    monkeypatch,
+):
+    observed = {}
+    monkeypatch.setattr(
+        fp8_backends,
+        "prepare_native_transformer_fp8_load",
+        lambda _adapter, **kwargs: observed.update(kwargs),
+    )
+    model = SimpleNamespace(
+        settings=SimpleNamespace(
+            fp8_gemm_include_suffixes=("attn.to_qkv",),
+        )
+    )
+
+    transformer_load._prepare_native_load(
+        model,
+        SimpleNamespace(format=QuantizationFormat.FP8),
+        "transformer",
+        ("blocks",),
+        True,
+        lambda: object(),
+    )
+
+    assert observed["stream_quant"] is False
+
+
+def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
+    observed = {}
+
+    def prepare(_adapter, **kwargs):
+        observed.update(kwargs)
+
+    from xfuser.model_executor.models.runner_models.loading import format_backends
+
+    monkeypatch.setattr(
+        format_backends,
+        "prepare_native_transformer_format_load",
+        prepare,
+    )
+    model = SimpleNamespace(
+        settings=SimpleNamespace(
+            fp8_precision_overrides=("0.",),
+            fp8_precision_override_suffixes=(".ff.net.2",),
+        ),
+        config=SimpleNamespace(use_hybrid_gemm_schedule=True),
+    )
+
+    transformer_load._prepare_native_load(
+        model,
+        SimpleNamespace(format=QuantizationFormat.INT8),
+        "transformer",
+        ("blocks",),
+        True,
+        lambda: object(),
+    )
+
+    assert observed["precision_prefixes"] == ()
+    assert observed["precision_suffixes"] == ()
+    assert observed["hybrid"] is False
 
 
 def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
@@ -106,7 +256,7 @@ def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
     )
 
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=1
+        runtime(model), "transformer", ["blocks"], local_rank=1
     )
     block = object()
     quantize(block, 3)
@@ -169,7 +319,7 @@ def test_blockwise_fp4_and_int8_route_through_format_adapter(
     )
 
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=2
+        runtime(model), "transformer", ["blocks"], local_rank=2
     )
     block = object()
     quantize(block, 2)
@@ -208,7 +358,7 @@ def test_blockwise_exact_component_target_routes_wrapped_blocks():
     )
 
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=1
+        runtime(model), "transformer", ["blocks"], local_rank=1
     )
     block = object()
     quantize(block, 0)
@@ -254,7 +404,7 @@ def test_descendant_target_quantizes_only_block_zero_subpath(format_name):
         fp8=targets.get("fp8", ()),
     )
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=0
+        runtime(model), "transformer", ["blocks"], local_rank=0
     )
     blocks = [object(), object()]
 
@@ -275,7 +425,7 @@ def test_descendant_target_filter_is_suffix_collision_safe():
         int8=("transformer.blocks.0.attn",),
     )
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=0
+        runtime(model), "transformer", ["blocks"], local_rank=0
     )
 
     quantize(object(), 0)
@@ -296,7 +446,7 @@ def test_multiple_wrap_attrs_resolve_flattened_index_to_actual_fqn():
         refiner=[object(), object()],
     )
     quantize = shard.build_block_quantize_fn(
-        model,
+        runtime(model),
         "transformer",
         ["blocks", "refiner"],
         local_rank=0,
@@ -325,7 +475,7 @@ def test_whole_component_or_list_target_quantizes_every_wrapped_block(target):
         int8=(target,),
     )
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=0
+        runtime(model), "transformer", ["blocks"], local_rank=0
     )
     blocks = [object(), object()]
 
@@ -405,7 +555,7 @@ def test_narrow_fp4_target_preserves_broad_fp8_remainder():
     model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
 
     quantize = shard.build_block_quantize_fn(
-        model, "transformer", ["blocks"], local_rank=2
+        runtime(model), "transformer", ["blocks"], local_rank=2
     )
     block = object()
     quantize(block, 0)
@@ -447,7 +597,7 @@ def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
     )
     monkeypatch.setattr(placement, "log", lambda *_args: None)
 
-    placement.setup_fp8_only_gemm_modules(model, local_rank=1)
+    placement.setup_fp8_only_gemm_modules(runtime(model), local_rank=1)
 
     module, kwargs = fp8_calls[0]
     filter_fn = kwargs.pop("filter_fn")
@@ -466,6 +616,35 @@ def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
     )
 
     assert backends(model).uses_blockwise_fp8()
+
+
+@pytest.mark.parametrize(
+    ("uses_blockwise", "expected"),
+    [
+        (False, ["fp8", "format"]),
+        (True, ["fp8", "format", "blockwise_fp8"]),
+    ],
+)
+def test_quantization_backends_preflight_resolves_required_adapters(
+    monkeypatch, uses_blockwise, expected
+):
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        QuantizationBackends,
+    )
+
+    observed = []
+    for name in ("fp8", "format", "blockwise_fp8"):
+        monkeypatch.setattr(
+            QuantizationBackends,
+            name,
+            property(lambda _self, name=name: observed.append(name)),
+        )
+    selected = object.__new__(QuantizationBackends)
+    selected.uses_blockwise_fp8 = lambda: uses_blockwise
+
+    selected.preflight()
+
+    assert observed == expected
 
 
 def _fsdp_patch_model(
@@ -707,7 +886,7 @@ def test_fsdp_boundary_has_no_global_fp8_patch_assertion(monkeypatch):
         _loader=object(),
     )
 
-    shard.shard_pipeline_components(model)
+    shard.shard_pipeline_components(runtime(model))
 
 
 def test_fp4_override_under_fsdp_requires_patches_with_aiter_fp8_backend(
@@ -821,7 +1000,7 @@ def test_eager_fp4_routes_fp8_only_module_by_hardware(
             descriptor_components={"transformer"}
         ),
     )
-    getattr(placement, setup_name)(model, local_rank=2)
+    getattr(placement, setup_name)(runtime(model), local_rank=2)
 
     assert adapter.backend is expected_fp8_backend, platform
     assert [call[0] for call in fp4_calls] == [fp4_module]
@@ -884,6 +1063,6 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
         lambda: SimpleNamespace(local_rank=0),
     )
 
-    placement.place_pipeline_components(model)
+    placement.place_pipeline_components(runtime(model))
 
     assert fp8_calls == [(post_load_module, {"device": "cuda:0"})]

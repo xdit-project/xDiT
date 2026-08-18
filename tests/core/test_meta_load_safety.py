@@ -230,7 +230,7 @@ def test_replicated_te_reconciles_specs_before_exact_layout_validation(runtime):
         )
 
     group = Group()
-    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader = object.__new__(runtime.meta.ModelLoader)
     loader._fill_te_replicated(
         component,
         "cpu",
@@ -320,7 +320,7 @@ def test_replicated_te_rebuilds_peer_aliases_from_tied_source_contract(runtime):
         )
 
     group = Group()
-    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader = object.__new__(runtime.meta.ModelLoader)
     loader._fill_te_replicated(component, "cpu", group, set_tensor)
 
     assert component.left.weight is component.right.weight
@@ -1071,7 +1071,7 @@ def test_replicated_transformer_restores_nonpersistent_buffers_before_fill(
 
     component = torch.nn.Module()
     component.blocks = torch.nn.ModuleList([Block()])
-    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader = object.__new__(runtime.meta.ModelLoader)
     loader.model = SimpleNamespace()
     seen = []
     loader.build_blockwise_disk_loaders = lambda *args, **kwargs: (
@@ -1105,7 +1105,7 @@ def test_local_transformer_fills_and_quantizes_each_block_before_tail(
     component.blocks = torch.nn.ModuleList(
         [torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)]
     )
-    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader = object.__new__(runtime.meta.ModelLoader)
     loader.model = SimpleNamespace()
     events = []
 
@@ -1147,7 +1147,7 @@ def test_replicated_quantize_failure_stops_all_ranks_before_next_block(
     )
     fills = []
     finalized = []
-    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader = object.__new__(runtime.meta.ModelLoader)
     loader.model = SimpleNamespace()
     loader.build_blockwise_disk_loaders = lambda *args, **kwargs: (
         lambda block, index: fills.append(index),
@@ -1210,7 +1210,7 @@ def test_text_encoder_source_state_failure_is_collective_before_scatter(
         def state_dict(self):
             raise OSError("state dict construction failed")
 
-    loader = object.__new__(runtime.meta.MemoryEfficientLoader)
+    loader = object.__new__(runtime.meta.ModelLoader)
     loader.model = SimpleNamespace(
         settings=SimpleNamespace(fsdp_strategy={"text_encoder": {"wrap_attrs": []}})
     )

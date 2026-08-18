@@ -80,24 +80,25 @@ def test_offline_mode_makes_a_request_use_the_weights_already_on_disk(monkeypatc
     pytest.importorskip("torch")
     from types import SimpleNamespace
 
-    from xfuser.model_executor.models.runner_models import base_model
+    from xfuser.model_executor.models.runner_models.loading.meta_load import ModelLoader
 
-    build = base_model.xFuserModel._checkpoint_request
+    build = ModelLoader.checkpoint_request
     model = SimpleNamespace(settings=SimpleNamespace(model_name="org/repo"))
+    loader = SimpleNamespace(model=model)
 
     monkeypatch.setattr(
         "huggingface_hub.constants.HF_HUB_OFFLINE", True, raising=False
     )
-    assert build(model, "transformer").local_files_only is True
+    assert build(loader, "transformer").local_files_only is True
 
     monkeypatch.setattr(
         "huggingface_hub.constants.HF_HUB_OFFLINE", False, raising=False
     )
-    assert build(model, "transformer").local_files_only is False
+    assert build(loader, "transformer").local_files_only is False
     # A runner that has already decided still decides: pinning a revision it fetched itself must not
     # be turned into an offline load by an environment variable.
     assert (
-        build(model, "transformer", local_files_only=False).local_files_only is False
+        build(loader, "transformer", local_files_only=False).local_files_only is False
     )
 
 

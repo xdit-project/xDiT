@@ -4,7 +4,7 @@ TorchAO has a separate native loader adapter when its Diffusers/Transformers API
 These configs only express AITER's transformer and text-encoder streaming formats; callers treat
 "no config" as "load normally, quantize later" only on placements that support that fallback.
 
-The runner side decides *whether* to quantize and *what* (see runner_models.loading.fp8_plan); this module
+The runner side decides *whether* to quantize and *what* (see runner_models.loading.quantization_plan); this module
 only knows how to express that decision to diffusers and transformers. It is imported lazily from
 those call sites: reaching it means AITER is active, so the quantizer classes are needed anyway.
 """

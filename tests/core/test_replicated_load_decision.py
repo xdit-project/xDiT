@@ -23,11 +23,19 @@ from xfuser.model_executor.models.runner_models.loading import (
     transformer_load,
 )
 from xfuser.model_executor.models.runner_models.loading.meta_load import (
-    MemoryEfficientLoader,
+    ModelLoader,
+)
+from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+    QuantizationBackends,
+)
+from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
+    QuantizationPlan,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadDeclaration,
-    LoaderAdapter,
+    LoadRoute,
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
     UnsupportedLoadContract,
 )
 from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
@@ -54,7 +62,9 @@ def loader_for(runner):
     call is present: a test that leaves out the meta fill wants the case where it is never
     reached, not an AttributeError from the branch it forgot.
     """
-    inner = getattr(runner, "_loader", SimpleNamespace())
+    inner = getattr(
+        runner, "loader", getattr(runner, "_loader", SimpleNamespace())
+    )
 
     def missing_route(name):
         def fail(*args, **kwargs):
@@ -62,18 +72,28 @@ def loader_for(runner):
 
         return fail
 
-    if not hasattr(runner, "_transformer_quantization_adapter"):
-        runner._transformer_quantization_adapter = lambda component_name: (
-            runner.fp8_backend,
-            runner.fp8.targets_for(component_name),
-        )
-    # A real runner always has the quantization ledger, so a stub gets it too: the routes record
-    # into it unconditionally, and a test that does not assert on it still has one written.
-    if not hasattr(runner, "quantization_ledger"):
-        runner.quantization_ledger = QuantizationLedger()
-    return SimpleNamespace(
+    ledger = getattr(runner, "quantization_ledger", QuantizationLedger())
+    runner.quantization_ledger = ledger
+    plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
+    backends = getattr(runner, "backends", SimpleNamespace())
+    transformer_adapter = getattr(
+        runner,
+        "_transformer_quantization_adapter",
+        lambda component_name: (
+            getattr(runner, "fp8_backend", None),
+            plan.targets_for(component_name),
+        ),
+    )
+    loader = SimpleNamespace(
         model=runner,
-        _checkpoint_request=lambda subfolder=None: runner._checkpoint_request(subfolder),
+        load_contract=getattr(runner, "load_contract", None),
+        checkpoint_request=lambda subfolder=None, **kwargs: runner._checkpoint_request(
+            subfolder, **kwargs
+        ),
+        quantization_ledger=ledger,
+        quantization_plan=plan,
+        backends=backends,
+        transformer_quantization_adapter=transformer_adapter,
         fsdp_meta_load=runner._memory_efficient_fsdp_load,
         replicated_broadcast_load=runner._replicated_broadcast_load,
         build_meta_transformer=getattr(
@@ -96,6 +116,38 @@ def loader_for(runner):
             missing_route("meta_te_kwargs_replicated"),
         ),
     )
+    runner.loader = loader
+    return loader
+
+
+def preflight_loader(runner):
+    """Build only the loader-owned runtime state needed by preflight tests."""
+    for name in (
+        "fp8_gemm_module_list",
+        "fp8_text_encoder_module_list",
+        "fp4_gemm_module_list",
+        "int8_gemm_module_list",
+        "fp8_precision_overrides",
+        "fp8_precision_override_suffixes",
+    ):
+        if not hasattr(runner.settings, name):
+            setattr(runner.settings, name, None)
+    if not hasattr(runner.config, "use_fp8_text_encoder"):
+        runner.config.use_fp8_text_encoder = False
+    if not hasattr(runner.config, "use_hybrid_gemm_schedule"):
+        runner.config.use_hybrid_gemm_schedule = False
+    loader = object.__new__(ModelLoader)
+    loader.model = runner
+    loader.load_declaration = runner.load_declaration
+    loader.load_contract = None
+    loader.quantization_plan = QuantizationPlan(runner)
+    loader.backends = SimpleNamespace(
+        fp8=None,
+        format=None,
+        uses_blockwise_fp8=lambda: False,
+        preflight=lambda: None,
+    )
+    return loader
 
 
 def make_loader(
@@ -114,6 +166,16 @@ def make_loader(
     )
     model = SimpleNamespace(
         settings=SimpleNamespace(model_name="stand-in/checkpoint"),
+        capabilities=SimpleNamespace(fully_shard_degree=True),
+        load_support=(
+            LoadSupport(
+                meta_transformers=("transformer",),
+                replicated_meta=True,
+                routes=STANDARD_LOAD_ROUTES,
+            )
+            if supported
+            else LoadSupport()
+        ),
         config=SimpleNamespace(
             memory_efficient_replicated_load=requested,
             memory_efficient_sharding=memory_efficient_sharding,
@@ -121,14 +183,9 @@ def make_loader(
             pipefusion_parallel_degree=pipefusion_parallel_degree,
             tensor_parallel_degree=tensor_parallel_degree,
         ),
-        load_declaration=(
-            LoadDeclaration.meta("transformer", replicated=True)
-            if supported
-            else LoadDeclaration.unsupported("test runner bypasses the seam")
-        ),
     )
     model.settings.fsdp_strategy = {"transformer": {"wrap_attrs": ["blocks"]}}
-    return MemoryEfficientLoader(model)
+    return ModelLoader(model)
 
 
 # ============================================================================
@@ -179,7 +236,10 @@ def test_single_rank_unsupported_runner_resolves_to_eager(monkeypatch):
 def test_never_broadcasts_for_a_runner_that_is_not_wired_for_it(monkeypatch):
     """A runner loading its components directly leaves peers with no meta tensors to fill."""
     loader = make_loader(monkeypatch, supported=False)
-    with pytest.raises(UnsupportedLoadContract, match="bypasses the seam"):
+    with pytest.raises(
+        UnsupportedLoadContract,
+        match="does not support replicated_meta materialization",
+    ):
         loader.replicated_broadcast_load()
 
 
@@ -315,9 +375,9 @@ def test_tracking_a_built_transformer_does_not_keep_it_alive(monkeypatch):
 
 def test_custom_mapped_source_can_build_meta_only_for_local_fill(monkeypatch):
     loader = make_loader(monkeypatch, world_size=1)
-    loader.model.load_declaration = LoadDeclaration(
+    loader.load_declaration = LoadDeclaration(
         local_meta_transformers=("transformer",),
-        loader_adapter=LoaderAdapter.DISTILLED_WAN,
+        routes=LoadRoute.LOCAL_BLOCKWISE,
     )
     source = CheckpointManifest(
         weight_map={"blocks.0.weight": "/weights/distilled.safetensors"}
@@ -362,7 +422,7 @@ def test_disk_filler_receives_the_exact_request_used_for_meta_build(monkeypatch)
 
 def test_dual_meta_transformers_keep_distinct_checkpoint_requests(monkeypatch):
     loader = make_loader(monkeypatch)
-    loader.model.load_declaration = LoadDeclaration.meta(
+    loader.load_declaration = LoadDeclaration.meta(
         "transformer", "transformer_2", replicated=True
     )
     loader.model.settings.fsdp_strategy["transformer_2"] = {"wrap_attrs": ["blocks"]}
@@ -414,14 +474,25 @@ def load_path_source(cls) -> str:
     return source
 
 
+def resolved_class_load_declaration(cls):
+    return LoadDeclaration.for_runner(
+        cls.capabilities,
+        load_support=cls.load_support,
+        fsdp_strategy=cls.settings.fsdp_strategy,
+    )
+
+
 def test_runners_that_bypass_the_meta_seam_declare_it():
     """A runner claiming meta support must construct through _build_transformer."""
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
-        goes_through_seam = "_build_transformer" in load_path_source(cls)
-        declares_support = bool(cls.load_declaration.meta_transformers)
+        source = load_path_source(cls)
+        goes_through_seam = (
+            "_build_transformer" in source or "loader.load_transformer" in source
+        )
+        declares_support = bool(resolved_class_load_declaration(cls).meta_transformers)
         if declares_support and not goes_through_seam:
             mismatched.append(f"{cls.__name__} (from {cls._load_model.__qualname__})")
 
@@ -466,7 +537,7 @@ def test_runners_that_declare_a_text_encoder_construct_it_through_the_seam():
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
         settings = cls.settings
-        shards_encoder = bool(cls.load_declaration.meta_transformers) and any(
+        shards_encoder = bool(resolved_class_load_declaration(cls).meta_transformers) and any(
             name.startswith("text_encoder") for name in (settings.fsdp_strategy or {})
         )
         quantizes_encoder = bool(settings.fp8_text_encoder_module_list)
@@ -501,7 +572,7 @@ def test_the_text_encoder_seam_exemptions_are_still_runners_that_need_one():
     for name in TEXT_ENCODER_SEAM_EXEMPT:
         cls = by_name[name]
         settings = cls.settings
-        shards_encoder = bool(cls.load_declaration.meta_transformers) and any(
+        shards_encoder = bool(resolved_class_load_declaration(cls).meta_transformers) and any(
             component.startswith("text_encoder") for component in (settings.fsdp_strategy or {})
         )
         if not (shards_encoder or settings.fp8_text_encoder_module_list):
@@ -518,7 +589,7 @@ def test_runner_load_declarations_match_model_quantization_capabilities():
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
         expected = LoadDeclaration.for_runner(cls.capabilities).quantization_contracts
-        if cls.load_declaration.quantization_contracts != expected:
+        if resolved_class_load_declaration(cls).quantization_contracts != expected:
             mismatched.append(cls.__name__)
 
     assert not mismatched, (
@@ -532,7 +603,7 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 
     mismatched = []
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
-        declaration = cls.load_declaration
+        declaration = resolved_class_load_declaration(cls)
         candidates = declaration.replicated_meta_transformers
         expected = (
             tuple(
@@ -555,8 +626,8 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: True)
-    monkeypatch.setattr(base_model, "_is_cuda", lambda: False)
+    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: True)
+    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
     model_capabilities = base_model.ModelCapabilities(
         fully_shard_degree=True,
         use_fp8_gemms=True,
@@ -577,13 +648,18 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
         ),
         load_declaration=LoadDeclaration.for_runner(
             model_capabilities,
-            meta_transformers=("transformer",),
-            replicated=True,
+            load_support=LoadSupport(
+                meta_transformers=("transformer",),
+                replicated_meta=True,
+                routes=STANDARD_LOAD_ROUTES,
+            ),
             fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
         ),
     )
 
-    selected = base_model.xFuserModel._select_preload_contract(runner, world_size=2)
+    loader = preflight_loader(runner)
+    loader.preflight(world_size=2)
+    selected = loader.load_contract
 
     assert selected.requested_format.name == "FP8"
     assert selected.selected_backend.name == "AITER"
@@ -593,8 +669,8 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
 def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: False)
-    monkeypatch.setattr(base_model, "_is_cuda", lambda: True)
+    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: False)
+    monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=1,
@@ -609,21 +685,22 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
         settings=SimpleNamespace(fsdp_strategy={}),
         load_declaration=LoadDeclaration.for_runner(
             base_model.ModelCapabilities(),
-            unsupported_reason="custom loader bypasses the seam",
+            load_support=LoadSupport(),
         ),
     )
 
     with pytest.raises(
-        UnsupportedLoadContract, match="custom loader bypasses the seam"
+        UnsupportedLoadContract,
+        match="does not support replicated_meta materialization",
     ):
-        base_model.xFuserModel._select_preload_contract(runner, world_size=2)
+        preflight_loader(runner).preflight(world_size=2)
 
 
 def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: False)
-    monkeypatch.setattr(base_model, "_is_cuda", lambda: True)
+    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: False)
+    monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
             fully_shard_degree=1,
@@ -638,16 +715,18 @@ def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
         settings=SimpleNamespace(fsdp_strategy={}),
         load_declaration=LoadDeclaration.for_runner(
             base_model.ModelCapabilities(),
-            unsupported_reason="custom loader bypasses the seam",
+            load_support=LoadSupport(),
         ),
     )
 
-    selected = base_model.xFuserModel._select_preload_contract(runner, world_size=1)
+    loader = preflight_loader(runner)
+    loader.preflight(world_size=1)
+    selected = loader.load_contract
 
     assert selected.materialization_mode.name == "EAGER"
 
 
-def test_wan22_instance_settings_refresh_both_transformers(monkeypatch):
+def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
     import copy
 
     from xfuser.model_executor.models.runner_models import base_model
@@ -668,17 +747,24 @@ def test_wan22_instance_settings_refresh_both_transformers(monkeypatch):
         use_int8_gemms=False,
     )
     runner._customize_settings(SimpleNamespace())
-    monkeypatch.setattr(base_model, "_use_aiter_fp8_rdna4", lambda: True)
-    monkeypatch.setattr(base_model, "_is_cuda", lambda: False)
+    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: True)
+    monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
 
-    runner._refresh_load_declaration()
-    fsdp_selected = runner._select_preload_contract(world_size=2)
+    loader = ModelLoader(runner)
+    loader.backends = SimpleNamespace(
+        fp8=None,
+        format=None,
+        uses_blockwise_fp8=lambda: False,
+        preflight=lambda: None,
+    )
+    loader.preflight(world_size=2)
+    fsdp_selected = loader.load_contract
 
-    assert runner.load_declaration.fsdp_meta_transformers == (
+    assert loader.load_declaration.fsdp_meta_transformers == (
         "transformer",
         "transformer_2",
     )
-    assert runner.load_declaration.replicated_meta_transformers == (
+    assert loader.load_declaration.replicated_meta_transformers == (
         "transformer",
         "transformer_2",
     )
@@ -687,7 +773,16 @@ def test_wan22_instance_settings_refresh_both_transformers(monkeypatch):
     runner.config.fully_shard_degree = 1
     runner.config.memory_efficient_sharding = False
     runner.config.memory_efficient_replicated_load = True
-    replicated_selected = runner._select_preload_contract(world_size=2)
+    # One loader owns one immutable preflight result; a changed run gets a new loader.
+    loader = ModelLoader(runner)
+    loader.backends = SimpleNamespace(
+        fp8=None,
+        format=None,
+        uses_blockwise_fp8=lambda: False,
+        preflight=lambda: None,
+    )
+    loader.preflight(world_size=2)
+    replicated_selected = loader.load_contract
 
     assert replicated_selected.materialization_mode.name == "REPLICATED_META"
 
@@ -1318,7 +1413,15 @@ def _attach_backends(runner):
         QuantizationBackends,
     )
 
-    runner.backends = QuantizationBackends(runner)
+    loader = loader_for(runner)
+    backends = QuantizationBackends(loader)
+    backends.__dict__.update(
+        fp8=getattr(runner, "fp8_backend", None),
+        blockwise_fp8=getattr(runner, "blockwise_fp8_backend", None),
+        format=getattr(runner, "format_backend", None),
+    )
+    loader.backends = backends
+    runner.backends = backends
     return runner
 
 def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):

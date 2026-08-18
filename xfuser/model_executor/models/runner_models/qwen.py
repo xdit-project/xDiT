@@ -9,7 +9,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
 )
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 @register_model("Qwen/Qwen-Image-Edit-2511")
 @register_model("Qwen/Qwen-Image-Edit-2509")
@@ -17,16 +20,21 @@ from xfuser.model_executor.models.runner_models.loading.contracts import LoadDec
 @register_model("Qwen-Image-Edit-2511")
 @register_model("Qwen-Image-Edit-2509")
 @register_model("Qwen-Image-Edit")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserQwenImageEditModel(xFuserModel):
-
     min_diffusers_version = "0.37.0"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -104,16 +112,21 @@ class xFuserQwenImageEditModel(xFuserModel):
 @register_model("Qwen/Qwen-Image")
 @register_model("Qwen-Image-2512")
 @register_model("Qwen-Image")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserQwenImageModel(xFuserModel):
-
     min_diffusers_version = "0.37.0"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
     )
     default_input_values = DefaultInputValues(
         height=928,

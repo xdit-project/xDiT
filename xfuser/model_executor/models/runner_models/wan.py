@@ -30,8 +30,9 @@ from xfuser.core.utils.runner_utils import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadDeclaration,
-    LoaderAdapter,
+    LoadSupport,
+    LoadRoute,
+    STANDARD_LOAD_ROUTES,
 )
 from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     resolve_mapped_checkpoint,
@@ -196,9 +197,7 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan21I2VModel(xFuserWanModel):
-
     min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -207,11 +206,18 @@ class xFuserWan21I2VModel(xFuserWanModel):
             return 2
         return 1
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_cfg_parallel=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
@@ -319,8 +325,13 @@ class xFuserWan21I2VModel(xFuserWanModel):
 
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan2.2-I2V")
-@LoadDeclaration.declare("transformer", "transformer_2", replicated=True)
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'transformer_2'),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
@@ -364,15 +375,6 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
 
 
 @register_model("Wan2.2-Distilled-I2V")
-@LoadDeclaration.declare(
-    "transformer",
-    "transformer_2",
-    loader_adapter=LoaderAdapter.DISTILLED_WAN,
-    unsupported_reason=(
-        "external LightX2V checkpoints support mapped local blockwise loading "
-        "but not standard distributed collectives"
-    )
-)
 class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
     """Wan2.2 I2V with LightX2V 4-step distilled weights.
 
@@ -383,17 +385,24 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         distilled_transformer_path:   path to high-noise .safetensors (transformer)
         distilled_transformer_2_path: path to low-noise .safetensors (transformer_2)
     """
-
     # LightX2V boundary_step_index=2 (step-index comparison) maps to a timestep threshold
     # between shifted t[1]≈937 and t[2]≈833. 0.9 → threshold 900 correctly splits 2+2.
     _BOUNDARY_RATIO = 0.9
     _BASE_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
+    # Mapped LightX2V checkpoints support local blockwise loading, not collectives.
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'transformer_2'),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.LOCAL_BLOCKWISE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_cfg_parallel=False,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
@@ -425,7 +434,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             xFuserWanTransformer3DWrapper,
         )
 
-        adapter, _ = self._transformer_quantization_adapter(component_name)
+        adapter, _ = self.loader.transformer_quantization_adapter(component_name)
         init_kwargs = {
             "attention_kwargs": _build_attention_kwargs(self.config)
         }
@@ -444,7 +453,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             path,
             live_key=_remap_lightx2v_to_diffusers,
         )
-        return self._build_transformer(
+        return self.loader.load_transformer(
             xFuserWanTransformer3DWrapper,
             subfolder=component_name,
             init_kwargs=init_kwargs,
@@ -515,9 +524,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan21T2VModel(xFuserWanModel):
-
     min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -526,11 +533,18 @@ class xFuserWan21T2VModel(xFuserWanModel):
             return 2
         return 1
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
@@ -614,8 +628,13 @@ class xFuserWan21T2VModel(xFuserWanModel):
 
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
-@LoadDeclaration.declare("transformer", "transformer_2", replicated=True)
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'transformer_2'),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
@@ -660,14 +679,19 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 @register_model("Wan2.2-TI2V")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan22TI2VModel(xFuserWan21T2VModel):
-
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
@@ -708,7 +732,6 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        torch.set_float32_matmul_precision('high')
         transformer = self._build_transformer(
             xFuserWanTransformer3DWrapper,
             init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
@@ -778,15 +801,20 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserWan21VACEModel(xFuserWanModel):
-
     min_diffusers_version = "0.35.2"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         cross_attention_backend=True,
         enable_tiling=True,
         enable_slicing=True,

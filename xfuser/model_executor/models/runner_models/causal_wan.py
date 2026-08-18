@@ -16,8 +16,8 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    LoadDeclaration,
-    LoaderAdapter,
+    LoadSupport,
+    LoadRoute,
 )
 
 if TYPE_CHECKING:
@@ -27,18 +27,16 @@ if TYPE_CHECKING:
 
 
 @register_model("CausalWan")
-@LoadDeclaration.declare(
-    loader_adapter=LoaderAdapter.CAUSAL_WAN,
-    unsupported_reason=(
-        "the checkpoint may require a manual single-file fallback after its "
-        "Diffusers index load fails; exact collective-safe key discovery is "
-        "not declared"
-    )
-)
 class xFuserCausalWanModel(xFuserModel):
-
     min_diffusers_version = "0.35.2"
 
+    # Its manual single-file fallback has no collective-safe key discovery.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=False,   # SP incompatible with KV cache initially
         ring_degree=False,

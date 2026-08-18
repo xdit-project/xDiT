@@ -1,7 +1,7 @@
 """Dependency-light contracts for checkpoint materialization and quantization."""
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, Flag, auto
 from typing import FrozenSet, Mapping, Protocol, runtime_checkable
 
 
@@ -29,43 +29,27 @@ class ConstructionSeam(str, Enum):
     BUILD_TRANSFORMER = "_build_transformer"
 
 
-class LoaderAdapter(str, Enum):
-    """Checkpoint construction strategy owned by a runner."""
+class LoadRoute(Flag):
+    """Independent loading routes a runner has explicitly verified."""
 
-    STANDARD_TRANSFORMER = "standard_transformer"
-    DISTILLED_WAN = "distilled_wan_remap"
-    SD35_COMPOSITION = "sd35_composition"
-    CAUSAL_WAN = "causal_wan_custom"
-    HUNYUAN15_VARIANTS = "hunyuan_video_15_variants"
+    NONE = 0
+    STANDARD_COLLECTIVES = auto()
+    LOCAL_BLOCKWISE = auto()
 
-    @property
-    def supports_standard_collectives(self) -> bool:
-        return self is LoaderAdapter.STANDARD_TRANSFORMER
 
-    @property
-    def supports_local_blockwise(self) -> bool:
-        return self in {
-            LoaderAdapter.STANDARD_TRANSFORMER,
-            LoaderAdapter.DISTILLED_WAN,
-        }
+STANDARD_LOAD_ROUTES = (
+    LoadRoute.STANDARD_COLLECTIVES | LoadRoute.LOCAL_BLOCKWISE
+)
 
 
 @dataclass(frozen=True)
-class ComponentLoadExclusion:
-    """A component intentionally kept outside the shared loader adapters."""
+class LoadSupport:
+    """Static, model-local loading support resolved after customization."""
 
-    component: str
-    reason: str
-
-
-KREA2_TEXT_ENCODER_EXCLUSION = ComponentLoadExclusion(
-    component="text_encoder",
-    reason=(
-        "Krea2's Qwen3VL text encoder uses a ROCm-specific float32 Linear "
-        "runtime patch; exact quantization targets and a compatible "
-        "quantize-on-load API are not declared"
-    ),
-)
+    meta_transformers: tuple[str, ...] = ()
+    meta_text_encoders: tuple[str, ...] = ()
+    replicated_meta: bool = False
+    routes: LoadRoute = LoadRoute.NONE
 
 
 class UnsupportedLoadContract(ValueError):
@@ -83,34 +67,27 @@ class CheckpointTensorReader(Protocol):
 class LoadDeclaration:
     """What one runner has declared it can construct before weights are allocated.
 
-    Part of this is a derived view over the two objects a runner already carries:
+    This is a derived instance view over the three objects a runner carries:
     ``quantization_contracts`` comes from ``ModelCapabilities`` (its fp8/fp4/int8 flags)
-    and ``materialization_modes`` from ``ModelSettings.fsdp_strategy``. The rest —
-    ``meta_transformers``, ``loader_adapter``, ``component_exclusions`` and
-    ``unsupported_reason`` — is per-runner information that lives in neither, and cannot
-    move into either. ``ModelCapabilities`` is a permission table keyed by CLI flag name,
-    which ``_validate_config`` matches field by field against ``xFuserArgs``; none of these
-    are flags a user passes. ``ModelSettings`` fits semantically but is not readable per
-    class, and this has to be: ``declare`` writes ``cls.load_declaration`` onto every
-    runner, while ``cls.settings`` is absent or stale for any runner that builds settings
-    in ``__init__`` or mutates a copy in ``_customize_settings``.
+    and ``materialization_modes`` from the final ``ModelSettings.fsdp_strategy``. Static
+    component intent, replicated-meta support, and load routes come from the runner's
+    frozen ``LoadSupport``.
 
     The default is unsupported, because memory-efficient loading is opt-in twice over: the
     user passes a flag defaulting to false, and the runner must have declared support. An
     inherited permissive default would opt a model into the path behind a flag set for a
-    different model. ``unsupported_reason`` therefore records verification status, not a
-    proven incapability.
+    different model.
     """
 
     fsdp_meta_transformers: tuple[str, ...] = ()
     replicated_meta_transformers: tuple[str, ...] = ()
     local_meta_transformers: tuple[str, ...] = ()
+    meta_text_encoders: tuple[str, ...] = ()
     materialization_modes: FrozenSet[MaterializationMode] = frozenset(
         {MaterializationMode.EAGER}
     )
     construction_seam: ConstructionSeam | None = None
-    loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER
-    component_exclusions: tuple[ComponentLoadExclusion, ...] = ()
+    routes: LoadRoute = STANDARD_LOAD_ROUTES
     quantization_formats: FrozenSet[QuantizationFormat] = frozenset(
         {QuantizationFormat.NONE}
     )
@@ -120,7 +97,6 @@ class LoadDeclaration:
     quantization_contracts: FrozenSet[
         tuple[QuantizationFormat, QuantizationBackend]
     ] = frozenset({(QuantizationFormat.NONE, QuantizationBackend.NONE)})
-    unsupported_reason: str | None = None
 
     @property
     def meta_transformers(self) -> tuple[str, ...]:
@@ -134,16 +110,6 @@ class LoadDeclaration:
     def all_meta_transformers(self) -> tuple[str, ...]:
         return tuple(
             dict.fromkeys(self.meta_transformers + self.local_meta_transformers)
-        )
-
-    def exclusion_for(self, component: str) -> ComponentLoadExclusion | None:
-        return next(
-            (
-                exclusion
-                for exclusion in self.component_exclusions
-                if exclusion.component == component
-            ),
-            None,
         )
 
     @classmethod
@@ -180,22 +146,14 @@ class LoadDeclaration:
         )
 
     @classmethod
-    def unsupported(cls, reason: str) -> "LoadDeclaration":
-        return cls(unsupported_reason=reason)
-
-    @classmethod
     def for_runner(
         cls,
         model_capabilities,
         *,
-        meta_transformers: tuple[str, ...] = (),
-        replicated: bool = False,
+        load_support: LoadSupport = LoadSupport(),
         fsdp_strategy: Mapping[str, Mapping] | None = None,
-        loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER,
-        component_exclusions: tuple[ComponentLoadExclusion, ...] = (),
-        unsupported_reason: str | None = None,
     ) -> "LoadDeclaration":
-        """Derive quantization support while keeping meta loading opt-in."""
+        """Resolve one model's static spec against final instance settings."""
 
         contracts = {(QuantizationFormat.NONE, QuantizationBackend.NONE)}
         if getattr(model_capabilities, "use_fp8_gemms", False):
@@ -233,20 +191,22 @@ class LoadDeclaration:
         modes = {MaterializationMode.EAGER}
         seam = None
         strategy = fsdp_strategy or {}
-        standard_collectives = loader_adapter.supports_standard_collectives
+        standard_collectives = bool(
+            load_support.routes & LoadRoute.STANDARD_COLLECTIVES
+        )
         local_transformers = (
             tuple(
                 name
-                for name in meta_transformers
+                for name in load_support.meta_transformers
                 if strategy.get(name, {}).get("wrap_attrs")
             )
-            if loader_adapter.supports_local_blockwise
+            if load_support.routes & LoadRoute.LOCAL_BLOCKWISE
             else ()
         )
         fsdp_transformers = (
             tuple(
                 name
-                for name in meta_transformers
+                for name in load_support.meta_transformers
                 if strategy.get(name, {}).get("wrap_attrs")
             )
             if standard_collectives
@@ -254,7 +214,9 @@ class LoadDeclaration:
             else ()
         )
         replicated_transformers = (
-            tuple(meta_transformers) if standard_collectives and replicated else ()
+            tuple(load_support.meta_transformers)
+            if standard_collectives and load_support.replicated_meta
+            else ()
         )
         if fsdp_transformers:
             modes.add(MaterializationMode.FSDP_META)
@@ -268,40 +230,14 @@ class LoadDeclaration:
             fsdp_meta_transformers=fsdp_transformers,
             replicated_meta_transformers=replicated_transformers,
             local_meta_transformers=local_transformers,
+            meta_text_encoders=tuple(load_support.meta_text_encoders),
             materialization_modes=frozenset(modes),
             construction_seam=seam,
-            loader_adapter=loader_adapter,
-            component_exclusions=tuple(component_exclusions),
+            routes=load_support.routes,
             quantization_formats=formats,
             quantization_backends=backends,
             quantization_contracts=frozenset(contracts),
-            unsupported_reason=unsupported_reason,
         )
-
-    @classmethod
-    def declare(
-        cls,
-        *meta_transformers: str,
-        replicated: bool = False,
-        loader_adapter: LoaderAdapter = LoaderAdapter.STANDARD_TRANSFORMER,
-        component_exclusions: tuple[ComponentLoadExclusion, ...] = (),
-        unsupported_reason: str | None = None,
-    ):
-        """Class decorator deriving quantization support after class creation."""
-
-        def decorate(runner_cls):
-            runner_cls.load_declaration = cls.for_runner(
-                runner_cls.capabilities,
-                meta_transformers=tuple(meta_transformers),
-                replicated=replicated,
-                fsdp_strategy=runner_cls.settings.fsdp_strategy,
-                loader_adapter=loader_adapter,
-                component_exclusions=component_exclusions,
-                unsupported_reason=unsupported_reason,
-            )
-            return runner_cls
-
-        return decorate
 
 
 @dataclass(frozen=True)
@@ -450,23 +386,15 @@ def validate_materialization_contract(
     runner_name: str,
 ) -> None:
     if mode not in declaration.materialization_modes:
-        reason = (
-            f": {declaration.unsupported_reason}"
-            if declaration.unsupported_reason
-            else ""
-        )
         raise UnsupportedLoadContract(
-            f"{runner_name} does not support {mode.value} materialization{reason}"
+            f"{runner_name} does not support {mode.value} materialization"
         )
     if mode is MaterializationMode.EAGER:
         return
-    if not declaration.loader_adapter.supports_standard_collectives:
-        reason = (
-            declaration.unsupported_reason
-            or f"{declaration.loader_adapter.value} is not collective-safe"
-        )
+    if not (declaration.routes & LoadRoute.STANDARD_COLLECTIVES):
         raise UnsupportedLoadContract(
-            f"{runner_name} does not support {mode.value} materialization: " f"{reason}"
+            f"{runner_name} does not support {mode.value} materialization: "
+            "the runner does not declare the standard collective load route"
         )
     if declaration.construction_seam is None:
         raise UnsupportedLoadContract(

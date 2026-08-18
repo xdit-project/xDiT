@@ -153,20 +153,22 @@ def test_a_denoiser_is_recognised_by_the_declaration_not_by_its_name():
     from types import SimpleNamespace
 
     from xfuser.model_executor.models.runner_models.loading.meta_load import (
-        MemoryEfficientLoader,
+        ModelLoader,
     )
 
-    loader = MemoryEfficientLoader.__new__(MemoryEfficientLoader)
+    loader = ModelLoader.__new__(ModelLoader)
     loader.model = SimpleNamespace(
         load_declaration=SimpleNamespace(
             all_meta_transformers=("transformer", "unconditional_transformer")
         )
     )
+    loader.load_declaration = loader.model.load_declaration
 
     assert loader._is_meta_denoiser("unconditional_transformer")
     assert loader._is_meta_denoiser("transformer")
     # The naming convention still holds for a runner that declares fewer components
     loader.model.load_declaration = SimpleNamespace(all_meta_transformers=())
+    loader.load_declaration = loader.model.load_declaration
     assert loader._is_meta_denoiser("transformer_2")
     assert not loader._is_meta_denoiser("text_encoder")
 

@@ -51,7 +51,7 @@ def native_quantization_device_map():
 
 
 def _resolve_request(loader, subfolder, checkpoint_request):
-    request = checkpoint_request or loader._checkpoint_request(
+    request = checkpoint_request or loader.checkpoint_request(
         subfolder or "transformer"
     )
     if subfolder is not None and request.subfolder != subfolder:
@@ -73,31 +73,48 @@ def _prepare_native_load(
             adapter,
             component_name=component_name,
             targets=targets,
-            stream_quant=stream_quant,
+            # Native FP8 configs quantize every linear under each target. A suffix-restricted
+            # policy must remain a post-load/blockwise conversion so the ledger does not claim
+            # broader coverage than was requested.
+            stream_quant=(
+                stream_quant
+                and not getattr(
+                    model.settings, "fp8_gemm_include_suffixes", None
+                )
+            ),
             model_factory=model_factory,
         )
     from .format_backends import prepare_native_transformer_format_load
 
+    is_fp4 = adapter.format.value in {"fp4", "fp8_fp4"}
     return prepare_native_transformer_format_load(
         adapter,
         component_name=component_name,
         targets=targets,
         stream_quant=stream_quant,
-        precision_prefixes=(model.settings.fp8_precision_overrides or ()),
-        precision_suffixes=(model.settings.fp8_precision_override_suffixes or ()),
-        hybrid=model.config.use_hybrid_gemm_schedule,
+        precision_prefixes=(
+            (model.settings.fp8_precision_overrides or ()) if is_fp4 else ()
+        ),
+        precision_suffixes=(
+            (model.settings.fp8_precision_override_suffixes or ())
+            if is_fp4
+            else ()
+        ),
+        hybrid=(model.config.use_hybrid_gemm_schedule if is_fp4 else False),
         model_factory=model_factory,
     )
 
 
-def _fp4_remainder(model, component_name):
+def _fp4_remainder(loader, component_name):
     """An FP4 blockwise fill also owns the FP8 remainder, whose targets it must be told."""
 
-    if not model.config.use_fp4_gemms:
+    if not loader.model.config.use_fp4_gemms:
         return {}
     return {
         "fp4_gemms": True,
-        "fp8_targets": tuple(model.fp8.targets_for(component_name)),
+        "fp8_targets": tuple(
+            loader.quantization_plan.targets_for(component_name)
+        ),
     }
 
 
@@ -136,10 +153,10 @@ def load_transformer(
     whose keys the standard loader cannot map, and is only honoured on a blockwise route.
     """
     model = loader.model
-    ledger = model.quantization_ledger
+    ledger = loader.quantization_ledger
     request = _resolve_request(loader, subfolder, checkpoint_request)
     component_name = request.subfolder
-    adapter, targets = model._transformer_quantization_adapter(component_name)
+    adapter, targets = loader.transformer_quantization_adapter(component_name)
     targets = tuple(targets)
     strategy = model.settings.fsdp_strategy.get(component_name, {})
     wrap_attrs = tuple(strategy.get("wrap_attrs", ()))
@@ -158,7 +175,7 @@ def load_transformer(
                 blockwise_transformer_descriptor(
                     adapter, component_name, targets, wrap_attrs
                 ),
-                **_fp4_remainder(model, component_name),
+                **_fp4_remainder(loader, component_name),
             )
         return loader.build_meta_transformer(
             wrapper_cls, request, init_kwargs, **build_kwargs
@@ -185,7 +202,7 @@ def load_transformer(
                 blockwise_transformer_descriptor(
                     adapter, component_name, targets, wrap_attrs, local=True
                 ),
-                **_fp4_remainder(model, component_name),
+                **_fp4_remainder(loader, component_name),
             )
             component = loader.build_meta_transformer(
                 wrapper_cls, request, init_kwargs, **build_kwargs

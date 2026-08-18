@@ -211,7 +211,7 @@ def test_disk_fill_preserves_nonpersistent_buffers_and_reports_source_errors():
     )
     assert "_collective_source_call" in source_call
 
-    loader = _class(meta_tree, "MemoryEfficientLoader")
+    loader = _class(meta_tree, "ModelLoader")
 
     def _loader_method(method_name):
         return ast.get_source_segment(

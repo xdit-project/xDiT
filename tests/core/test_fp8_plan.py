@@ -1,4 +1,4 @@
-"""Unit tests for Fp8Plan, which decides what a run quantizes to FP8.
+"""Unit tests for backend-neutral quantization target planning.
 
 Every FP8 consumer (the post-load walks on any hardware, the per-block FSDP quantize, the streaming
 quantize-on-load, the meta-init paths) reads its target list from here, so the
@@ -11,10 +11,9 @@ Run with:
 
 from types import SimpleNamespace
 
-import pytest
-
-from xfuser.model_executor.models.runner_models.loading import fp8_plan
-from xfuser.model_executor.models.runner_models.loading.fp8_plan import Fp8Plan
+from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
+    QuantizationPlan,
+)
 
 
 def make_plan(
@@ -24,35 +23,21 @@ def make_plan(
     te_targets=None,
     use_fp8_gemms=True,
     use_fp8_text_encoder=False,
-    on_rdna4=True,
 ):
-    """An Fp8Plan over a stand-in model: the plan only reads settings and config."""
-    monkeypatch.setattr(fp8_plan, "_use_aiter_fp8_rdna4", lambda: on_rdna4)
+    """A QuantizationPlan over a stand-in runner."""
     model = SimpleNamespace(
         settings=SimpleNamespace(
             fp8_gemm_module_list=transformer_targets,
             fp8_text_encoder_module_list=te_targets,
+            fp4_gemm_module_list=["transformer.fp4_blocks"],
+            int8_gemm_module_list=["transformer.int8_blocks"],
         ),
         config=SimpleNamespace(
             use_fp8_gemms=use_fp8_gemms,
             use_fp8_text_encoder=use_fp8_text_encoder,
         ),
     )
-    return Fp8Plan(model)
-
-
-# ============================================================================
-# aiter_active
-# ============================================================================
-
-
-def test_inactive_without_fp8_gemms(monkeypatch):
-    assert not make_plan(monkeypatch, use_fp8_gemms=False).aiter_active
-
-
-def test_inactive_off_rdna4(monkeypatch):
-    """The AITER block-scale kernels are the only implementation, so FP8 is off elsewhere."""
-    assert not make_plan(monkeypatch, on_rdna4=False).aiter_active
+    return QuantizationPlan(model)
 
 
 # ============================================================================
@@ -102,8 +87,15 @@ def test_module_list_does_not_alias_settings(monkeypatch):
     assert targets == ["transformer.blocks"]
 
 
+def test_backend_neutral_targets_cover_fp4_and_int8(monkeypatch):
+    plan = make_plan(monkeypatch)
+
+    assert plan.targets_for("transformer", "fp4") == ["fp4_blocks"]
+    assert plan.targets_for("transformer", "int8") == ["int8_blocks"]
+
+
 # ============================================================================
-# targets_for / aiter_covers: per-component prefix matching
+# targets_for: per-component prefix matching
 # ============================================================================
 
 
@@ -126,92 +118,34 @@ def test_prefix_match_does_not_leak_across_sibling_components(monkeypatch):
     assert plan.targets_for("transformer_2") == ["blocks"]
 
 
-def test_aiter_covers_is_false_for_an_untargeted_component(monkeypatch):
-    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
-    assert plan.aiter_covers("transformer")
-    assert not plan.aiter_covers("vae")
-
-
-def test_aiter_covers_is_false_for_a_text_encoder_without_the_flag(monkeypatch):
-    plan = make_plan(monkeypatch, te_targets=["text_encoder.encoder.block"])
-    assert not plan.aiter_covers("text_encoder")
-
-
-def test_aiter_covers_is_false_when_the_aiter_path_is_off(monkeypatch):
-    plan = make_plan(
-        monkeypatch, transformer_targets=["transformer.blocks"], use_fp8_gemms=False
-    )
-    assert not plan.aiter_covers("transformer")
-
-
-# ============================================================================
-# loader configs
-# ============================================================================
-
-
-def test_no_stream_quant_config_when_inactive(monkeypatch):
-    plan = make_plan(
-        monkeypatch, transformer_targets=["transformer.blocks"], use_fp8_gemms=False
-    )
-    assert plan.aiter_stream_config("transformer") is None
-
-
-def test_no_stream_quant_config_for_an_untargeted_component(monkeypatch):
-    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
-    assert plan.aiter_stream_config("transformer_2") is None
-
-
-def test_no_te_quant_config_without_the_flag(monkeypatch):
-    """Belt and braces: the TE streaming config is gated on the flag as well as the target list."""
-    plan = make_plan(monkeypatch, te_targets=["text_encoder.encoder.block"])
-    assert plan.aiter_te_pipeline_config() is None
-
-
-def test_no_te_quant_config_when_inactive(monkeypatch):
-    plan = make_plan(
-        monkeypatch,
-        te_targets=["text_encoder.encoder.block"],
-        use_fp8_text_encoder=True,
-        use_fp8_gemms=False,
-    )
-    assert plan.aiter_te_pipeline_config() is None
-
-
-def test_no_te_quant_config_for_a_bare_component_name(monkeypatch):
-    """An entry with no sub-module path ("text_encoder") targets nothing the loader can route."""
-    plan = make_plan(
-        monkeypatch, te_targets=["text_encoder"], use_fp8_text_encoder=True
-    )
-    assert plan.aiter_te_pipeline_config() is None
-
-
-def test_te_quant_config_groups_targets_by_component(monkeypatch):
-    quantizers = pytest.importorskip("diffusers.quantizers")
-    if not hasattr(quantizers, "PipelineQuantizationConfig"):
-        pytest.skip("installed diffusers has no PipelineQuantizationConfig")
-    plan = make_plan(
-        monkeypatch,
-        te_targets=["text_encoder.encoder.block", "text_encoder_2.layers"],
-        use_fp8_text_encoder=True,
-    )
-    config = plan.aiter_te_pipeline_config()
-    assert set(config.quant_mapping) == {"text_encoder", "text_encoder_2"}
-    assert config.quant_mapping["text_encoder"].target_modules == ["encoder.block"]
-    assert config.quant_mapping["text_encoder_2"].target_modules == ["layers"]
-
-
 # ============================================================================
 # Every runner declares its targets in the right list
 # ============================================================================
 
 
+def test_registered_runner_text_encoder_capability_matches_declared_targets():
+    from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
+
+    mismatches = {
+        cls.__name__: {
+            "capability": cls.capabilities.use_fp8_text_encoder,
+            "targets": cls.settings.fp8_text_encoder_module_list,
+        }
+        for cls in dict.fromkeys(MODEL_REGISTRY.values())
+        if cls.capabilities.use_fp8_text_encoder
+        != bool(cls.settings.fp8_text_encoder_module_list)
+    }
+
+    assert not mismatches
+
+
 def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
     """A text-encoder path left in fp8_gemm_module_list is quantized unconditionally, which breaks
     two ways: on CUDA the torchao walk silently quantizes a text encoder the user never opted into,
-    and on the replicated broadcast path aiter_covers() turns True while aiter_te_pipeline_config()
-    stays None, so peers fp8-swap a component rank0 loads bf16 and the load hangs on mismatched
-    tensor counts. Checked over the registry because the split is per-runner and easy to miss (flux
-    was missed once, in the exact configuration the feature targets).
+    and on the replicated broadcast path the generic FP8 target plan can claim coverage while the
+    text-encoder load remains bf16, so peers swap a different layout and hang on mismatched tensor
+    counts. Checked over the registry because the split is per-runner and easy to miss (flux was
+    missed once, in the exact configuration the feature targets).
 
     A denoiser is not always the component literally named "transformer": Ideogram 4 carries a second
     unconditional_transformer and MiniMax-H3-Ref2VA names its own transformer_ref, so the component

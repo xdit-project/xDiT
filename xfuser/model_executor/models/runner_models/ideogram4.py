@@ -21,8 +21,8 @@ from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     DerivedTensor,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    ComponentLoadExclusion,
-    LoadDeclaration,
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
 )
 from xfuser.model_executor.pipelines.pipeline_ideogram4 import (
     get_ideogram4_pipeline_class,
@@ -158,17 +158,6 @@ def _dequantize_fp8_state_dict(
         else:
             result[key] = tensor
     return result
-
-
-IDEOGRAM4_TEXT_ENCODER_EXCLUSION = ComponentLoadExclusion(
-    component="text_encoder",
-    reason=(
-        "the FP8 checkpoint stores this encoder with the same per-row scales as the "
-        "transformers, but it is built through AutoModel with trust_remote_code, so "
-        "its parameter names come from code the manifest cannot read ahead of the "
-        "load; it is filled eagerly while the two denoisers use the meta path"
-    ),
-)
 
 
 def _dequantize_fp8(weight, scale, dtype: torch.dtype = torch.bfloat16):
@@ -307,12 +296,6 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 @register_model("ideogram-ai/ideogram-4-fp8")
 @register_model("CalamitousFelicitousness/Ideogram-4-bf16-Diffusers")
 @register_model("Ideogram-4")
-@LoadDeclaration.declare(
-    "transformer",
-    "unconditional_transformer",
-    replicated=True,
-    component_exclusions=(IDEOGRAM4_TEXT_ENCODER_EXCLUSION,),
-)
 class xFuserIdeogram4Model(xFuserModel):
     min_diffusers_version = "0.39.0"
 
@@ -320,6 +303,13 @@ class xFuserIdeogram4Model(xFuserModel):
     # model. Stated here so a Ulysses degree that cannot work is refused before the download.
     attention_heads = 18
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'unconditional_transformer'),
+        # trust_remote_code hides text-encoder parameter names from manifest discovery.
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -412,7 +402,7 @@ class xFuserIdeogram4Model(xFuserModel):
         fill reads one block at a time.
         """
 
-        return self._build_transformer(
+        return self.loader.load_transformer(
             transformer_class,
             subfolder=subfolder,
             weight_source=_fp8_transformer_manifest(
@@ -457,7 +447,7 @@ class xFuserIdeogram4Model(xFuserModel):
         transformer_class = get_ideogram4_transformer_wrapper_class()
 
         if _is_fp8_checkpoint(model_id):
-            if self._memory_efficient_fsdp_load() or self._replicated_broadcast_load():
+            if self.loader.fsdp_meta_load() or self.loader.replicated_broadcast_load():
                 transformer = self._meta_fp8_transformer(
                     transformer_class, "transformer"
                 )

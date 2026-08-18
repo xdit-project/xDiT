@@ -17,7 +17,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
-from xfuser.model_executor.models.runner_models.loading.contracts import LoadDeclaration
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 # Only full-precision attention backends produce correct results on Cosmos3.
 # Quantized backends (FP8, MXFP4, MLA) cause >50% relative error per layer
@@ -87,12 +90,16 @@ def _setup_parallel_vae(vae, enable_parallel_encoder=True):
 
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserCosmos3SuperModel(xFuserModel):
-
     # No released diffusers ships pipeline_cosmos3_omni yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -225,8 +232,13 @@ class xFuserCosmos3SuperModel(xFuserModel):
 
 @register_model("nvidia/Cosmos3-Nano")
 @register_model("Cosmos3-Nano")
-@LoadDeclaration.declare("transformer", replicated=True)
 class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     settings = ModelSettings(
         model_name="nvidia/Cosmos3-Nano",

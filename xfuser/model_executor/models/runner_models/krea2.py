@@ -19,8 +19,8 @@ from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
 )
 from xfuser.model_executor.models.runner_models.loading.contracts import (
-    KREA2_TEXT_ENCODER_EXCLUSION,
-    LoadDeclaration,
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
 )
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
@@ -71,17 +71,18 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
     )
 
 
-@LoadDeclaration.declare(
-    "transformer",
-    replicated=True,
-    component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
-)
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
-
     # No released diffusers ships Krea2Transformer2DModel yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        # Qwen3VL's ROCm float32-Linear workaround has no compatible shared-load contract.
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -188,13 +189,14 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("krea/krea-2-raw")
 @register_model("krea/Krea-2-Raw")
 @register_model("Krea-2-Raw")
-@LoadDeclaration.declare(
-    "transformer",
-    replicated=True,
-    component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
-)
 class xFuserKrea2RawModel(_Krea2BaseModel):
     """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     default_input_values = DefaultInputValues(
         height=2048,
@@ -230,13 +232,14 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("krea/krea-2-turbo")
 @register_model("krea/Krea-2-Turbo")
 @register_model("Krea-2-Turbo")
-@LoadDeclaration.declare(
-    "transformer",
-    replicated=True,
-    component_exclusions=(KREA2_TEXT_ENCODER_EXCLUSION,),
-)
 class xFuserKrea2TurboModel(_Krea2BaseModel):
     """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     _TURBO_STEPS = 8
     _TURBO_GUIDANCE = 0.0

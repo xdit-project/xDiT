@@ -145,6 +145,7 @@ class xFuserArgs:
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
+    profile_capture_phase: bool = False
     profile_wait: int = 2
     profile_warmup: int = 2
     profile_active: int = 1
@@ -693,6 +694,11 @@ class xFuserArgs:
             type=int,
             default=1,
             help="active argument for torch.profiler.schedule. Only used with --profile.",
+        )
+        parser.add_argument(
+            "--profile_capture_phase",
+            action="store_true",
+            help="Profile the CUDA graph recording phase and save the capture trace.",
         )
         parser.add_argument(
             "--warmup_calls",

@@ -361,6 +361,24 @@ def _supported(query, key, cos) -> bool:
     return True
 
 
+def _reference(query, key, norm_q, norm_k, rotary_emb):
+    """Unfused diffusers path: RMSNorm then interleaved RoPE.
+
+    The fallback for inputs outside the fused kernel's envelope; produces the
+    exact same result the model would get without the fused kernel at all.
+    """
+    from diffusers.models.embeddings import apply_rotary_emb
+
+    if norm_q is not None:
+        query = norm_q(query)
+    if norm_k is not None:
+        key = norm_k(key)
+    if rotary_emb is not None:
+        query = apply_rotary_emb(query, rotary_emb, sequence_dim=1)
+        key = apply_rotary_emb(key, rotary_emb, sequence_dim=1)
+    return query, key
+
+
 def _norm_is_plain_rmsnorm(m) -> bool:
     if m is None:
         return True
@@ -387,8 +405,6 @@ def flydsl_fused_qk_norm_rope(
     anything outside the supported envelope so the result is identical either
     way.
     """
-    from xfuser.model_executor.layers.fused_qk_rope import _reference
-
     if (
         rotary_emb is None
         or not isinstance(rotary_emb, (tuple, list))

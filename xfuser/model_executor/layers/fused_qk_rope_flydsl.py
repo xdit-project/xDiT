@@ -1,10 +1,8 @@
 """Fused QK-RMSNorm + interleaved (GPT-J) RoPE for FLUX joint attention (FlyDSL).
 
-This is a FlyDSL port of the Triton kernel in
-``xfuser/model_executor/layers/fused_qk_rope.py`` -- same maths, same rounding
-schedule, same public contract -- written in the high-level ``flydsl.expr`` (fx)
-API on top of aiter's ``GTensor`` buffer-tensor shim (the same style aiter uses
-in ``aiter/ops/flydsl/kernels/qk_norm_rope_quant.py``).
+Written in the high-level ``flydsl.expr`` (fx) API on top of aiter's
+``GTensor`` buffer-tensor shim (the same style aiter uses in
+``aiter/ops/flydsl/kernels/qk_norm_rope_quant.py``).
 
 Layout / algorithm (per attention layer the baseline runs norm_q/norm_k then
 diffusers ``apply_rotary_emb``; this fuses the whole chain):
@@ -21,14 +19,14 @@ formula.  ``diffusers`` RMSNorm rounds to the (bf16) weight dtype after the
 rstd-multiply and again after the affine-multiply, then ``apply_rotary_emb``
 upcasts to fp32 for the rotate and rounds once at the end.  ``ROUND_AFTER_NORM``
 replays the two intermediate roundings so the fused output matches the unfused
-output to within a ULP.  This mirrors the Triton kernel's ``ROUND_AFTER_NORM``.
+output to within a ULP.
 
 Envelope: bf16 activations, 4-D ``[B, S, H, D]`` (sequence_dim == 1), even ``D``
 that factors into a power-of-two lane count with an even per-lane width, plain
 (affine-or-weightless) RMSNorm, and a full-D cos/sin table whose row count is
 ``S`` or ``B*S``.  Anything outside that falls back to the unfused diffusers
-reference (norm then ``apply_rotary_emb``) -- never to the Triton kernel -- so
-selection never changes the result, only the speed.
+reference (norm then ``apply_rotary_emb``) so selection never changes the
+result, only the speed.
 """
 
 # NOTE: no ``from __future__ import annotations`` -- PEP 563 stringifies the
@@ -153,7 +151,7 @@ if _HAS_FLYDSL:
             wk_ = GTensor(wk, dtype=T.bf16, shape=(-1,))
 
             # cos/sin loaded once, shared by q and k (full-D table, indexed per
-            # lane like the Triton ``COS + cbase + offs``).
+            # lane).
             cos_f = fx.Vector(cos_.load(coff, vec_size=VEC)).to(fx.Float32)
             sin_f = fx.Vector(sin_.load(coff, vec_size=VEC)).to(fx.Float32)
 
@@ -383,12 +381,11 @@ def flydsl_fused_qk_norm_rope(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """FlyDSL RMSNorm(q)/RMSNorm(k) + interleaved RoPE, fused.
 
-    Same signature/contract as the Triton ``fused_qk_norm_rope``.  ``query`` /
-    ``key`` are ``[B, S, H, D]`` (sequence_dim == 1); ``rotary_emb`` is the
-    diffusers ``(cos, sin)`` pair broadcastable to ``[S, D]``.  Falls back to the
-    unfused diffusers reference (norm then ``apply_rotary_emb``) for anything
-    outside the supported envelope -- never to the Triton kernel -- so the result
-    is identical either way.
+    ``query`` / ``key`` are ``[B, S, H, D]`` (sequence_dim == 1); ``rotary_emb``
+    is the diffusers ``(cos, sin)`` pair broadcastable to ``[S, D]``.  Falls back
+    to the unfused diffusers reference (norm then ``apply_rotary_emb``) for
+    anything outside the supported envelope so the result is identical either
+    way.
     """
     from xfuser.model_executor.layers.fused_qk_rope import _reference
 

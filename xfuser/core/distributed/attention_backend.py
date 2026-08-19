@@ -382,9 +382,19 @@ if env_info["has_aiter"]:
     # sage_v2 relies on aiter's own matrix and has no Sylvester fallback (None
     # disables hadamard_rotation when create_hadamard_matrix is unavailable).
     HADAMARD_MATRIX = _aiter_hadamard_matrix(AITER_SAGE_V2_BLOCK_R, allow_sylvester_fallback=False)
-    # Own Hadamard matrix for the fp8 paths (separate from sage_v2's);
-    # block_r = 128 = head_dim (full-head rotation). Sylvester fallback allowed.
-    FP8_HADAMARD_MATRIX = _aiter_hadamard_matrix(128)
+    # FP8 Hadamard matrices keyed by block_r, built lazily to support models
+    # with head_dim != 128 (e.g. LTX-2.5 audio head_dim=64). Seed with 128 for
+    # all existing models so first call is fast.
+    _FP8_HADAMARD_MATRICES: dict = {128: _aiter_hadamard_matrix(128)}
+
+    def _get_fp8_hadamard_matrix(head_dim: int, device: torch.device) -> torch.Tensor:
+        # Use full-head 128-blocked rotation for head_dim that is a multiple of 128;
+        # fall back to a full-head rotation for smaller power-of-two dims (e.g. 64).
+        block_r = 128 if head_dim % 128 == 0 else head_dim
+        if block_r not in _FP8_HADAMARD_MATRICES:
+            _FP8_HADAMARD_MATRICES[block_r] = _aiter_hadamard_matrix(block_r)
+        return _FP8_HADAMARD_MATRICES[block_r][device]
+
     _TRITON_SSTA_BLOCK_SIZE = 128
     
 
@@ -952,7 +962,7 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
 
     # Hadamard-rotate Q,K before quant: QK-preserving (kernel unchanged), cuts fp8 quant error.
-    R = FP8_HADAMARD_MATRIX[query.device]
+    R = _get_fp8_hadamard_matrix(query.shape[-1], query.device)
     query = _fp8_hadamard_rotate(query, R).contiguous()
     key = _fp8_hadamard_rotate(key, R).contiguous()
 

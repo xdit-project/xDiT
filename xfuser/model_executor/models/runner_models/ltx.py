@@ -545,7 +545,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             guidance_scale = input_args.get("guidance_scale")
             if guidance_scale != 1.0:
                 log(
-                    "Using guidance_scale=1.0. Other guindance scale values are not supported with this model."
+                    "Using guidance_scale=1.0. Other guidance scale values are not supported with this model."
                 )
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

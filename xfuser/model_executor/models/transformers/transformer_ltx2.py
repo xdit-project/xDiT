@@ -22,7 +22,7 @@ from xfuser.model_executor.layers.usp import USP, attention
 
 
 def _get_mask_meta(cache: dict, mask: torch.Tensor | None) -> object | None:
-    """Convert a 2-D boolean attention mask to AttentionMaskWithMeta, cached per tensor."""
+    """Convert a 2-D key-padding mask (1=valid, 0=pad) to AttentionMaskWithMeta, cached per tensor."""
     if mask is None or mask.ndim != 2:
         return mask
     key = (mask.data_ptr(), tuple(mask.shape))
@@ -65,11 +65,12 @@ class xFuserLTX2PerturbedAttnProcessor:
             ]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
-            # Only forward attn_mask. The varlen fields (indices_k etc.) are for
-            # self-attention where Q and K share the same sequence length; here the
-            # mask covers text encoder tokens (K) while Q is video tokens, so the
-            # varlen pack path in _varlen_pack_keys would mis-reshape the key tensor.
-            attn_kw = {"attn_mask": attention_mask.attn_mask}
+            attn_kw = {
+                "attn_mask": attention_mask.attn_mask,
+                "indices_k": attention_mask.indices_k,
+                "cu_seqlens_k": attention_mask.cu_seqlens_k,
+                "max_seqlen_k": attention_mask.max_seqlen_k,
+            }
         elif attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(
                 attention_mask, sequence_length, batch_size
@@ -184,11 +185,12 @@ class xFuserLTX2AudioVideoAttnProcessor:
             ]
 
         if isinstance(attention_mask, AttentionMaskWithMeta):
-            # Only forward attn_mask. The varlen fields (indices_k etc.) are for
-            # self-attention where Q and K share the same sequence length; here the
-            # mask covers text encoder tokens (K) while Q is video tokens, so the
-            # varlen pack path in _varlen_pack_keys would mis-reshape the key tensor.
-            attn_kw = {"attn_mask": attention_mask.attn_mask}
+            attn_kw = {
+                "attn_mask": attention_mask.attn_mask,
+                "indices_k": attention_mask.indices_k,
+                "cu_seqlens_k": attention_mask.cu_seqlens_k,
+                "max_seqlen_k": attention_mask.max_seqlen_k,
+            }
         elif attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(
                 attention_mask, sequence_length, batch_size

@@ -382,18 +382,21 @@ if env_info["has_aiter"]:
     # sage_v2 relies on aiter's own matrix and has no Sylvester fallback (None
     # disables hadamard_rotation when create_hadamard_matrix is unavailable).
     HADAMARD_MATRIX = _aiter_hadamard_matrix(AITER_SAGE_V2_BLOCK_R, allow_sylvester_fallback=False)
-    # FP8 Hadamard matrices keyed by block_r, built lazily to support models
-    # with head_dim != 128 (e.g. LTX-2.5 audio head_dim=64). Seed with 128 for
-    # all existing models so first call is fast.
-    _FP8_HADAMARD_MATRICES: dict = {128: _aiter_hadamard_matrix(128)}
+    # 128-blocked FP8 Hadamard matrix (per-device), used by every model with
+    # head_dim a multiple of 128.
+    FP8_HADAMARD_MATRIX = _aiter_hadamard_matrix(128)
+    # Extra FP8 Hadamard matrices for smaller power-of-two head dims (e.g. LTX-2.5
+    # audio head_dim=64), built lazily and keyed by head_dim.
+    _FP8_HADAMARD_MATRICES: dict = {}
 
     def _get_fp8_hadamard_matrix(head_dim: int, device: torch.device) -> torch.Tensor:
-        # Use full-head 128-blocked rotation for head_dim that is a multiple of 128;
-        # fall back to a full-head rotation for smaller power-of-two dims (e.g. 64).
-        block_r = 128 if head_dim % 128 == 0 else head_dim
-        if block_r not in _FP8_HADAMARD_MATRICES:
-            _FP8_HADAMARD_MATRICES[block_r] = _aiter_hadamard_matrix(block_r)
-        return _FP8_HADAMARD_MATRICES[block_r][device]
+        # 128-blocked rotation for head_dim that is a multiple of 128 (all existing
+        # models); full-head rotation for smaller power-of-two dims (audio=64).
+        if head_dim % 128 == 0:
+            return FP8_HADAMARD_MATRIX[device]
+        if head_dim not in _FP8_HADAMARD_MATRICES:
+            _FP8_HADAMARD_MATRICES[head_dim] = _aiter_hadamard_matrix(head_dim)
+        return _FP8_HADAMARD_MATRICES[head_dim][device]
 
     _TRITON_SSTA_BLOCK_SIZE = 128
     
@@ -584,8 +587,9 @@ def _varlen_pack_keys(query_bshd, key_bshd, value_bshd, attention_kwargs):
     if indices_k is None:
         return None
     B, S, H, D = query_bshd.shape
-    k_flat = key_bshd.reshape(B * S, H, D)
-    v_flat = value_bshd.reshape(B * S, H, D)
+    Sk = key_bshd.shape[1]  # key seqlen may differ from query in cross-attention
+    k_flat = key_bshd.reshape(B * Sk, H, D)
+    v_flat = value_bshd.reshape(B * Sk, H, D)
     k_packed = torch.index_select(k_flat, 0, indices_k)
     v_packed = torch.index_select(v_flat, 0, indices_k)
     cu_seqlens_q = torch.arange(0, B + 1, dtype=torch.int32, device=query_bshd.device) * S
@@ -607,8 +611,6 @@ def _sdpa_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=No
     Allows Pytorch to decide which SDPA backend to use.
     """
     attn_mask = attention_kwargs.get("attn_mask") if attention_kwargs else None
-    if attn_mask is not None and attn_mask.dtype != query.dtype:
-        attn_mask = attn_mask.to(query.dtype)
     output = F.scaled_dot_product_attention(
         query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal
     )

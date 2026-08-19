@@ -72,7 +72,8 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
 class xFuserWanModel(xFuserModel):
     """Common lifecycle hooks for Wan runners."""
 
-    def _prepare_inference_run(self, input_args: dict) -> None:
+    def prepare_run(self, input_args: dict) -> None:
+        super().prepare_run(input_args)
         get_runtime_state().reset_vsa_schedule_state(
             int(input_args["num_inference_steps"])
         )

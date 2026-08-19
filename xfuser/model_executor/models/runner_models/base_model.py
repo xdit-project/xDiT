@@ -673,14 +673,14 @@ class xFuserModel(abc.ABC):
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}", log_from_all_processes=True)
 
-    def _prepare_inference_run(self, input_args: dict) -> None:
-        """Prepare model-specific state before a pipeline invocation."""
+    def prepare_run(self, input_args: dict) -> None:
+        """Prepare model state before a pipeline invocation."""
+        self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
-        self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
-        self._prepare_inference_run(input_args)
+        self.prepare_run(input_args)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()

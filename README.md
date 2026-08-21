@@ -284,10 +284,21 @@ Several different attention backends are supported:
 | [AITER F6F4](https://github.com/rocm/aiter) | aiter_f6f4 |
 | [AITER MXFP4](https://github.com/rocm/aiter) | aiter_mxfp4 |
 | [AITER F4F4](https://github.com/rocm/aiter) | aiter_f4f4 |
+| [AITER I8FP8 Sparge](https://github.com/rocm/aiter) | aiter_i8fp8_sparge |
+| [AITER FP8 Sparge](https://github.com/rocm/aiter) | aiter_fp8_sparge |
+| [AITER MXFP8 Sparge](https://github.com/rocm/aiter) | aiter_mxfp8_sparge |
+| [AITER F8F6 Sparge](https://github.com/rocm/aiter) | aiter_f8f6_sparge |
+| [AITER MXFP6 Sparge](https://github.com/rocm/aiter) | aiter_mxfp6_sparge |
+| [AITER F6F4 Sparge](https://github.com/rocm/aiter) | aiter_f6f4_sparge |
+| [AITER MXFP4 Sparge](https://github.com/rocm/aiter) | aiter_mxfp4_sparge |
+| [AITER F4F4 Sparge](https://github.com/rocm/aiter) | aiter_f4f4_sparge |
 | [AITER Sage](https://github.com/rocm/aiter) | aiter_sage |
 | [AITER Sage V2](https://github.com/rocm/aiter) | aiter_sage_v2 |
 | [AITER Sparse Sage](https://github.com/rocm/aiter) | aiter_sparse_sage |
 | [AITER Sparse Sage V2](https://github.com/rocm/aiter) | aiter_sparse_sage_v2 |
+| [AITER Sparge](https://github.com/rocm/aiter) | aiter_sparge |
+| [AITER Sparge V2](https://github.com/rocm/aiter) | aiter_sparge_v2 |
+| [Flex Block Sparge](https://github.com/xdit-project/xDiT) | flex_block_sparge |
 | [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
 | [AITER FlyDSL](https://github.com/rocm/aiter) | aiter_flydsl |
 | [AITER FlyDSL FP8](https://github.com/rocm/aiter) | aiter_flydsl_fp8 |
@@ -297,6 +308,8 @@ However, newer implementations generally offer better performance. If available 
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
 
 The dedicated `aiter_mxfp8`, `aiter_f8f6`, `aiter_mxfp6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4` ASM backends require gfx950 and head dimension 128. `aiter_mxfp8` additionally requires an AITER build that exposes `aiter.ops.mha_v4.mha_v4_mxfp8`. F4F4/F6F4 pad only the packed FP4 V storage for partial final 128-token tiles; the logical attention sequence length is unchanged.
+
+Each of those recipes has a Sparge alias (`aiter_fp8_sparge`, `aiter_i8fp8_sparge`, `aiter_mxfp8_sparge`, `aiter_f8f6_sparge`, `aiter_mxfp6_sparge`, `aiter_f6f4_sparge`, `aiter_mxfp4_sparge`, `aiter_f4f4_sparge`) that builds a Sparge block mask at 256×128 and launches the matching MHA v4 sparse row. They need gfx950, head dimension 128, and an AITER `mha_v4` that accepts `block_mask`. Triton Sparge (`aiter_sparge`, `aiter_sparge_v2`) and Flex Sparge (`flex_block_sparge`) are unchanged. Hybrid can switch dense and Sparge per step, for example `--hybrid_attn_high_precision_backend aiter_fp8` with `--hybrid_attn_low_precision_backend aiter_fp8_sparge`.
 
 `aiter_flydsl` uses a FlyDSL kernel (MLIR-compiled), validated on gfx1200+ (RDNA4), and runs bf16. It handles self-attention and non-causal cross-attention. Causal cross-attention, GQA, and out-of-range head dims (mismatched between Q and K, or not at least 64 and a multiple of 32) fall back to `sdpa_flash`. Cross-attention needs the kernel from [ROCm/aiter#4188](https://github.com/ROCm/aiter/pull/4188) or later; on earlier `AITER` builds it falls back as well, as does non-causal self-attention padded by more than 0.5% to reach a 128 multiple. `aiter_flydsl_fp8` adds an fp8 self-attention fast path: it quantizes Q/K/V to fp8 for long self-attention (above a head-shape-dependent sequence-length crossover, ~2560-3584 tokens on gfx1201) and stays bf16 below that and for cross-attention. The fp8 pre-pass is unfused, so it raises peak VRAM; pick `aiter_flydsl` on memory-tight configs. fp8 self-attention needs a newer `AITER` build than the bf16 kernel.
 

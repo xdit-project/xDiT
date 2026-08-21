@@ -15,6 +15,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 # Only full-precision attention backends produce correct results on Cosmos3.
 # Quantized backends (FP8, MXFP4, MLA) cause >50% relative error per layer
@@ -42,10 +46,15 @@ COSMOS3_FSDP_STRATEGY = {
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
-
     # No released diffusers ships pipeline_cosmos3_omni yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -102,11 +111,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
 
         xFuserCosmos3OmniTransformerWrapper = get_cosmos3_transformer_wrapper_class()
 
-        transformer = xFuserCosmos3OmniTransformerWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self.loader.load_transformer(xFuserCosmos3OmniTransformerWrapper)
 
         xFuserCosmos3OmniPipeline = get_cosmos3_pipeline_class()
 
@@ -145,7 +150,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             fps=float(self.settings.fps),
             enable_sound=False,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             output_type="np",
             add_resolution_template=False,
             add_duration_template=False,
@@ -181,6 +186,12 @@ class xFuserCosmos3SuperModel(xFuserModel):
 @register_model("nvidia/Cosmos3-Nano")
 @register_model("Cosmos3-Nano")
 class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     settings = ModelSettings(
         model_name="nvidia/Cosmos3-Nano",

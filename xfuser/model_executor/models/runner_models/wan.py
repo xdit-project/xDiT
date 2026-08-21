@@ -26,6 +26,17 @@ from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     resize_image_to_max_area,
 )
+from xfuser.envs import PACKAGES_CHECKER
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+    STANDARD_LOAD_ROUTES,
+)
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    resolve_mapped_checkpoint,
+)
+
+
 COMMON_FSDP_STRATEGY = {
     "transformer": {
         "wrap_attrs": ["blocks"],
@@ -144,7 +155,6 @@ class _DistilledWanScheduler(FlowMatchEulerDiscreteScheduler):
 @register_model("Wan-AI/Wan2.1-I2V-14B-720P-Diffusers")
 @register_model("Wan2.1-I2V")
 class xFuserWan21I2VModel(xFuserWanModel):
-
     min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -153,11 +163,18 @@ class xFuserWan21I2VModel(xFuserWanModel):
             return 2
         return 1
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_cfg_parallel=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
@@ -186,6 +203,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
         mod_value = 16, # vae_scale_factor_spatial * patch_size[1] = 8
         fps = 16,
         fp8_gemm_module_list=["transformer.blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
                                  "5.", "6.", "7.", "8.", "9.",
@@ -202,16 +220,18 @@ class xFuserWan21I2VModel(xFuserWanModel):
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+
+        transformer = self.loader.load_transformer(
+            xFuserWanTransformer3DWrapper,
+            init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
         )
         return pipe
 
@@ -226,7 +246,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
             guidance_scale_2=input_args["guidance_scale_2"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -261,6 +281,12 @@ class xFuserWan21I2VModel(xFuserWanModel):
 @register_model("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 @register_model("Wan2.2-I2V")
 class xFuserWan22I2VModel(xFuserWan21I2VModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'transformer_2'),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
@@ -271,6 +297,7 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
                 "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides = None
 
 
@@ -278,23 +305,20 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+
+        attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
+        transformer = self.loader.load_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
+        transformer_2 = self.loader.load_transformer(
+            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
         )
-        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer_2",
-            attention_kwargs=_build_attention_kwargs(self.config),
-        )
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
                 transformer_2=transformer_2,
+                quantization_config=te_quant,
+                **te_kwargs,
         )
         return pipe
 
@@ -316,17 +340,24 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         distilled_transformer_path:   path to high-noise .safetensors (transformer)
         distilled_transformer_2_path: path to low-noise .safetensors (transformer_2)
     """
-
     # LightX2V boundary_step_index=2 (step-index comparison) maps to a timestep threshold
     # between shifted t[1]≈937 and t[2]≈833. 0.9 → threshold 900 correctly splits 2+2.
     _BOUNDARY_RATIO = 0.9
     _BASE_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
+    # Mapped LightX2V checkpoints support local blockwise loading, not collectives.
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'transformer_2'),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.LOCAL_BLOCKWISE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_cfg_parallel=False,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
@@ -354,32 +385,57 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
 
-    def _load_model(self) -> DiffusionPipeline:
+
+    def _build_distilled_transformer(self, component_name: str, path: str):
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self._BASE_MODEL,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
-            low_cpu_mem_usage=True,
+
+        adapter, _ = self.loader.transformer_quantization_adapter(component_name)
+        init_kwargs = {
+            "attention_kwargs": _build_attention_kwargs(self.config)
+        }
+        if adapter is None:
+            transformer = xFuserWanTransformer3DWrapper.from_pretrained(
+                pretrained_model_name_or_path=self._BASE_MODEL,
+                torch_dtype=torch.bfloat16,
+                subfolder=component_name,
+                low_cpu_mem_usage=True,
+                **init_kwargs,
+            )
+            _load_distilled_weights(transformer, path)
+            return transformer
+
+        weight_source = resolve_mapped_checkpoint(
+            path,
+            live_key=_remap_lightx2v_to_diffusers,
         )
-        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self._BASE_MODEL,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer_2",
-            attention_kwargs=_build_attention_kwargs(self.config),
-            low_cpu_mem_usage=True,
+        return self.loader.load_transformer(
+            xFuserWanTransformer3DWrapper,
+            subfolder=component_name,
+            init_kwargs=init_kwargs,
+            stream_quant=False,
+            weight_source=weight_source,
         )
-        _load_distilled_weights(transformer,   self.config.distilled_transformer_path)
-        _load_distilled_weights(transformer_2, self.config.distilled_transformer_2_path)
+
+    def _load_model(self) -> DiffusionPipeline:
+        transformer = self._build_distilled_transformer(
+            "transformer",
+            self.config.distilled_transformer_path,
+        )
+        transformer_2 = self._build_distilled_transformer(
+            "transformer_2",
+            self.config.distilled_transformer_2_path,
+        )
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = xFuserWanImageToVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self._BASE_MODEL,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
             transformer_2=transformer_2,
             boundary_ratio=self._BOUNDARY_RATIO,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         pipe.scheduler = _DistilledWanScheduler.from_config(pipe.scheduler.config)
         return pipe
@@ -418,7 +474,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             num_frames=input_args["num_frames"],
             guidance_scale=1.0,
             guidance_scale_2=None,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -426,7 +482,6 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 @register_model("Wan-AI/Wan2.1-T2V-14B-Diffusers")
 @register_model("Wan2.1-T2V")
 class xFuserWan21T2VModel(xFuserWanModel):
-
     min_diffusers_version = "0.35.2"
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
@@ -435,11 +490,18 @@ class xFuserWan21T2VModel(xFuserWanModel):
             return 2
         return 1
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_parallel_vae=True,
@@ -466,6 +528,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         model_name="Wan-AI/Wan2.1-T2V-14B-Diffusers",
         output_name="wan2.1_t2v",
         fp8_gemm_module_list=["transformer.blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "2.", "3.", "4.",
                                  "5.", "6.", "7.", "8.", "9.",
@@ -479,20 +542,22 @@ class xFuserWan21T2VModel(xFuserWanModel):
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import WanPipeline
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+
+        transformer = self.loader.load_transformer(
+            xFuserWanTransformer3DWrapper,
+            init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
-        from diffusers import WanPipeline
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -506,7 +571,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
             guidance_scale_2=input_args["guidance_scale_2"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -519,6 +584,12 @@ class xFuserWan21T2VModel(xFuserWanModel):
 @register_model("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 @register_model("Wan2.2-T2V")
 class xFuserWan22T2VModel(xFuserWan21T2VModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'transformer_2'),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
@@ -529,30 +600,28 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
                 "dtype": torch.bfloat16,
         }
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
+        self.settings.fp8_text_encoder_module_list=["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides=None
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import WanPipeline
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+
+        attn_kwargs = {"attention_kwargs": _build_attention_kwargs(self.config)}
+        transformer = self.loader.load_transformer(xFuserWanTransformer3DWrapper, init_kwargs=attn_kwargs)
+        transformer_2 = self.loader.load_transformer(
+            xFuserWanTransformer3DWrapper, subfolder="transformer_2", init_kwargs=attn_kwargs
         )
-        transformer_2 = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer_2",
-            attention_kwargs=_build_attention_kwargs(self.config),
-        )
-        from diffusers import WanPipeline
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
             transformer_2=transformer_2,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -566,12 +635,18 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
 @register_model("Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 @register_model("Wan2.2-TI2V")
 class xFuserWan22TI2VModel(xFuserWan21T2VModel):
-
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
@@ -601,6 +676,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         model_name="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         output_name="wan2.2_ti2v",
         fp8_gemm_module_list=["transformer.blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fp4_gemm_module_list=["transformer.blocks"],
         fp8_precision_overrides=("0.", "1.", "28.", "29."),
         fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
@@ -612,19 +688,19 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         from xfuser.model_executor.models.transformers.transformer_wan import (
             xFuserWanTransformer3DWrapper,
         )
-        torch.set_float32_matmul_precision('high')
-        transformer = xFuserWanTransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            attention_kwargs=_build_attention_kwargs(self.config),
+        transformer = self.loader.load_transformer(
+            xFuserWanTransformer3DWrapper,
+            init_kwargs={"attention_kwargs": _build_attention_kwargs(self.config)},
         )
         from diffusers import WanPipeline
         pipe_class = xFuserWanImageToVideoPipeline if self.config.task == "i2v" else WanPipeline
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = pipe_class.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
         )
         return pipe
 
@@ -638,7 +714,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
             "num_frames": input_args["num_frames"],
             "guidance_scale": input_args["guidance_scale"],
             "guidance_scale_2": input_args["guidance_scale_2"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
         }
         if self.config.task == "i2v":
             kwargs["image"] = input_args["image"]
@@ -682,13 +758,19 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
 @register_model("Wan2.1-VACE-14B")
 @register_model("Wan2.1-VACE-1.3B")
 class xFuserWan21VACEModel(xFuserWanModel):
-
     min_diffusers_version = "0.35.2"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         cross_attention_backend=True,
         enable_tiling=True,
         enable_slicing=True,
@@ -710,6 +792,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
         fps=16,
         model_output_type="video",
         fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
+        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["blocks", "vace_blocks"],
@@ -731,19 +814,19 @@ class xFuserWan21VACEModel(xFuserWanModel):
             self.settings.output_name = "wan.2.1_vace_1.3b"
 
     def _load_model(self) -> DiffusionPipeline:
+        from diffusers import WanVACEPipeline
         from xfuser.model_executor.models.transformers.transformer_wan_vace import (
             xFuserWanVACETransformer3DWrapper,
         )
-        transformer = xFuserWanVACETransformer3DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
-        from diffusers import WanVACEPipeline
+
+        transformer = self.loader.load_transformer(xFuserWanVACETransformer3DWrapper)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = WanVACEPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         pipe.scheduler.flow_shift = 5.0 # 5.0 for 720p, 3.0 for 480p
         return pipe
@@ -782,7 +865,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             video=input_args["video"],
             mask=input_args["mask"],
         )

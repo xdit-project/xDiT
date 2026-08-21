@@ -9,12 +9,22 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+)
 
 @register_model("stabilityai/stable-diffusion-3.5-large")
 @register_model("stable-diffusion-3.5-large")
 @register_model("SD3.5")
 class xFuserStableDiffusionModel(xFuserModel):
-
+    # The composition wrapper has no config-only transformer construction seam.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -24,6 +34,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
@@ -45,16 +56,19 @@ class xFuserStableDiffusionModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.transformer_blocks"],
+        fp8_text_encoder_module_list=["text_encoder_3.encoder.block"],
     )
 
     def _load_model(self) -> DiffusionPipeline:
+        # SD3's wrapper is composition-style (wraps a transformer instance) and lacks
+        # ConfigMixin.load_config, so it cannot be built on meta like flux/z_image. Load real on
+        # every rank; the per-rank AITER fp8 walk quantizes the real weights CPU->GPU afterwards.
         dtype = torch.float16 if self.config.pipefusion_parallel_degree > 1 else torch.bfloat16
-        pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
+        return xFuserStableDiffusion3Pipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             engine_config=self.engine_config,
             torch_dtype=dtype,
         )
-        return pipe
 
     def _get_compiled_pipe_components(self):
         return ["transformer", "text_encoder", "text_encoder_2", "text_encoder_3"]
@@ -66,7 +80,7 @@ class xFuserStableDiffusionModel(xFuserModel):
             prompt=input_args["prompt"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []
         return DiffusionOutput(images=images, pipe_args=input_args)

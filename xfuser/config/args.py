@@ -121,6 +121,8 @@ class xFuserArgs:
     flow_shift: Optional[float] = None
     enable_model_cpu_offload: bool = False
     enable_sequential_cpu_offload: bool = False
+    enable_group_cpu_offload: bool = False
+    group_offload_low_cpu_mem: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
     vae_tile_size_height: Optional[int] = None
@@ -143,6 +145,7 @@ class xFuserArgs:
     cross_attention_backend: Optional[str] = None
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
+    use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
     fp8_precision_override_suffix_patterns: Optional[str] = None
@@ -163,6 +166,7 @@ class xFuserArgs:
     fully_shard_degree: int = 1
     reshard_after_forward: bool = True
     memory_efficient_sharding: bool = False
+    memory_efficient_replicated_load: bool = False
     use_vae_channels_last_format: bool = False
     # Hybrid attention schedule
     use_hybrid_attn_schedule: bool = False
@@ -409,6 +413,12 @@ class xFuserArgs:
             help="Offloading the weights to the CPU.",
         )
         runtime_group.add_argument(
+            "--enable_group_cpu_offload",
+            action="store_true",
+            help="Async leaf-level group CPU offload (streamed, per-group pinned). Overlaps H2D "
+                 "transfer with compute; upstream diffusers group offloading.",
+        )
+        runtime_group.add_argument(
             "--enable_tiling",
             action="store_true",
             help="Making VAE decode a tile at a time to save GPU memory.",
@@ -590,9 +600,21 @@ class xFuserArgs:
             "--memory_efficient_sharding",
             action="store_true",
             default=False,
-            help="Load transformer blocks one at a time during init to reduce peak GPU memory. "
-                 "Slightly slower at inference - only use if the model OOMs during load despite "
-                 "--fully_shard_degree. Requires --fully_shard_degree > 1.",
+            help="Reduce peak VRAM during load: shard transformer blocks one at a time on GPU "
+                 "during init, so the full unsharded component never materializes on device. "
+                 "Slightly slower to load - use if the model OOMs on GPU during init. Requires "
+                 "--fully_shard_degree > 1.",
+        )
+        parser.add_argument(
+            "--memory_efficient_replicated_load",
+            action="store_true",
+            default=False,
+            help="Reduce peak host RAM when a model that fits one GPU is replicated across ranks "
+                 "(pure sequence/CFG/data parallelism): rank0 loads the real weights and peers "
+                 "build on meta and receive them over a GPU->GPU broadcast, so host peak is 1x the "
+                 "model instead of Nx. Use if the load is OOM-killed on host as rank count grows. "
+                 "No effect with weight-splitting parallelism (FSDP/PipeFusion/tensor parallel), "
+                 "which loads per-rank weights anyway, or on a single rank.",
         )
         parser.add_argument(
             "--height",
@@ -662,6 +684,18 @@ class xFuserArgs:
             help="Offloading the weights to the CPU.",
         )
         parser.add_argument(
+            "--enable_group_cpu_offload",
+            action="store_true",
+            help="Async leaf-level group CPU offload (streamed).",
+        )
+        parser.add_argument(
+            "--group_offload_low_cpu_mem",
+            action="store_true",
+            help="With --enable_group_cpu_offload, pin each tensor as it is offloaded instead of "
+                 "pre-pinning whole components. Keeps host RAM flat on hosts where it is the "
+                 "binding constraint, at some of the streaming speedup.",
+        )
+        parser.add_argument(
             "--enable_tiling",
             action="store_true",
             help="Enable VAE tiling to save GPU memory.",
@@ -711,6 +745,14 @@ class xFuserArgs:
             "--use_fp8_gemms",
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
+        )
+        parser.add_argument(
+            "--use_fp8_text_encoder",
+            action="store_true",
+            help="Also quantize the text encoder's linear layers to FP8 (selected models only). "
+                 "Requires --use_fp8_gemms, which covers the transformer alone. Frees several GB "
+                 "for large bf16 text encoders, at whatever output-quality cost FP8 carries for "
+                 "the encoder; off by default because that is a quality trade-off, not a free win.",
         )
         parser.add_argument(
             "--use_fp4_gemms",
@@ -980,9 +1022,27 @@ class xFuserArgs:
         return engine_args
 
 
+    def _validate_gemm_quantization_flags(self) -> None:
+        """Validate ownership of mutually exclusive generic GEMM quantizers."""
+        if self.use_int8_gemms and (self.use_fp8_gemms or self.use_fp4_gemms):
+            raise ValueError(
+                "--use_int8_gemms cannot be combined with --use_fp8_gemms or "
+                "--use_fp4_gemms, including explicit hybrid FP8/FP4 mode."
+            )
+        if self.use_fp8_gemms and self.use_fp4_gemms and not self.use_hybrid_gemm_schedule:
+            raise ValueError(
+                "--use_fp8_gemms and --use_fp4_gemms cannot both be enabled unless "
+                "--use_hybrid_gemm_schedule explicitly owns the mixed FP8/FP4 mode."
+            )
+        if self.use_hybrid_gemm_schedule and not self.use_fp4_gemms:
+            raise ValueError(
+                "When use_hybrid_gemm_schedule is True, use_fp4_gemms must be set."
+            )
+
     def create_config(
         self,
     ) -> Tuple[EngineConfig, InputConfig]:
+        self._validate_gemm_quantization_flags()
         if not self.use_ray and not torch.distributed.is_initialized():
             logger.warning(
                 "Distributed environment is not initialized. " "Initializing..."
@@ -1014,9 +1074,17 @@ class xFuserArgs:
                     "hybrid_attn_high_precision_backend must be set."
                 )
 
-        if self.use_hybrid_gemm_schedule:
-            if not self.use_fp4_gemms:
-                raise ValueError("When use_hybrid_gemm_schedule is True, use_fp4_gemms must be set.")
+        if self.group_offload_low_cpu_mem and not self.enable_group_cpu_offload:
+            raise ValueError(
+                "--group_offload_low_cpu_mem only affects group CPU offload; pass "
+                "--enable_group_cpu_offload too."
+            )
+
+        if self.use_fp8_text_encoder and not self.use_fp8_gemms:
+            raise ValueError(
+                "--use_fp8_text_encoder extends --use_fp8_gemms, which covers the transformer "
+                "alone, to the text encoder; pass --use_fp8_gemms too."
+            )
 
         if (
             self.fp8_precision_override_prefix_patterns is not None

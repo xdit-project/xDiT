@@ -6,6 +6,7 @@ from diffusers import AutoencoderKLWan
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
+from xfuser import xFuserArgs
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -18,6 +19,12 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+)
+from xfuser.core.distributed.runtime_state import get_runtime_state
+from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import log
 
 
@@ -75,7 +82,6 @@ def _load_json_prompt(prompt: str) -> str:
 @register_model("robbyant/lingbot-video-moe-30b-a3b")
 @register_model("LingBot-Video-MoE")
 class xFuserLingBotVideoMoEModel(xFuserModel):
-
     def save_output(self, output):
         # Stock TI2V CFG parallel puts output on rank 0, but xDiT's runner
         # only saves from the last rank. Skip gracefully when no output.
@@ -97,6 +103,13 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             return 2
         return 1
 
+    # Composed loading and custom FSDP wrapping bypass xDiT's shared load seam.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -446,6 +459,14 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 @register_model("robbyant/lingbot-video-dense-1.3b")
 @register_model("LingBot-Video-Dense")
 class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
+    # The dense runner shares the composed loading and custom FSDP limitation.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     settings = ModelSettings(
         model_name="robbyant/lingbot-video-dense-1.3b",
         output_name="lingbot_video_dense",

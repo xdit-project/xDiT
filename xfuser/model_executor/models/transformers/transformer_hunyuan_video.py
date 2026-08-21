@@ -176,15 +176,22 @@ class xFuserHunyuanVideoAttnProcessor:
 
 class xFuserHunyuanVideoTransformer3DWrapper(HunyuanVideoTransformer3DModel):
 
-    def __init__(
-        self,
-        *args
-    ):
-        super().__init__(
-            *args
-        )
+    def install_xdit_attention_processors(self):
         for block in self.transformer_blocks + self.single_transformer_blocks:
             block.attn.processor = xFuserHunyuanVideoAttnProcessor()
+        return self
+
+    @classmethod
+    def from_config(cls, config, return_unused_kwargs=False, **kwargs):
+        """Keep the parent config signature, then install xDiT processors."""
+        result = super().from_config(
+            config,
+            return_unused_kwargs=return_unused_kwargs,
+            **kwargs,
+        )
+        model = result[0] if return_unused_kwargs else result
+        model.install_xdit_attention_processors()
+        return result
 
 
     def forward(

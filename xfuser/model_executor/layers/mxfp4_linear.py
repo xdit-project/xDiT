@@ -10,7 +10,7 @@ from typing import Optional
 from xfuser.core.distributed.runtime_state import get_runtime_state
 
 
-@torch.library.custom_op("mylib::mxfp4_gemm", mutates_args=())
+@torch.library.custom_op("xfuser::mxfp4_gemm", mutates_args=())
 def _mxfp4_gemm(a: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     quant_func = aiter.get_hip_quant(aiter.QuantType.per_1x32)
     a_quant, a_scale = quant_func(a, shuffle=True)
@@ -90,7 +90,7 @@ class xFuserMXFP4Linear(nn.Module):
     
     def _quantize_weights(self) -> None:
         """
-        Quantize weights to FP4 and register quantized tensors as buffers.
+        Quantize weights to FP4 and register the shardable weight and scale.
         
         This ensures proper device movement with .to(), .cuda(), CPU offload,
         and distributed training frameworks (FSDP, DDP).
@@ -105,9 +105,15 @@ class xFuserMXFP4Linear(nn.Module):
         weight_quant, weight_scale = quant_func(self.weight, shuffle=True)
         weight_shuffle = shuffle_weight(weight_quant, layout=(16, 16))
         
-        # Register quantized tensors as buffers for proper state management
-        # persistent=True ensures they're saved in state_dict
-        self.register_buffer('weight_shuffle', weight_shuffle, persistent=True)
+        # FSDP only shards parameters. Keep the large packed weight non-trainable but registered
+        # as a parameter; the much smaller scale remains a persistent buffer.
+        if hasattr(self, 'weight_shuffle'):
+            delattr(self, 'weight_shuffle')
+        if hasattr(self, 'weight_scale'):
+            delattr(self, 'weight_scale')
+        self.register_parameter(
+            'weight_shuffle', nn.Parameter(weight_shuffle, requires_grad=False)
+        )
         self.register_buffer('weight_scale', weight_scale, persistent=True)
         
         # Properly remove the original weight parameter to save memory
@@ -115,8 +121,116 @@ class xFuserMXFP4Linear(nn.Module):
         delattr(self, 'weight')
         self.register_parameter('weight', None)
 
+    def _is_fsdp_managed_parameter(self, parameter) -> bool:
+        """Whether replacing ``parameter`` would break composable FSDP ownership."""
+        try:
+            from torch.distributed.tensor import DTensor
+        except ImportError:
+            return False
+        return isinstance(parameter, DTensor)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Match this layer's registered layout to full-precision or packed checkpoints."""
+        weight_key = prefix + "weight"
+        packed_key = prefix + "weight_shuffle"
+        scale_key = prefix + "weight_scale"
+        has_quantized_state = packed_key in state_dict and scale_key in state_dict
+
+        if has_quantized_state:
+            current_parameter = (
+                self.weight_shuffle
+                if hasattr(self, "weight_shuffle")
+                else self.weight
+            )
+            if self._is_fsdp_managed_parameter(current_parameter):
+                raise RuntimeError(
+                    "MXFP4 packed state cannot be loaded after FSDP wrapping; "
+                    "load the packed checkpoint before fully_shard."
+                )
+            current_device = (
+                self.weight_shuffle.device
+                if hasattr(self, "weight_shuffle")
+                else self.weight.device
+            )
+            incoming_device = state_dict[packed_key].device
+            destination_device = (
+                incoming_device if current_device.type == "meta" else current_device
+            )
+            if hasattr(self, "weight_shuffle"):
+                delattr(self, "weight_shuffle")
+            if hasattr(self, "weight_scale"):
+                delattr(self, "weight_scale")
+            if self.weight is not None:
+                delattr(self, "weight")
+                self.register_parameter("weight", None)
+            self.register_parameter(
+                "weight_shuffle",
+                nn.Parameter(
+                    torch.empty(
+                        state_dict[packed_key].shape,
+                        dtype=state_dict[packed_key].dtype,
+                        device=destination_device,
+                    ),
+                    requires_grad=False,
+                ),
+            )
+            self.register_buffer(
+                "weight_scale",
+                torch.empty(
+                    state_dict[scale_key].shape,
+                    dtype=state_dict[scale_key].dtype,
+                    device=destination_device,
+                ),
+                persistent=True,
+            )
+        elif weight_key in state_dict and self.weight is None:
+            if self._is_fsdp_managed_parameter(self.weight_shuffle):
+                raise RuntimeError(
+                    "MXFP4 full-precision state cannot replace an FSDP-managed packed parameter; "
+                    "load the full-precision checkpoint before fully_shard."
+                )
+            current_device = self.weight_shuffle.device
+            incoming_device = state_dict[weight_key].device
+            destination_device = (
+                incoming_device if current_device.type == "meta" else current_device
+            )
+            if hasattr(self, "weight_shuffle"):
+                delattr(self, "weight_shuffle")
+            if hasattr(self, "weight_scale"):
+                delattr(self, "weight_scale")
+            delattr(self, "weight")
+            self.register_parameter(
+                "weight",
+                nn.Parameter(
+                    torch.empty(
+                        state_dict[weight_key].shape,
+                        dtype=state_dict[weight_key].dtype,
+                        device=destination_device,
+                    )
+                ),
+            )
+
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     def _run_mxfp4_gemm(self, a: torch.Tensor, w_quant: torch.Tensor, w_scale: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return torch.ops.mylib.mxfp4_gemm(a, w_quant, w_scale, bias)
+        return torch.ops.xfuser.mxfp4_gemm(a, w_quant, w_scale, bias)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """

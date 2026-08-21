@@ -15,6 +15,14 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.checkpoint import (
+    CheckpointManifest,
+    DerivedTensor,
+)
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 from xfuser.model_executor.pipelines.pipeline_ideogram4 import (
     get_ideogram4_pipeline_class,
 )
@@ -22,6 +30,9 @@ from xfuser.model_executor.pipelines.pipeline_ideogram4 import (
 
 FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 FP8_SCALE_SUFFIX = ".weight_scale"
+# What the checkpoint appends to a weight's own name to name its scale, which is
+# how the scale is found from the weight rather than the other way round
+_SCALE_SUFFIX = "_scale"
 
 
 def _resolve_pretrained_file(model_id: str, filename: str) -> str:
@@ -148,6 +159,104 @@ def _dequantize_fp8_state_dict(
     return result
 
 
+def _dequantize_fp8(weight, scale, dtype: torch.dtype = torch.bfloat16):
+    """One FP8 weight and its per-row scale, as the model's own dtype."""
+    return (weight.to(torch.float32) * scale.to(torch.float32).unsqueeze(-1)).to(dtype)
+
+
+def _dequantize_fp8_chunk(weight, scale, *, index: int, chunks: int = 3):
+    """One projection out of a fused one, dequantized from its slice of the scale."""
+    return _dequantize_fp8(
+        weight.chunk(chunks, dim=0)[index],
+        scale.chunk(chunks, dim=0)[index],
+    )
+
+
+def _stored_tensor_names(path: str) -> list[str]:
+    """The shard's tensor names, from its header, without reading a payload."""
+    from safetensors import safe_open
+
+    with safe_open(path, framework="pt") as handle:
+        return list(handle.keys())
+
+
+def _shard_paths(model_id: str, subfolder: str, basename: str) -> list[str]:
+    from huggingface_hub.errors import EntryNotFoundError
+
+    index_filename = f"{subfolder}/{basename}.safetensors.index.json"
+    try:
+        index_path = _resolve_pretrained_file(model_id, index_filename)
+    except (EntryNotFoundError, FileNotFoundError):
+        return [
+            _resolve_pretrained_file(model_id, f"{subfolder}/{basename}.safetensors")
+        ]
+    with open(index_path) as index_file:
+        weight_map = json.load(index_file)["weight_map"]
+    return [
+        _resolve_pretrained_file(model_id, f"{subfolder}/{shard}")
+        for shard in sorted(set(weight_map.values()))
+    ]
+
+
+def _fp8_transformer_manifest(
+    model_id: str,
+    subfolder: str,
+    basename: str = "diffusion_pytorch_model",
+) -> CheckpointManifest:
+    """Map this checkpoint's stored tensors onto the model's own parameter names.
+
+    The same two conversions the eager path does in memory, expressed per tensor so
+    a block can be filled without the whole state dict: the fused qkv weight is a
+    third of itself for each of to_q, to_k and to_v, every FP8 weight is read with
+    the scale stored beside it, and the attention output projection is named `o`
+    here and `to_out.0` in the model.
+    """
+    from functools import partial
+
+    weight_map: dict[str, str] = {}
+    checkpoint_keys: dict[str, str] = {}
+    derived: dict[str, DerivedTensor] = {}
+    for path in _shard_paths(model_id, subfolder, basename):
+        stored = set(_stored_tensor_names(path))
+        for name in sorted(stored):
+            if name.endswith(_SCALE_SUFFIX):
+                # Read as part of the weight it scales, never on its own
+                continue
+            scale = f"{name}{_SCALE_SUFFIX}"
+            if scale not in stored:
+                weight_map[name] = path
+                continue
+            if name.endswith(".attention.qkv.weight"):
+                base = name.removesuffix(".attention.qkv.weight")
+                for index, projection in enumerate(("to_q", "to_k", "to_v")):
+                    live = f"{base}.attention.{projection}.weight"
+                    weight_map[live] = path
+                    derived[live] = DerivedTensor(
+                        sources=(name, scale),
+                        build=partial(_dequantize_fp8_chunk, index=index),
+                        description=f"{projection} third of a fused qkv weight",
+                    )
+                continue
+            live = name
+            if name.endswith(".attention.o.weight"):
+                live = name.replace(
+                    ".attention.o.weight", ".attention.to_out.0.weight"
+                )
+            weight_map[live] = path
+            derived[live] = DerivedTensor(
+                sources=(name, scale),
+                build=_dequantize_fp8,
+                description="FP8 weight read with its scale",
+            )
+    return CheckpointManifest(
+        weight_map=weight_map,
+        checkpoint_keys=checkpoint_keys,
+        derived=derived,
+        strict=True,
+        label=f"{subfolder} (Ideogram FP8)",
+    )
+
+
 def _check_load_result(
     component_name: str,
     missing_keys: list[str],
@@ -174,6 +283,17 @@ def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
 class xFuserIdeogram4Model(xFuserModel):
     min_diffusers_version = "0.39.0"
 
+    # The transformer config states this too, and runtime_state re-checks it against the loaded
+    # model. Stated here so a Ulysses degree that cannot work is refused before the download.
+    attention_heads = 18
+
+    load_support = LoadSupport(
+        meta_transformers=('transformer', 'unconditional_transformer'),
+        # trust_remote_code hides text-encoder parameter names from manifest discovery.
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -213,9 +333,11 @@ class xFuserIdeogram4Model(xFuserModel):
 
     def _validate_config(self, config) -> None:
         super()._validate_config(config)
-        if 18 % config.ulysses_degree != 0:
+        heads = self.attention_heads
+        if heads % config.ulysses_degree != 0:
             raise ValueError(
-                "Ideogram 4 has 18 attention heads, so --ulysses_degree must divide 18."
+                f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must "
+                f"divide {heads}."
             )
 
     def _validate_args(self, input_args: dict) -> None:
@@ -255,6 +377,23 @@ class xFuserIdeogram4Model(xFuserModel):
         log(f"Loaded {model_id}/{subfolder} through the Ideogram FP8 converter.")
         return transformer
 
+    def _meta_fp8_transformer(self, transformer_class, subfolder: str):
+        """Build this denoiser on meta and fill it per block from the FP8 checkpoint.
+
+        The eager path above reads every tensor, converts the whole state dict and
+        assigns it, so both denoisers exist in full before either is sharded. Here the
+        conversion travels with the checkpoint map instead, as derived tensors, and the
+        fill reads one block at a time.
+        """
+
+        return self.loader.load_transformer(
+            transformer_class,
+            subfolder=subfolder,
+            weight_source=_fp8_transformer_manifest(
+                self.settings.model_name, subfolder
+            ),
+        )
+
     def _load_fp8_text_encoder(self, model_id: str):
         from transformers import AutoConfig, AutoModel
 
@@ -285,15 +424,26 @@ class xFuserIdeogram4Model(xFuserModel):
             get_ideogram4_transformer_wrapper_class,
         )
 
-        model_id = self.config.model
+        # settings.model_name, not config.model: the latter can be a registry alias
+        # such as "Ideogram-4", which is not a repo, and every checkpoint read here
+        # goes to the hub or to a directory
+        model_id = self.settings.model_name
         transformer_class = get_ideogram4_transformer_wrapper_class()
 
         if _is_fp8_checkpoint(model_id):
-            transformer = self._load_fp8_transformer(model_id, "transformer")
-            unconditional_transformer = self._load_fp8_transformer(
-                model_id,
-                "unconditional_transformer",
-            )
+            if self.loader.fsdp_meta_load() or self.loader.replicated_broadcast_load():
+                transformer = self._meta_fp8_transformer(
+                    transformer_class, "transformer"
+                )
+                unconditional_transformer = self._meta_fp8_transformer(
+                    transformer_class, "unconditional_transformer"
+                )
+            else:
+                transformer = self._load_fp8_transformer(model_id, "transformer")
+                unconditional_transformer = self._load_fp8_transformer(
+                    model_id,
+                    "unconditional_transformer",
+                )
             text_encoder = self._load_fp8_text_encoder(model_id)
         else:
             transformer = transformer_class.from_pretrained(

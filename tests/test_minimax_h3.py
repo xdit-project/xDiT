@@ -251,6 +251,32 @@ def test_text_encoder_tp_requires_model_capability():
     assert xFuserMiniMaxH3Model.capabilities.text_encoder_tp_degree
 
 
+@pytest.mark.parametrize(
+    "offload_flag",
+    [
+        "enable_model_cpu_offload",
+        "enable_sequential_cpu_offload",
+        "enable_group_cpu_offload",
+    ],
+)
+def test_minimax_h3_text_encoder_tp_rejects_cpu_offload(offload_flag):
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    config = xFuserArgs(
+        model="MiniMax-H3",
+        task="t2va",
+        ulysses_degree=2,
+        text_encoder_tp_degree=2,
+        **{offload_flag: True},
+    )
+
+    with pytest.raises(ValueError, match="incompatible with CPU offloading"):
+        xFuserMiniMaxH3Model(config)
+
+
 def test_minimax_h3_patches_shared_qwen_encoder_helper(monkeypatch):
     from diffusers.modular_pipelines.minimax_h3 import encoders
 

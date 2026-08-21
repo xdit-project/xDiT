@@ -94,6 +94,14 @@ def _make_xfuser_ideogram4_transformer_wrapper():
             model._install_xfuser_processors()
             return model
 
+        @classmethod
+        def from_config(cls, *args, **kwargs):
+            # The meta path builds from config and never calls from_pretrained, and a
+            # processor swap touches no weights, so it is safe on meta tensors.
+            model = super().from_config(*args, **kwargs)
+            model._install_xfuser_processors()
+            return model
+
         def _set_sequence_layout(
             self,
             num_pad_tokens: int,

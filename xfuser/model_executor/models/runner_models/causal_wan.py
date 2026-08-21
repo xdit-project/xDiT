@@ -1,4 +1,3 @@
-import copy
 import os
 from typing import TYPE_CHECKING
 
@@ -32,7 +31,8 @@ class xFuserCausalWanModel(xFuserModel):
         ring_degree=False,
         fully_shard_degree=True,
         use_fp8_gemms=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
     )

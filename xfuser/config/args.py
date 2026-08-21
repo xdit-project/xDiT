@@ -123,6 +123,10 @@ class xFuserArgs:
     enable_sequential_cpu_offload: bool = False
     enable_tiling: bool = False
     enable_slicing: bool = False
+    vae_tile_size_height: Optional[int] = None
+    vae_tile_size_width: Optional[int] = None
+    vae_tile_overlap_height: Optional[int] = None
+    vae_tile_overlap_width: Optional[int] = None
     # DiTFastAttn arguments
     use_fast_attn: bool = False
     n_calib: int = 8
@@ -412,7 +416,38 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Making VAE decode a tile at a time to save GPU memory.",
+            help="Decode one batch item at a time to reduce GPU memory use. This has no effect "
+                 "when the batch size is 1.",
+        )
+        runtime_group.add_argument(
+            "--vae_tile_size_height",
+            type=int,
+            default=None,
+            help="Exact output-pixel height of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_width.",
+        )
+        runtime_group.add_argument(
+            "--vae_tile_size_width",
+            type=int,
+            default=None,
+            help="Exact output-pixel width of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_height.",
+        )
+        runtime_group.add_argument(
+            "--vae_tile_overlap_height",
+            type=int,
+            default=None,
+            help="Exact VAE tile overlap along the height axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_width. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
+        )
+        runtime_group.add_argument(
+            "--vae_tile_overlap_width",
+            type=int,
+            default=None,
+            help="Exact VAE tile overlap along the width axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_height. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
         )
         runtime_group.add_argument(
             "--use_fp8_t5_encoder",
@@ -634,7 +669,38 @@ class xFuserArgs:
         parser.add_argument(
             "--enable_slicing",
             action="store_true",
-            help="Enable VAE slicing to save GPU memory.",
+            help="Decode one batch item at a time to reduce GPU memory use. This has no effect "
+                 "when the batch size is 1.",
+        )
+        parser.add_argument(
+            "--vae_tile_size_height",
+            type=int,
+            default=None,
+            help="Exact output-pixel height of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_width.",
+        )
+        parser.add_argument(
+            "--vae_tile_size_width",
+            type=int,
+            default=None,
+            help="Exact output-pixel width of each VAE tile. Requires --enable_tiling. "
+                 "Must be used with --vae_tile_size_height.",
+        )
+        parser.add_argument(
+            "--vae_tile_overlap_height",
+            type=int,
+            default=None,
+            help="Exact VAE tile overlap along the height axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_width. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
+        )
+        parser.add_argument(
+            "--vae_tile_overlap_width",
+            type=int,
+            default=None,
+            help="Exact VAE tile overlap along the width axis, in output pixels. Requires "
+                 "--enable_tiling. Must be used with --vae_tile_overlap_height. Height and width "
+                 "may differ; use 0 for an inactive strip axis.",
         )
         parser.add_argument(
             "--use_int8_gemms",

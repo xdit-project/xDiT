@@ -15,13 +15,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
 )
-from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
 
 @register_model("tencent/HunyuanVideo")
@@ -39,6 +37,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -121,6 +120,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -275,6 +276,8 @@ class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
         enable_slicing=True,
         enable_tiling=True,
         supports_sparse_attention_backends=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
     )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:

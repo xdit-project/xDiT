@@ -6,7 +6,7 @@ using pytest conventions. Tests run on CPU with gloo backend for CI compatibilit
 
 Run with:
     pytest tests/test_sharding.py -v
-    pytest tests/test_sharding.py::test_shard_transformer_blocks -v  # Single test
+    pytest tests/test_sharding.py::test_shard_component_basic -v  # Single test
 """
 import pytest
 import torch
@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xfuser.core.distributed.sharding import (
-    shard_transformer_blocks,
+    shard_component,
     shard_dit,
     shard_t5_encoder,
 )
@@ -137,17 +137,17 @@ def t5_encoder_model():
 
 
 # ============================================================================
-# Test shard_transformer_blocks
+# Test shard_component
 # ============================================================================
 
-def test_shard_transformer_blocks_basic(setup_distributed, simple_transformer_model):
+def test_shard_component_basic(setup_distributed, simple_transformer_model):
     """Test basic FSDP wrapping of transformer blocks."""
     model = simple_transformer_model
     
     # Shard the model
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
     )
     
@@ -158,14 +158,14 @@ def test_shard_transformer_blocks_basic(setup_distributed, simple_transformer_mo
     assert hasattr(sharded_model, 'blocks'), "Blocks attribute should exist"
 
 
-def test_shard_transformer_blocks_with_dtype(setup_distributed, simple_transformer_model):
+def test_shard_component_with_dtype(setup_distributed, simple_transformer_model):
     """Test FSDP wrapping with dtype conversion."""
     model = simple_transformer_model
     
     # Shard with bfloat16
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
         dtype=torch.bfloat16,
     )
@@ -178,26 +178,28 @@ def test_shard_transformer_blocks_with_dtype(setup_distributed, simple_transform
             assert param.dtype == torch.bfloat16, f"Param dtype should be bfloat16, got {param.dtype}"
 
 
-def test_shard_transformer_blocks_invalid_attr(setup_distributed, simple_transformer_model):
+def test_shard_component_invalid_attr(setup_distributed, simple_transformer_model):
     """Test error handling for invalid block attribute."""
     model = simple_transformer_model
-    
-    with pytest.raises(ValueError, match="Model does not have attribute"):
-        shard_transformer_blocks(
+
+    # rgetattr resolves each component of the nested attribute name; the failing getattr raises
+    # AttributeError when nonexistent_blocks is absent.
+    with pytest.raises(AttributeError, match="nonexistent_blocks"):
+        shard_component(
             model,
-            block_attr='nonexistent_blocks',
+            wrap_attrs=['nonexistent_blocks'],
             device_id=0,
         )
 
 
-def test_shard_transformer_blocks_with_fsdp_kwargs(setup_distributed, simple_transformer_model):
+def test_shard_component_with_fsdp_kwargs(setup_distributed, simple_transformer_model):
     """Test passing additional FSDP kwargs."""
     model = simple_transformer_model
     
     # Should not raise an error
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
         sync_module_states=True,
         forward_prefetch=True,
@@ -292,9 +294,9 @@ def test_empty_blocks_list(setup_distributed):
     model = EmptyBlockModel()
     
     # Should still work with empty blocks
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
     )
     
@@ -313,9 +315,9 @@ def test_single_block(setup_distributed):
     
     model = SingleBlockModel()
     
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
     )
     
@@ -327,9 +329,9 @@ def test_default_device_id(setup_distributed, simple_transformer_model):
     model = simple_transformer_model
     
     # Should use current device (0 in single-GPU test)
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=None,  # Explicitly pass None
     )
     
@@ -341,9 +343,9 @@ def test_no_dtype_conversion(setup_distributed, simple_transformer_model):
     model = simple_transformer_model
     original_dtype = next(model.parameters()).dtype
     
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
         dtype=None,  # No conversion
     )
@@ -363,9 +365,9 @@ def test_parameter_count_preserved(setup_distributed, simple_transformer_model):
     # Count params before sharding
     original_param_count = sum(p.numel() for p in model.parameters())
     
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
     )
     
@@ -384,9 +386,9 @@ def test_end_to_end_forward_pass(setup_distributed, simple_transformer_model):
     """Test complete forward pass through sharded model."""
     model = simple_transformer_model
     
-    sharded_model = shard_transformer_blocks(
+    sharded_model = shard_component(
         model,
-        block_attr='blocks',
+        wrap_attrs=['blocks'],
         device_id=0,
         dtype=torch.float32,
     )

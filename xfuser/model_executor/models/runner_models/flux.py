@@ -13,30 +13,9 @@ from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
-    quantize_linear_layers_to_fp8,
 )
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
-from xfuser import xFuserFluxPipeline, xFuserArgs
-
-
-def _setup_parallel_vae(vae) -> None:
-    """Parallalizes the VAE decoder using distvae"""
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-
-        patched_decoder = DecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group().device_group
-        ).to(vae.device)
-        vae.decoder = patched_decoder
-        log(f"Parallel VAE decoder enabled successfully.")
-    except ImportError:
-        raise ValueError(
-            "DistVAE library is missing or does not support DecoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE."
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE decoder. {e}")
+from xfuser import xFuserFluxPipeline
 
 
 @register_model("black-forest-labs/FLUX.1-dev")
@@ -79,11 +58,6 @@ class xFuserFluxModel(xFuserModel):
             },
         },
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
         if PACKAGES_CHECKER._on_rdna4():
@@ -149,6 +123,7 @@ class xFuserFluxKontextModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         fully_shard_degree=True,
     )
     default_input_values = DefaultInputValues(
@@ -176,11 +151,6 @@ class xFuserFluxKontextModel(xFuserModel):
             },
         },
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline
@@ -265,6 +235,7 @@ class xFuserFlux2Model(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         use_fbcache=True,
         pipefusion_parallel_degree=True,
     )
@@ -301,8 +272,6 @@ class xFuserFlux2Model(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
 
         if self.config.use_fbcache:
             from xfuser.model_executor.cache.diffusers_adapters.flux2 import (
@@ -414,6 +383,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         fully_shard_degree=True,
         use_fbcache=True,
         pipefusion_parallel_degree=True,
@@ -442,11 +412,6 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             },
         },
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with FBCache cross-step caching,

@@ -59,6 +59,7 @@ class xFuserZImageModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_int8_gemms=True,
+        use_parallel_vae=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -133,9 +134,12 @@ class xFuserZImageTurboModel(xFuserModel):
     min_diffusers_version = "0.36.0"
 
     capabilities = ModelCapabilities(
+        enable_tiling=True,
+        enable_slicing=True,
         use_fp8_gemms=True,
         use_int8_gemms=True,
         fully_shard_degree=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,

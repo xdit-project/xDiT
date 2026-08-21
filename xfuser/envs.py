@@ -213,7 +213,6 @@ class PackagesEnvChecker:
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
-        packages_info["has_distvae"] = self.check_distvae()
         self.packages_info = packages_info
 
     def check_aiter(self):
@@ -380,13 +379,6 @@ class PackagesEnvChecker:
         except ImportError:
             return False
 
-    def check_distvae(self):
-        try:
-            from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-            return True
-        except ImportError:
-            return False
-
     def get_packages_info(self):
         return self.packages_info
 
@@ -403,6 +395,19 @@ class PackagesEnvChecker:
 
 PACKAGES_CHECKER = PackagesEnvChecker()
 _TORCH_GROUPNORM = torch.nn.GroupNorm
+
+
+def restore_torch_group_norm_for_distvae() -> bool:
+    """Restore torch GroupNorm when xDiT's ROCm setup replaced it with AITER's.
+
+    DistVAE discovers norms to shard by their torch type. This must run before a VAE intended
+    for sharding is built, while xDiT is still validating its environment.
+    """
+    if torch.nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
+        return False
+    torch.nn.GroupNorm = _TORCH_GROUPNORM
+    return True
+
 
 def _setup_rocm_libraries():
     if PACKAGES_CHECKER.packages_info.get("has_aiter", False):

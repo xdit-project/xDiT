@@ -62,6 +62,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        use_parallel_vae=True,
     )
 
     _STG_SCALE = 1.0
@@ -116,17 +117,13 @@ class xFuserLTX23VideoModel(xFuserModel):
             vae=pipe.vae, latent_upsampler=latent_upsampler
         )
 
+        log("Enabling VAE tiling for LTX-2.3's full-resolution second-stage decode.")
         second_pipe.vae.enable_tiling()
 
         self.second_pipe = second_pipe
         self.upsample_pipe = upsample_pipe
 
         return pipe
-
-    def _enable_options(self) -> None:
-        super()._enable_options()
-        if self.config.enable_slicing:
-            self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES
@@ -234,8 +231,6 @@ class xFuserLTX23VideoModel(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.upsample_pipe.to(self.pipe.device)
         self.second_pipe.to(self.pipe.device)
-
-
 @register_model("Lightricks/LTX-2")
 @register_model("LTX-2")
 class xFuserLTX2VideoModel(xFuserModel):
@@ -263,6 +258,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
+        use_parallel_vae=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -311,13 +307,6 @@ class xFuserLTX2VideoModel(xFuserModel):
         self.upsample_pipe = upsample_pipe
 
         return pipe
-
-    def _enable_options(self) -> None:
-        super()._enable_options()
-        if self.config.enable_tiling:
-            self.second_pipe.vae.enable_tiling()
-        if self.config.enable_slicing:
-            self.second_pipe.vae.enable_slicing()
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         from diffusers.pipelines.ltx2.utils import STAGE_2_DISTILLED_SIGMA_VALUES

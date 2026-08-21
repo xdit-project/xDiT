@@ -79,7 +79,7 @@ class _Krea2BaseModel(xFuserModel):
         pipefusion_parallel_degree=False,
         data_parallel_degree=True,
         use_cfg_parallel=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,

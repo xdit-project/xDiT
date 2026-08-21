@@ -847,7 +847,7 @@ def test_build_transformer_routes_torchao_fp8_to_native_diffusers_config(
         transformer_load, "build_transformer_structure", structure_factory
     )
     monkeypatch.setattr(
-        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+        transformer_load, "native_quantization_device_map", lambda *args: {"": 0}
     )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
@@ -1130,7 +1130,7 @@ def test_build_transformer_preserves_aiter_native_streaming(monkeypatch):
     sentinel = object()
     monkeypatch.setattr(adapter, "_stream_config_factory", lambda targets: sentinel)
     monkeypatch.setattr(
-        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+        transformer_load, "native_quantization_device_map", lambda *args: {"": 0}
     )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
@@ -1195,7 +1195,7 @@ def test_build_transformer_streams_native_fp4_and_int8_configs(
         ),
     )
     monkeypatch.setattr(
-        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+        transformer_load, "native_quantization_device_map", lambda *args: {"": 0}
     )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,
@@ -1255,7 +1255,7 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
         transformer_load, "build_transformer_structure", lambda *args, **kwargs: structure
     )
     monkeypatch.setattr(
-        transformer_load, "native_quantization_device_map", lambda: {"": 0}
+        transformer_load, "native_quantization_device_map", lambda *args: {"": 0}
     )
     runner = SimpleNamespace(
         _memory_efficient_fsdp_load=lambda: False,

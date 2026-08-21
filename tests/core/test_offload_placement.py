@@ -13,6 +13,7 @@ import torch
 
 from xfuser.model_executor.models.runner_models import base_model
 from xfuser.model_executor.models.runner_models.base_model import xFuserModel
+from xfuser.model_executor.models.runner_models.loading import transformer_load
 
 
 @pytest.fixture(autouse=True)
@@ -91,3 +92,68 @@ def test_group_offload_onloads_to_this_ranks_device(monkeypatch, local_rank):
     xFuserModel._enable_options(model)
 
     assert str(offloaded["onload_device"]) == f"cuda:{local_rank}"
+
+
+@pytest.mark.parametrize(
+    "offload_flag",
+    [
+        "enable_model_cpu_offload",
+        "enable_sequential_cpu_offload",
+        "enable_group_cpu_offload",
+    ],
+)
+def test_native_fp8_load_targets_cpu_when_offload_is_requested(
+    monkeypatch, offload_flag
+):
+    monkeypatch.setattr(
+        transformer_load,
+        "get_world_group",
+        lambda: SimpleNamespace(local_rank=3),
+    )
+    model = SimpleNamespace(config=SimpleNamespace(**{offload_flag: True}))
+    adapter = SimpleNamespace(
+        format=SimpleNamespace(value="fp8"),
+        backend=SimpleNamespace(value="aiter"),
+    )
+
+    assert transformer_load.native_quantization_device_map(model, adapter) == {
+        "": "cpu"
+    }
+
+
+@pytest.mark.parametrize(
+    ("format_name", "backend_name"),
+    [("fp4", "aiter"), ("int8", "torchao"), ("fp8", "torchao")],
+)
+def test_other_native_loads_stay_on_accelerator_during_cpu_offload(
+    monkeypatch, format_name, backend_name
+):
+    monkeypatch.setattr(
+        transformer_load,
+        "get_world_group",
+        lambda: SimpleNamespace(local_rank=3),
+    )
+    model = SimpleNamespace(
+        config=SimpleNamespace(enable_model_cpu_offload=True)
+    )
+    adapter = SimpleNamespace(
+        format=SimpleNamespace(value=format_name),
+        backend=SimpleNamespace(value=backend_name),
+    )
+
+    assert transformer_load.native_quantization_device_map(model, adapter) == {"": 3}
+
+
+def test_native_fp8_load_stays_on_accelerator_without_cpu_offload(monkeypatch):
+    monkeypatch.setattr(
+        transformer_load,
+        "get_world_group",
+        lambda: SimpleNamespace(local_rank=3),
+    )
+    model = SimpleNamespace(config=SimpleNamespace())
+    adapter = SimpleNamespace(
+        format=SimpleNamespace(value="fp8"),
+        backend=SimpleNamespace(value="aiter"),
+    )
+
+    assert transformer_load.native_quantization_device_map(model, adapter) == {"": 3}

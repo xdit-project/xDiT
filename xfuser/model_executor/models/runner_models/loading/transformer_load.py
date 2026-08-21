@@ -44,9 +44,30 @@ def build_transformer_structure(wrapper_cls, request: CheckpointRequest, init_kw
         return wrapper_cls.from_config(config, **(init_kwargs or {}))
 
 
-def native_quantization_device_map():
-    """Place TorchAO quantize-on-load weights on this rank's accelerator."""
+def native_quantization_device_map(model, adapter):
+    """Choose where a native quantizer leaves each weight after conversion.
 
+    AITER FP8 still performs the conversion on the local accelerator, but its quantizer uses the
+    device map as the final placement and immediately evicts each converted leaf when that target
+    is CPU.  This keeps only one transient bf16/FP8 layer on the accelerator while a pipeline that
+    will receive CPU-offload hooks is loading.  Other native quantizers retain their accelerator
+    placement requirements.
+    """
+
+    cpu_offload = any(
+        getattr(model.config, flag, False)
+        for flag in (
+            "enable_model_cpu_offload",
+            "enable_sequential_cpu_offload",
+            "enable_group_cpu_offload",
+        )
+    )
+    if (
+        adapter.format.value == "fp8"
+        and adapter.backend.value == "aiter"
+        and cpu_offload
+    ):
+        return {"": "cpu"}
     return {"": get_world_group().local_rank}
 
 
@@ -226,7 +247,9 @@ def load_transformer(
 
     load_kwargs = request.from_pretrained_kwargs()
     if quantization_config is not None:
-        load_kwargs.setdefault("device_map", native_quantization_device_map())
+        load_kwargs.setdefault(
+            "device_map", native_quantization_device_map(model, adapter)
+        )
     return wrapper_cls.from_pretrained(
         request.model_name_or_path,
         torch_dtype=torch.bfloat16,

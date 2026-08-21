@@ -77,8 +77,10 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
             self.config = SimpleNamespace(
                 use_parallel_vae=True,
                 use_torch_compile=False,
+                cache_method=None,
                 create_config=lambda: (object(), None),
             )
+            self.loader = mock.Mock()
             self._vae_manager = mock.Mock()
             self._vae_manager.decoding_vaes.side_effect = (
                 lambda pipes: [pipe.vae for pipe in pipes]
@@ -103,6 +105,9 @@ def test_initialize_sets_up_every_parallel_vae_before_enabling_options(monkeypat
     )
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(base_model, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        base_model, "get_world_group", lambda: SimpleNamespace(world_size=1)
+    )
     monkeypatch.setattr(base_model, "initialize_runtime_state", lambda *args: None)
 
     runner.initialize({})

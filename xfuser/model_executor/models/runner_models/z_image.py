@@ -13,6 +13,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelSettings,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 
 def _normalize_prompt(prompt_input):
@@ -48,7 +52,6 @@ def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
 @register_model("Tongyi-MAI/Z-Image")
 @register_model("Z-Image")
 class xFuserZImageModel(xFuserModel):
-
     min_diffusers_version = "0.36.0"
 
     default_input_values = DefaultInputValues(
@@ -57,14 +60,22 @@ class xFuserZImageModel(xFuserModel):
         num_inference_steps=50,
         guidance_scale=4.0,
     )
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         use_cfg_parallel=True,
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_int8_gemms=True,
         supports_step_caching=True,
+        use_parallel_vae=True,
     )
     settings = ModelSettings(
         model_name="Tongyi-MAI/Z-Image",
@@ -75,13 +86,14 @@ class xFuserZImageModel(xFuserModel):
                 "wrap_attrs": ["noise_refiner", "context_refiner", "layers"],
             },
             "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
+                "wrap_attrs": ["layers"],
             },
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        fp8_text_encoder_module_list=["text_encoder.layers"],
         int8_gemm_module_list=[
-            "transformer.layers", 
-            "transformer.noise_refiner", 
+            "transformer.layers",
+            "transformer.noise_refiner",
             "transformer.context_refiner"
         ],
         step_cache_config={
@@ -114,16 +126,16 @@ class xFuserZImageModel(xFuserModel):
         from xfuser.model_executor.models.transformers.transformer_z_image import (
             xFuserZImageTransformer2DWrapper,
         )
-        transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+
+        transformer = self.loader.load_transformer(xFuserZImageTransformer2DWrapper)
         _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -135,7 +147,7 @@ class xFuserZImageModel(xFuserModel):
             prompt=prompt,
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(images=output.images, pipe_args=input_args)
 
@@ -143,13 +155,22 @@ class xFuserZImageModel(xFuserModel):
 @register_model("Tongyi-MAI/Z-Image-Turbo")
 @register_model("Z-Image-Turbo")
 class xFuserZImageTurboModel(xFuserModel):
-
     min_diffusers_version = "0.36.0"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
+        enable_tiling=True,
+        enable_slicing=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_int8_gemms=True,
         fully_shard_degree=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -166,10 +187,11 @@ class xFuserZImageTurboModel(xFuserModel):
                 "wrap_attrs": ["noise_refiner", "context_refiner", "layers"],
             },
             "text_encoder": {
-                "wrap_attrs": ["model.language_model.layers"],
+                "wrap_attrs": ["layers"],
             },
         },
         fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        fp8_text_encoder_module_list=["text_encoder.layers"],
         int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
     )
 
@@ -193,16 +215,16 @@ class xFuserZImageTurboModel(xFuserModel):
         from xfuser.model_executor.models.transformers.transformer_z_image import (
             xFuserZImageTransformer2DWrapper,
         )
-        transformer = xFuserZImageTransformer2DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+
+        transformer = self.loader.load_transformer(xFuserZImageTransformer2DWrapper)
         _set_effective_heads_for_ulysses(transformer, self.config.ulysses_degree)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = ZImagePipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -214,6 +236,6 @@ class xFuserZImageTurboModel(xFuserModel):
             prompt=prompt,
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(images=output.images, pipe_args=input_args)

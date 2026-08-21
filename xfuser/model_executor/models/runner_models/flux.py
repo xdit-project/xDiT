@@ -18,43 +18,32 @@ from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
-    quantize_linear_layers_to_fp8,
 )
 from xfuser.core.distributed import get_runtime_state, get_pipeline_parallel_world_size
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
-from xfuser import xFuserFluxPipeline, xFuserArgs
-
-
-def _setup_parallel_vae(vae) -> None:
-    """Parallalizes the VAE decoder using distvae"""
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-
-        patched_decoder = DecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group().device_group
-        ).to(vae.device)
-        vae.decoder = patched_decoder
-        log(f"Parallel VAE decoder enabled successfully.")
-    except ImportError:
-        raise ValueError(
-            "DistVAE library is missing or does not support DecoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE."
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE decoder. {e}")
+from xfuser import xFuserFluxPipeline
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 
 @register_model("black-forest-labs/FLUX.1-dev")
 @register_model("FLUX.1-dev")
 class xFuserFluxModel(xFuserModel):
-
     min_diffusers_version = "0.35.2"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder_2',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         pipefusion_parallel_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_parallel_vae=True,
         enable_tiling=True,
         enable_slicing=True,
@@ -76,6 +65,9 @@ class xFuserFluxModel(xFuserModel):
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
         ],
+        fp8_text_encoder_module_list=[
+            "text_encoder_2.encoder.block",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -95,11 +87,6 @@ class xFuserFluxModel(xFuserModel):
         },
     )
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
-
     def _get_compile_mode(self) -> str:
         if PACKAGES_CHECKER._on_rdna4() or self.config.cache_method:
             return "default"
@@ -117,15 +104,15 @@ class xFuserFluxModel(xFuserModel):
             from xfuser.model_executor.models.transformers.transformer_flux import (
                 xFuserFlux1Transformer2DWrapper,
             )
-            transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer",
-            )
+
+            transformer = self.loader.load_transformer(xFuserFlux1Transformer2DWrapper)
+            te_kwargs, te_quant = self.loader.plan_text_encoders()
             pipe = FluxPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
             )
 
         return pipe
@@ -145,7 +132,7 @@ class xFuserFluxModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # For legacy pipelines
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -154,16 +141,23 @@ class xFuserFluxModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.1-Kontext-dev")
 @register_model("FLUX.1-Kontext-dev")
 class xFuserFluxKontextModel(xFuserModel):
-
     min_diffusers_version = "0.35.2"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder_2',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         fully_shard_degree=True,
         supports_step_caching=True,
     )
@@ -183,6 +177,9 @@ class xFuserFluxKontextModel(xFuserModel):
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
         ],
+        fp8_text_encoder_module_list=[
+            "text_encoder_2.encoder.block",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -200,25 +197,20 @@ class xFuserFluxKontextModel(xFuserModel):
         )},
     )
 
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
-
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import FluxKontextPipeline
         from xfuser.model_executor.models.transformers.transformer_flux import (
             xFuserFlux1Transformer2DWrapper,
         )
-        transformer = xFuserFlux1Transformer2DWrapper.from_pretrained(
-            pretrained_model_name_or_path=self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+
+        transformer = self.loader.load_transformer(xFuserFlux1Transformer2DWrapper)
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = FluxKontextPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             torch_dtype=torch.bfloat16,
             transformer=transformer,
+            quantization_config=te_quant,
+            **te_kwargs,
         )
         return pipe
 
@@ -239,7 +231,7 @@ class xFuserFluxKontextModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # non-last pp ranks return None
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -273,21 +265,28 @@ class xFuserFluxKontextModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-dev")
 @register_model("FLUX.2-dev")
 class xFuserFlux2Model(xFuserModel):
-
     # Flux2Pipeline and the transformer symbols the wrapper needs all landed in 0.36.
     # PipeFusion additionally needs 0.37, because xfuser's FLUX.2 pipeline module also
     # binds Flux2KleinPipeline.
     min_diffusers_version = "0.36.0"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         use_fp4_gemms=True,
         fully_shard_degree=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         pipefusion_parallel_degree=True,
         supports_step_caching=True,
     )
@@ -306,6 +305,9 @@ class xFuserFlux2Model(xFuserModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
+            "text_encoder.model.language_model.layers",
         ],
         fp4_gemm_module_list=[
             "transformer.transformer_blocks",
@@ -333,8 +335,6 @@ class xFuserFlux2Model(xFuserModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
@@ -362,15 +362,15 @@ class xFuserFlux2Model(xFuserModel):
                 xFuserFlux2Transformer2DWrapper,
             )
             from diffusers import Flux2Pipeline
-            transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer",
-            )
+
+            transformer = self.loader.load_transformer(xFuserFlux2Transformer2DWrapper)
+            te_kwargs, te_quant = self.loader.plan_text_encoders()
             pipe = Flux2Pipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
             )
         return pipe
 
@@ -402,7 +402,7 @@ class xFuserFlux2Model(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
             max_sequence_length=input_args["max_sequence_length"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # non-last pp ranks return None
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -411,17 +411,24 @@ class xFuserFlux2Model(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-klein-9B")
 @register_model("FLUX.2-klein-9B")
 class xFuserFlux2Klein9BModel(xFuserModel):
-
     # Flux2KleinPipeline landed in 0.37, one release after Flux2Pipeline.
     min_diffusers_version = "0.37.0"
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         use_fp8_gemms=True,
+        use_fp8_text_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         fully_shard_degree=True,
         pipefusion_parallel_degree=True,
         supports_step_caching=True,
@@ -441,6 +448,9 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
         ],
+        fp8_text_encoder_module_list=[
+            "text_encoder.model.layers",
+        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -451,11 +461,6 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         },
         step_cache_config={"fbcache": None},
     )
-
-    def _post_load_and_state_initialization(self, input_args: dict) -> None:
-        super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
 
     def _get_compile_mode(self) -> str:
         # CUDA graphs incompatible with cross-step caching, and
@@ -483,15 +488,15 @@ class xFuserFlux2Klein9BModel(xFuserModel):
                 xFuserFlux2Transformer2DWrapper,
             )
             from diffusers import Flux2KleinPipeline
-            transformer = xFuserFlux2Transformer2DWrapper.from_pretrained(
-                pretrained_model_name_or_path=self.settings.model_name,
-                torch_dtype=torch.bfloat16,
-                subfolder="transformer",
-            )
+
+            transformer = self.loader.load_transformer(xFuserFlux2Transformer2DWrapper)
+            te_kwargs, te_quant = self.loader.plan_text_encoders()
             pipe = Flux2KleinPipeline.from_pretrained(
                 pretrained_model_name_or_path=self.settings.model_name,
                 torch_dtype=torch.bfloat16,
                 transformer=transformer,
+                quantization_config=te_quant,
+                **te_kwargs,
             )
         return pipe
 
@@ -503,7 +508,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
             image=input_args["images"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         images = output.images if output else []  # non-last pp ranks return None
         return DiffusionOutput(images=images, pipe_args=input_args)
@@ -531,6 +536,12 @@ class xFuserFlux2Klein9BModel(xFuserModel):
 @register_model("black-forest-labs/FLUX.2-klein-4B")
 @register_model("FLUX.2-klein-4B")
 class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     settings = ModelSettings(
         model_name="black-forest-labs/FLUX.2-klein-4B",
@@ -539,6 +550,9 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",
+        ],
+        fp8_text_encoder_module_list=[
+            "text_encoder.model.layers",
         ],
         fsdp_strategy={
             "transformer": {

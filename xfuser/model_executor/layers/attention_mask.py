@@ -16,7 +16,7 @@ class AttentionMaskWithMeta:
     produces indices_k is made once per forward pass rather than once per layer.
     """
 
-    attn_mask: torch.Tensor  # [B, 1, 1, S]  1 = valid key, 0 = padding
+    attn_mask: torch.Tensor  # [B, 1, 1, S]  bool: True = attend, False = pad
     indices_k: torch.Tensor  # [total_valid_k]  int64 flat valid positions
     cu_seqlens_k: torch.Tensor  # [B+1]  int32 cumulative valid-key counts
     max_seqlen_k: int
@@ -34,7 +34,7 @@ def make_attn_mask_with_meta(mask_2d: torch.Tensor) -> AttentionMaskWithMeta:
     indices_k = mask_2d.flatten().nonzero(as_tuple=False).flatten()
     max_seqlen_k = int(seqlens_k.max())
     return AttentionMaskWithMeta(
-        attn_mask=mask_2d[:, None, None, :],
+        attn_mask=mask_2d.to(torch.bool)[:, None, None, :],
         indices_k=indices_k,
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_k=max_seqlen_k,

@@ -18,6 +18,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 
@@ -69,17 +73,23 @@ def _patch_text_encoder_linear_for_rocm(text_encoder: "torch.nn.Module") -> None
 
 class _Krea2BaseModel(xFuserModel):
     """Shared base for the Krea-2-Raw and Krea-2-Turbo runner models."""
-
     # No released diffusers ships Krea2Transformer2DModel yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        # Qwen3VL's ROCm float32-Linear workaround has no compatible shared-load contract.
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
         pipefusion_parallel_degree=False,
         data_parallel_degree=True,
         use_cfg_parallel=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
         use_hybrid_attn_schedule=True,
@@ -118,11 +128,7 @@ class _Krea2BaseModel(xFuserModel):
         )
 
         log(f"Loading {self.settings.model_name}")
-        transformer = xFuserKrea2Transformer2DWrapper.from_pretrained(
-            self.settings.model_name,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-        )
+        transformer = self.loader.load_transformer(xFuserKrea2Transformer2DWrapper)
 
         # On ROCm 7.13, Qwen3VL bfloat16 GEMM shapes (with max_sequence_length > 448)
         # may produce non-deterministic NaN via a split-K uninitialized-output issue.
@@ -185,6 +191,12 @@ class _Krea2BaseModel(xFuserModel):
 @register_model("Krea-2-Raw")
 class xFuserKrea2RawModel(_Krea2BaseModel):
     """Krea-2-Raw: base checkpoint. 52 steps, guidance_scale=3.5."""
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     default_input_values = DefaultInputValues(
         height=2048,
@@ -207,7 +219,10 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
                 "dtype": torch.bfloat16,
             },
             "text_encoder": {
-                "wrap_attrs": ["model.layers"],
+                # Qwen3VLModel holds its decoder layers under language_model, beside the vision
+                # tower. "model.layers", where a text-only encoder keeps them, resolves to nothing
+                # here and takes every sharded case down with an AttributeError.
+                "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },
         },
@@ -219,6 +234,12 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
 @register_model("Krea-2-Turbo")
 class xFuserKrea2TurboModel(_Krea2BaseModel):
     """Krea-2-Turbo: 8-step CFG-free distilled checkpoint."""
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     _TURBO_STEPS = 8
     _TURBO_GUIDANCE = 0.0
@@ -244,7 +265,7 @@ class xFuserKrea2TurboModel(_Krea2BaseModel):
                 "dtype": torch.bfloat16,
             },
             "text_encoder": {
-                "wrap_attrs": ["model.layers"],
+                "wrap_attrs": ["language_model.layers"],
                 "offload_policy": "cpu",
             },
         },

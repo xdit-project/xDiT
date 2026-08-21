@@ -15,28 +15,36 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.utils.runner_utils import (
     resize_and_crop_image,
     fix_llama_tokenizer_pretokenizer,
 )
-from xfuser.envs import PACKAGES_CHECKER
 from xfuser.compile import install_inductor_passes
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
     DBCacheSettings,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+    STANDARD_LOAD_ROUTES,
+)
 
 @register_model("tencent/HunyuanVideo")
 @register_model("HunyuanVideo")
 class xFuserHunyuanvideoModel(xFuserModel):
-
     # HunyuanVideoPipeline and HunyuanVideoTransformer3DModel both exist at the 0.33
     # install floor, so there is nothing extra to ask for here.
     min_diffusers_version = None
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=('text_encoder',),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -45,6 +53,9 @@ class xFuserHunyuanvideoModel(xFuserModel):
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
         supports_step_caching=True,
+        use_fp8_text_encoder=True,
+        fully_shard_degree=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -70,26 +81,58 @@ class xFuserHunyuanvideoModel(xFuserModel):
                 preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
             ),
         },
+        fp8_text_encoder_module_list=["text_encoder.layers"],
+        fsdp_strategy={
+            "transformer": {
+                "wrap_attrs": [
+                    "transformer_blocks", "single_transformer_blocks"
+                ],
+                "dtype": torch.bfloat16,
+            },
+            # The declared 14G Llama encoder would otherwise be this model's host peak: every rank
+            # would load it whole while the transformer fills one block at a time. LlamaModel keeps
+            # its decoder layers at the top level, not under "model" as text-only encoders do.
+            # text_encoder_2, a 0.2G CLIP, is deliberately absent: wrapping it would add a
+            # collective per prompt to save a fraction of a gigabyte.
+            "text_encoder": {
+                "wrap_attrs": ["layers"],
+                # Shards stay on CPU between uses so the encoder's all_gather buffer does not
+                # compete with the sharded transformer during encode_prompt.
+                "offload_policy": "cpu",
+            },
+        },
     )
+
+    # The diffusers-format conversion of this repo lives on a PR branch rather than main.
+    _DIFFUSERS_FORMAT_REVISION = "refs/pr/18"
+    checkpoint_request_defaults = {
+        "revision": _DIFFUSERS_FORMAT_REVISION,
+    }
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import HunyuanVideoPipeline
         from xfuser.model_executor.models.transformers.transformer_hunyuan_video import (
             xFuserHunyuanVideoTransformer3DWrapper,
         )
-        transformer = xFuserHunyuanVideoTransformer3DWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-            revision="refs/pr/18",
+
+        request = self.loader.checkpoint_request()
+        transformer_request = request.with_subfolder("transformer")
+        transformer = self.loader.load_transformer(
+            xFuserHunyuanVideoTransformer3DWrapper,
+            checkpoint_request=transformer_request,
         )
+        te_kwargs, te_quant = self.loader.plan_text_encoders()
         pipe = HunyuanVideoPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
-            revision="refs/pr/18",
+            quantization_config=te_quant,
+            **te_kwargs,
+            **request.from_pretrained_kwargs(include_subfolder=False),
         )
-        fix_llama_tokenizer_pretokenizer(pipe, self.settings.model_name, revision="refs/pr/18")
+        fix_llama_tokenizer_pretokenizer(
+            pipe, self.settings.model_name, revision=request.revision
+        )
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -100,7 +143,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
             num_frames=input_args["num_frames"],
             num_inference_steps=input_args["num_inference_steps"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
         )
         return DiffusionOutput(videos=output.frames, pipe_args=input_args)
 
@@ -128,9 +171,15 @@ class xFuserHunyuanvideoModel(xFuserModel):
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v")
 @register_model("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v")
 class xFuserHunyuanvideo15Model(xFuserModel):
-
     min_diffusers_version = "0.36.0"
 
+    # The 1.5 wrapper's config-only construction and checkpoint layout are unverified.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -138,6 +187,8 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_tiling=True,
         use_fp8_gemms=True,
         supports_step_caching=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -195,7 +246,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         kwargs = {
             "num_inference_steps": input_args["num_inference_steps"],
             "num_frames": input_args["num_frames"],
-            "generator": torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            "generator": self._make_generator(input_args["seed"]),
             "prompt": input_args["prompt"],
         }
         if self.config.task == "i2v":
@@ -246,7 +297,14 @@ class xFuserHunyuanvideo15Model(xFuserModel):
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled")
 @register_model("Hunyuanvideo-1.5-Distilled")
 class xFuserHunyuanvideo15DistilledModel(xFuserHunyuanvideo15Model):
-    
+    # The distilled 1.5 wrapper is unverified for config-only collective loading.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled"
@@ -294,13 +352,21 @@ HUNYUANVIDEO_15_SPARSE_SINGLE_BLOCK_KEY_MAP = {
 @register_model("Hunyuanvideo-1.5-Sparse")
 @register_model("tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse")
 class xFuserHunyuanvideo15SparseModel(xFuserHunyuanvideo15Model):
-
+    # Sparse weights are composed and remapped outside loader.load_transformer.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
         enable_slicing=True,
         enable_tiling=True,
         supports_sparse_attention_backends=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
     )
 
     def _validate_ssta_attention_kwargs(self, attn_param: dict) -> None:

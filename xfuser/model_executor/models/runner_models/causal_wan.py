@@ -1,4 +1,3 @@
-import copy
 import os
 from typing import TYPE_CHECKING
 
@@ -20,6 +19,10 @@ from xfuser.model_executor.cache import (
     CacheDitAdapterConfig,
     DBCacheSettings,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+)
 
 if TYPE_CHECKING:
     from xfuser.model_executor.models.transformers.transformer_causal_wan import (
@@ -29,15 +32,22 @@ if TYPE_CHECKING:
 
 @register_model("CausalWan")
 class xFuserCausalWanModel(xFuserModel):
-
     min_diffusers_version = "0.35.2"
 
+    # Its manual single-file fallback has no collective-safe key discovery.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=False,   # SP incompatible with KV cache initially
         ring_degree=False,
         fully_shard_degree=True,
         use_fp8_gemms=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
         supports_step_caching=True,
@@ -159,7 +169,7 @@ class xFuserCausalWanModel(xFuserModel):
             num_inference_steps=input_args["num_inference_steps"],
             num_frames=input_args["num_frames"],
             guidance_scale=input_args["guidance_scale"],
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             num_frames_per_block=self._NUM_FRAMES_PER_BLOCK, # Processes X frames at a time
             sliding_window_num_frames=self._SLIDING_WINDOW_NUM_FRAMES, # Sliding window size
             context_noise=self._CONTEXT_NOISE, # Noise to add to the context as a regularization

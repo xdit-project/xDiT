@@ -85,29 +85,38 @@ Individual model classes that inherit from `xFuserModel`:
 
 | Model | Valid Model Name(s) |
 |-------|-----------------|
+| CausalWan | `CausalWan` |
+| Cosmos3-Nano | `Cosmos3-Nano`, `nvidia/Cosmos3-Nano` |
+| Cosmos3-Super | `Cosmos3-Super`, `nvidia/Cosmos3-Super` |
 | FLUX.1-dev | `FLUX.1-dev`, `black-forest-labs/FLUX.1-dev` |
 | FLUX.1-Kontext | `FLUX.1-Kontext-dev`, `black-forest-labs/FLUX.1-Kontext-dev` |
 | FLUX.2 | `FLUX.2-dev`, `black-forest-labs/FLUX.2-dev` |
 | FLUX.2-klein | `FLUX.2-klein-9B`, `black-forest-labs/FLUX.2-klein-9B`, `FLUX.2-klein-4B`, `black-forest-labs/FLUX.2-klein-4B` |
 | HunyuanVideo | `HunyuanVideo`, `tencent/HunyuanVideo` |
-| HunyuanVideo-1.5 | `HunyuanVideo-1.5`, `tencent/HunyuanVideo-1.5` |
-| Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
-| Wan 2.2 Distilled I2V (LightX2V 4-step) | `Wan2.2-Distilled-I2V` |
-| Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
-| Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B`, `Wan-AI/Wan2.1-VACE-1.3B` |
-| Stable Diffusion 3 | `SD3.5`, `stabilityai/stable-diffusion-3.5-large` |
-| Z-Image-Turbo | `Z-Image-Turbo`, `Tongyi-MAI/Z-Image-Turbo` |
-| LTX-2 | `LTX-2`, `Lightricks/LTX-2` |
-| LTX-2.3 | `LTX-2.3`, `dg845/LTX-2.3-Diffusers` |
-| Cosmos3-Super | `Cosmos3-Super`, `nvidia/Cosmos3-Super` |
-| Cosmos3-Nano | `Cosmos3-Nano`, `nvidia/Cosmos3-Nano` |
-| CausalWan | `CausalWan` |
-| Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
-| Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
+| HunyuanVideo-1.5 | `Hunyuanvideo-1.5`, `tencent/HunyuanVideo-1.5`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v` |
+| HunyuanVideo-1.5 Distilled | `Hunyuanvideo-1.5-Distilled`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled`, `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled` |
+| HunyuanVideo-1.5 Sparse | `Hunyuanvideo-1.5-Sparse`, `tencent/HunyuanVideo-1.5-Sparse`, `tencent/HunyuanVideo-1.5-Diffusers-720p_i2v_distilled_sparse` |
+| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-nf4`, `ideogram-ai/ideogram-4-fp8` |
+| Ideogram 4 Diffusers | `ideogram-ai/ideogram-4-nf4-diffusers`, `CalamitousFelicitousness/Ideogram-4-bf16-Diffusers` |
 | Krea2-Raw | `krea/krea-2-raw`, `krea/Krea-2-Raw`, `Krea-2-Raw` |
 | Krea2-Turbo | `krea/krea-2-turbo`, `krea/Krea-2-Turbo`, `Krea-2-Turbo` |
-| Ideogram 4 | `Ideogram-4`, `ideogram-ai/ideogram-v4`, `ideogram-ai/ideogram-4-nf4`, `ideogram-ai/ideogram-4-fp8` |
+| LingBot-Video-Dense | `LingBot-Video-Dense`, `robbyant/lingbot-video-dense-1.3b` |
+| LingBot-Video-MoE | `LingBot-Video-MoE`, `robbyant/lingbot-video-moe-30b-a3b` |
+| LTX-2 | `LTX-2`, `Lightricks/LTX-2` |
+| LTX-2.3 | `LTX-2.3`, `dg845/LTX-2.3-Diffusers` |
+| LTX-2.5 Distilled | `LTX-2.5`, `LTX-2.5-distilled`, `Lightricks/LTX-2.5-Diffusers` |
+| LTX-2.5 Full | `LTX-2.5-full` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
+| Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
+| Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
+| Stable Diffusion 3.5 | `SD3.5`, `stable-diffusion-3.5-large`, `stabilityai/stable-diffusion-3.5-large` |
+| Wan 2.1 VACE | `Wan2.1-VACE-14B`, `Wan2.1-VACE-1.3B`, `Wan-AI/Wan2.1-VACE-14B-diffusers`, `Wan-AI/Wan2.1-VACE-1.3B-diffusers` |
+| Wan 2.1/2.2 I2V | `Wan2.1-I2V`, `Wan2.2-I2V`, `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
+| Wan 2.1/2.2 T2V | `Wan2.1-T2V`, `Wan2.2-T2V`, `Wan-AI/Wan2.1-T2V-14B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
+| Wan 2.2 Distilled I2V (LightX2V 4-step) | `Wan2.2-Distilled-I2V` |
+| Wan 2.2 TI2V | `Wan2.2-TI2V`, `Wan-AI/Wan2.2-TI2V-5B-Diffusers` |
+| Z-Image | `Z-Image`, `Tongyi-MAI/Z-Image` |
+| Z-Image-Turbo | `Z-Image-Turbo`, `Tongyi-MAI/Z-Image-Turbo` |
 
 ## CLI Arguments
 

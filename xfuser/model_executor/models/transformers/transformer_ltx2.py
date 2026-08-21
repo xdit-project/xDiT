@@ -1,34 +1,37 @@
+from typing import Any
+
 import torch
-from typing import Any, Dict, List, Optional, Tuple
 from diffusers.models.transformers.transformer_ltx2 import (
+    AudioVisualModelOutput,
     LTX2VideoTransformer3DModel,
     apply_interleaved_rotary_emb,
     apply_split_rotary_emb,
-    AudioVisualModelOutput,
 )
-
-from diffusers.utils import (
-    USE_PEFT_BACKEND,
-    scale_lora_layers,
-    unscale_lora_layers,
-)
-
-
-
-from xfuser.model_executor.layers.usp import (
-    USP,
-    attention,
-)
+from diffusers.utils import USE_PEFT_BACKEND, scale_lora_layers, unscale_lora_layers
 
 from xfuser.core.distributed import (
-    get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
     get_sp_group,
 )
+from xfuser.model_executor.layers.attention_mask import (
+    AttentionMaskWithMeta,
+    make_attn_mask_with_meta,
+)
+from xfuser.model_executor.layers.usp import USP, attention
+
+
+def _get_mask_meta(cache: dict, mask: torch.Tensor | None) -> object | None:
+    """Convert a 2-D key-padding mask (1=valid, 0=pad) to AttentionMaskWithMeta, cached per tensor."""
+    if mask is None or mask.ndim != 2:
+        return mask
+    key = (mask.data_ptr(), tuple(mask.shape))
+    if key not in cache:
+        cache[key] = make_attn_mask_with_meta(mask)
+    return cache[key]
 
 
 class xFuserLTX2PerturbedAttnProcessor:
-
     def __init__(self, use_parallel_attention: bool = True, gather_kv=False):
         if use_parallel_attention:
             self.attention_method = USP
@@ -38,26 +41,46 @@ class xFuserLTX2PerturbedAttnProcessor:
 
     def __call__(
         self,
-        attn: "LTX2Attention",
+        attn: Any,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        query_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        key_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        perturbation_mask: Optional[torch.Tensor] = None,
-        all_perturbed: Optional[bool] = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        query_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        key_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        perturbation_mask: torch.Tensor | None = None,
+        all_perturbed: bool | None = None,
     ) -> torch.Tensor:
         batch_size, sequence_length, _ = (
-            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
         )
         if self.gather_kv:
-            encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
+            encoder_hidden_states = get_sp_group().all_gather(
+                encoder_hidden_states, dim=1
+            )
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
-            key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
+            key_rotary_emb = [
+                get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb
+            ]
 
-        if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+        if isinstance(attention_mask, AttentionMaskWithMeta):
+            attn_kw = {
+                "attn_mask": attention_mask.attn_mask,
+                "indices_k": attention_mask.indices_k,
+                "cu_seqlens_k": attention_mask.cu_seqlens_k,
+                "max_seqlen_k": attention_mask.max_seqlen_k,
+            }
+        elif attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(
+                attention_mask, sequence_length, batch_size
+            )
+            attention_mask = attention_mask.view(
+                batch_size, attn.heads, -1, attention_mask.shape[-1]
+            )
+            attn_kw = {"attn_mask": attention_mask}
+        else:
+            attn_kw = None
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -66,10 +89,13 @@ class xFuserLTX2PerturbedAttnProcessor:
             gate_logits = attn.to_gate_logits(hidden_states)
         value = attn.to_v(encoder_hidden_states)
         if all_perturbed is None:
-            all_perturbed = torch.all(perturbation_mask == 0) if perturbation_mask is not None else False
+            all_perturbed = (
+                torch.all(perturbation_mask == 0)
+                if perturbation_mask is not None
+                else False
+            )
 
         if all_perturbed:
-            # Skip attention, use the value projection value
             hidden_states = value
         else:
             query = attn.to_q(hidden_states)
@@ -82,11 +108,19 @@ class xFuserLTX2PerturbedAttnProcessor:
                 if attn.rope_type == "interleaved":
                     query = apply_interleaved_rotary_emb(query, query_rotary_emb)
                     key = apply_interleaved_rotary_emb(
-                        key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb
+                        key,
+                        key_rotary_emb
+                        if key_rotary_emb is not None
+                        else query_rotary_emb,
                     )
                 elif attn.rope_type == "split":
                     query = apply_split_rotary_emb(query, query_rotary_emb)
-                    key = apply_split_rotary_emb(key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb)
+                    key = apply_split_rotary_emb(
+                        key,
+                        key_rotary_emb
+                        if key_rotary_emb is not None
+                        else query_rotary_emb,
+                    )
 
             query = query.unflatten(2, (attn.heads, -1)).transpose(1, 2)
             key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
@@ -98,6 +132,7 @@ class xFuserLTX2PerturbedAttnProcessor:
                 value,
                 dropout_p=0.0,
                 is_causal=False,
+                attention_kwargs=attn_kw,
             )
             hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
             hidden_states = hidden_states.to(query.dtype)
@@ -118,7 +153,6 @@ class xFuserLTX2PerturbedAttnProcessor:
 
 
 class xFuserLTX2AudioVideoAttnProcessor:
-
     def __init__(self, use_parallel_attention: bool = True, gather_kv=False):
         if use_parallel_attention:
             self.attention_method = USP
@@ -128,25 +162,45 @@ class xFuserLTX2AudioVideoAttnProcessor:
 
     def __call__(
         self,
-        attn: "LTX2Attention",
+        attn: Any,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        query_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        key_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        query_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        key_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         batch_size, sequence_length, _ = (
-            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
         )
 
         if self.gather_kv:
-            encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
+            encoder_hidden_states = get_sp_group().all_gather(
+                encoder_hidden_states, dim=1
+            )
             key_rotary_emb = [x.contiguous() for x in key_rotary_emb]
-            key_rotary_emb = [get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb]
+            key_rotary_emb = [
+                get_sp_group().all_gather(x, dim=2) for x in key_rotary_emb
+            ]
 
-        if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+        if isinstance(attention_mask, AttentionMaskWithMeta):
+            attn_kw = {
+                "attn_mask": attention_mask.attn_mask,
+                "indices_k": attention_mask.indices_k,
+                "cu_seqlens_k": attention_mask.cu_seqlens_k,
+                "max_seqlen_k": attention_mask.max_seqlen_k,
+            }
+        elif attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(
+                attention_mask, sequence_length, batch_size
+            )
+            attention_mask = attention_mask.view(
+                batch_size, attn.heads, -1, attention_mask.shape[-1]
+            )
+            attn_kw = {"attn_mask": attention_mask}
+        else:
+            attn_kw = None
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -165,22 +219,22 @@ class xFuserLTX2AudioVideoAttnProcessor:
             if attn.rope_type == "interleaved":
                 query = apply_interleaved_rotary_emb(query, query_rotary_emb)
                 key = apply_interleaved_rotary_emb(
-                    key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb
+                    key,
+                    key_rotary_emb if key_rotary_emb is not None else query_rotary_emb,
                 )
             elif attn.rope_type == "split":
                 query = apply_split_rotary_emb(query, query_rotary_emb)
-                key = apply_split_rotary_emb(key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb)
+                key = apply_split_rotary_emb(
+                    key,
+                    key_rotary_emb if key_rotary_emb is not None else query_rotary_emb,
+                )
 
         query = query.unflatten(2, (attn.heads, -1)).transpose(1, 2)
         key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
         value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
 
         hidden_states = self.attention_method(
-            query,
-            key,
-            value,
-            dropout_p=0.0,
-            is_causal=False,
+            query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=attn_kw
         )
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
@@ -197,24 +251,23 @@ class xFuserLTX2AudioVideoAttnProcessor:
 
 
 class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
-
     def __init__(
         self,
         in_channels: int = 128,  # Video Arguments
-        out_channels: Optional[int] = 128,
+        out_channels: int | None = 128,
         patch_size: int = 1,
         patch_size_t: int = 1,
         num_attention_heads: int = 32,
         attention_head_dim: int = 128,
         cross_attention_dim: int = 4096,
-        vae_scale_factors: Tuple[int, int, int] = (8, 32, 32),
+        vae_scale_factors: tuple[int, int, int] = (8, 32, 32),
         pos_embed_max_pos: int = 20,
         base_height: int = 2048,
         base_width: int = 2048,
         gated_attn: bool = False,
         cross_attn_mod: bool = False,
         audio_in_channels: int = 128,  # Audio Arguments
-        audio_out_channels: Optional[int] = 128,
+        audio_out_channels: int | None = 128,
         audio_patch_size: int = 1,
         audio_patch_size_t: int = 1,
         audio_num_attention_heads: int = 32,
@@ -242,6 +295,10 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         rope_type: str = "interleaved",
         use_prompt_embeddings: bool = True,
         perturbed_attn: bool = False,
+        ff_bias: bool = True,
+        audio_ff_bias: bool = True,
+        use_prompt_adaln_single: bool = True,
+        use_keyframes_abs_pos_embedding: bool = False,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -286,7 +343,14 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
             rope_type=rope_type,
             use_prompt_embeddings=use_prompt_embeddings,
             perturbed_attn=perturbed_attn,
+            ff_bias=ff_bias,
+            audio_ff_bias=audio_ff_bias,
+            use_prompt_adaln_single=use_prompt_adaln_single,
+            use_keyframes_abs_pos_embedding=use_keyframes_abs_pos_embedding,
         )
+
+        self._enc_mask_cache: dict = {}
+        self._audio_enc_mask_cache: dict = {}
 
         if perturbed_attn:
             attn_processor_cls = xFuserLTX2PerturbedAttnProcessor
@@ -296,30 +360,49 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         for block in self.transformer_blocks:
             block.attn1.processor = attn_processor_cls()
             block.attn2.processor = attn_processor_cls(use_parallel_attention=False)
-            block.audio_attn1.processor = attn_processor_cls(use_parallel_attention=False)
-            block.audio_attn2.processor = attn_processor_cls(use_parallel_attention=False)
-            block.audio_to_video_attn.processor = attn_processor_cls(use_parallel_attention=False)
-            block.video_to_audio_attn.processor = attn_processor_cls(use_parallel_attention=False, gather_kv=True)
+            block.audio_attn1.processor = attn_processor_cls(
+                use_parallel_attention=False
+            )
+            block.audio_attn2.processor = attn_processor_cls(
+                use_parallel_attention=False
+            )
+            block.audio_to_video_attn.processor = attn_processor_cls(
+                use_parallel_attention=False
+            )
+            block.video_to_audio_attn.processor = attn_processor_cls(
+                use_parallel_attention=False, gather_kv=True
+            )
 
-
-    def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
+    def _chunk_and_pad_sequence(
+        self,
+        x: torch.Tensor,
+        sp_world_rank: int,
+        sp_world_size: int,
+        pad_amount: int,
+        dim: int,
+    ) -> torch.Tensor:
         if pad_amount > 0:
             if dim < 0:
                 dim = x.ndim + dim
             pad_shape = list(x.shape)
             pad_shape[dim] = pad_amount
-            x = torch.cat([x,
-                        torch.zeros(
-                            pad_shape,
-                            dtype=x.dtype,
-                            device=x.device,
-                        )], dim=dim)
-        x = torch.chunk(x,
-                        sp_world_size,
-                        dim=dim)[sp_world_rank]
+            x = torch.cat(
+                [
+                    x,
+                    torch.zeros(
+                        pad_shape,
+                        dtype=x.dtype,
+                        device=x.device,
+                    ),
+                ],
+                dim=dim,
+            )
+        x = torch.chunk(x, sp_world_size, dim=dim)[sp_world_rank]
         return x
 
-    def _gather_and_unpad(self, x: torch.Tensor, pad_amount: int, dim: int) -> torch.Tensor:
+    def _gather_and_unpad(
+        self, x: torch.Tensor, pad_amount: int, dim: int
+    ) -> torch.Tensor:
         x = get_sp_group().all_gather(x, dim=dim)
         size = x.size(dim)
         return x.narrow(dim=dim, start=0, length=size - pad_amount)
@@ -331,95 +414,25 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         encoder_hidden_states: torch.Tensor,
         audio_encoder_hidden_states: torch.Tensor,
         timestep: torch.LongTensor,
-        audio_timestep: Optional[torch.LongTensor] = None,
-        sigma: Optional[torch.Tensor] = None,
-        audio_sigma: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        audio_encoder_attention_mask: Optional[torch.Tensor] = None,
-        num_frames: Optional[int] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        audio_timestep: torch.LongTensor | None = None,
+        sigma: torch.Tensor | None = None,
+        audio_sigma: torch.Tensor | None = None,
+        encoder_attention_mask: torch.Tensor | None = None,
+        audio_encoder_attention_mask: torch.Tensor | None = None,
+        num_frames: int | None = None,
+        height: int | None = None,
+        width: int | None = None,
         fps: float = 24.0,
-        audio_num_frames: Optional[int] = None,
-        video_coords: Optional[torch.Tensor] = None,
-        audio_coords: Optional[torch.Tensor] = None,
+        audio_num_frames: int | None = None,
+        video_coords: torch.Tensor | None = None,
+        audio_coords: torch.Tensor | None = None,
         isolate_modalities: bool = False,
-        spatio_temporal_guidance_blocks: Optional[List[int]] = None,
-        perturbation_mask: Optional[torch.Tensor] = None,
+        spatio_temporal_guidance_blocks: list[int] | None = None,
+        perturbation_mask: torch.Tensor | None = None,
         use_cross_timestep: bool = False,
-        attention_kwargs: Optional[Dict[str, Any]] = None,
+        attention_kwargs: dict[str, Any] | None = None,
         return_dict: bool = True,
     ) -> torch.Tensor:
-        """
-        Forward pass for LTX-2.0 audiovisual video transformer.
-
-        Args:
-            hidden_states (`torch.Tensor`):
-                Input patchified video latents of shape `(batch_size, num_video_tokens, in_channels)`.
-            audio_hidden_states (`torch.Tensor`):
-                Input patchified audio latents of shape `(batch_size, num_audio_tokens, audio_in_channels)`.
-            encoder_hidden_states (`torch.Tensor`):
-                Input video text embeddings of shape `(batch_size, text_seq_len, self.config.caption_channels)`.
-            audio_encoder_hidden_states (`torch.Tensor`):
-                Input audio text embeddings of shape `(batch_size, text_seq_len, self.config.caption_channels)`.
-            timestep (`torch.Tensor`):
-                Input timestep of shape `(batch_size, num_video_tokens)`. These should already be scaled by
-                `self.config.timestep_scale_multiplier`.
-            audio_timestep (`torch.Tensor`, *optional*):
-                Input timestep of shape `(batch_size,)` or `(batch_size, num_audio_tokens)` for audio modulation
-                params. This is only used by certain pipelines such as the I2V pipeline.
-            encoder_attention_mask (`torch.Tensor`, *optional*):
-                Optional multiplicative text attention mask of shape `(batch_size, text_seq_len)`.
-            audio_encoder_attention_mask (`torch.Tensor`, *optional*):
-                Optional multiplicative text attention mask of shape `(batch_size, text_seq_len)` for audio modeling.
-            num_frames (`int`, *optional*):
-                The number of latent video frames. Used if calculating the video coordinates for RoPE.
-            height (`int`, *optional*):
-                The latent video height. Used if calculating the video coordinates for RoPE.
-            width (`int`, *optional*):
-                The latent video width. Used if calculating the video coordinates for RoPE.
-            fps: (`float`, *optional*, defaults to `24.0`):
-                The desired frames per second of the generated video. Used if calculating the video coordinates for
-                RoPE.
-            audio_num_frames: (`int`, *optional*):
-                The number of latent audio frames. Used if calculating the audio coordinates for RoPE.
-            video_coords (`torch.Tensor`, *optional*):
-                The video coordinates to be used when calculating the rotary positional embeddings (RoPE) of shape
-                `(batch_size, 3, num_video_tokens, 2)`. If not supplied, this will be calculated inside `forward`.
-            audio_coords (`torch.Tensor`, *optional*):
-                The audio coordinates to be used when calculating the rotary positional embeddings (RoPE) of shape
-                `(batch_size, 1, num_audio_tokens, 2)`. If not supplied, this will be calculated inside `forward`.
-            attention_kwargs (`Dict[str, Any]`, *optional*):
-                Optional dict of keyword args to be passed to the attention processor.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether to return a dict-like structured output of type `AudioVisualModelOutput` or a tuple.
-
-        Returns:
-            `AudioVisualModelOutput` or `tuple`:
-                If `return_dict` is `True`, returns a structured output of type `AudioVisualModelOutput`, otherwise a
-                `tuple` is returned where the first element is the denoised video latent patch sequence and the second
-                element is the denoised audio latent patch sequence.
-        """
-
-        """
-            _cp_plan = {
-        "": {
-            "hidden_states": ContextParallelInput(split_dim=1, expected_dims=3, split_output=False),
-            "encoder_hidden_states": ContextParallelInput(split_dim=1, expected_dims=3, split_output=False),
-            "encoder_attention_mask": ContextParallelInput(split_dim=1, expected_dims=2, split_output=False),
-        },
-        "rope": {
-            0: ContextParallelInput(split_dim=1, expected_dims=3, split_output=True),
-            1: ContextParallelInput(split_dim=1, expected_dims=3, split_output=True),
-        },
-        "proj_out": ContextParallelOutput(gather_dim=1, expected_dims=3),
-    }
-
-        """
-
-        # Newer diffusers passes sigma / STG / modality kwargs; accepted above for API compatibility.
-        # When all are omitted (older pipelines), behavior matches the pre-update path.
-
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
@@ -427,34 +440,38 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
             lora_scale = 1.0
 
         if USE_PEFT_BACKEND:
-            # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
-        else:
-            if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
-                logger.warning(
-                    "Passing `scale` via `attention_kwargs` when not using the PEFT backend is ineffective."
-                )
-
-
 
         sp_world_rank = get_sequence_parallel_rank()
         sp_world_size = get_sequence_parallel_world_size()
 
-        pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
-        hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
+        full_seq_len = hidden_states.shape[1]
+        pad_amount = (sp_world_size - (full_seq_len % sp_world_size)) % sp_world_size
+        hidden_states = self._chunk_and_pad_sequence(
+            hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1
+        )
 
-        # Determine timestep for audio.
+        # Determine timestep for audio before chunking the video-side timestep.
+        # The pipeline passes audio_timestep as a separate per-sample tensor, so
+        # it must not inherit the (to-be-chunked) per-token video timestep.
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
         audio_sigma = audio_sigma if audio_sigma is not None else sigma
 
-        # convert encoder_attention_mask to a bias the same way we do for attention_mask
-        if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
-            encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
+        # If the video timestep is per-token [batch, num_video_tokens] rather than
+        # per-sample, chunk it to match the local hidden_states shard.  This avoids
+        # the broadcast mismatch between chunked hidden_states [batch, local_seq, dim]
+        # and embedded_timestep [batch, full_seq, dim] in the output scale/shift layer.
+        if timestep.ndim == 2 and timestep.shape[1] == full_seq_len:
+            timestep = self._chunk_and_pad_sequence(
+                timestep, sp_world_rank, sp_world_size, pad_amount, dim=1
+            )
 
-        if audio_encoder_attention_mask is not None and audio_encoder_attention_mask.ndim == 2:
-            audio_encoder_attention_mask = (1 - audio_encoder_attention_mask.to(audio_hidden_states.dtype)) * -10000.0
-            audio_encoder_attention_mask = audio_encoder_attention_mask.unsqueeze(1)
+        encoder_attention_mask = _get_mask_meta(
+            self._enc_mask_cache, encoder_attention_mask
+        )
+        audio_encoder_attention_mask = _get_mask_meta(
+            self._audio_enc_mask_cache, audio_encoder_attention_mask
+        )
 
         batch_size = hidden_states.size(0)
 
@@ -468,14 +485,19 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
                 batch_size, audio_num_frames, audio_hidden_states.device
             )
 
-
-        video_coords = self._chunk_and_pad_sequence(video_coords, sp_world_rank, sp_world_size, pad_amount, dim=2)
+        video_coords = self._chunk_and_pad_sequence(
+            video_coords, sp_world_rank, sp_world_size, pad_amount, dim=2
+        )
 
         video_rotary_emb = self.rope(video_coords, device=hidden_states.device)
 
-        audio_rotary_emb = self.audio_rope(audio_coords, device=audio_hidden_states.device)
+        audio_rotary_emb = self.audio_rope(
+            audio_coords, device=audio_hidden_states.device
+        )
 
-        video_cross_attn_rotary_emb = self.cross_attn_rope(video_coords[:, 0:1, :], device=hidden_states.device)
+        video_cross_attn_rotary_emb = self.cross_attn_rope(
+            video_coords[:, 0:1, :], device=hidden_states.device
+        )
         audio_cross_attn_rotary_emb = self.cross_attn_audio_rope(
             audio_coords[:, 0:1, :], device=audio_hidden_states.device
         )
@@ -486,7 +508,8 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
         # 3. Prepare timestep embeddings and modulation parameters
         timestep_cross_attn_gate_scale_factor = (
-            self.config.cross_attn_timestep_scale_multiplier / self.config.timestep_scale_multiplier
+            self.config.cross_attn_timestep_scale_multiplier
+            / self.config.timestep_scale_multiplier
         )
 
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
@@ -499,7 +522,9 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         )
 
         temb = temb.view(batch_size, -1, temb.size(-1))
-        embedded_timestep = embedded_timestep.view(batch_size, -1, embedded_timestep.size(-1))
+        embedded_timestep = embedded_timestep.view(
+            batch_size, -1, embedded_timestep.size(-1)
+        )
 
         temb_audio, audio_embedded_timestep = self.audio_time_embed(
             audio_timestep.flatten(),
@@ -509,25 +534,34 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
         temb_audio = temb_audio.view(batch_size, -1, temb_audio.size(-1))
 
-        audio_embedded_timestep = audio_embedded_timestep.view(batch_size, -1, audio_embedded_timestep.size(-1))
+        audio_embedded_timestep = audio_embedded_timestep.view(
+            batch_size, -1, audio_embedded_timestep.size(-1)
+        )
 
-        if self.prompt_modulation:
-            # LTX-2.3
+        if self.prompt_modulation and self.config.use_prompt_adaln_single:
             temb_prompt, _ = self.prompt_adaln(
                 sigma.flatten(), batch_size=batch_size, hidden_dtype=hidden_states.dtype
             )
             temb_prompt_audio, _ = self.audio_prompt_adaln(
-                audio_sigma.flatten(), batch_size=batch_size, hidden_dtype=audio_hidden_states.dtype
+                audio_sigma.flatten(),
+                batch_size=batch_size,
+                hidden_dtype=audio_hidden_states.dtype,
             )
             temb_prompt = temb_prompt.view(batch_size, -1, temb_prompt.size(-1))
-            temb_prompt_audio = temb_prompt_audio.view(batch_size, -1, temb_prompt_audio.size(-1))
+            temb_prompt_audio = temb_prompt_audio.view(
+                batch_size, -1, temb_prompt_audio.size(-1)
+            )
         else:
             temb_prompt = temb_prompt_audio = None
 
         # 3.2. Prepare global modality cross attention modulation parameters
         # LTX-2.3: use the cross-modality sigma (audio sigma for video CA, video sigma for audio CA)
-        video_ca_timestep = audio_sigma.flatten() if use_cross_timestep else timestep.flatten()
-        audio_ca_timestep = sigma.flatten() if use_cross_timestep else audio_timestep.flatten()
+        video_ca_timestep = (
+            audio_sigma.flatten() if use_cross_timestep else timestep.flatten()
+        )
+        audio_ca_timestep = (
+            sigma.flatten() if use_cross_timestep else audio_timestep.flatten()
+        )
 
         video_cross_attn_scale_shift, _ = self.av_cross_attn_video_scale_shift(
             video_ca_timestep,
@@ -543,7 +577,9 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         video_cross_attn_scale_shift = video_cross_attn_scale_shift.view(
             batch_size, -1, video_cross_attn_scale_shift.shape[-1]
         )
-        video_cross_attn_a2v_gate = video_cross_attn_a2v_gate.view(batch_size, -1, video_cross_attn_a2v_gate.shape[-1])
+        video_cross_attn_a2v_gate = video_cross_attn_a2v_gate.view(
+            batch_size, -1, video_cross_attn_a2v_gate.shape[-1]
+        )
 
         audio_cross_attn_scale_shift, _ = self.av_cross_attn_audio_scale_shift(
             audio_ca_timestep,
@@ -558,15 +594,23 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
         audio_cross_attn_scale_shift = audio_cross_attn_scale_shift.view(
             batch_size, -1, audio_cross_attn_scale_shift.shape[-1]
         )
-        audio_cross_attn_v2a_gate = audio_cross_attn_v2a_gate.view(batch_size, -1, audio_cross_attn_v2a_gate.shape[-1])
+        audio_cross_attn_v2a_gate = audio_cross_attn_v2a_gate.view(
+            batch_size, -1, audio_cross_attn_v2a_gate.shape[-1]
+        )
 
         # 4. Prepare prompt embeddings (LTX-2.0)
         if self.config.use_prompt_embeddings:
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
-            encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.size(-1))
+            encoder_hidden_states = encoder_hidden_states.view(
+                batch_size, -1, hidden_states.size(-1)
+            )
 
-            audio_encoder_hidden_states = self.audio_caption_projection(audio_encoder_hidden_states)
-            audio_encoder_hidden_states = audio_encoder_hidden_states.view(batch_size, -1, audio_hidden_states.size(-1))
+            audio_encoder_hidden_states = self.audio_caption_projection(
+                audio_encoder_hidden_states
+            )
+            audio_encoder_hidden_states = audio_encoder_hidden_states.view(
+                batch_size, -1, audio_hidden_states.size(-1)
+            )
 
         # 5. Run transformer blocks
         stg_blocks = set(spatio_temporal_guidance_blocks or [])
@@ -581,9 +625,11 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
             is_stg_block = block_i in stg_blocks
             block_all_perturbed = default_all_perturbed if is_stg_block else False
             block_perturbation_mask = (
-                perturbation_mask if (is_stg_block and not default_all_perturbed) else None
+                perturbation_mask
+                if (is_stg_block and not default_all_perturbed)
+                else None
             )
-            
+
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states, audio_hidden_states = self._gradient_checkpointing_func(
                     block,
@@ -648,7 +694,9 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
                 audio_hidden_states = audio_hidden_states.clone()
 
         # 6. Output layers (including unpatchification)
-        scale_shift_values = self.scale_shift_table[None, None] + embedded_timestep[:, :, None]
+        scale_shift_values = (
+            self.scale_shift_table[None, None] + embedded_timestep[:, :, None]
+        )
         shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]
 
         hidden_states = self.norm_out(hidden_states)
@@ -657,8 +705,14 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
         output = self._gather_and_unpad(output, pad_amount, dim=1)
 
-        audio_scale_shift_values = self.audio_scale_shift_table[None, None] + audio_embedded_timestep[:, :, None]
-        audio_shift, audio_scale = audio_scale_shift_values[:, :, 0], audio_scale_shift_values[:, :, 1]
+        audio_scale_shift_values = (
+            self.audio_scale_shift_table[None, None]
+            + audio_embedded_timestep[:, :, None]
+        )
+        audio_shift, audio_scale = (
+            audio_scale_shift_values[:, :, 0],
+            audio_scale_shift_values[:, :, 1],
+        )
 
         audio_hidden_states = self.audio_norm_out(audio_hidden_states)
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift

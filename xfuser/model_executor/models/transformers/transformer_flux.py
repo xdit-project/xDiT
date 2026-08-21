@@ -53,6 +53,10 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
+    flydsl_fused_qk_norm_rope,
+    _HAS_FLYDSL,
+)
 
 logger = init_logger(__name__)
 
@@ -89,6 +93,35 @@ class xFuserFluxAttentionWrapper(xFuserAttentionBaseWrapper):
         kwargs = {k: w for k, w in kwargs.items() if k in attn_parameters}
         return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
+def _split_rotary_emb(image_rotary_emb, num_text_tokens: int, num_image_tokens: int):
+    """Split a diffusers ``(cos, sin)`` pair at the text/image boundary.
+
+    The joint FLUX stream is ``cat([text, image], dim=seq)`` and RoPE is a
+    strictly per-token map, so slicing the tables and applying RoPE to each
+    stream *before* the concat is bit-identical to applying it after.  Doing it
+    before is what lets QK-RMSNorm and RoPE collapse into one kernel per stream.
+
+    Returns ``(None, None)`` -- meaning "caller must apply RoPE post-concat" --
+    unless the table row count is exactly ``num_text_tokens + num_image_tokens``,
+    so any sequence-parallel slicing we do not understand stays on the safe path.
+    """
+    if image_rotary_emb is None:
+        return None, None
+    if not isinstance(image_rotary_emb, (tuple, list)) or len(image_rotary_emb) != 2:
+        # unsupported (e.g. complex) layout -- caller applies RoPE post-concat
+        return None, None
+    cos, sin = image_rotary_emb
+    if not isinstance(cos, torch.Tensor) or not isinstance(sin, torch.Tensor):
+        return None, None
+    if cos.dim() != 2 or cos.shape != sin.shape:
+        return None, None
+    if cos.shape[0] != num_text_tokens + num_image_tokens:
+        return None, None
+    txt = (cos[:num_text_tokens, :], sin[:num_text_tokens, :])
+    img = (cos[num_text_tokens:, :], sin[num_text_tokens:, :])
+    return txt, img
+
+
 @xFuserAttentionProcessorRegister.register(FluxAttnProcessor)
 class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
@@ -117,34 +150,73 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        query = attn.norm_q(query)
-        key = attn.norm_k(key)
-
-
         if attn.added_kv_proj_dim is not None:
             encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
             encoder_key = encoder_key.unflatten(-1, (attn.heads, -1))
             encoder_value = encoder_value.unflatten(-1, (attn.heads, -1))
 
-            encoder_query = attn.norm_added_q(encoder_query)
-            encoder_key = attn.norm_added_k(encoder_key)
-
             num_encoder_hidden_states_tokens = encoder_query.shape[1]
             num_query_tokens = query.shape[1]
 
-            query = torch.cat([encoder_query, query], dim=1)
-            key = torch.cat([encoder_key, key], dim=1)
-            value = torch.cat([encoder_value, value], dim=1)
+            if _HAS_FLYDSL:
+                # AITER/FlyDSL present: fuse QK-RMSNorm and RoPE into one kernel
+                # per stream. RoPE is per-token, so applying it before the joint
+                # concat over dim=1 is mathematically identical to applying it
+                # after.
+                txt_rope, img_rope = _split_rotary_emb(
+                    image_rotary_emb, num_encoder_hidden_states_tokens, num_query_tokens
+                )
+                encoder_query, encoder_key = flydsl_fused_qk_norm_rope(
+                    encoder_query,
+                    encoder_key,
+                    attn.norm_added_q,
+                    attn.norm_added_k,
+                    txt_rope,
+                )
+                query, key = flydsl_fused_qk_norm_rope(
+                    query, key, attn.norm_q, attn.norm_k, img_rope
+                )
+
+                query = torch.cat([encoder_query, query], dim=1)
+                key = torch.cat([encoder_key, key], dim=1)
+                value = torch.cat([encoder_value, value], dim=1)
+
+                if txt_rope is None and image_rotary_emb is not None:
+                    # tables could not be split -> apply RoPE on the joint stream
+                    query, key = flydsl_fused_qk_norm_rope(
+                        query, key, None, None, image_rotary_emb
+                    )
+            else:
+                # No AITER: the original unfused diffusers path (norm then rope
+                # on the joint stream), unchanged from before the fused kernel.
+                query = attn.norm_q(query)
+                key = attn.norm_k(key)
+                encoder_query = attn.norm_added_q(encoder_query)
+                encoder_key = attn.norm_added_k(encoder_key)
+
+                query = torch.cat([encoder_query, query], dim=1)
+                key = torch.cat([encoder_key, key], dim=1)
+                value = torch.cat([encoder_value, value], dim=1)
+
+                if image_rotary_emb is not None:
+                    query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                    key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
         else:
             num_encoder_hidden_states_tokens = (
                 get_runtime_state().max_condition_sequence_length
             )
             num_query_tokens = query.shape[1] - num_encoder_hidden_states_tokens
-
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+            if _HAS_FLYDSL:
+                query, key = flydsl_fused_qk_norm_rope(
+                    query, key, attn.norm_q, attn.norm_k, image_rotary_emb
+                )
+            else:
+                query = attn.norm_q(query)
+                key = attn.norm_k(key)
+                if image_rotary_emb is not None:
+                    query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                    key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
         distri_cache_updated = False
         if (
@@ -173,7 +245,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
 
         uses_pipeline_parallelism = get_runtime_state().num_pipeline_patch > 1
         if not uses_pipeline_parallelism:
-            hidden_states = USP(query, key, value)
+            hidden_states = USP(query, key, value, combine_qkv_a2a=True)
             hidden_states = hidden_states.transpose(1, 2)
         else:
             if get_runtime_state().split_text_embed_in_sp:
@@ -198,6 +270,7 @@ class xFuserFluxAttnProcessor(FluxAttnProcessor):
                 value,
                 dropout_p=0.0,
                 is_causal=False,
+                combine_qkv_a2a=True,
                 joint_query=encoder_hidden_states_query_proj,
                 joint_key=encoder_hidden_states_key_proj,
                 joint_value=encoder_hidden_states_value_proj,

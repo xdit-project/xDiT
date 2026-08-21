@@ -35,6 +35,8 @@ class xFuserQwenImageEditModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -127,6 +129,9 @@ class xFuserQwenImageModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
+        use_parallel_vae=True,
+        enable_tiling=True,
+        enable_slicing=True,
     )
     default_input_values = DefaultInputValues(
         height=928,

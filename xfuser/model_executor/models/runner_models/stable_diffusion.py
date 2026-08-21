@@ -1,6 +1,6 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from xfuser import xFuserStableDiffusion3Pipeline, xFuserArgs
+from xfuser import xFuserStableDiffusion3Pipeline
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -35,6 +35,7 @@ class xFuserStableDiffusionModel(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
+        use_parallel_vae=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,

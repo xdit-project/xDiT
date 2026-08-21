@@ -1,4 +1,3 @@
-import copy
 import re
 import torch
 from typing import List, Optional
@@ -22,7 +21,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import (
     log,
     resize_and_crop_image,
@@ -85,52 +83,11 @@ def _build_attention_kwargs(config: "xFuserArgs") -> dict:
 class xFuserWanModel(xFuserModel):
     """Common lifecycle hooks for Wan runners."""
 
-    def _prepare_inference_run(self, input_args: dict) -> None:
+    def prepare_run(self, input_args: dict) -> None:
+        super().prepare_run(input_args)
         get_runtime_state().reset_vsa_schedule_state(
             int(input_args["num_inference_steps"])
         )
-
-
-def _setup_parallel_vae(vae, enable_parallel_encoder: bool = True) -> None:
-    """ Parallelizes VAE en-/decoder using distvae """
-    # Handle encoder
-    if enable_parallel_encoder:
-        try:
-            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
-            vae_scale_factor = getattr(vae.config, 'scaling_factor', 8)
-            if hasattr(vae.config, 'vae_scale_factor_spatial'):
-                vae_scale_factor = vae.config.vae_scale_factor_spatial
-            patched_encoder = WanEncoderAdapter(
-                vae.encoder,
-                vae_group=get_vae_parallel_group().device_group,
-                vae_scale_factor=vae_scale_factor,
-            ).to(vae.device)
-            vae.encoder = patched_encoder
-            log(f"Parallel VAE encoder enabled successfully.")
-        except ImportError:
-            log(
-                "DistVAE library is missing or does not support WanEncoderAdapter. "
-                "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
-                "Defaulting to single-rank encoder."
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to patch VAE encoder. {e}")
-    # Handle decoder
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
-        patched_decoder = WanDecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group().device_group
-        ).to(vae.device)
-        vae.decoder = patched_decoder
-        log(f"Parallel VAE decoder enabled successfully.")
-    except ImportError:
-        log(
-            "DistVAE library is missing or does not support WanDecoderAdapter. "
-            "Try installing latest DistVAE from https://github.com/xdit-project/DistVAE. "
-            "Defaulting to single-rank decoder."
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE decoder. {e}")
 
 
 def _remap_lightx2v_to_diffusers(k: str) -> str:
@@ -257,8 +214,6 @@ class xFuserWan21I2VModel(xFuserWanModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -410,6 +365,8 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
+        enable_tiling=True,
+        enable_slicing=True,
         supports_distilled_weights=True,
     )
     default_input_values = DefaultInputValues(
@@ -503,7 +460,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             )
         guidance_scale = input_args.get("guidance_scale")
         if guidance_scale != 1.0:
-            log(f"Using guidance_scale=1.0. Other guindance scale values are not supported with this model.")
+            log("Using guidance_scale=1.0. Other guidance-scale values are unsupported for this model.")
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
         # Guidance is baked into the distilled weights. guidance_scale=1.0 keeps
@@ -582,8 +539,6 @@ class xFuserWan21T2VModel(xFuserWanModel):
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
 
     def _load_model(self) -> DiffusionPipeline:
@@ -696,6 +651,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         cross_attention_backend=True,
         supports_sparge_attention_backends=True,
         enable_tiling=True,
@@ -819,6 +775,8 @@ class xFuserWan21VACEModel(xFuserWanModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
+        use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
     )
 
     default_input_values = DefaultInputValues(

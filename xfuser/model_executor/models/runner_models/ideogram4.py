@@ -6,7 +6,6 @@ import os
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.utils.runner_utils import log
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
@@ -270,21 +269,6 @@ def _check_load_result(
         )
 
 
-def _setup_parallel_vae(vae) -> None:
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-
-        vae.decoder = DecoderAdapter(
-            vae.decoder,
-            vae_group=get_vae_parallel_group().device_group,
-        ).to(vae.device)
-        log("Parallel VAE decoder enabled.")
-    except ImportError:
-        log("DistVAE not available for decoder. Defaulting to single-rank.")
-    except Exception as error:
-        raise ValueError(f"Failed to patch VAE decoder: {error}") from error
-
-
 def _default_guidance_schedule(num_inference_steps: int) -> list[float]:
     polish_steps = min(3, num_inference_steps)
     return [7.0] * (num_inference_steps - polish_steps) + [3.0] * polish_steps
@@ -543,5 +527,3 @@ class xFuserIdeogram4Model(xFuserModel):
         super()._post_load_and_state_initialization(input_args)
         self.pipe.transformer._init_sp_state()
         self.pipe.unconditional_transformer._init_sp_state()
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)

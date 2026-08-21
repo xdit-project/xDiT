@@ -1,7 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from xfuser.compat import version_at_least
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional
 import sys
 import torch
 import torch.distributed
@@ -9,7 +9,6 @@ import torch.nn as nn
 
 from diffusers import DiffusionPipeline
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
-from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
 from xfuser.core.distributed.group_coordinator import GroupCoordinator
 from xfuser.config.config import (
     EngineConfig,
@@ -47,6 +46,8 @@ from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
 
 from xfuser.envs import PACKAGES_CHECKER
 
+from distvae.vae import parallelize_decoder
+
 PACKAGES_CHECKER.check_diffusers_version()
 
 from xfuser.model_executor.schedulers import *
@@ -65,6 +66,12 @@ except:
     HAS_OF = False
 
 logger = init_logger(__name__)
+
+
+def _vae_process_group():
+    group = get_vae_parallel_group()
+    return getattr(group, "device_group", group)
+
 
 class xFuserVAEWrapper:
     def __init__(
@@ -99,8 +106,8 @@ class xFuserVAEWrapper:
 
     def _convert_vae(self, vae: AutoencoderKL):
         """Convert VAE to parallel version"""
-        logger.info("VAE found, paralleling vae...")
-        vae.decoder = DecoderAdapter(vae.decoder, vae_group=get_vae_parallel_group())
+        logger.info("VAE found; enabling parallel VAE decoding...")
+        parallelize_decoder(vae, _vae_process_group())
         return vae
     
     def reset_activation_cache(self):
@@ -468,8 +475,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         self,
         vae: AutoencoderKL,
     ):
-        logger.info("VAE found, paralleling vae...")
-        vae.decoder = DecoderAdapter(vae.decoder)
+        logger.info("VAE found; enabling parallel VAE decoding...")
+        parallelize_decoder(vae, _vae_process_group())
         return vae
 
     @abstractmethod

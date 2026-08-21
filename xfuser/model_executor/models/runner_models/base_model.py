@@ -1,9 +1,7 @@
 import abc
 import torch
 import copy
-import argparse
 import json
-import functools
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field, replace
@@ -13,19 +11,20 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 import numpy as np
 from xfuser.compat import is_diffusers_import_error
-from xfuser.config import args, xFuserArgs
+from xfuser.config import xFuserArgs
 from xfuser.envs import (
     PACKAGES_CHECKER,
-    _TORCH_GROUPNORM,
-    get_platform,
     _is_hip,
     _is_cuda,
 )
 from xfuser.core.utils.runner_utils import (
     log,
     load_dataset_prompts,
-    convert_model_convs_to_channels_last,
     rgetattr,
+)
+from xfuser.model_executor.models.runner_models.vae_manager import (
+    VAEManager,
+    validate_vae_config,
 )
 
 from xfuser.core.distributed import (
@@ -48,7 +47,6 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     apply_fp8_override_cli_to_settings,
 )
-
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -263,6 +261,7 @@ class xFuserModel(abc.ABC):
     def __init__(self, config: xFuserArgs) -> None:
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
+        self._vae_manager = VAEManager(config, self.capabilities, self.settings)
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -336,6 +335,8 @@ class xFuserModel(abc.ABC):
         initialize_runtime_state(self._get_runtime_state_pipeline(), self.engine_config)
 
         self._post_load_and_state_initialization(input_args)
+        if self.config.use_parallel_vae:
+            self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
 
         if self.config.use_torch_compile:
@@ -355,13 +356,7 @@ class xFuserModel(abc.ABC):
         if getattr(self.config, "use_spargeattn_head_balance", False):
             log("Enabling Sparge block-sparse head balancing...")
 
-        if self.config.enable_slicing:
-            log("Enabling VAE slicing...")
-            self.pipe.vae.enable_slicing()
-
-        if self.config.enable_tiling:
-            log("Enabling VAE tiling...")
-            self.pipe.vae.enable_tiling()
+        self._vae_manager.enable_options(self._decoding_vaes())
 
         if self.config.enable_group_cpu_offload:
             # block_level groups only top-level ModuleLists: fits compiled transformers
@@ -407,6 +402,12 @@ class xFuserModel(abc.ABC):
     def _get_runtime_state_pipeline(self):
         return self.pipe
 
+
+    def _decoding_vaes(self) -> List:
+        """Forward staged VAE discovery to the VAE manager."""
+        return self._vae_manager.decoding_vaes(
+            [self.pipe, getattr(self, "second_pipe", None)]
+        )
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
@@ -476,7 +477,7 @@ class xFuserModel(abc.ABC):
         if not possible_task and self.settings.valid_tasks:
             raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.settings.valid_tasks}")
         if config.dataset_path and not config.batch_size:
-            raise ValueError(f"Dataset path specified without batch size. Please specify batch size for dataset inference.")
+            raise ValueError("Dataset path specified without batch size. Please specify batch size for dataset inference.")
 
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
@@ -494,17 +495,11 @@ class xFuserModel(abc.ABC):
                         f"NVFP4 GEMMs require CUDA capability >= 10.0 (Blackwell). "
                         f"Detected: {torch.cuda.get_device_capability()}"
                     )
-        if config.use_parallel_vae:
-            if not packages_info.get("has_distvae", False):
-                raise ValueError("DistVAE is not installed. Please install it before using parallel VAE.")
-            if torch.nn.GroupNorm.__module__ == "aiter.ops.groupnorm":
-                log("AITER GroupNorm is not supported with parallel VAE. Reverting to torch GroupNorm.")
-                torch.nn.GroupNorm = _TORCH_GROUPNORM
+        validate_vae_config(config, self.capabilities, self.settings)
         
         if config.distilled_transformer_path or config.distilled_transformer_2_path:
             if not self.capabilities.supports_distilled_weights:
                 raise ValueError(f"Model {self.settings.model_name} does not support distilled_transformer_path or distilled_transformer_2_path params.")
-
 
     def _get_compile_mode(self) -> str:
         # Overrides should return "default" when PACKAGES_CHECKER._on_rdna4():
@@ -668,7 +663,7 @@ class xFuserModel(abc.ABC):
             for iteration in range(self.config.warmup_calls):
                 log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
                 self._run_timed_pipe(input_args)
-            log(f"Warmup complete.")
+            log("Warmup complete.")
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """
@@ -749,7 +744,7 @@ class xFuserModel(abc.ABC):
                 export_to_video(video, output_path, fps=self.settings.fps)
                 log(f"Output video saved to {output_path}")
         else:
-            raise NotImplementedError(f"No output to save.")
+            raise NotImplementedError("No output to save.")
 
     def save_timings(self, timings: list) -> None:
         timing_file_name = f"{self.config.output_directory}/timings.json"
@@ -762,13 +757,14 @@ class xFuserModel(abc.ABC):
         profile.export_chrome_trace(profile_file)
         log(f"Profile trace saved to {profile_file}", log_from_all_processes=True)
 
-    def _prepare_inference_run(self, input_args: dict) -> None:
-        """Prepare model-specific state before a pipeline invocation."""
+    def prepare_run(self, input_args: dict) -> None:
+        """Prepare model state before a pipeline invocation."""
+        self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
         """ Run a a full pipeline with timing information """
 
-        self._prepare_inference_run(input_args)
+        self.prepare_run(input_args)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()
@@ -859,24 +855,8 @@ class xFuserModel(abc.ABC):
         get_runtime_state().set_gemm_schedule(gemm_schedule, total_steps=total_steps)
 
     def _convert_vae_to_channels_last(self) -> None:
-        """ Convert the VAE to channels last """
-        convert_model_convs_to_channels_last(self.pipe.vae)
-
-        original_decode = self.pipe.vae.decode
-        memory_format = torch.channels_last if self.settings.model_output_type == "image" else torch.channels_last_3d
-
-        @functools.wraps(original_decode)
-        def decode_wrapper(*args, **kwargs):
-            if args:
-                args = list(args)
-                args[0] = args[0].to(memory_format=memory_format)
-                args = tuple(args)
-            elif "z" in kwargs:
-                kwargs["z"] = kwargs["z"].to(memory_format=memory_format)
-            output = original_decode(*args, **kwargs)
-            return output
-
-        self.pipe.vae.decode = decode_wrapper
+        """Forward channels-last conversion for subclass compatibility."""
+        self._vae_manager.convert_to_channels_last(self._decoding_vaes())
 
     def _make_generator(self, seed: int) -> torch.Generator:
         """Generator on the pipe's execution device (cuda normally, cpu under offload).

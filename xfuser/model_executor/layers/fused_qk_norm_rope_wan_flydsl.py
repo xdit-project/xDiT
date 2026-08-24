@@ -1,10 +1,4 @@
-"""Fused QK-RMSNorm(across-heads) + interleaved RoPE for Wan (FlyDSL port).
-
-This is the FlyDSL rewrite of the Triton kernel in
-``xfuser/model_executor/layers/hl_fused_wan.py``.  Wan's ``norm_q`` / ``norm_k``
-are ``torch.nn.RMSNorm(H*D)`` -- the RMS reduction spans the WHOLE flattened
-``[.., H*D]`` row ("rms_norm_across_heads"), NOT one head at a time -- so this
-cannot reuse the per-head FLUX/Qwen kernel in ``fused_qk_rope_flydsl.py``.
+"""Fused QK-RMSNorm(across-heads) + interleaved RoPE for Wan
 
 Layout / algorithm
 ------------------
@@ -27,22 +21,7 @@ Layout / algorithm
     diffusers builds the full-D cos/sin with ``repeat_interleave(2)``, so
     ``cos[..., 2p] == cos[..., 2p+1]`` and the full-D table already equals the
     ``even_in_head`` table the Triton kernel constructs.
-
-Numerics: matches the Triton kernel (NOT the eager reference) -- ``x*rstd*w`` is
-kept in fp32 straight through the rotate with a single round to bf16 at the
-store.  (The eager path rounds once more, to bf16, between RMSNorm and
-``apply_rotary_emb``; this fast path skips that intermediate round, exactly as
-the shipped Triton kernel does.)
-
-The fused kernel is used automatically whenever FlyDSL is importable; there is
-no env flag and no Triton path.  The entry point falls back to the unfused
-diffusers reference for anything outside the supported envelope (and when FlyDSL
-is absent), so selection never changes the result, only the speed.
 """
-
-# NOTE: no ``from __future__ import annotations`` -- PEP 563 stringifies the
-# annotations and defeats flydsl's runtime-arg detection for Int32 kernel/launch
-# params (n_tokens), forcing a fresh JIT per value.
 
 import math
 from functools import lru_cache
@@ -163,8 +142,7 @@ if _HAS_FLYDSL:
             kin_ = GTensor(k_in, dtype=T.bf16, shape=(-1,))
             # Single output buffer; q and k write disjoint halves ([0,S) and
             # [S,2S)).  One output tensor arg -> one fewer dlpack marshal per
-            # launch than two separate q_out/k_out, which matters at the Wan
-            # shape where the op is a ~3us boundary race against triton.
+            # launch than two separate q_out/k_out
             out_ = GTensor(out, dtype=T.bf16, shape=(-1,))
             wq_ = GTensor(wq, dtype=T.bf16, shape=(-1,))
             wk_ = GTensor(wk, dtype=T.bf16, shape=(-1,))
@@ -326,17 +304,12 @@ if _HAS_FLYDSL:
         # One allocation for both outputs (halves the per-call torch.empty
         # python/dispatch cost) as a single [2, S, heads, D] tensor -- the two
         # halves are contiguous [S, heads, D] views the caller splits AFTER the
-        # op (custom_op forbids two returns aliasing one storage).  At the Wan
-        # shape the whole op is a ~3us boundary race against triton, so shaving
-        # an allocation is the lever.
+        # op (custom_op forbids two returns aliasing one storage)
         out = torch.empty((2, S, heads, D), dtype=q.dtype, device=q.device)
 
         # Fetch the stream on q's device directly instead of a
         # ``torch.cuda.device(...)`` context manager (two cudaSetDevice calls) --
-        # at the Wan shape this is a ~5us boundary race against triton, so the
-        # per-call python is worth trimming.  The kernel writes q and k into the
-        # two halves of a single flat [2*S, H*D] view (k's rows start at S*HD),
-        # so only one output tensor is marshaled per launch.
+        # at the Wan shape this is a ~5us boundary 
         stream = torch.cuda.current_stream(q.device)
         # q/k may be non-contiguous rows (e.g. chunks of a fused-QKV projection,
         # row stride 3*H*D).  Pass their runtime row strides so the kernel reads
@@ -413,8 +386,7 @@ def fused_qk_norm_rope(
     ``query`` / ``key`` are the raw projection outputs of shape ``[B, S, H*D]``.
     Runs the fused FlyDSL kernel when the shape is in-envelope, otherwise falls
     back to the unfused diffusers reference (``_reference``) so the result is
-    identical either way -- there is no Triton path and no env flag: FlyDSL is
-    always used when importable, diffusers otherwise.
+    identical either way 
     """
     _ref = lambda: _reference(  # noqa: E731 - local fallback shorthand
         query, key, norm_q, norm_k, freqs_cos, freqs_sin, heads

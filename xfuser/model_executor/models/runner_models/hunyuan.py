@@ -21,6 +21,11 @@ from xfuser.core.utils.runner_utils import (
     fix_llama_tokenizer_pretokenizer,
 )
 from xfuser.compile import install_inductor_passes
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheSettings,
+)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -47,6 +52,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         enable_tiling=True,
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
+        supports_step_caching=True,
         use_fp8_text_encoder=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
@@ -65,6 +71,16 @@ class xFuserHunyuanvideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         fp8_gemm_module_list=["transformer.transformer_blocks", "transformer.single_transformer_blocks"],
+        # guidance embedded into timestep conditioning (1 forward pass per step, no separate cfg).
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"), ("single_transformer_blocks", "Pattern_0")),
+                    enable_separate_cfg=False,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
         fp8_text_encoder_module_list=["text_encoder.layers"],
         fsdp_strategy={
             "transformer": {
@@ -170,6 +186,7 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         enable_slicing=True,
         enable_tiling=True,
         use_fp8_gemms=True,
+        supports_step_caching=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
     )
@@ -186,6 +203,15 @@ class xFuserHunyuanvideo15Model(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         mod_value=16,
         valid_tasks=["i2v", "t2v"],
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=5, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
 

@@ -84,6 +84,9 @@ def shard_pipeline_components(loader) -> None:
                 reshard_after_forward=model.config.reshard_after_forward,
                 memory_efficient_init=model.config.memory_efficient_sharding,
                 offload_policy=offload_policy,
+                # Cache hits skip transformer blocks, so prefetching their all-gathers
+                # wastes communication; executed blocks still gather on demand.
+                forward_prefetch=not bool(model.config.cache_method),
                 # All ranks load from the same checkpoint so states are already
                 # identical. No broadcast needed regardless of offload policy.
                 sync_module_states=False,

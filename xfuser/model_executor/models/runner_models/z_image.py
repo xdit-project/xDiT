@@ -1,5 +1,10 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheSettings,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     xFuserModel,
     register_model,
@@ -69,6 +74,7 @@ class xFuserZImageModel(xFuserModel):
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
         use_int8_gemms=True,
+        supports_step_caching=True,
         use_parallel_vae=True,
     )
     settings = ModelSettings(
@@ -90,6 +96,14 @@ class xFuserZImageModel(xFuserModel):
             "transformer.noise_refiner",
             "transformer.context_refiner"
         ],
+        step_cache_config={
+            "dbcache":DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("layers", "Pattern_3"),),
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=3, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _customize_settings(self, config) -> None:

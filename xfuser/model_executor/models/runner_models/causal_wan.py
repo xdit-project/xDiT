@@ -14,6 +14,11 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheSettings,
+)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -45,6 +50,7 @@ class xFuserCausalWanModel(xFuserModel):
         use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=512,
@@ -74,6 +80,18 @@ class xFuserCausalWanModel(xFuserModel):
             "text_encoder": {
                 "wrap_attrs": ["encoder.block"],
             },
+        },
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                ],
+            ),
         },
     )
 

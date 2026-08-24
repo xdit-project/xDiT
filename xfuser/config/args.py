@@ -1,6 +1,7 @@
 import sys
 import argparse
 import dataclasses
+import warnings
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Union
 
@@ -138,6 +139,8 @@ class xFuserArgs:
     use_cache: bool = False
     use_teacache: bool = False
     use_fbcache: bool = False
+    cache_method: Optional[str] = None
+    cache_config: Optional[str] = None
     # Other arguments
     use_fp8_t5_encoder: bool = False
     shard_t5_encoder: bool = False
@@ -199,6 +202,23 @@ class xFuserArgs:
     distilled_transformer_path: Optional[str] = None
     distilled_transformer_2_path: Optional[str] = None
 
+    def __post_init__(self):
+        if self.cache_method is None:
+            if self.use_fbcache:
+                warnings.warn(
+                    "--use_fbcache is deprecated, use --cache_method fbcache",
+                    FutureWarning,
+                    stacklevel=2,
+                )
+                self.cache_method = "fbcache"
+            elif self.use_teacache:
+                warnings.warn(
+                    "--use_teacache is deprecated, use --cache_method teacache",
+                    FutureWarning,
+                    stacklevel=2,
+                )
+                self.cache_method = "teacache"
+
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
         """Shared CLI arguments for xFuser engine."""
@@ -244,12 +264,28 @@ class xFuserArgs:
         runtime_group.add_argument(
             "--use_teacache",
             action="store_true",
-            help="Enable teacache to accelerate inference in a single card",
+            help="[Deprecated] Use --cache_method teacache instead.",
         )
         runtime_group.add_argument(
             "--use_fbcache",
             action="store_true",
-            help="Enable teacache to accelerate inference in a single card",
+            help="[Deprecated] Use --cache_method fbcache instead.",
+        )
+        runtime_group.add_argument(
+            "--cache_method",
+            type=str,
+            default=None,
+            choices=["teacache", "fbcache", "dbcache"],
+            help="Step caching method.",
+        )
+        runtime_group.add_argument(
+            "--cache_config",
+            type=str,
+            default=None,
+            help=(
+                "JSON string of advanced config overrides merged on top of preset defaults. "
+                "E.g. '{\"residual_diff_threshold\": 0.5}'."
+            ),
         )
         runtime_group.add_argument(
             "--attention_backend",
@@ -1000,9 +1036,31 @@ class xFuserArgs:
             help="Path to the low-noise distilled transformer_2 safetensors file.",
         )
         parser.add_argument(
+            "--use_teacache",
+            action="store_true",
+            help="[Deprecated] Use --cache_method teacache instead.",
+        )
+        parser.add_argument(
             "--use_fbcache",
             action="store_true",
-            help="Enable FBCache to accelerate the diffusion loop",
+            help="[Deprecated] Use --cache_method fbcache instead.",
+        )
+        parser.add_argument(
+            "--cache_method",
+            type=str,
+            default=None,
+            choices=["teacache", "fbcache", "dbcache"],
+            help="Step caching method.",
+        )
+        parser.add_argument(
+            "--cache_config",
+            type=str,
+            default=None,
+            help=(
+                "JSON string of advanced config overrides merged on top of preset defaults. "
+                "E.g. '{\"residual_diff_threshold\": 0.5, \"max_warmup_steps\": 6}'. "
+                "Keys must match DBCacheConfig fields (cache-dit)."
+            ),
         )
         return parser
 

@@ -37,6 +37,11 @@ DEFAULT_NEGATIVE_PROMPT = (
     "pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, "
     "inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts."
 )
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheSettings,
+)
 
 
 @register_model("dg845/LTX-2.3-Diffusers")
@@ -67,6 +72,15 @@ class xFuserLTX23VideoModel(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=64,
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
@@ -80,6 +94,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         ring_degree=True,
         enable_tiling=True,
         enable_slicing=True,
+        supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
     )
@@ -275,6 +290,15 @@ class xFuserLTX2VideoModel(xFuserModel):
         fp8_gemm_module_list=["transformer.transformer_blocks"],
         fps=24,
         resolution_divisor=64,
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_0"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
@@ -288,6 +312,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         use_fp8_gemms=True,
+        supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
     )

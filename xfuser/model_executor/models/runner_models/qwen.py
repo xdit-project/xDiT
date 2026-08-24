@@ -1,5 +1,10 @@
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheSettings,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
@@ -39,6 +44,7 @@ class xFuserQwenImageEditModel(xFuserModel):
         use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         num_inference_steps=50,
@@ -58,6 +64,15 @@ class xFuserQwenImageEditModel(xFuserModel):
             },
         },
         fp8_gemm_module_list=["transformer.transformer_blocks"],
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_1"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=6, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
         fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
     )
 
@@ -128,6 +143,7 @@ class xFuserQwenImageModel(xFuserModel):
         ring_degree=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
+        supports_step_caching=True,
         use_fp8_text_encoder=True,
         use_parallel_vae=True,
         enable_tiling=True,
@@ -153,6 +169,14 @@ class xFuserQwenImageModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("transformer_blocks", "Pattern_1"),),
+                    enable_separate_cfg=False,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=6, residual_diff_threshold=0.12, scm_policy="ultra"),
+        )},
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:

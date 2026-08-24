@@ -27,6 +27,7 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
     validate_vae_config,
 )
 
+from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
 from xfuser.core.distributed import (
     get_world_group,
     get_data_parallel_rank,
@@ -130,7 +131,7 @@ class ModelCapabilities:
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
-    use_fbcache: bool = False
+    supports_step_caching: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -170,6 +171,7 @@ class ModelSettings:
     fp8_precision_overrides: Tuple[str] = None
     fp8_precision_override_suffixes: Tuple[str] = None
     fbcache_thresh: float = 0.12
+    step_cache_config: Optional[ModelCacheConfig] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
     fsdp_strategy: dict = field(default_factory=lambda: {
         "": { # name, e.g. transformer
@@ -184,6 +186,7 @@ class ModelSettings:
     })
     valid_tasks: List[str] = field(default_factory=list)
     resolution_divisor: Optional[int] = None
+    transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
 class DiffusionOutput:
     """ Class to encapsulate diffusion model outputs """
@@ -339,6 +342,10 @@ class xFuserModel(abc.ABC):
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
 
+        # Compile and warm the original blocks before cache adapters replace or
+        # patch them, keeping stateful cross-step cache logic out of traced graphs.
+        # Adapters use declared forward patterns because compiled block signatures
+        # are no longer introspectable.
         if self.config.use_torch_compile:
             log("Torch.compile enabled. Warming up torch compiler ...")
             compile_input_args = copy.deepcopy(input_args)
@@ -346,6 +353,9 @@ class xFuserModel(abc.ABC):
             if self.config.batch_size and isinstance(compile_input_args.get("prompt"), list):
                 compile_input_args["prompt"] = compile_input_args["prompt"][: self.config.batch_size]
             self._compile_model(compile_input_args)
+
+        if self.config.cache_method:
+            self._apply_step_cache()
 
     def _local_onload_device(self) -> torch.device:
         """The device this rank offloads to and from, which is never implicitly cuda:0."""
@@ -402,6 +412,51 @@ class xFuserModel(abc.ABC):
     def _get_runtime_state_pipeline(self):
         return self.pipe
 
+    def _apply_step_cache(self) -> None:
+        from xfuser.core.distributed import get_tensor_model_parallel_world_size
+        from xfuser.model_executor.cache.adapters import apply_cache
+        cache_method = self.config.cache_method
+        method_cfg = (self.settings.step_cache_config or {}).get(cache_method)
+        # A configured FBCache entry uses cache-dit's DBCache engine with an
+        # Fn=1 preset. None marks an in-tree FBCache adapter.
+        engine_method = (
+            "dbcache"
+            if cache_method == "fbcache"
+            and isinstance(method_cfg, DBCacheSettings)
+            else cache_method
+        )
+        pp_size = get_pipeline_parallel_world_size()
+        if engine_method == "dbcache" and pp_size > 1:
+            raise ValueError(
+                f"dbcache is incompatible with PipeFusion (PP={pp_size}): "
+                "the residual-diff skip decision is computed via a collective that only runs on the "
+                "stage holding the cached block, so the world collective deadlocks. Disable dbcache "
+                "or set --pipefusion_parallel_degree 1."
+            )
+        if engine_method == "dbcache" and get_data_parallel_world_size() > 1:
+            raise ValueError(
+                "dbcache is incompatible with data parallelism because its cache "
+                "decision is synchronized across the world group. Set "
+                "--data_parallel_degree 1."
+            )
+        if engine_method in ("teacache", "fbcache") and pp_size > 1:
+            raise ValueError(
+                f"{engine_method} is incompatible with PipeFusion (PP={pp_size}). "
+                "Set --pipefusion_parallel_degree 1."
+            )
+        if cache_method == "teacache" and get_tensor_model_parallel_world_size() > 1:
+            raise RuntimeError("teacache requires TP=1")
+        apply_cache(
+            cache_method=engine_method,
+            num_steps=self.config.num_inference_steps,
+            pipe=self.pipe,
+            preset_kwargs=method_cfg.preset if method_cfg else None,
+            adapter_config=method_cfg.adapter if method_cfg else None,
+            cache_config=self.config.cache_config,
+            transformer_attr=self.settings.transformer_attr_names[0],
+        )
+        log(f"Step cache applied: method={cache_method}"
+            + (f" (engine={engine_method})" if engine_method != cache_method else ""))
 
     def _decoding_vaes(self) -> List:
         """Forward staged VAE discovery to the VAE manager."""
@@ -420,6 +475,18 @@ class xFuserModel(abc.ABC):
             else:
                 if config_value and not getattr(self.capabilities, key):
                     raise ValueError(f"Model {self.settings.model_name} does not support {key}.")
+
+        if config.cache_method:
+            if not self.capabilities.supports_step_caching:
+                raise ValueError(
+                    f"Model {self.settings.model_name} does not support step caching."
+                )
+            supported_methods = self.settings.step_cache_config or {}
+            if config.cache_method not in supported_methods:
+                raise ValueError(
+                    f"Model {self.settings.model_name} does not support --cache_method {config.cache_method}. "
+                    f"Supported: {', '.join(supported_methods)}"
+                )
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends
@@ -569,7 +636,9 @@ class xFuserModel(abc.ABC):
             component = getattr(self.pipe, component_name, None)
             if component is None:
                 continue
-            if self.config.fully_shard_degree > 1:
+            if self.config.fully_shard_degree > 1 or self.config.cache_method:
+                # Per-block compile: leaves transformer as original object so cache-dit's
+                # transformer.forward patch remains visible during compiled execution.
                 wrap_attrs = self.settings.fsdp_strategy.get(component_name, {}).get("wrap_attrs", [])
                 compiled_any = False
                 for attr in wrap_attrs:
@@ -802,6 +871,8 @@ class xFuserModel(abc.ABC):
 
         if self.config.use_vae_channels_last_format:
             self._convert_vae_to_channels_last()
+
+
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         return 1

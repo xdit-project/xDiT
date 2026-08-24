@@ -11,6 +11,11 @@ from xfuser import xFuserArgs
 from xfuser.model_executor.pipelines.pipeline_wan_i2v import (
     xFuserWanImageToVideoPipeline,
 )
+from xfuser.model_executor.cache import (
+    DBCachePreset,
+    CacheDitAdapterConfig,
+    DBCacheSettings,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     ModelSettings,
     xFuserModel,
@@ -184,6 +189,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
         supports_sparge_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -210,6 +216,15 @@ class xFuserWan21I2VModel(xFuserWanModel):
                                  "30.", "31.", "32.", "33.", "34.",
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("blocks", "Pattern_2"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -288,6 +303,9 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         routes=STANDARD_LOAD_ROUTES,
     )
 
+    # WAN has no in-tree FBCache adapter (that path is FLUX.2-specific). FBCache is a
+    # special case of DBCache (first-block cache), so expose "fbcache" as DBCache with
+    # Fn_compute_blocks=1; base_model routes it through the cache-dit (dbcache) engine.
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
@@ -299,6 +317,33 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
         self.settings.fp8_gemm_module_list = ["transformer.blocks", "transformer_2.blocks"]
         self.settings.fp8_text_encoder_module_list = ["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides = None
+        self.settings.transformer_attr_names = ["transformer", "transformer_2"]
+        # Dual-transformer: t1=high-noise denoiser, t2=low-noise refiner (shorter warmup).
+        self.settings.step_cache_config = {
+            "dbcache": DBCacheSettings(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                ],
+            ),
+            # "True" FBCache: plain first-block residual cache (Fn_compute_blocks=1) on
+            # both experts, with the TaylorSeer calibrator and SCM policy disabled so it
+            # matches FLUX.2-style FBCache rather than full DBCache.
+            "fbcache": DBCacheSettings(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=2),
+                ],
+            ),
+        }
 
 
     def _load_model(self) -> DiffusionPipeline:
@@ -368,6 +413,7 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         enable_tiling=True,
         enable_slicing=True,
         supports_distilled_weights=True,
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=720,
@@ -384,6 +430,18 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
         super()._customize_settings(config)
         self.settings.model_name = self._BASE_MODEL
         self.settings.output_name = "wan2.2_distilled_i2v"
+        self.settings.step_cache_config = {
+            "dbcache": DBCacheSettings(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=False, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                ],
+            ),
+        }
 
 
     def _build_distilled_transformer(self, component_name: str, path: str):
@@ -417,7 +475,6 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
             stream_quant=False,
             weight_source=weight_source,
         )
-
     def _load_model(self) -> DiffusionPipeline:
         transformer = self._build_distilled_transformer(
             "transformer",
@@ -521,6 +578,20 @@ class xFuserWan21T2VModel(xFuserWanModel):
         flow_shift=12,
         num_hybrid_attn_high_precision_steps = 5,
     )
+    capabilities = ModelCapabilities(
+        ulysses_degree=True,
+        ring_degree=True,
+        fully_shard_degree=True,
+        use_fp8_gemms=True,
+        use_fp4_gemms=True,
+        use_hybrid_attn_schedule=True,
+        use_parallel_vae=True,
+        cross_attention_backend=True,
+        supports_sparge_attention_backends=True,
+        enable_tiling=True,
+        enable_slicing=True,
+        supports_step_caching=True,
+    )
     settings = ModelSettings(
         mod_value=8,
         fps=16,
@@ -535,6 +606,15 @@ class xFuserWan21T2VModel(xFuserWanModel):
                                  "30.", "31.", "32.", "33.", "34.",
                                  "35.", "36.", "37.", "38.", "39."),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("blocks", "Pattern_2"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        },
     )
 
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
@@ -591,6 +671,7 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         routes=STANDARD_LOAD_ROUTES,
     )
 
+    # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
@@ -602,6 +683,32 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
         self.settings.fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"]
         self.settings.fp8_text_encoder_module_list=["text_encoder.encoder.block"]
         self.settings.fp8_precision_overrides=None
+        self.settings.transformer_attr_names = ["transformer", "transformer_2"]
+        self.settings.step_cache_config = {
+            "dbcache": DBCacheSettings(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra", max_warmup_steps=2),
+                ],
+            ),
+            # "True" FBCache: plain first-block residual cache (Fn_compute_blocks=1) on
+            # both experts, with the TaylorSeer calibrator and SCM policy disabled so it
+            # matches FLUX.2-style FBCache rather than full DBCache.
+            "fbcache": DBCacheSettings(
+                adapter=[
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer"),
+                    CacheDitAdapterConfig(blocks=(("blocks", "Pattern_2"),), enable_separate_cfg=True, transformer_attr="transformer_2"),
+                ],
+                preset=[
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=4),
+                    DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False, max_warmup_steps=2),
+                ],
+            ),
+        }
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import WanPipeline
@@ -656,6 +763,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         supports_sparge_attention_backends=True,
         enable_tiling=True,
         enable_slicing=True,
+        supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
         height=736,
@@ -682,6 +790,25 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         fp8_precision_override_suffixes=(".net.0.proj", ".net.2"),
         fsdp_strategy=COMMON_FSDP_STRATEGY,
         valid_tasks=["i2v", "t2v"],
+        step_cache_config={
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("blocks", "Pattern_2"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=3, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+            # "True" FBCache: plain first-block residual cache (Fn_compute_blocks=1) with
+            # the TaylorSeer calibrator and SCM policy disabled so it matches FLUX.2-style
+            # FBCache rather than full DBCache.
+            "fbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("blocks", "Pattern_2"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=1, residual_diff_threshold=0.12, scm_policy=None, enable_taylorseer=False),
+            ),
+        },
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -775,6 +902,7 @@ class xFuserWan21VACEModel(xFuserWanModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
+        supports_step_caching=True,
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
     )
@@ -812,6 +940,16 @@ class xFuserWan21VACEModel(xFuserWanModel):
         else:
             self.settings.model_name = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
             self.settings.output_name = "wan.2.1_vace_1.3b"
+        # Only cache `blocks`; vace_blocks have a different forward pattern not supported by cache-dit.
+        self.settings.step_cache_config = {
+            "dbcache": DBCacheSettings(
+                adapter=CacheDitAdapterConfig(
+                    blocks=(("blocks", "Pattern_2"),),
+                    enable_separate_cfg=True,
+                ),
+                preset=DBCachePreset(Fn_compute_blocks=4, residual_diff_threshold=0.12, scm_policy="ultra"),
+            ),
+        }
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import WanVACEPipeline

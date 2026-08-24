@@ -391,6 +391,7 @@ if env_info["has_aiter"]:
         _AITER_MHA_V4_AVAILABLE = False
         pass # Error is raised in runtime_state.py when an MHA v4 backend is selected.
 
+    # MXFP8 shipped after the base MHA v4 API; keep it optional for older AITER builds.
     try:
         from aiter.ops.mha_v4 import (
             mha_v4_mxfp8 as _aiter_mha_v4_mxfp8,

@@ -24,7 +24,7 @@ from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
 from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
     fused_qk_norm_rope,
-    fused_qk_norm_rope_enabled,
+    _HAS_FLYDSL,
 )
 
 env_info = PACKAGES_CHECKER.get_packages_info()
@@ -101,20 +101,18 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
         query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
 
-        # XFUSER_HL_WAN_FUSED_QK_NORM_ROPE: collapse
-        #   norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
-        # into a single Triton pass.  inductor cannot fuse RoPE into the norm
+        # Collapse norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
+        # into a single FlyDSL kernel: inductor cannot fuse RoPE into the norm
         # (the RMS reduction sits between them) and the reference RoPE writes
         # through two stride-2 scatters, so the reference is four uncoalesced
-        # bandwidth-bound passes over a [1, S, H*D] bf16 tensor.  Falls back to
-        # the original code whenever the fast path's guards do not hold.
-        fused_qk = None
-        if rotary_emb is not None and fused_qk_norm_rope_enabled():
-            fused_qk = fused_qk_norm_rope(
+        # bandwidth-bound passes over a [1, S, H*D] bf16 tensor.  FlyDSL is used
+        # automatically when importable (no env flag, no Triton path); the entry
+        # self-falls-back to the diffusers reference for out-of-envelope shapes.
+        # value carries no norm/rope -- it just needs the head split.
+        if _HAS_FLYDSL and rotary_emb is not None:
+            query, key = fused_qk_norm_rope(
                 query, key, attn.norm_q, attn.norm_k, rotary_emb[0], rotary_emb[1], attn.heads
             )
-        if fused_qk is not None:
-            query, key = fused_qk
             value = value.unflatten(2, (attn.heads, -1))
         else:
             query, key, value = self._qk_norm_rope_reference(attn, query, key, value, rotary_emb)

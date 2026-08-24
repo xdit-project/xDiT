@@ -19,7 +19,7 @@
 - [🔥 Meet xDiT](#meet-xdit)
 - [📢 Open-source Community](#updates)
 - [🎯 Supported DiTs](#support-dits)
-- [📈 Performance](#perf)
+- [📈 Performance](#support-dits)
 - [🚀 QuickStart](#QuickStart)
 - [🖼️ ComfyUI with xDiT](#comfyui)
 - [✨ xDiT's Arsenal](#secrets)

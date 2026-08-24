@@ -1,3 +1,5 @@
+import functools
+import os
 import torch
 import torch.nn as nn
 from typing import Optional
@@ -7,12 +9,45 @@ try:
 except ImportError:
     pass  # Error raised in base_model.py if fp8 enabled without AITER.
 
-_FP8_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
+
+@functools.lru_cache(maxsize=1)
+def _hip_quant_per_1x128():
+    # aiter.get_hip_quant rebuilds a dispatch dict + functools.partial on every call (its
+    # triton twin get_triton_quant is lru_cached; the hip one is not).
+    return aiter.get_hip_quant(aiter.QuantType.per_1x128)
+
+try:
+    from aiter.ops.shuffle import shuffle_weight
+    from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
+        gemm_a8w8_blockscale_preshuffle,
+    )
+    _HAS_PRESHUFFLE = True
+except ImportError:
+    _HAS_PRESHUFFLE = False  # older AITER without preshuffle blockscale GEMM
+
 _FP8_BLOCK = 128
+_PRESHUFFLE_LAYOUT = (16, 16)
+
+# Default off: AITER has no tuned block-128 preshuffle kernel for gfx1201, so preshuffle falls back
+# to a small-M triton config and measured ~25% slower than plain there. Set XFUSER_FP8_PRESHUFFLE=1
+# on an arch that does have one.
+_PRESHUFFLE_ENABLED = os.environ.get("XFUSER_FP8_PRESHUFFLE", "0") != "0"
+
+
+def _fp8_dtype() -> torch.dtype:
+    return aiter.dtypes.fp8
+
+
+def _fp8_max() -> float:
+    return torch.finfo(aiter.dtypes.fp8).max
 
 
 def _quantize_weight_blocks(w_blocks: torch.Tensor, w_amax: torch.Tensor) -> torch.Tensor:
-    return (w_blocks / w_amax[:, None, :, None] * _FP8_MAX).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+    fp8_max = _fp8_max()
+    # One scale-mul + in-place clamp, then cast — avoids the extra full-size bf16 temps a
+    # (divide, multiply, clamp) chain would materialise at load time.
+    scale = (fp8_max / w_amax)[:, None, :, None]
+    return (w_blocks * scale).clamp_(-fp8_max, fp8_max).to(_fp8_dtype())
 
 
 def _pad_cols_to_multiple(t: torch.Tensor, block: int) -> tuple[torch.Tensor, bool]:
@@ -22,7 +57,36 @@ def _pad_cols_to_multiple(t: torch.Tensor, block: int) -> tuple[torch.Tensor, bo
     return torch.nn.functional.pad(t, (0, c_pad)), True
 
 
-@torch.library.custom_op("mylib::fp8_blockscale_gemm", mutates_args=())
+def quantize_weight_to_fp8_blockscale_plain(
+    weight: torch.Tensor, device: Optional[torch.device] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block-128 FP8 quantize a weight to the plain (non-preshuffle) layout.
+
+    Returns (w_fp8 [N, K] fp8, w_scale [ceil(N/128), ceil(K/128)] float32). Mirrors
+    xFuserFP8BlockScaleLinear._quantize_weights' plain branch; used by the transformers
+    HfQuantizer load path (aiter_fp8_quantizer), which stores fp8 under a state-dict
+    key rather than calling load_and_quantize_weights.
+    """
+    N, K = weight.shape
+    n_blocks = (N + _FP8_BLOCK - 1) // _FP8_BLOCK
+    k_blocks = (K + _FP8_BLOCK - 1) // _FP8_BLOCK
+    target = device if device is not None else weight.device
+    w = weight.to(device=target)
+    r_pad = (-N) % _FP8_BLOCK
+    c_pad = (-K) % _FP8_BLOCK
+    if r_pad or c_pad:
+        w = torch.nn.functional.pad(w, (0, c_pad, 0, r_pad))
+    w_blocks = w.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
+    w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)
+    w_scale = (w_amax.float() / _fp8_max())
+    w_q = _quantize_weight_blocks(w_blocks, w_amax)
+    w_q = w_q.reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
+    if r_pad or c_pad:
+        w_q = w_q[:N, :K].contiguous()
+    return w_q, w_scale
+
+
+@torch.library.custom_op("xfuser::fp8_blockscale_gemm", mutates_args=())
 def _fp8_blockscale_gemm(
     x: torch.Tensor,
     w_fp8: torch.Tensor,
@@ -30,7 +94,7 @@ def _fp8_blockscale_gemm(
 ) -> torch.Tensor:
     K = x.shape[1]
     x_padded, needs_pad = _pad_cols_to_multiple(x, _FP8_BLOCK)
-    x_q, x_scale = aiter.get_hip_quant(aiter.QuantType.per_1x128)(x_padded, quant_dtype=aiter.dtypes.fp8)
+    x_q, x_scale = _hip_quant_per_1x128()(x_padded, quant_dtype=_fp8_dtype())
     if needs_pad:
         x_q = x_q[:, :K].contiguous()
     return aiter.gemm_a8w8_blockscale(x_q, w_fp8, x_scale, w_scale)
@@ -47,12 +111,59 @@ def _(
     return torch.empty(M, N, dtype=torch.bfloat16, device=x.device)
 
 
+@torch.library.custom_op("xfuser::fp8_blockscale_gemm_preshuffle", mutates_args=())
+def _fp8_blockscale_gemm_preshuffle(
+    x: torch.Tensor,
+    w_shuffle: torch.Tensor,
+    w_scale: torch.Tensor,
+    n: int,
+    k_padded: int,
+) -> torch.Tensor:
+    # Weight already in (N/16, K*16) fragment order from load. x_scale must be
+    # transposed-contiguous — the preshuffle kernel reads it as is_x_scale_tranposed=True (sic).
+    K = x.shape[1]
+    if K < k_padded:
+        x = torch.nn.functional.pad(x, (0, k_padded - K))
+    x_q, x_scale = _hip_quant_per_1x128()(x, quant_dtype=_fp8_dtype())
+    x_scale = x_scale.transpose(0, 1).contiguous().view(x_scale.shape[0], x_scale.shape[1])
+    out = gemm_a8w8_blockscale_preshuffle(x_q, w_shuffle, x_scale, w_scale, dtype=torch.bfloat16)
+    return out[:, :n].contiguous() if out.shape[1] != n else out
+
+
+@_fp8_blockscale_gemm_preshuffle.register_fake
+def _(
+    x: torch.Tensor,
+    w_shuffle: torch.Tensor,
+    w_scale: torch.Tensor,
+    n: int,
+    k_padded: int,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], n, dtype=torch.bfloat16, device=x.device)
+
+
+def _rehome_sentinel(sentinel: torch.Tensor, fn) -> torch.Tensor:
+    """Put the `weight` sentinel wherever `fn` puts real tensors, without copying it.
+
+    A meta sentinel reaches here whenever a layer is quantized under the replicated meta context:
+    the broadcast fills weight_fp8 and weight_scale with real data but cannot rehome a plain
+    __dict__ attribute, so the pipeline's later move to device is the first thing to touch it, and
+    that move is a copy meta cannot satisfy. The sentinel holds no data to copy — it exists only to
+    advertise dtype and device — so rebuild it on the target instead of moving it.
+    """
+    if sentinel.is_meta:
+        return fn(torch.empty(0, dtype=sentinel.dtype))
+    return fn(sentinel)
+
+
 class xFuserFP8BlockScaleLinear(nn.Module):
     """
-    Drop-in nn.Linear replacement using AITER gemm_a8w8_blockscale (block-128 FP8 w8a8).
+    Drop-in nn.Linear replacement, block-128 FP8 w8a8 on AITER.
 
     Weights pre-quantized at load time. Activations quantized inside the custom op
     via aiter.get_hip_quant(QuantType.per_1x128) — fused with GEMM under torch.compile.
+    Plain gemm_a8w8_blockscale by default; preshuffle (offline weight reorder for
+    gemm_a8w8_blockscale_preshuffle) is opt-in via XFUSER_FP8_PRESHUFFLE=1 — it measured
+    ~25% slower on gfx1201/RDNA4.
 
     Scale shapes:
         weight_scale: [ceil(N/128), ceil(K/128)]
@@ -60,10 +171,17 @@ class xFuserFP8BlockScaleLinear(nn.Module):
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 device=None, dtype=None):
+                 device=None, dtype=None, preshuffle: bool = True):
         super().__init__()
+        # Preshuffle needs a newer AITER and can be disabled via env for A/B measurement.
+        # Fall back to the plain blockscale path when the kernel is absent or forced off.
+        if preshuffle and (not _HAS_PRESHUFFLE or not _PRESHUFFLE_ENABLED):
+            preshuffle = False
         self.in_features = in_features
         self.out_features = out_features
+        self.preshuffle = preshuffle
+        # Dtype of the original bf16/fp16 linear, used for the `weight` sentinel.
+        self._compute_dtype = dtype or torch.bfloat16
         self.register_parameter("weight", None)
         if bias:
             self.bias = nn.Parameter(
@@ -80,6 +198,38 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         if bias is not None and self.bias is not None:
             target = device if device is not None else bias.device
             self.bias = torch.nn.Parameter(bias.to(device=target, dtype=bias.dtype).detach())
+        self._install_weight_sentinel()
+
+    def _install_weight_sentinel(self) -> None:
+        """Keep `weight` a real, 0-element, bf16 tensor once fp8 lives in `weight_fp8`.
+
+        T5-family text encoders cast activations to `wo.weight.dtype` unless it is int8; an fp8
+        `weight` would force an fp8 activation into the bf16/fp16-only AITER quant kernel (abort),
+        and a None `weight` raises AttributeError. A bf16 sentinel makes the dtype match so no cast
+        happens; forward uses `weight_fp8`.
+
+        Stored as a plain __dict__ attribute (not a param/buffer): it must stay invisible to
+        named_parameters/named_buffers so it neither inflates the replicated-broadcast tensor count
+        (rank0 vs peers must agree) nor collides with the DiT quantizer's later `weight` handling.
+        0-element ⇒ no VRAM.
+        """
+        self._parameters.pop("weight", None)
+        self._buffers.pop("weight", None)
+        dev = self.weight_fp8.device if getattr(self, "weight_fp8", None) is not None else None
+        self.__dict__["weight"] = torch.empty(0, dtype=self._compute_dtype, device=dev)
+
+    def absorb_fp8_weight_from_weight_attr(self) -> None:
+        """Move loader-stored fp8 out of `weight` into `weight_fp8`, then install the sentinel.
+
+        The transformers HfQuantizer path stores fp8 under `weight` (the loader requires that key);
+        normalize it to the DiT layout (fp8 in `weight_fp8`, bf16 sentinel in `weight`). Plain
+        layout — the TE swap uses preshuffle=False. No-op if `weight` is not fp8.
+        """
+        weight = getattr(self, "weight", None)
+        if weight is None or weight.dtype != _fp8_dtype():
+            return
+        self.weight_fp8 = nn.Parameter(weight.data, requires_grad=False)
+        self._install_weight_sentinel()
 
     def _quantize_weights(self, weight: torch.Tensor, device: Optional[torch.device] = None) -> None:
         N, K = weight.shape
@@ -98,10 +248,33 @@ class xFuserFP8BlockScaleLinear(nn.Module):
 
         w_blocks = w.reshape(n_blocks, _FP8_BLOCK, k_blocks, _FP8_BLOCK)
         w_amax = w_blocks.abs().amax(dim=(1, 3)).clamp(min=1e-12)  # [n_blocks, k_blocks]
-        w_scale = (w_amax.float() / _FP8_MAX)
+        w_scale = (w_amax.float() / _fp8_max())
 
         w_q = _quantize_weight_blocks(w_blocks, w_amax)
         w_q = w_q.reshape(n_blocks * _FP8_BLOCK, k_blocks * _FP8_BLOCK)
+
+        # bf16 weight is done with; drop it before shuffle/slice so the load peak isn't
+        # bf16 + fp8(w_q) + fp8(w_shuffle) held at once.
+        del w, w_blocks
+
+        # Preshuffle stores the 128-padded weight permanently. For 128-aligned dims that
+        # matches plain's numel (free speed), but for non-aligned dims the padding is pure
+        # persistent VRAM waste. Only preshuffle when padding is zero; otherwise store exact
+        # [N,K] plain (forward reads self.preshuffle, so flip it here too).
+        if self.preshuffle and was_padded:
+            self.preshuffle = False
+
+        if self.preshuffle:
+            # Dims are 128-aligned here (128-multiples satisfy the kernel's N%16, K%32 rule).
+            n_pad = n_blocks * _FP8_BLOCK
+            k_pad = k_blocks * _FP8_BLOCK
+            w_shuffle = shuffle_weight(w_q, _PRESHUFFLE_LAYOUT).reshape(
+                n_pad // _PRESHUFFLE_LAYOUT[0], k_pad * _PRESHUFFLE_LAYOUT[0]
+            )
+            self.weight_fp8 = nn.Parameter(w_shuffle, requires_grad=False)
+            self.register_buffer("weight_scale", w_scale, persistent=True)
+            return
+
         if was_padded:
             w_q = w_q[:N, :K].contiguous()
 
@@ -110,20 +283,82 @@ class xFuserFP8BlockScaleLinear(nn.Module):
         self.weight_fp8 = nn.Parameter(w_q, requires_grad=False)
         self.register_buffer("weight_scale", w_scale, persistent=True)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if not hasattr(self, "weight_fp8"):
-            raise RuntimeError(
-                "weight_fp8 not initialized. Call load_and_quantize_weights() first."
-            )
+    def _gemm_operands(self, x: torch.Tensor):
+        """Resolve the weight and its scale, both on the device the GEMM will launch on.
 
+        The kernel takes each of these as a raw pointer, so one of them on host aborts the launch
+        naming only an argument index. They are different kinds of state and no single mechanism
+        carries all of it: `weight_fp8` is a parameter FSDP2 shards and restores from its own copy,
+        `weight_scale` an ordinary buffer that only a module move carries, and `weight` a plain
+        attribute that neither looks at. A route that touches one and not the others separates them —
+        the scale is what lags behind a sharded component onloaded per forward by
+        --enable_model_cpu_offload. The scale is [ceil(N/128), ceil(K/128)] floats, small enough to
+        rehome here rather than trust the move; a misplaced weight is too big to move under the
+        caller's feet, so say so instead of letting the kernel abort on a pointer number.
+        """
+        # DiT streaming path stores fp8 in `weight_fp8` (and nulls `weight`); the transformers
+        # HfQuantizer path stores fp8 under `weight` (state-dict fill). Resolve either.
+        weight_fp8 = getattr(self, "weight_fp8", None)
+        if weight_fp8 is None:
+            weight_fp8 = self.weight
+        if weight_fp8 is None:
+            raise RuntimeError(
+                "FP8 weight not initialized. Call load_and_quantize_weights() or load a checkpoint first."
+            )
+        scale = self.weight_scale
+        if scale.device != x.device:
+            scale = scale.to(x.device)
+            self.weight_scale = scale
+        if weight_fp8.device != x.device:
+            raise RuntimeError(
+                f"FP8 weight is on {weight_fp8.device} but its activation is on {x.device}, so the "
+                "block-scale GEMM has nothing it can launch. The weight was left behind by whatever "
+                "last moved this module."
+            )
+        return weight_fp8, scale
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         original_shape = input.shape
-        x = input.view(-1, self.in_features)
-        output = torch.ops.mylib.fp8_blockscale_gemm(
-            x, self.weight_fp8, self.weight_scale,
-        ).to(input.dtype)
+        x = input.reshape(-1, self.in_features)
+        weight_fp8, weight_scale = self._gemm_operands(x)
+        if self.preshuffle:
+            k_padded = ((self.in_features + _FP8_BLOCK - 1) // _FP8_BLOCK) * _FP8_BLOCK
+            output = torch.ops.xfuser.fp8_blockscale_gemm_preshuffle(
+                x, weight_fp8, weight_scale, self.out_features, k_padded,
+            ).to(input.dtype)
+        else:
+            output = torch.ops.xfuser.fp8_blockscale_gemm(
+                x, weight_fp8, weight_scale,
+            ).to(input.dtype)
         if self.bias is not None:
             output = output + self.bias
         return output.view(*original_shape[:-1], self.out_features)
+
+    def move_fp8_weights_to(self, device) -> None:
+        """Move just the quantized weight tensors (and the `weight` sentinel that advertises their
+        device) to `device`, leaving everything else alone.
+
+        Load-time eviction needs this instead of a plain .to(): a freshly quantized layer can still
+        hold tensors that cannot move, such as a meta `bias` the loader has yet to stream.
+        """
+        self.weight_fp8 = nn.Parameter(self.weight_fp8.data.to(device), requires_grad=False)
+        self.weight_scale = self.weight_scale.to(device)
+        sentinel = self.__dict__.get("weight")
+        if sentinel is not None:
+            self.__dict__["weight"] = _rehome_sentinel(sentinel, lambda t: t.to(device))
+
+    def _apply(self, fn, *args, **kwargs):
+        """Carry the `weight` sentinel along with .to()/.cuda()/.cpu().
+
+        nn.Module._apply only walks _parameters and _buffers, and the sentinel is deliberately
+        neither, so a module move would leave it advertising a stale device. Anything that probes
+        `weight` then reads the wrong one. T5 does exactly that, via `wo.weight.dtype`.
+        """
+        module = super()._apply(fn, *args, **kwargs)
+        sentinel = module.__dict__.get("weight")
+        if sentinel is not None:
+            module.__dict__["weight"] = _rehome_sentinel(sentinel, fn)
+        return module
 
     def extra_repr(self):
         return (

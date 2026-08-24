@@ -1,12 +1,17 @@
 import unittest
 from itertools import product
+import pytest
 import torch
 import torch.distributed as dist
+
+# These tests require flash-attn. Skip the module before importing xDiT attention code when the
+# package is unavailable.
+flash_attn_func = pytest.importorskip("flash_attn").flash_attn_func
+
 from xfuser.core.long_ctx_attention.ring.ring_flash_attn import (
     xdit_ring_flash_attn_func,
 )
 from xfuser.core.long_ctx_attention import xFuserLongContextAttention
-from flash_attn import flash_attn_func
 import os
 
 from xfuser.model_executor.layers.attention_processor import (

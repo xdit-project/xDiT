@@ -1,21 +1,26 @@
-"""
-adapted from https://github.com/ali-vilab/TeaCache.git
-adapted from https://github.com/chengzeyi/ParaAttention.git
-"""
-import importlib
-from typing import Type, Dict, TypeVar
-from xfuser.model_executor.cache.diffusers_adapters.registry import TRANSFORMER_ADAPTER_REGISTRY
-from xfuser.logger import init_logger
-
-logger = init_logger(__name__)
+"""Deprecated compatibility layer for the former cache adapter API."""
+import warnings
 
 
 def apply_cache_on_transformer(transformer, *args, **kwargs):
-    adapter_name = TRANSFORMER_ADAPTER_REGISTRY.get(type(transformer))
-    if not adapter_name:
-        logger.error(f"Unknown transformer class: {transformer.__class__.__name__}")
-        return transformer
+    warnings.warn(
+        "xfuser.model_executor.cache.diffusers_adapters is deprecated; "
+        "use xfuser.model_executor.cache.adapters instead.",
+        FutureWarning,
+        stacklevel=2,
+    )
+    use_cache = kwargs.get("use_cache", "Fb")
+    if hasattr(transformer, "single_stream_modulation"):
+        from xfuser.model_executor.cache.adapters.flux2 import apply_fbcache
 
-    adapter_module = importlib.import_module(f".{adapter_name}", __package__)
-    apply_cache_on_transformer_fn = getattr(adapter_module, "apply_cache_on_transformer")
-    return apply_cache_on_transformer_fn(transformer, *args, **kwargs)
+        return apply_fbcache(transformer, *args, **kwargs)
+
+    from xfuser.model_executor.cache.adapters.flux import (
+        apply_fbcache,
+        apply_teacache,
+    )
+
+    if use_cache == "Tea":
+        kwargs.pop("use_cache", None)
+        return apply_teacache(transformer, *args, **kwargs)
+    return apply_fbcache(transformer, *args, **kwargs)

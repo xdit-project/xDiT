@@ -49,6 +49,19 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             ),
     "AITER_SAGE_V2_BLOCK_R": lambda: os.environ.get("XFUSER_AITER_SAGE_V2_BLOCK_R", "128"),
     "XDIT_FBCACHE_THRESH": lambda: os.environ.get("XDIT_FBCACHE_THRESH", None),
+    # opt-in breakdown of where a memory-efficient fill spends its time. Off by default because an
+    # honest breakdown has to synchronise at each phase boundary, and that serialises a fill which
+    # otherwise overlaps its reads, broadcasts and sharding: measured 2.3x slower with it on.
+    "XDIT_FILL_PHASE_TIMING": lambda: os.environ.get("XDIT_FILL_PHASE_TIMING", "0"),
+    # How many checkpoint shards a memory-efficient fill may hold in page cache, which is the read
+    # speed against host cache trade. Streaming a shard in before mmap-reading it makes the read
+    # bandwidth-bound rather than fault-bound (measured 0.62 -> 3.21 GB/s on local NVMe).
+    #   0 - never stream; the read faults its way through mmap.
+    #   1 - stream the shard about to be read, then consume it.
+    #   2 - also stream the next shard while consuming this one, hiding that stream under the
+    #       quantise and broadcast work, at the cost of a second shard resident.
+    # These are reclaimable file-backed pages that the fill drops as it finishes each shard.
+    "XDIT_WARM_SHARDS": lambda: os.environ.get("XDIT_WARM_SHARDS", "2"),
 }
 
 
@@ -213,7 +226,6 @@ class PackagesEnvChecker:
         packages_info["has_long_ctx_attn"] = self.check_long_ctx_attn()
         packages_info["diffusers_version"] = self.check_diffusers_version()
         packages_info["has_npu_flash_attn"] = self.check_npu_flash_attn()
-        packages_info["has_distvae"] = self.check_distvae()
         self.packages_info = packages_info
 
     def check_aiter(self):
@@ -380,13 +392,6 @@ class PackagesEnvChecker:
         except ImportError:
             return False
 
-    def check_distvae(self):
-        try:
-            from distvae.modules.adapters.vae.decoder_adapters import DecoderAdapter
-            return True
-        except ImportError:
-            return False
-
     def get_packages_info(self):
         return self.packages_info
 
@@ -403,6 +408,19 @@ class PackagesEnvChecker:
 
 PACKAGES_CHECKER = PackagesEnvChecker()
 _TORCH_GROUPNORM = torch.nn.GroupNorm
+
+
+def restore_torch_group_norm_for_distvae() -> bool:
+    """Restore torch GroupNorm when xDiT's ROCm setup replaced it with AITER's.
+
+    DistVAE discovers norms to shard by their torch type. This must run before a VAE intended
+    for sharding is built, while xDiT is still validating its environment.
+    """
+    if torch.nn.GroupNorm.__module__ != "aiter.ops.groupnorm":
+        return False
+    torch.nn.GroupNorm = _TORCH_GROUPNORM
+    return True
+
 
 def _setup_rocm_libraries():
     if PACKAGES_CHECKER.packages_info.get("has_aiter", False):

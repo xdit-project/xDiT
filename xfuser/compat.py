@@ -19,7 +19,6 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-
 @lru_cache(maxsize=None)
 def declared_floor(name: str) -> Optional[str]:
     """The minimum version of ``name`` that setup.py declares xfuser needs.

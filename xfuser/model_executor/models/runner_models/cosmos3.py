@@ -3,7 +3,6 @@ import torch
 from diffusers import UniPCMultistepScheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
-from xfuser import xFuserArgs
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     ModelSettings,
@@ -14,9 +13,12 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     _parse_attention_backend,
 )
-from xfuser.core.distributed.parallel_state import get_vae_parallel_group
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    STANDARD_LOAD_ROUTES,
+)
 
 # Only full-precision attention backends produce correct results on Cosmos3.
 # Quantized backends (FP8, MXFP4, MLA) cause >50% relative error per layer
@@ -41,56 +43,18 @@ COSMOS3_FSDP_STRATEGY = {
 }
 
 
-def _setup_parallel_vae(vae, enable_parallel_encoder=True):
-    if enable_parallel_encoder:
-        try:
-            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
-            # scale_factor_spatial includes patch_size (e.g. 16 = 8x from encoder + 2x
-            # from patching). The encoder adapter needs just the encoder's own
-            # downsampling ratio, excluding the patching step.
-            vae_scale_factor = getattr(vae.config, 'scale_factor_spatial', 8)
-            patch_size = getattr(vae.config, 'patch_size', None)
-            if patch_size and patch_size > 1:
-                vae_scale_factor = vae_scale_factor // patch_size
-            patched_encoder = WanEncoderAdapter(
-                vae.encoder,
-                vae_group=get_vae_parallel_group().device_group,
-                vae_scale_factor=vae_scale_factor,
-            ).to(vae.device)
-            vae.encoder = patched_encoder
-            log("Parallel VAE encoder enabled.")
-        except ImportError:
-            log("DistVAE not available for encoder. Defaulting to single-rank.")
-        except Exception as e:
-            raise ValueError(f"Failed to patch VAE encoder: {e}")
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
-        patched_decoder = WanDecoderAdapter(
-            vae.decoder, vae_group=get_vae_parallel_group().device_group
-        ).to(vae.device)
-        # Cosmos3 VAE has patch_size=2 (extra 2x spatial upsampling from
-        # unpatching). The decoder adapter's scale_factor defaults to 1 in
-        # its Patchify, which is correct for Wan (patch_size=None). For
-        # Cosmos3 we need to account for the extra factor so that the
-        # narrow in _forward crops to the right size.
-        patch_size = getattr(vae.config, 'patch_size', None)
-        if patch_size and patch_size > 1:
-            patched_decoder.patchify.scale_factor = patch_size
-        vae.decoder = patched_decoder
-        log("Parallel VAE decoder enabled.")
-    except ImportError:
-        log("DistVAE not available for decoder. Defaulting to single-rank.")
-    except Exception as e:
-        raise ValueError(f"Failed to patch VAE decoder: {e}")
-
-
 @register_model("nvidia/Cosmos3-Super")
 @register_model("Cosmos3-Super")
 class xFuserCosmos3SuperModel(xFuserModel):
-
     # No released diffusers ships pipeline_cosmos3_omni yet.
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
@@ -147,11 +111,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
 
         xFuserCosmos3OmniTransformerWrapper = get_cosmos3_transformer_wrapper_class()
 
-        transformer = xFuserCosmos3OmniTransformerWrapper.from_pretrained(
-            self.settings.model_name,
-            torch_dtype=torch.bfloat16,
-            subfolder="transformer",
-        )
+        transformer = self.loader.load_transformer(xFuserCosmos3OmniTransformerWrapper)
 
         xFuserCosmos3OmniPipeline = get_cosmos3_pipeline_class()
 
@@ -190,7 +150,7 @@ class xFuserCosmos3SuperModel(xFuserModel):
             guidance_scale=input_args["guidance_scale"],
             fps=float(self.settings.fps),
             enable_sound=False,
-            generator=torch.Generator(device="cuda").manual_seed(input_args["seed"]),
+            generator=self._make_generator(input_args["seed"]),
             output_type="np",
             add_resolution_template=False,
             add_duration_template=False,
@@ -221,13 +181,17 @@ class xFuserCosmos3SuperModel(xFuserModel):
         if self.config.fully_shard_degree > 1:
             if hasattr(self.pipe.transformer, '_patch_time_embedder_for_fsdp'):
                 self.pipe.transformer._patch_time_embedder_for_fsdp()
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae, self.capabilities.use_parallel_vae_encoder)
 
 
 @register_model("nvidia/Cosmos3-Nano")
 @register_model("Cosmos3-Nano")
 class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
+    load_support = LoadSupport(
+        meta_transformers=('transformer',),
+        meta_text_encoders=(),
+        replicated_meta=True,
+        routes=STANDARD_LOAD_ROUTES,
+    )
 
     settings = ModelSettings(
         model_name="nvidia/Cosmos3-Nano",

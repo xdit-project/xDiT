@@ -7,9 +7,6 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
 from xfuser import xFuserArgs
-from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
-    xFuserLingBotVideoTransformer3DWrapper,
-)
 from xfuser.model_executor.pipelines.pipeline_lingbot_video import (
     xFuserLingBotVideoPipeline,
     get_lingbot_video_pipeline_class,
@@ -21,6 +18,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     DefaultInputValues,
     DiffusionOutput,
+)
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
 )
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.parallel_state import get_vae_parallel_group
@@ -78,36 +79,9 @@ def _load_json_prompt(prompt: str) -> str:
     return prompt
 
 
-def _setup_parallel_vae(vae, use_encoder=False):
-    import torch.distributed as dist
-    vae_group = get_vae_parallel_group().device_group
-    log(f"VAE parallel group: world_size={dist.get_world_size(vae_group)}, "
-        f"rank={dist.get_rank(vae_group)}, vae.device={vae.device}")
-    try:
-        from distvae.modules.adapters.vae.decoder_adapters import WanDecoderAdapter
-        vae.decoder = WanDecoderAdapter(vae.decoder, vae_group=vae_group).to(vae.device)
-        log("Parallel VAE decoder enabled.")
-    except ImportError:
-        log("distvae WanDecoderAdapter not available, skipping parallel VAE decoder.")
-        return
-    except Exception as e:
-        log(f"Failed to patch VAE decoder: {e}")
-        return
-    if use_encoder:
-        try:
-            from distvae.modules.adapters.vae.encoder_adapters import WanEncoderAdapter
-            vae.encoder = WanEncoderAdapter(vae.encoder, vae_group=vae_group).to(vae.device)
-            log("Parallel VAE encoder enabled.")
-        except ImportError:
-            log("distvae WanEncoderAdapter not available, skipping parallel VAE encoder.")
-        except Exception as e:
-            log(f"Failed to patch VAE encoder: {e}")
-
-
 @register_model("robbyant/lingbot-video-moe-30b-a3b")
 @register_model("LingBot-Video-MoE")
 class xFuserLingBotVideoMoEModel(xFuserModel):
-
     def save_output(self, output):
         # Stock TI2V CFG parallel puts output on rank 0, but xDiT's runner
         # only saves from the last rank. Skip gracefully when no output.
@@ -129,6 +103,13 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             return 2
         return 1
 
+    # Composed loading and custom FSDP wrapping bypass xDiT's shared load seam.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -139,6 +120,7 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         use_hybrid_gemm_schedule=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        use_parallel_vae_encoder=True,
         enable_tiling=True,
         enable_slicing=True,
     )
@@ -198,9 +180,6 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             for block in self.pipe.transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
                     _patch_block_bulk_dtype(block)
-        if self.config.use_parallel_vae:
-            _setup_parallel_vae(self.pipe.vae)
-
         # Cache pre-transposed expert weights to eliminate per-call copies
         self.pipe.transformer.cache_expert_weights()
 
@@ -212,6 +191,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def _load_refiner(self, input_args):
         from lingbot_video.scheduling_flow_unipc import FlowUniPCMultistepScheduler
+        from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
+            xFuserLingBotVideoTransformer3DWrapper,
+        )
 
         log("Loading refiner transformer...")
         model_name = self.settings.model_name
@@ -262,12 +244,6 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
             for block in refiner_transformer.blocks:
                 if hasattr(block, "_cached_bulk_dtype"):
                     _patch_block_bulk_dtype(block)
-        # Enable VAE tiling/slicing for refiner (1080p needs it)
-        if self.config.enable_tiling:
-            refiner_pipe.vae.enable_tiling()
-        if self.config.enable_slicing:
-            refiner_pipe.vae.enable_slicing()
-
         # FSDP shard the refiner transformer if enabled
         if self.config.fully_shard_degree > 1:
             from xfuser.core.distributed.parallel_state import get_fs_group
@@ -286,6 +262,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 
     def _build_pipe(self, model_name, transformer_subfolder="transformer", use_i2v=False):
         from lingbot_video.scheduling_flow_unipc import FlowUniPCMultistepScheduler
+        from xfuser.model_executor.models.transformers.transformer_lingbot_video import (
+            xFuserLingBotVideoTransformer3DWrapper,
+        )
 
         transformer = xFuserLingBotVideoTransformer3DWrapper.from_pretrained(
             model_name, torch_dtype=torch.bfloat16, subfolder=transformer_subfolder,
@@ -480,15 +459,20 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
 @register_model("robbyant/lingbot-video-dense-1.3b")
 @register_model("LingBot-Video-Dense")
 class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
+    # The dense runner shares the composed loading and custom FSDP limitation.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
 
-    def __init__(self, config: xFuserArgs) -> None:
-        super().__init__(config)
-        self.settings = ModelSettings(
-            model_name="robbyant/lingbot-video-dense-1.3b",
-            output_name="lingbot_video_dense",
-            model_output_type="video",
-            fps=24,
-            fp8_gemm_module_list=["transformer.blocks"],
-            fp4_gemm_module_list=["transformer.blocks"],
-            fsdp_strategy=LINGBOT_FSDP_STRATEGY,
-        )
+    settings = ModelSettings(
+        model_name="robbyant/lingbot-video-dense-1.3b",
+        output_name="lingbot_video_dense",
+        model_output_type="video",
+        fps=24,
+        fp8_gemm_module_list=["transformer.blocks"],
+        fp4_gemm_module_list=["transformer.blocks"],
+        fsdp_strategy=LINGBOT_FSDP_STRATEGY,
+    )

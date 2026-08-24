@@ -29,8 +29,62 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 from torch.distributed.device_mesh import DeviceMesh
 
+from xfuser.core.utils.dtype_policy import (
+    cast_preserving_fp32_modules,
+    fp32_modules_for,
+    pinned_fp32_parameters,
+)
+
 
 logger = logging.getLogger(__name__)
+
+
+def _save_nonpersistent_buffers(module: torch.nn.Module, device: str):
+    """Copy initialized runtime-only buffers before ``to_empty`` discards their storage."""
+    saved = []
+    for owner in module.modules():
+        for name in owner._non_persistent_buffers_set:
+            buffer = owner._buffers.get(name)
+            if buffer is not None and not buffer.is_meta:
+                saved.append(
+                    (owner, name, buffer.detach().to(device=device, copy=True))
+                )
+    return saved
+
+
+def _restore_nonpersistent_buffers(saved) -> None:
+    """Restore saved buffers without changing their non-persistent registration."""
+    for owner, name, buffer in saved:
+        owner._buffers[name] = buffer
+
+
+def _collective_quantize_call(operation, process_group, context):
+    """Run quantization locally and make every process-group rank agree on failure."""
+    dist = torch.distributed
+    if not dist.is_available() or not dist.is_initialized():
+        return operation()
+    world_size = dist.get_world_size(group=process_group)
+    if world_size <= 1:
+        return operation()
+
+    local_error = None
+    local_exception = None
+    try:
+        result = operation()
+    except Exception as error:
+        result = None
+        local_exception = error
+        local_error = (type(error).__name__, str(error))
+
+    failures = [None] * world_size
+    dist.all_gather_object(failures, local_error, group=process_group)
+    for rank, failure in enumerate(failures):
+        if failure is not None:
+            error_type, message = failure
+            raise RuntimeError(
+                f"{context} failed on rank {rank}: {error_type}: {message}"
+            ) from local_exception
+    return result
 
 
 def _make_mesh(
@@ -186,6 +240,37 @@ def shard_t5_encoder(
     return transformer
 
 
+def _keep_recording_outputs(component: torch.nn.Module) -> None:
+    """Re-key transformers' output recording onto the class fully_shard just rebound.
+
+    A transformers model decides which submodule outputs to record — ``hidden_states``,
+    ``attentions`` — by looking its own class up in a registry populated when the model was
+    constructed. ``fully_shard`` rebinds ``__class__`` on what it wraps, so after sharding that
+    lookup misses and a forward asked for ``output_hidden_states=True`` returns ``None`` instead of
+    raising, which surfaces much later as a pipeline subscripting ``hidden_states[-2]``.
+
+    The root has to be wrapped, so the recording has to follow it: the blocks share the root's
+    lazily-initialized comm context, and leaving the root unwrapped makes each block its own root
+    and breaks the cross-block prefetch. Registering the sharded class under the same spec is what
+    lets both hold.
+
+    Absence of the registry is not an error: it means the installed transformers does not resolve
+    recording this way, in which case there is nothing to carry over. The end-to-end behaviour is
+    pinned by tests/core/test_sharded_text_encoder_outputs.py, so a reworked mechanism fails there
+    rather than silently costing a caller its hidden states.
+    """
+    try:
+        from transformers.modeling_utils import (  # noqa: PLC0415
+            _CAN_RECORD_REGISTRY,
+        )
+    except ImportError:
+        return
+
+    recordable = getattr(component, "_can_record_outputs", None)
+    if recordable:
+        _CAN_RECORD_REGISTRY[str(type(component))] = recordable
+
+
 def shard_component(
     component: torch.nn.Module,
     wrap_attrs: list[str],
@@ -199,6 +284,9 @@ def shard_component(
     quantize_fn: Optional[Callable] = None,
     memory_efficient_init: bool = False,
     offload_policy: Optional[str] = None,
+    meta_init: bool = False,
+    load_block_fn: Optional[Callable] = None,
+    load_epilogue_fn: Optional[Callable] = None,
 ) -> torch.nn.Module:
     """
     Wrap a component with FSDP, treating each block as a separate FSDP unit.
@@ -239,6 +327,26 @@ def shard_component(
             time to minimize peak GPU memory during model load. Selects FSDP2. Only use
             when the model OOMs during init with FSDP1; FSDP1 is faster at inference.
             Defaults to False.
+        offload_policy (str, optional): "cpu" wraps params in FSDP2 CPUOffloadPolicy
+            (params live on host, streamed to GPU per block); any other value / None keeps
+            params on GPU. Selects FSDP2 when "cpu". Defaults to None.
+        meta_init (bool, optional): The component's params are on the meta device (built from
+            config, no weights). Skips all host/device moves and quantization; blocks are
+            fully_shard'd while still meta. The caller must materialize real weights afterwards
+            (e.g. rank0-broadcast set_model_state_dict). Selects FSDP2. Defaults to False.
+        load_block_fn (Callable, optional): Called as load_block_fn(block, idx) per block, after the
+            block is materialized empty on device (to_empty) and before quantize_fn/fully_shard, to
+            fill that block's real weights (e.g. streamed per-block from disk). Unlike meta_init,
+            which materializes the whole component from a rank0 state dict, this fills one block at a
+            time, so no rank holds more than a block beyond the source's incremental reads; how the
+            weights are obtained is the callback's business (xDiT reads on rank0 and broadcasts per
+            block; see runner_models.loading.meta_load). Selects FSDP2. When set, quantize_fn still runs (on
+            the now-real block) and the block is sharded normally. The component must already be on
+            meta. Defaults to None.
+        load_epilogue_fn (Callable, optional): Called as load_epilogue_fn(component) after the block
+            loop but BEFORE the component-level fully_shard, to fill non-block params/buffers (which
+            would otherwise become DTensors and reject a plain assignment). Pairs with load_block_fn.
+            Defaults to None.
 
     Returns:
         nn.Module: The FSDP-wrapped component.
@@ -262,7 +370,7 @@ def shard_component(
         - Each element in wrap_attrs becomes a separate FSDP unit
         - Requires PyTorch distributed to be initialized before calling
     """
-    use_fsdp2 = quantize_fn is not None or memory_efficient_init
+    use_fsdp2 = quantize_fn is not None or memory_efficient_init or meta_init or load_block_fn is not None
 
     if device_id is None and torch.cuda.is_available():
         device_id = torch.cuda.current_device()
@@ -271,11 +379,34 @@ def shard_component(
     for wrap_attr in wrap_attrs:
         wrapped_blocks.extend(rgetattr(component, wrap_attr))
 
-    if dtype:
-        component = component.to(dtype)
+    # The modules the model's loader keeps in fp32 have to stay out of every FSDP unit: a unit is one
+    # flat allocation and FSDP rejects a mixture of dtypes within it. They are a rounding error in
+    # size next to the weights they normalise (a few MB across all of Wan's blocks), so replicating
+    # them costs nothing measurable, whereas casting them down loses precision the ordinary load of
+    # the same checkpoint keeps.
+    fp32_modules = fp32_modules_for(component, dtype) if dtype else ()
+    if dtype and not meta_init:
+        component = cast_preserving_fp32_modules(component, dtype)
+
+    def ignore_fp32(module):
+        """This module's pinned parameters, resolved now: a fill rebinds parameter slots, so a set
+        collected earlier would name parameters the module no longer holds and FSDP would take them
+        into a unit anyway. FSDP also leaves ignored parameters where they are, so they need the
+        device move themselves; meta ones get it from the caller's fill.
+        """
+        pinned = pinned_fp32_parameters(module, fp32_modules)
+        if pinned and device_id is not None:
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu", device_id
+            )
+            for parameter in pinned:
+                if not parameter.is_meta and parameter.device != device:
+                    parameter.data = parameter.data.to(device)
+        return pinned or None
 
     if not use_fsdp2:
         # FSDP1: Fastest path for non-quantized inference.
+        ignored = ignore_fp32(component)
         return FSDP(
             component,
             process_group=process_group,
@@ -285,6 +416,7 @@ def shard_component(
             sync_module_states=sync_module_states,
             use_orig_params=use_orig_params,
             forward_prefetch=forward_prefetch,
+            ignored_states=list(ignored) if ignored else None,
         )
 
     # FSDP2: Required for torchao quantized tensors, or when use_fsdp2=True for
@@ -297,8 +429,12 @@ def shard_component(
 
     # Move non-block children to device. With CPUOffloadPolicy params stay on CPU,
     # so skip this step — fully_shard handles placement.
+    # meta_init: params can't be .to()'d (meta) and hold no real values to quantize; leave
+    # them meta and let fully_shard build meta DTensors, filled later by the caller's broadcast.
     wrap_top_names = {attr.split(".")[0] for attr in wrap_attrs}
-    if cpu_offload is None:
+    # Skip the .to() move for both meta paths: broadcast (meta_init) fills DTensors later, and
+    # self-fill (load_block_fn) materializes non-block children via load_epilogue_fn below.
+    if cpu_offload is None and not meta_init and load_block_fn is None:
         for name, child in component.named_children():
             if name not in wrap_top_names:
                 child.to(device_str)
@@ -306,12 +442,48 @@ def shard_component(
     # Sequential: after fully_shard(block) each rank holds 1/N params, freeing memory
     # for the next block. At most one full block on GPU at a time.
     for i, block in enumerate(wrapped_blocks):
-        block.to(device_str)
-        if quantize_fn is not None:
-            quantize_fn(block, i)
-        fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
+        if load_block_fn is not None:
+            # Self-fill per rank: materialize the block empty on device, fill its real weights
+            # from disk on this rank, quantize, then shard — the full model never lands anywhere.
+            nonpersistent_buffers = _save_nonpersistent_buffers(block, device_str)
+            block.to_empty(device=device_str, recurse=True)
+            _restore_nonpersistent_buffers(nonpersistent_buffers)
+            load_block_fn(block, i)
+            if quantize_fn is not None:
+                _collective_quantize_call(
+                    lambda: quantize_fn(block, i),
+                    process_group,
+                    context=f"quantizing FSDP block {i}",
+                )
+        elif not meta_init:
+            block.to(device_str)
+            if quantize_fn is not None:
+                _collective_quantize_call(
+                    lambda: quantize_fn(block, i),
+                    process_group,
+                    context=f"quantizing FSDP block {i}",
+                )
+        fully_shard(
+            block,
+            mesh=mesh,
+            reshard_after_forward=reshard_after_forward,
+            offload_policy=cpu_offload,
+            ignored_params=ignore_fp32(block),
+        )
 
-    fully_shard(component, mesh=mesh, reshard_after_forward=reshard_after_forward, offload_policy=cpu_offload)
+    # Fill non-block params/buffers before the component-level fully_shard turns them into DTensors
+    # (a plain assignment onto a DTensor slot would diverge across ranks).
+    if load_epilogue_fn is not None:
+        load_epilogue_fn(component)
+
+    fully_shard(
+        component,
+        mesh=mesh,
+        reshard_after_forward=reshard_after_forward,
+        offload_policy=cpu_offload,
+        ignored_params=ignore_fp32(component),
+    )
+    _keep_recording_outputs(component)
 
     # FSDP2 forward prefetch: each block pre-fetches the next two blocks' all-gathers
     # so communication overlaps with compute. The first block has no predecessor to

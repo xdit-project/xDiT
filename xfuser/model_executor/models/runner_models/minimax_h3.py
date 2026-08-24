@@ -20,6 +20,10 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+)
 
 
 _SUPPORTED_ATTN_BACKENDS = frozenset({
@@ -148,6 +152,13 @@ class xFuserMiniMaxH3Model(xFuserModel):
         valid_tasks=["t2va", "i2va", "l2va", "fl2va"],
     )
 
+    # Modular loading and QKV fusion leave no collective-safe checkpoint mapping.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -213,7 +224,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 "--text_encoder_tp_degree must be 1 or match --ulysses_degree."
             )
         if text_encoder_tp_degree > 1 and (
-            config.enable_model_cpu_offload or config.enable_sequential_cpu_offload
+            config.enable_model_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_group_cpu_offload
         ):
             raise ValueError(
                 "MiniMax-H3 text encoder TP is incompatible with CPU offloading."
@@ -447,6 +460,14 @@ class xFuserMiniMaxH3Model(xFuserModel):
 
 @register_model("MiniMax-H3-Ref2VA")
 class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
+    # The reference workflow shares the modular loading and QKV-fusion limitation.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     _transformer_component_name = "transformer_ref"
     settings = ModelSettings(
         model_name="MiniMaxAI/MiniMax-H3",

@@ -22,6 +22,13 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
     except ImportError:
         pytest.skip("AITER does not expose the MHA v4 API.")
 
+    if backend_name == "AITER_MXFP8":
+        try:
+            from aiter.ops.mha_v4 import mha_v4_mxfp8
+        except ImportError:
+            pytest.skip("AITER does not expose the MHA v4 MXFP8 raw API.")
+        del mha_v4_mxfp8
+
     del mha_v4
     kernel_dir = (
         Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
@@ -92,6 +99,36 @@ def test_aiter_mixed_attention_compiles_fullgraph(backend_name):
     output = torch.compile(attention, fullgraph=True)(query, key, value)
     assert output.shape == query.shape
     assert torch.isfinite(output).all()
+
+
+def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
+    _require_mha_v4_aiter("AITER_MXFP8")
+
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    torch.manual_seed(1234)
+    query = torch.randn((1, 64, 128, 128), device="cuda", dtype=torch.bfloat16)
+    key = torch.randn((1, 4, 128, 128), device="cuda", dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    attention_function = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_MXFP8]
+
+    def attention(query, key, value):
+        return attention_function(query, key, value, dropout_p=0.0, is_causal=False)[0]
+
+    reference = F.scaled_dot_product_attention(query, key, value, enable_gqa=True)
+    output = torch.compile(attention, fullgraph=True)(query, key, value)
+
+    assert output.shape == query.shape
+    assert torch.isfinite(output).all()
+    assert (
+        F.cosine_similarity(
+            output.float().flatten(), reference.float().flatten(), dim=0
+        ).item()
+        > 0.95
+    )
 
 
 @pytest.mark.parametrize(

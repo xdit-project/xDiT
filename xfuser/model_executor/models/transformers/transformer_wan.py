@@ -22,6 +22,10 @@ from xfuser.model_executor.layers.attention_processor import (
 )
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.vsa_attention import jenga_scheduled_drop_rate
+from xfuser.model_executor.layers.fused_qk_norm_rope_wan_flydsl import (
+    fused_qk_norm_rope,
+    fused_qk_norm_rope_enabled,
+)
 
 env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
@@ -97,30 +101,23 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
 
         query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
 
-        query = attn.norm_q(query)
-        key = attn.norm_k(key)
-
-        query = query.unflatten(2, (attn.heads, -1))
-        key = key.unflatten(2, (attn.heads, -1))
-        value = value.unflatten(2, (attn.heads, -1))
-
-        if rotary_emb is not None:
-
-            def apply_rotary_emb(
-                hidden_states: torch.Tensor,
-                freqs_cos: torch.Tensor,
-                freqs_sin: torch.Tensor,
-            ):
-                x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
-                cos = freqs_cos[..., 0::2]
-                sin = freqs_sin[..., 1::2]
-                out = torch.empty_like(hidden_states)
-                out[..., 0::2] = x1 * cos - x2 * sin
-                out[..., 1::2] = x1 * sin + x2 * cos
-                return out.type_as(hidden_states)
-
-            query = apply_rotary_emb(query, *rotary_emb)
-            key = apply_rotary_emb(key, *rotary_emb)
+        # XFUSER_HL_WAN_FUSED_QK_NORM_ROPE: collapse
+        #   norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
+        # into a single Triton pass.  inductor cannot fuse RoPE into the norm
+        # (the RMS reduction sits between them) and the reference RoPE writes
+        # through two stride-2 scatters, so the reference is four uncoalesced
+        # bandwidth-bound passes over a [1, S, H*D] bf16 tensor.  Falls back to
+        # the original code whenever the fast path's guards do not hold.
+        fused_qk = None
+        if rotary_emb is not None and fused_qk_norm_rope_enabled():
+            fused_qk = fused_qk_norm_rope(
+                query, key, attn.norm_q, attn.norm_k, rotary_emb[0], rotary_emb[1], attn.heads
+            )
+        if fused_qk is not None:
+            query, key = fused_qk
+            value = value.unflatten(2, (attn.heads, -1))
+        else:
+            query, key, value = self._qk_norm_rope_reference(attn, query, key, value, rotary_emb)
 
         # I2V task
         hidden_states_img = None
@@ -159,6 +156,41 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         return hidden_states
+
+    def _qk_norm_rope_reference(
+        self,
+        attn: "WanAttention",
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]],
+    ):
+        query = attn.norm_q(query)
+        key = attn.norm_k(key)
+
+        query = query.unflatten(2, (attn.heads, -1))
+        key = key.unflatten(2, (attn.heads, -1))
+        value = value.unflatten(2, (attn.heads, -1))
+
+        if rotary_emb is not None:
+
+            def apply_rotary_emb(
+                hidden_states: torch.Tensor,
+                freqs_cos: torch.Tensor,
+                freqs_sin: torch.Tensor,
+            ):
+                x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
+                cos = freqs_cos[..., 0::2]
+                sin = freqs_sin[..., 1::2]
+                out = torch.empty_like(hidden_states)
+                out[..., 0::2] = x1 * cos - x2 * sin
+                out[..., 1::2] = x1 * sin + x2 * cos
+                return out.type_as(hidden_states)
+
+            query = apply_rotary_emb(query, *rotary_emb)
+            key = apply_rotary_emb(key, *rotary_emb)
+
+        return query, key, value
 
 
 class xFuserWanTransformer3DWrapper(WanTransformer3DModel):

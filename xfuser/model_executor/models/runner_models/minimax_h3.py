@@ -29,6 +29,9 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.AITER,
     AttentionBackendType.AITER_FP8,
+    AttentionBackendType.CUDNN,
+    AttentionBackendType.SDPA,
+    AttentionBackendType.NVTE_FP8,
 })
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
@@ -199,7 +202,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         if backend is not None and backend not in _SUPPORTED_ATTN_BACKENDS:
             supported = ", ".join(sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS))
             raise ValueError(
-                f"MiniMax-H3 currently supports only packed varlen AITER attention. "
+                f"MiniMax-H3 does not support attention backend {backend.name}. "
                 f"Supported backends: {supported}."
             )
         if backend == AttentionBackendType.AITER_FP8:

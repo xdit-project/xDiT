@@ -18,6 +18,7 @@ from xfuser.model_executor.layers.attention_mask import (
     AttentionMaskWithMeta,
     make_attn_mask_with_meta,
 )
+from xfuser.model_executor.layers.norms import _replace_rms_norms_with_aiter
 from xfuser.model_executor.layers.usp import USP, attention
 
 
@@ -351,6 +352,11 @@ class xFuserLTX2VideoTransformer3DWrapper(LTX2VideoTransformer3DModel):
 
         self._enc_mask_cache: dict = {}
         self._audio_enc_mask_cache: dict = {}
+
+        # If AITER is available, replace diffusers RMSNorm (slow float32 cast)
+        # with AITER RMSNorm.
+        # Called BEFORE device move so buffers are placed correctly by model.to().
+        _replace_rms_norms_with_aiter(self)
 
         if perturbed_attn:
             attn_processor_cls = xFuserLTX2PerturbedAttnProcessor

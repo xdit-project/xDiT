@@ -528,7 +528,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
             diff_decoder.set_attn_processor(LTX2VideoVaeEagerSdpaAttnProcessor())
             log(
-                "Diffusion decoder: NATTEN unavailable; using Triton na3d attention fallback."
+                "Diffusion decoder: NATTEN unavailable; using tiled PyTorch SDPA fallback."
             )
         self.decode_pipe = LTX2VideoDiffusionDecodePipeline(
             diffusion_decoder=diff_decoder,

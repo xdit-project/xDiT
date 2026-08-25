@@ -26,8 +26,10 @@ logger = init_logger(__name__)
 ATTENTION_FUNCTION_REGISTRY = {}
 _AITER_MHA_V4_AVAILABLE = False
 _AITER_MHA_V4_SPARSE_AVAILABLE = False
+_AITER_MHA_V4_SPARSE_GFX942 = False
 _AITER_MHA_V4_HAS_BLOCK_MASK = False
 _AITER_MHA_V4_MXFP8_HAS_BLOCK_MASK = False
+_AITER_MHA_V4_KV_TILE = 128
 
 def _setup_aiter_environment_variables():
     AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
@@ -397,13 +399,22 @@ if env_info["has_aiter"]:
         _AITER_MHA_V4_AVAILABLE = (
             "gfx942" in _aiter_arch_name or "gfx950" in _aiter_arch_name
         )
-        _AITER_MHA_V4_SPARSE_AVAILABLE = "gfx950" in _aiter_arch_name
+        _AITER_MHA_V4_SPARSE_GFX942 = "gfx942" in _aiter_arch_name
+        _AITER_MHA_V4_SPARSE_AVAILABLE = (
+            "gfx950" in _aiter_arch_name or _AITER_MHA_V4_SPARSE_GFX942
+        )
         _AITER_MHA_V4_HAS_BLOCK_MASK = (
             inspect.signature(_aiter_mha_v4).parameters.get("block_mask") is not None
         )
+        try:
+            from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
+            _AITER_MHA_V4_KV_TILE = int(_aiter_mha_v4_kv_tile())
+        except ImportError:
+            _AITER_MHA_V4_KV_TILE = 64 if _AITER_MHA_V4_SPARSE_GFX942 else 128
     except ImportError:
         _AITER_MHA_V4_AVAILABLE = False
         _AITER_MHA_V4_SPARSE_AVAILABLE = False
+        _AITER_MHA_V4_SPARSE_GFX942 = False
         _AITER_MHA_V4_HAS_BLOCK_MASK = False
         pass # Error is raised in runtime_state.py when an MHA v4 backend is selected.
 
@@ -657,7 +668,17 @@ AITER_MHA_V4_ONLY_BACKENDS = tuple(
 )
 AITER_MHA_V4_ONLY_BACKEND_SET = frozenset(AITER_MHA_V4_ONLY_BACKENDS)
 AITER_MHA_V4_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_SPARGE_BACKENDS)
-_MHA_V4_SPARGE_TILE = {"BLOCK_M": 256, "BLOCK_N": 128}
+AITER_MHA_V4_GFX942_SPARGE_BACKENDS = (
+    AttentionBackendType.AITER_I8FP8_SPARGE,
+    AttentionBackendType.AITER_FP8_SPARGE,
+)
+AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_GFX942_SPARGE_BACKENDS)
+
+
+def _mha_v4_sparge_tile():
+    """Return Sparge tile sizes matching the active MHA v4 sparse KV geometry."""
+    return {"BLOCK_M": 256, "BLOCK_N": _AITER_MHA_V4_KV_TILE}
+
 
 def register_attention_function(backend_type):
     """
@@ -1250,14 +1271,36 @@ def _aiter_f6f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
     )
 
 
-def _validate_aiter_mha_v4_sparge_request(query, key, value, dropout_p, is_causal, attention_kwargs):
+def _validate_aiter_mha_v4_sparge_request(
+    query,
+    key,
+    value,
+    dropout_p,
+    is_causal,
+    attention_kwargs,
+    *,
+    qk_format=None,
+    v_format=None,
+    mxfp8=False,
+):
     _validate_aiter_mha_v4_request(dropout_p, is_causal)
     if not _AITER_MHA_V4_HAS_BLOCK_MASK:
         raise RuntimeError(
             "MHA v4 Sparge requires an AITER build whose mha_v4 accepts block_mask"
         )
     if not _AITER_MHA_V4_SPARSE_AVAILABLE:
-        raise RuntimeError("MHA v4 Sparge attention requires gfx950")
+        raise RuntimeError("MHA v4 Sparge attention requires gfx950 or gfx942")
+    if _AITER_MHA_V4_SPARSE_GFX942 and (
+        mxfp8
+        or qk_format not in (
+            _aiter_native_fp8_format(),
+            _AiterAttentionFormat.INT8,
+        )
+        or v_format != _aiter_native_fp8_format()
+    ):
+        raise NotImplementedError(
+            "MHA v4 Sparge on gfx942 currently supports native FP8/FP8 and INT8/FP8 only"
+        )
     if query.shape[-1] != 128 or key.shape[-1] != 128 or value.shape[-1] != 128:
         raise NotImplementedError("MHA v4 Sparge currently supports head dimension 128 only")
     if query.shape[1] != key.shape[1] or query.shape[1] != value.shape[1]:
@@ -1316,9 +1359,17 @@ def _aiter_mha_v4_sparge_call(
     *,
     mxfp8=False,
 ):
-    """Build a Sparge 256x128 mask and run the matching MHA v4 sparse row."""
+    """Build a Sparge mask at the MHA v4 sparse tile and run the matching sparse row."""
     _validate_aiter_mha_v4_sparge_request(
-        query, key, value, dropout_p, is_causal, attention_kwargs
+        query,
+        key,
+        value,
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+        qk_format=qk_format,
+        v_format=v_format,
+        mxfp8=mxfp8,
     )
     q, k, v, state, block_mask, _ = _build_sparge_block_mask(
         query,
@@ -1326,7 +1377,7 @@ def _aiter_mha_v4_sparge_call(
         value,
         is_causal,
         attention_kwargs,
-        _MHA_V4_SPARGE_TILE,
+        _mha_v4_sparge_tile(),
         pad_block_divisible=True,
     )
     q = torch.permute(q, [0, 2, 1, 3]).contiguous()

@@ -19,14 +19,17 @@ _MHA_V4_SPARGE_BACKENDS = (
 )
 
 
+_MHA_V4_GFX942_SPARGE_BACKENDS = (
+    "AITER_I8FP8_SPARGE",
+    "AITER_FP8_SPARGE",
+)
+
+
 def _require_mha_v4_sparge_aiter(backend_name):
     if not torch.cuda.is_available() or torch.version.hip is None:
         pytest.skip("AITER MHA v4 Sparge requires a ROCm GPU.")
 
     arch_name = getattr(torch.cuda.get_device_properties(0), "gcnArchName", "")
-    if "gfx950" not in arch_name:
-        pytest.skip(f"AITER MHA v4 Sparge requires gfx950, got {arch_name}.")
-
     try:
         import aiter
         from aiter.ops.mha_v4 import mha_v4
@@ -37,11 +40,29 @@ def _require_mha_v4_sparge_aiter(backend_name):
         pytest.skip("AITER mha_v4 does not accept block_mask.")
 
     kernel_name = backend_name.removeprefix("AITER_").removesuffix("_SPARGE").lower()
-    kernel_dir = (
-        Path(aiter.__file__).resolve().parent.parent / "hsa" / "gfx950" / "fmha_v4_fwd"
-    )
-    if not (kernel_dir / f"fwd_hd128_{kernel_name}_sparse.co").exists():
-        pytest.skip(f"AITER does not include the gfx950 {kernel_name} sparse FMHA kernel.")
+    aiter_root = Path(aiter.__file__).resolve().parent.parent
+    if "gfx950" in arch_name:
+        kernel_path = (
+            aiter_root / "hsa" / "gfx950" / "fmha_v4_fwd" / f"fwd_hd128_{kernel_name}_sparse.co"
+        )
+        arch = "gfx950"
+    elif "gfx942" in arch_name:
+        if backend_name not in _MHA_V4_GFX942_SPARGE_BACKENDS:
+            pytest.skip(f"{backend_name} sparse attention is gfx950-only.")
+        kernel_path = (
+            aiter_root
+            / "hsa"
+            / "gfx942"
+            / "fmha_v4_fwd"
+            / "MI300"
+            / f"fwd_hd128_{kernel_name}_sparse.co"
+        )
+        arch = "gfx942"
+    else:
+        pytest.skip(f"AITER MHA v4 Sparge requires gfx950 or gfx942, got {arch_name}.")
+
+    if not kernel_path.exists():
+        pytest.skip(f"AITER does not include the {arch} {kernel_name} sparse FMHA kernel.")
 
 
 def test_mha_v4_sparge_backends_are_registered():
@@ -107,12 +128,65 @@ def test_fp8_sparge_passes_block_mask_to_mha_v4(monkeypatch):
 
     assert lse is None
     assert output.shape == query.shape
-    assert captured["config"] == {"BLOCK_M": 256, "BLOCK_N": 128}
+    assert captured["config"] == {"BLOCK_M": 256, "BLOCK_N": ab._AITER_MHA_V4_KV_TILE}
     assert captured["pad_block_divisible"] is True
     assert captured["layout"] == (1, 512, 2, 128)
     assert captured["block_mask"] is not None
     assert tuple(captured["block_mask"].shape) == (1, 2, 2, 4)
     assert captured["used_packed"] is False
+
+
+def test_fp8_sparge_uses_gfx942_kv_tile(monkeypatch):
+    from xfuser.core.distributed import attention_backend as ab
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+
+    captured = {}
+
+    def fake_build(query, key, value, is_causal, attention_kwargs, config, pad_block_divisible=False):
+        captured["config"] = dict(config)
+        mask = torch.ones((query.shape[0], query.shape[1], 2, 8), dtype=torch.bool)
+        return query, key, value, SimpleNamespace(), mask, query.shape[1]
+
+    def fake_mha_v4(query, key, value, q_format, k_format, v_format, block_mask=None):
+        captured["block_mask"] = block_mask
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_HAS_BLOCK_MASK", True)
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_AVAILABLE", True)
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_GFX942", True)
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_KV_TILE", 64)
+    monkeypatch.setattr(ab, "_build_sparge_block_mask", fake_build)
+    monkeypatch.setattr(ab, "restore_sparge_output", lambda output, state: output)
+    monkeypatch.setattr(ab, "_aiter_mha_v4", fake_mha_v4)
+
+    query = torch.zeros((1, 2, 512, 128), dtype=torch.bfloat16)
+    output, _ = ab.ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_FP8_SPARGE](
+        query, query, query, dropout_p=0.0, is_causal=False
+    )
+
+    assert output.shape == query.shape
+    assert captured["config"] == {"BLOCK_M": 256, "BLOCK_N": 64}
+    assert tuple(captured["block_mask"].shape) == (1, 2, 2, 8)
+
+
+def test_mxfp8_sparge_rejected_on_gfx942(monkeypatch):
+    from xfuser.core.distributed import attention_backend as ab
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_HAS_BLOCK_MASK", True)
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_AVAILABLE", True)
+    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_GFX942", True)
+    monkeypatch.setattr(
+        ab,
+        "_build_sparge_block_mask",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("mask")),
+    )
+
+    query = torch.zeros((1, 2, 128, 128), dtype=torch.bfloat16)
+    with pytest.raises(NotImplementedError, match="gfx942"):
+        ab.ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_MXFP8_SPARGE](
+            query, query, query, dropout_p=0.0, is_causal=False
+        )
 
 
 def test_mxfp8_sparge_passes_block_mask_to_mha_v4_mxfp8(monkeypatch):

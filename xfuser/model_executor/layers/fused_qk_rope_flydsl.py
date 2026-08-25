@@ -39,6 +39,8 @@ from typing import Optional, Tuple
 
 import torch
 
+from diffusers.models.embeddings import apply_rotary_emb
+
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -372,6 +374,30 @@ def _norm_is_plain_rmsnorm(m) -> bool:
     return True
 
 
+def _reference(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    norm_q,
+    norm_k,
+    rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Unfused diffusers path: RMSNorm(q)/RMSNorm(k) then interleaved RoPE.
+
+    Runs exactly the ops diffusers runs -- the module's own RMSNorm followed by
+    diffusers' ``apply_rotary_emb`` -- so it is numerically interchangeable with
+    the fused fast path below.  ``norm_q`` / ``norm_k`` may be None (skip the
+    norm) and ``rotary_emb`` may be None (skip RoPE).
+    """
+    if norm_q is not None:
+        query = norm_q(query)
+    if norm_k is not None:
+        key = norm_k(key)
+    if rotary_emb is not None:
+        query = apply_rotary_emb(query, rotary_emb, sequence_dim=1)
+        key = apply_rotary_emb(key, rotary_emb, sequence_dim=1)
+    return query, key
+
+
 def flydsl_fused_qk_norm_rope(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -387,8 +413,6 @@ def flydsl_fused_qk_norm_rope(
     anything outside the supported envelope so the result is identical either
     way.
     """
-    from xfuser.model_executor.layers.fused_qk_rope import _reference
-
     if (
         rotary_emb is None
         or not isinstance(rotary_emb, (tuple, list))

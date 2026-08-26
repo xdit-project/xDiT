@@ -1,9 +1,5 @@
 """Fused QK-RMSNorm + complex (interleaved / GPT-J) RoPE for Z-Image (FlyDSL).
 
-Written in the high-level ``flydsl.expr`` (fx) API on top of aiter's ``GTensor``
-buffer-tensor shim -- the same style as ``fused_qk_rope_flydsl.py`` (FLUX/Qwen)
-and ``fused_qk_norm_rope_wan_flydsl.py`` (Wan).
-
 Layout / algorithm
 ------------------
 One block == one ``(token, head)``; the block's ``BLOCK_THREADS`` lanes cover
@@ -22,24 +18,6 @@ i.e. a contiguous width-``D`` table laid out ``[c0, s0, c1, s1, ...]``.  That is
 *already* the layout a lane wants: the lane owning channels
 ``[lane, lane + VEC)`` loads ``fc[row*D + lane : + VEC]`` in one fp32 buffer op
 and reads its pair ``kk`` as ``cos = cs[2*kk]``, ``sin = cs[2*kk + 1]``.
-
-This is why the kernel takes the freqs as **one** tensor rather than the two
-full-D ``(cos, sin)`` tables the FLUX/Qwen kernel takes.  The Qwen path pays a
-``repeat_interleave`` into two materialised fp32 tensors on every attention
-call (``_qwen_cos_sin``); here the table is passed through as a view.  One
-fewer tensor to marshal per launch, and no per-call allocation -- which matters
-because at these bandwidth-bound shapes the custom-op boundary, not the kernel,
-is what decides the race against Triton.
-
-The rotation itself is::
-
-    out[2k]     = e*cos_k - o*sin_k
-    out[2k + 1] = o*cos_k + e*sin_k        (e = x[2k], o = x[2k+1])
-
-which is exactly ``view_as_real(complex(e, o) * complex(cos_k, sin_k))``, the
-reference ``apply_rotary_emb``.  Note both lanes of a pair share one
-``(cos_k, sin_k)``, unlike the FLUX kernel's repeat_interleave tables where the
-per-lane cos/sin happen to be equal by construction.
 
 Output buffer
 -------------
@@ -71,9 +49,6 @@ autograd formula -- falls back to :func:`_reference`, the unfused diffusers
 path, so selection changes the speed, never the result.
 """
 
-# NOTE: no ``from __future__ import annotations`` -- PEP 563 stringifies the
-# annotations and defeats flydsl's runtime-arg detection for the Int32 kernel
-# params, forcing a fresh JIT per value.
 
 import math
 from functools import lru_cache

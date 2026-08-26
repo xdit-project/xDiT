@@ -17,6 +17,27 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.models.transformers.transformers_utils import chunk_and_pad_sequence, gather_and_unpad
 
+from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
+    flydsl_fused_qk_norm_rope,
+    _HAS_FLYDSL,
+)
+
+
+def _qwen_cos_sin(freqs: torch.Tensor):
+    """Real ``(cos, sin)`` tables equivalent to the complex Qwen ``freqs_cis``.
+
+    ``apply_rotary_emb_qwen(x, freqs, use_real=False)`` treats each interleaved
+    channel pair ``(2k, 2k+1)`` of ``x`` as a complex number and multiplies by
+    ``freqs`` -- the interleaved (GPT-J) rotation the fused kernel implements
+    with ``cos = repeat_interleave(Re(freqs), 2)`` and
+    ``sin = repeat_interleave(Im(freqs), 2)``.
+    """
+    fr = torch.view_as_real(freqs.contiguous())  # [S, D/2, 2] fp32
+    cos = fr[..., 0].repeat_interleave(2, dim=-1)
+    sin = fr[..., 1].repeat_interleave(2, dim=-1)
+    return cos, sin
+
+
 class xFuserQwenDoubleStreamAttnProcessor:
 
     def __call__(
@@ -50,23 +71,37 @@ class xFuserQwenDoubleStreamAttnProcessor:
         txt_key = txt_key.unflatten(-1, (attn.heads, -1))
         txt_value = txt_value.unflatten(-1, (attn.heads, -1))
 
-        # Apply QK normalization
-        if attn.norm_q is not None:
-            img_query = attn.norm_q(img_query)
-        if attn.norm_k is not None:
-            img_key = attn.norm_k(img_key)
-        if attn.norm_added_q is not None:
-            txt_query = attn.norm_added_q(txt_query)
-        if attn.norm_added_k is not None:
-            txt_key = attn.norm_added_k(txt_key)
-
-        # Apply RoPE
-        if image_rotary_emb is not None:
+        # Fuse QK-RMSNorm and RoPE into one kernel per stream when AITER/FlyDSL
+        # is present. RoPE is per-token, so fusing it per stream before the
+        # joint concat is identical to the unfused norm-then-rope path below.
+        # Qwen's rotary emb is a complex freqs pair, so convert it to the real
+        # (cos, sin) tables the kernel expects.
+        if _HAS_FLYDSL and image_rotary_emb is not None:
             img_freqs, txt_freqs = image_rotary_emb
-            img_query = apply_rotary_emb_qwen(img_query, img_freqs, use_real=False)
-            img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
-            txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
-            txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+            img_query, img_key = flydsl_fused_qk_norm_rope(
+                img_query, img_key, attn.norm_q, attn.norm_k, _qwen_cos_sin(img_freqs)
+            )
+            txt_query, txt_key = flydsl_fused_qk_norm_rope(
+                txt_query, txt_key, attn.norm_added_q, attn.norm_added_k, _qwen_cos_sin(txt_freqs)
+            )
+        else:
+            # Apply QK normalization
+            if attn.norm_q is not None:
+                img_query = attn.norm_q(img_query)
+            if attn.norm_k is not None:
+                img_key = attn.norm_k(img_key)
+            if attn.norm_added_q is not None:
+                txt_query = attn.norm_added_q(txt_query)
+            if attn.norm_added_k is not None:
+                txt_key = attn.norm_added_k(txt_key)
+
+            # Apply RoPE
+            if image_rotary_emb is not None:
+                img_freqs, txt_freqs = image_rotary_emb
+                img_query = apply_rotary_emb_qwen(img_query, img_freqs, use_real=False)
+                img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
+                txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
+                txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
 
         # Concatenate for joint attention
         # Order: [text, image]

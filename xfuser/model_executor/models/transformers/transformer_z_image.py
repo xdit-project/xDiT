@@ -9,6 +9,9 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
+    flydsl_fused_qk_norm_rope,
+)
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -53,23 +56,15 @@ class xFuserZSingleStreamAttnProcessor:
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        # Apply Norms
-        if attn.norm_q is not None:
-            query = attn.norm_q(query)
-        if attn.norm_k is not None:
-            key = attn.norm_k(key)
-
-        # Apply RoPE
-        def apply_rotary_emb(x_in: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-            with torch.amp.autocast("cuda", enabled=False):
-                x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
-                freqs_cis = freqs_cis.unsqueeze(2)
-                x_out = torch.view_as_real(x * freqs_cis).flatten(3)
-                return x_out.type_as(x_in)
-
-        if freqs_cis is not None:
-            query = apply_rotary_emb(query, freqs_cis)
-            key = apply_rotary_emb(key, freqs_cis)
+        # Apply Norms + RoPE.
+        #
+        # The wrapper selects from tensor properties alone and falls back to the
+        # unfused diffusers path (norm then complex rope) whenever the FlyDSL
+        # stack is absent or the shape is out of envelope, so this call is
+        # numerically interchangeable with the code it replaced.
+        query, key = flydsl_fused_qk_norm_rope(
+            query, key, attn.norm_q, attn.norm_k, freqs_cis
+        )
 
         # Cast to correct dtype
         dtype = query.dtype

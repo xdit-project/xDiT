@@ -37,7 +37,6 @@ import torch
 from torch import nn
 
 from xfuser.model_executor.cache import utils
-from xfuser.model_executor.cache.diffusers_adapters.registry import TRANSFORMER_ADAPTER_REGISTRY
 
 
 class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
@@ -51,7 +50,7 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
         `temb_mod_img`/`temb_mod_txt`) and take a single concatenated
         hidden_states tensor.
 
-    Permanent hook design (set by apply_cache_on_transformer):
+    Permanent hook design (set by apply_fbcache):
         self._single_stream_mod           : torch.Tensor  (injected by pre-hook)
         self._single_joint_attn_kwargs    : dict | None   (injected by pre-hook)
 
@@ -75,15 +74,13 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
            correctly sees the updated data.
 
     Device compatibility:
-      The base class initialises rel_l1_thresh with get_device(0) = cuda:0 for
-      ALL ranks. In Ulysses SP with 8 ranks using cuda:0..cuda:7, the l1_distance
-      result on rank N (cuda:N) cannot be compared to a threshold on cuda:0.
-      are_two_tensor_similar is overridden to move threshold to t1's device.
+      rel_l1_thresh is registered without assuming a rank-local device.
+      are_two_tensor_similar moves it to t1's device before comparison.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Injected by permanent pre-hook in apply_cache_on_transformer.
+        # Injected by permanent pre-hook in apply_fbcache.
         self._single_stream_mod = None
         self._single_joint_attn_kwargs = None
         # Persistent GPU buffers for cross-step cache storage.
@@ -217,7 +214,7 @@ class Flux2FBCachedTransformerBlocks(utils.FBCachedTransformerBlocks):
         return hidden, encoder
 
 
-def apply_cache_on_transformer(
+def apply_fbcache(
     transformer,
     *,
     rel_l1_thresh: float = 0.12,
@@ -264,16 +261,13 @@ def apply_cache_on_transformer(
             f"Got '{use_cache}'. TeaCache is not supported for FLUX.2."
         )
 
-    adapter_name = TRANSFORMER_ADAPTER_REGISTRY.get(type(transformer), "flux")
-
     cached_blocks = Flux2FBCachedTransformerBlocks(
         transformer.transformer_blocks,
         transformer.single_transformer_blocks,
-        transformer=transformer,
         rel_l1_thresh=rel_l1_thresh,
         return_hidden_states_first=return_hidden_states_first,
         num_steps=num_steps,
-        name=adapter_name,
+        name="flux2",
     )
 
     # ── 1. Permanently swap the block lists ─────────────────────────────

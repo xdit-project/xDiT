@@ -6,9 +6,11 @@ All tests are CPU-only and have no HuggingFace or GPU dependencies.
 Run with:
     pytest tests/test_wan_distilled.py -v
 """
+
 import pytest
 import torch
-
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Helpers — import only the pure functions / classes under test
@@ -19,7 +21,6 @@ from xfuser.model_executor.models.runner_models.wan import (
     _distilled_scheduler_sigmas,
     _DistilledWanScheduler,
 )
-
 
 # ---------------------------------------------------------------------------
 # _remap_lightx2v_to_diffusers
@@ -56,10 +57,22 @@ class TestRemapLightx2vToDiffusers:
             ("head.head.weight", "proj_out.weight"),
             ("head.modulation", "scale_shift_table"),
             # text / time embeddings
-            ("text_embedding.0.weight", "condition_embedder.text_embedder.linear_1.weight"),
-            ("text_embedding.2.weight", "condition_embedder.text_embedder.linear_2.weight"),
-            ("time_embedding.0.weight", "condition_embedder.time_embedder.linear_1.weight"),
-            ("time_embedding.2.weight", "condition_embedder.time_embedder.linear_2.weight"),
+            (
+                "text_embedding.0.weight",
+                "condition_embedder.text_embedder.linear_1.weight",
+            ),
+            (
+                "text_embedding.2.weight",
+                "condition_embedder.text_embedder.linear_2.weight",
+            ),
+            (
+                "time_embedding.0.weight",
+                "condition_embedder.time_embedder.linear_1.weight",
+            ),
+            (
+                "time_embedding.2.weight",
+                "condition_embedder.time_embedder.linear_2.weight",
+            ),
             ("time_projection.1.weight", "condition_embedder.time_proj.weight"),
             # keys that should pass through unchanged (diffusers native)
             ("patch_embedding.weight", "patch_embedding.weight"),
@@ -134,9 +147,9 @@ class TestDistilledWanScheduler:
         ts_4 = scheduler.timesteps.clone()
         scheduler.set_timesteps(20)
         ts_20 = scheduler.timesteps.clone()
-        assert torch.allclose(ts_4, ts_20), (
-            "Schedule must be fixed regardless of num_inference_steps"
-        )
+        assert torch.allclose(
+            ts_4, ts_20
+        ), "Schedule must be fixed regardless of num_inference_steps"
 
     def test_timesteps_match_expected(self, scheduler):
         scheduler.set_timesteps(4)
@@ -162,6 +175,48 @@ class TestDistilledWanScheduler:
         assert torch.allclose(scheduler.timesteps.cpu(), expected.cpu())
 
 
+class TestDistilledTransformerLoading:
+    def test_quantized_load_uses_mapped_local_blockwise_source(self):
+        from xfuser.model_executor.models.runner_models import wan
+        from xfuser.model_executor.models.transformers.transformer_wan import (
+            xFuserWanTransformer3DWrapper,
+        )
+
+        model = object.__new__(wan.xFuserWan22DistilledI2VModel)
+        model.config = SimpleNamespace()
+        model.loader = SimpleNamespace(
+            transformer_quantization_adapter=MagicMock(
+                return_value=(object(), ("blocks",))
+            ),
+            load_transformer=MagicMock(return_value=object()),
+        )
+        manifest = object()
+        attention_kwargs = object()
+
+        with (
+            patch.object(
+                wan, "resolve_mapped_checkpoint", return_value=manifest
+            ) as resolve,
+            patch.object(wan, "_build_attention_kwargs", return_value=attention_kwargs),
+        ):
+            result = model._build_distilled_transformer(
+                "transformer", "/weights/high.safetensors"
+            )
+
+        assert result is model.loader.load_transformer.return_value
+        resolve.assert_called_once_with(
+            "/weights/high.safetensors",
+            live_key=wan._remap_lightx2v_to_diffusers,
+        )
+        model.loader.load_transformer.assert_called_once_with(
+            xFuserWanTransformer3DWrapper,
+            subfolder="transformer",
+            init_kwargs={"attention_kwargs": attention_kwargs},
+            stream_quant=False,
+            weight_source=manifest,
+        )
+
+
 # ---------------------------------------------------------------------------
 # _validate_args (via xFuserWan22DistilledI2VModel)
 # ---------------------------------------------------------------------------
@@ -183,7 +238,12 @@ class TestValidateArgs:
             def __init__(self):
                 pass
 
-        def _call(args, *, transformer_path="/fake/high.safetensors", transformer_2_path="/fake/low.safetensors"):
+        def _call(
+            args,
+            *,
+            transformer_path="/fake/high.safetensors",
+            transformer_2_path="/fake/low.safetensors",
+        ):
             instance = _TestModel()
             instance.config = MagicMock()
             instance.config.distilled_transformer_path = transformer_path
@@ -199,7 +259,13 @@ class TestValidateArgs:
         return _call
 
     def test_accepts_four_steps(self, call_validate):
-        call_validate({"num_inference_steps": 4, "input_images": []})
+        call_validate(
+            {
+                "num_inference_steps": 4,
+                "guidance_scale": 1.0,
+                "input_images": [],
+            }
+        )
 
     def test_rejects_wrong_steps(self, call_validate):
         with pytest.raises(ValueError, match="num_inference_steps must be 4"):
@@ -207,8 +273,12 @@ class TestValidateArgs:
 
     def test_rejects_missing_transformer_path(self, call_validate):
         with pytest.raises(ValueError, match="distilled_transformer_path"):
-            call_validate({"num_inference_steps": 4, "input_images": []}, transformer_path=None)
+            call_validate(
+                {"num_inference_steps": 4, "input_images": []}, transformer_path=None
+            )
 
     def test_rejects_missing_transformer_2_path(self, call_validate):
         with pytest.raises(ValueError, match="distilled_transformer_2_path"):
-            call_validate({"num_inference_steps": 4, "input_images": []}, transformer_2_path=None)
+            call_validate(
+                {"num_inference_steps": 4, "input_images": []}, transformer_2_path=None
+            )

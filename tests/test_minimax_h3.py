@@ -100,6 +100,32 @@ def _tiny_inputs(device):
     }
 
 
+def _patch_minimax_runtime_state(monkeypatch, *, track_steps=False):
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+
+    calls = []
+
+    class _RuntimeState:
+        attention_backend = AttentionBackendType.SDPA
+
+        def has_attention_schedule(self):
+            return False
+
+        def increment_step_counter(self):
+            if track_steps:
+                calls.append(True)
+
+    runtime_state = _RuntimeState()
+    getter = lambda: runtime_state
+    monkeypatch.setattr(transformer_minimax_h3, "get_runtime_state", getter)
+    monkeypatch.setattr(minimax_h3_runner, "get_runtime_state", getter)
+    monkeypatch.setattr("xfuser.core.distributed.get_runtime_state", getter)
+    monkeypatch.setattr("xfuser.model_executor.layers.usp.get_runtime_state", getter)
+    return calls
+
+
 def test_minimax_h3_wrapper_matches_diffusers_u1(monkeypatch):
     from diffusers import MiniMaxH3Transformer3DModel
 
@@ -119,6 +145,7 @@ def test_minimax_h3_wrapper_matches_diffusers_u1(monkeypatch):
         "get_ulysses_parallel_rank",
         lambda: 0,
     )
+    _patch_minimax_runtime_state(monkeypatch)
 
     config = _tiny_config()
     base = MiniMaxH3Transformer3DModel(**config).eval()
@@ -249,6 +276,32 @@ def test_text_encoder_tp_requires_model_capability():
     )
 
     assert xFuserMiniMaxH3Model.capabilities.text_encoder_tp_degree
+
+
+@pytest.mark.parametrize(
+    "offload_flag",
+    [
+        "enable_model_cpu_offload",
+        "enable_sequential_cpu_offload",
+        "enable_group_cpu_offload",
+    ],
+)
+def test_minimax_h3_text_encoder_tp_rejects_cpu_offload(offload_flag):
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    config = xFuserArgs(
+        model="MiniMax-H3",
+        task="t2va",
+        ulysses_degree=2,
+        text_encoder_tp_degree=2,
+        **{offload_flag: True},
+    )
+
+    with pytest.raises(ValueError, match="incompatible with CPU offloading"):
+        xFuserMiniMaxH3Model(config)
 
 
 def test_minimax_h3_patches_shared_qwen_encoder_helper(monkeypatch):
@@ -418,7 +471,7 @@ def test_minimax_h3_ref2va_runtime_state_uses_ref_transformer():
     assert not hasattr(model.pipe, "transformer")
 
 
-def test_minimax_h3_compile_preserves_forward_signature():
+def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserMiniMaxH3Model,
     )
@@ -426,6 +479,7 @@ def test_minimax_h3_compile_preserves_forward_signature():
         xFuserMiniMaxH3Transformer3DWrapper,
     )
 
+    _patch_minimax_runtime_state(monkeypatch)
     transformer = xFuserMiniMaxH3Transformer3DWrapper(**_tiny_config()).eval()
     model = object.__new__(xFuserMiniMaxH3Model)
     model.config = SimpleNamespace(fully_shard_degree=1)
@@ -477,3 +531,81 @@ def test_minimax_h3_ref2va_uses_typed_image_references():
     assert len(captured["references"]) == 1
     assert isinstance(captured["references"][0], MiniMaxH3ImageReference)
     assert captured["references"][0].image is image
+
+
+def test_minimax_h3_supports_hybrid_attention_capability():
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+        xFuserMiniMaxH3Ref2VAModel,
+    )
+
+    assert xFuserMiniMaxH3Model.capabilities.use_hybrid_attn_schedule
+    assert xFuserMiniMaxH3Ref2VAModel.capabilities.use_hybrid_attn_schedule
+    assert (
+        xFuserMiniMaxH3Model.default_input_values.num_hybrid_attn_high_precision_steps
+        == 5
+    )
+
+
+def test_minimax_h3_accepts_hybrid_attention_backends():
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    config = xFuserArgs(
+        model="MiniMax-H3",
+        task="t2va",
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_high_precision_backend="cudnn",
+        hybrid_attn_low_precision_backend="nvte_fp8",
+        num_hybrid_attn_high_precision_steps=5,
+    )
+
+    xFuserMiniMaxH3Model(config)
+
+
+def test_minimax_h3_rejects_unsupported_hybrid_backend():
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    config = xFuserArgs(
+        model="MiniMax-H3",
+        task="t2va",
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_high_precision_backend="cudnn",
+        hybrid_attn_low_precision_backend="flash_3_fp8",
+        num_hybrid_attn_high_precision_steps=5,
+    )
+
+    with pytest.raises(ValueError, match="does not support attention backend"):
+        xFuserMiniMaxH3Model(config)
+
+
+def test_minimax_h3_forward_increments_hybrid_step_counter(monkeypatch):
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(
+        transformer_minimax_h3,
+        "get_ulysses_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        transformer_minimax_h3,
+        "get_ulysses_parallel_rank",
+        lambda: 0,
+    )
+    calls = _patch_minimax_runtime_state(monkeypatch, track_steps=True)
+
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(**_tiny_config()).eval()
+    inputs = _tiny_inputs(torch.device("cpu"))
+
+    with torch.no_grad():
+        wrapper(**inputs)
+
+    assert len(calls) == 1

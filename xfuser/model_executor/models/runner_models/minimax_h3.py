@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed import get_world_group
+from xfuser.core.distributed import get_runtime_state, get_world_group
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -20,11 +20,18 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.models.runner_models.loading.contracts import (
+    LoadSupport,
+    LoadRoute,
+)
 
 
 _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.AITER,
     AttentionBackendType.AITER_FP8,
+    AttentionBackendType.CUDNN,
+    AttentionBackendType.SDPA,
+    AttentionBackendType.NVTE_FP8,
 })
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
@@ -123,6 +130,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         width=1344,
         num_frames=124,
         num_inference_steps=50,
+        num_hybrid_attn_high_precision_steps=5,
     )
 
     settings = ModelSettings(
@@ -148,6 +156,13 @@ class xFuserMiniMaxH3Model(xFuserModel):
         valid_tasks=["t2va", "i2va", "l2va", "fl2va"],
     )
 
+    # Modular loading and QKV fusion leave no collective-safe checkpoint mapping.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -158,6 +173,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
+        use_hybrid_attn_schedule=True,
         enable_slicing=False,
         enable_tiling=False,
     )
@@ -181,23 +197,41 @@ class xFuserMiniMaxH3Model(xFuserModel):
             else:
                 config.task = "fl2va"
         super()._validate_config(config)
-        backend = _parse_attention_backend(
-            config.attention_backend,
-            "attention backend",
-        )
-        if backend is not None and backend not in _SUPPORTED_ATTN_BACKENDS:
-            supported = ", ".join(sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS))
-            raise ValueError(
-                f"MiniMax-H3 currently supports only packed varlen AITER attention. "
-                f"Supported backends: {supported}."
-            )
-        if backend == AttentionBackendType.AITER_FP8:
-            try:
-                from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
-            except ImportError:
-                raise RuntimeError(
-                    "MiniMax-H3 FP8 attention requires AITER varlen FP8 flash attention."
-                ) from None
+        if config.use_hybrid_attn_schedule:
+            backend_specs = [
+                (
+                    config.hybrid_attn_high_precision_backend,
+                    "hybrid attention high precision backend",
+                ),
+                (
+                    config.hybrid_attn_low_precision_backend,
+                    "hybrid attention low precision backend",
+                ),
+            ]
+        else:
+            backend_specs = [(config.attention_backend, "attention backend")]
+
+        backends = [
+            backend
+            for value, label in backend_specs
+            if (backend := _parse_attention_backend(value, label)) is not None
+        ]
+        for backend in backends:
+            if backend not in _SUPPORTED_ATTN_BACKENDS:
+                supported = ", ".join(
+                    sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS)
+                )
+                raise ValueError(
+                    f"MiniMax-H3 does not support attention backend {backend.name}. "
+                    f"Supported backends: {supported}."
+                )
+            if backend == AttentionBackendType.AITER_FP8:
+                try:
+                    from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
+                except ImportError:
+                    raise RuntimeError(
+                        "MiniMax-H3 FP8 attention requires AITER varlen FP8 flash attention."
+                    ) from None
 
         ulysses_degree = config.ulysses_degree or 1
         if ulysses_degree not in _SUPPORTED_ULYSSES_DEGREES:
@@ -213,7 +247,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 "--text_encoder_tp_degree must be 1 or match --ulysses_degree."
             )
         if text_encoder_tp_degree > 1 and (
-            config.enable_model_cpu_offload or config.enable_sequential_cpu_offload
+            config.enable_model_cpu_offload
+            or config.enable_sequential_cpu_offload
+            or config.enable_group_cpu_offload
         ):
             raise ValueError(
                 "MiniMax-H3 text encoder TP is incompatible with CPU offloading."
@@ -384,13 +420,15 @@ class xFuserMiniMaxH3Model(xFuserModel):
             return
         self._enable_compute_comm_overlap()
         transformer = getattr(self.pipe, self._transformer_component_name)
+        use_hybrid = get_runtime_state().has_attention_schedule()
         transformer.forward = torch.compile(
             transformer.forward,
             mode=self._get_compile_mode(),
-            fullgraph=True,
+            fullgraph=not use_hybrid,
         )
         compile_args = copy.deepcopy(input_args)
-        compile_args["num_inference_steps"] = 3
+        if not get_runtime_state().has_attention_schedule():
+            compile_args["num_inference_steps"] = 3
         self._run_timed_pipe(compile_args)
 
     def _run_warmup_calls(self, input_args: dict) -> None:
@@ -447,6 +485,14 @@ class xFuserMiniMaxH3Model(xFuserModel):
 
 @register_model("MiniMax-H3-Ref2VA")
 class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
+    # The reference workflow shares the modular loading and QKV-fusion limitation.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     _transformer_component_name = "transformer_ref"
     settings = ModelSettings(
         model_name="MiniMaxAI/MiniMax-H3",

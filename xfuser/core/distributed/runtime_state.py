@@ -24,7 +24,11 @@ if envs._is_npu():
     from torch.npu import manual_seed as device_manual_seed
     from torch.npu import manual_seed_all as device_manual_seed_all
 
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_backend import (
+    AITER_LOW_PRECISION_BACKENDS,
+    AITER_MHA_V4_ONLY_BACKEND_SET,
+    AttentionBackendType,
+)
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.config.config import (
     ParallelConfig,
@@ -125,7 +129,14 @@ class RuntimeState(metaclass=ABCMeta):
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        if attention_backend in [AttentionBackendType.FLASH_3_FP8, AttentionBackendType.AITER_FP8, AttentionBackendType.NVTE_FP8, AttentionBackendType.FLASH_4_FP4, AttentionBackendType.AITER_MLA, AttentionBackendType.AITER_FLYDSL_FP8]:
+        if attention_backend in [
+            AttentionBackendType.FLASH_3_FP8,
+            AttentionBackendType.NVTE_FP8,
+            AttentionBackendType.FLASH_4_FP4,
+            *AITER_LOW_PRECISION_BACKENDS,
+            AttentionBackendType.AITER_MLA,
+            AttentionBackendType.AITER_FLYDSL_FP8,
+        ]:
             logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
@@ -217,7 +228,7 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.SDPA_MATH,
                                  AttentionBackendType.FLASH_4,
                                  AttentionBackendType.FLASH_4_FP4,
-                                 AttentionBackendType.AITER_FP8,
+                                 *AITER_LOW_PRECISION_BACKENDS,
                                  AttentionBackendType.AITER_MLA,
                                  AttentionBackendType.AITER_SAGE,
                                  AttentionBackendType.AITER_SPARSE_SAGE,
@@ -270,6 +281,22 @@ class RuntimeState(metaclass=ABCMeta):
                 from aiter import flash_attn_fp8_pertensor_func
             except ImportError:
                 raise RuntimeError("AITER fp8 flash attention is not available, please update AITER")
+        elif attention_backend == AttentionBackendType.AITER_MXFP8:
+            try:
+                from aiter.ops.mha_v4 import mha_v4_mxfp8
+            except ImportError:
+                raise RuntimeError(
+                    f"{attention_backend.value} attention is not available, "
+                    "please update AITER"
+                ) from None
+        elif attention_backend in AITER_MHA_V4_ONLY_BACKEND_SET:
+            try:
+                from aiter.ops.mha_v4 import mha_v4
+            except ImportError:
+                raise RuntimeError(
+                    f"{attention_backend.value} attention is not available, "
+                    "please update AITER"
+                ) from None
         elif attention_backend == AttentionBackendType.NVTE_FP8:
             if not env_info.get("has_transformer_engine"):
                 raise RuntimeError(

@@ -31,7 +31,7 @@ if __name__ == "__main__":
             "transformers>=4.39.1",
             "sentencepiece>=0.1.99",
             "beautifulsoup4>=4.12.3",
-            "distvae",
+            "distvae>=0.1.0",
             "yunchang>=0.6.0",
             "einops",
             "diffusers>=0.33.0",
@@ -57,6 +57,9 @@ if __name__ == "__main__":
             ],
             "opencv-python": [
                 "opencv-python-headless", # NOTE: opencv-python is necessary if ConsisIDPipeline is used
+            ],
+            "cache-dit": [
+                "cache-dit>=1.5.0,<1.6.0",  # NOTE: cache-dit is required for --cache_method dbcache
             ],
             "test": [
                 "pytest",

@@ -52,6 +52,11 @@ from xfuser.model_executor.layers import (
 )
 from xfuser.model_executor.models.transformers.transformer_flux import (
     xFuserFluxAttentionWrapper,
+    _split_rotary_emb,
+)
+from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
+    flydsl_fused_qk_norm_rope,
+    _HAS_FLYDSL,
 )
 from xfuser.model_executor.models.transformers.register import (
     xFuserTransformerWrappersRegister,
@@ -89,27 +94,68 @@ class xFuserFlux2AttnProcessor(Flux2AttnProcessor):
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        query = attn.norm_q(query)
-        key = attn.norm_k(key)
-
         num_encoder_tokens = 0
         if attn.added_kv_proj_dim is not None:
             encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
             encoder_key = encoder_key.unflatten(-1, (attn.heads, -1))
             encoder_value = encoder_value.unflatten(-1, (attn.heads, -1))
 
-            encoder_query = attn.norm_added_q(encoder_query)
-            encoder_key = attn.norm_added_k(encoder_key)
-
             num_encoder_tokens = encoder_query.shape[1]
+            num_query_tokens = query.shape[1]
 
-            query = torch.cat([encoder_query, query], dim=1)
-            key = torch.cat([encoder_key, key], dim=1)
-            value = torch.cat([encoder_value, value], dim=1)
+            if _HAS_FLYDSL:
+                # AITER/FlyDSL present: fuse QK-RMSNorm and RoPE into one kernel
+                # per stream.  RoPE is per-token, so applying it before the
+                # joint concat over dim=1 is mathematically identical to
+                # applying it after.  Mirrors xFuserFluxAttnProcessor.
+                txt_rope, img_rope = _split_rotary_emb(
+                    image_rotary_emb, num_encoder_tokens, num_query_tokens
+                )
+                encoder_query, encoder_key = flydsl_fused_qk_norm_rope(
+                    encoder_query,
+                    encoder_key,
+                    attn.norm_added_q,
+                    attn.norm_added_k,
+                    txt_rope,
+                )
+                query, key = flydsl_fused_qk_norm_rope(
+                    query, key, attn.norm_q, attn.norm_k, img_rope
+                )
 
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+                query = torch.cat([encoder_query, query], dim=1)
+                key = torch.cat([encoder_key, key], dim=1)
+                value = torch.cat([encoder_value, value], dim=1)
+
+                if txt_rope is None and image_rotary_emb is not None:
+                    # tables could not be split -> apply RoPE on the joint stream
+                    query, key = flydsl_fused_qk_norm_rope(
+                        query, key, None, None, image_rotary_emb
+                    )
+            else:
+                # No AITER: the original unfused diffusers path, unchanged.
+                query = attn.norm_q(query)
+                key = attn.norm_k(key)
+                encoder_query = attn.norm_added_q(encoder_query)
+                encoder_key = attn.norm_added_k(encoder_key)
+
+                query = torch.cat([encoder_query, query], dim=1)
+                key = torch.cat([encoder_key, key], dim=1)
+                value = torch.cat([encoder_value, value], dim=1)
+
+                if image_rotary_emb is not None:
+                    query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                    key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+        else:
+            if _HAS_FLYDSL:
+                query, key = flydsl_fused_qk_norm_rope(
+                    query, key, attn.norm_q, attn.norm_k, image_rotary_emb
+                )
+            else:
+                query = attn.norm_q(query)
+                key = attn.norm_k(key)
+                if image_rotary_emb is not None:
+                    query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                    key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
         # PipeFusion stale-KV: cache image KV per patch, keep encoder (text) KV fresh.
         # Mirrors xFuserFluxAttnProcessor.
@@ -227,12 +273,24 @@ class xFuserFlux2ParallelSelfAttnProcessor(Flux2ParallelSelfAttnProcessor):
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        query = attn.norm_q(query)
-        key = attn.norm_k(key)
+        if _HAS_FLYDSL:
+            # AITER/FlyDSL present: fuse QK-RMSNorm and RoPE into one kernel.
+            # No stream splitting needed here -- the single block already runs
+            # on the concatenated [text, image] stream and image_rotary_emb is
+            # the joint table covering exactly it.  query/key are non-contiguous
+            # chunks of the fused to_qkv_mlp_proj; the kernel reads them in
+            # place, so do NOT make them contiguous first.
+            query, key = flydsl_fused_qk_norm_rope(
+                query, key, attn.norm_q, attn.norm_k, image_rotary_emb
+            )
+        else:
+            # No AITER: the original unfused diffusers path, unchanged.
+            query = attn.norm_q(query)
+            key = attn.norm_k(key)
 
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+            if image_rotary_emb is not None:
+                query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
         # PipeFusion stale-KV: single block runs on concatenated [text, image].
         # Cache only the image portion (text KV stays fresh). MLP part is NOT cached.

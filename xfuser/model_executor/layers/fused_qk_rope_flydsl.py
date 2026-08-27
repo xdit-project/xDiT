@@ -71,19 +71,29 @@ except Exception:  # pragma: no cover - only exercised where flydsl is absent
 MAX_GRID_Y = 65535
 
 
-def _pick_block(d: int) -> Optional[Tuple[int, int]]:
+def _pick_block(d: int, wave_size: int) -> Optional[Tuple[int, int]]:
     """Return ``(BLOCK_THREADS, VEC)`` for head_dim ``d`` or None if unsupported.
 
     Prefer the widest wave (few lanes, more work each) while keeping VEC even
-    (GPT-J pairs stay lane-local) and BLOCK_THREADS a power of two <= 64 (single
-    wave, so the sum-of-squares reduction is a pure shuffle_xor butterfly).
+    (GPT-J pairs stay lane-local) and BLOCK_THREADS no larger than the hardware
+    wave, so the sum-of-squares reduction is a pure shuffle_xor butterfly.
     """
-    for bt in (64, 32, 16, 8, 4, 2):
+    bt = wave_size
+    while bt >= 2:
         if d % bt == 0:
             vec = d // bt
             if vec >= 2 and vec % 2 == 0:
                 return bt, vec
+        bt //= 2
     return None
+
+
+def _device_wave_size(query: torch.Tensor) -> Optional[int]:
+    properties = torch.cuda.get_device_properties(query.device)
+    wave_size = getattr(properties, "warp_size", None)
+    if not isinstance(wave_size, int) or wave_size < 2 or wave_size & (wave_size - 1):
+        return None
+    return wave_size
 
 
 if _HAS_FLYDSL:
@@ -356,7 +366,8 @@ def _supported(query, key, cos) -> bool:
     if query.dim() != 4:  # [B, S, H, D]
         return False
     d = query.shape[-1]
-    if _pick_block(d) is None:
+    wave_size = _device_wave_size(query)
+    if wave_size is None or _pick_block(d, wave_size) is None:
         return False
     if not isinstance(cos, torch.Tensor) or cos.shape[-1] != d:
         return False
@@ -436,7 +447,10 @@ def flydsl_fused_qk_norm_rope(
     if cos2.dtype not in (torch.float32, torch.bfloat16):
         return _reference(query, key, norm_q, norm_k, rotary_emb)
 
-    block_vec = _pick_block(d)
+    wave_size = _device_wave_size(query)
+    if wave_size is None:
+        return _reference(query, key, norm_q, norm_k, rotary_emb)
+    block_vec = _pick_block(d, wave_size)
     if block_vec is None:  # already checked in _supported, belt & suspenders
         return _reference(query, key, norm_q, norm_k, rotary_emb)
     block_threads, vec = block_vec

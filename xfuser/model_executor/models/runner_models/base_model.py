@@ -139,6 +139,9 @@ class ModelCapabilities:
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
     supports_distilled_weights: bool = False
+    # Only models compiled with "reduce-overhead" (CUDA graphs) produce a capture
+    # phase trace; enabling this flag on any other model would silently do nothing.
+    profile_capture_phase: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -746,14 +749,11 @@ class xFuserModel(abc.ABC):
             active=self.config.profile_active,
         )
         num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
-        with_stack = self.config.profile_capture_phase
-        batch_size = input_args.get("num_images_per_prompt", 1)
+        with_stack = self.config.profile_with_stack
+        batch_size = self.config.batch_size or 1
         height = input_args.get("height", 0)
         width = input_args.get("width", 0)
-        if self.config.profile_capture_phase:
-            annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
-        else:
-            annotation = "model_inference"
+        annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
 
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -859,7 +859,6 @@ class xFuserModel(abc.ABC):
         """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
         enable_capture = (
             self.config.profile_capture_phase
-            and get_world_group().rank == 0
             and self._get_compile_mode() == "reduce-overhead"
             and not self.pipe.scheduler.config.shift_terminal
         )
@@ -875,7 +874,8 @@ class xFuserModel(abc.ABC):
         log("Profiling CUDA graph recording phase for shape trace...")
         capture_dir = f"{self.config.output_directory}/capture_traces"
         os.makedirs(capture_dir, exist_ok=True)
-        capture_path = f"{capture_dir}/capture_trace_rank_0.json.gz"
+        rank = get_world_group().rank
+        capture_path = f"{capture_dir}/capture_trace_rank_{rank}.json.gz"
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,

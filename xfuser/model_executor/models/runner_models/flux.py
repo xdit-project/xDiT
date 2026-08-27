@@ -49,6 +49,7 @@ class xFuserFluxModel(xFuserModel):
         enable_slicing=True,
         fully_shard_degree=True,
         supports_step_caching=True,
+        profile_capture_phase=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -289,6 +290,7 @@ class xFuserFlux2Model(xFuserModel):
         use_parallel_vae_encoder=True,
         pipefusion_parallel_degree=True,
         supports_step_caching=True,
+        profile_capture_phase=True,
     )
     default_input_values = DefaultInputValues(
         height=1024,
@@ -432,6 +434,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         fully_shard_degree=True,
         pipefusion_parallel_degree=True,
         supports_step_caching=True,
+        profile_capture_phase=True,
     )
 
     default_input_values = DefaultInputValues(

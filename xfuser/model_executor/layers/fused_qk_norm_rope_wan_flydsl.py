@@ -29,6 +29,8 @@ from typing import Optional, Tuple
 
 import torch
 
+from xfuser.model_executor.layers.flydsl_utils import get_device_wave_size
+
 # The FlyDSL + aiter stack is optional; importing this module must never hard
 # fail on a box without them (CPU-only CI, non-ROCm).  ``_HAS_FLYDSL`` gates the
 # fast path; the wrapper / enabled() check fall back to the reference when False.
@@ -47,7 +49,7 @@ except Exception:  # pragma: no cover - only exercised where flydsl is absent
     _HAS_FLYDSL = False
 
 
-def _pick_tiling(H: int, D: int) -> Optional[Tuple[int, int, int]]:
+def _pick_tiling(H: int, D: int, wave_size: int) -> Optional[Tuple[int, int, int]]:
     """Return ``(BLOCK_THREADS, VEC, N_TILES)`` for ``[H, D]`` or None.
 
     ``VEC`` is the q/k/out vectorization -- q/k/out are bf16, so a single 128-bit
@@ -56,7 +58,8 @@ def _pick_tiling(H: int, D: int) -> Optional[Tuple[int, int, int]]:
     the bf16 q/k path keeps its full 128-bit VEC even when cos/sin are fp32.
 
     Constraints (see module docstring):
-      * BLOCK_THREADS a power of two <= 64 (single wave -> shuffle_xor butterfly);
+      * BLOCK_THREADS no larger than the hardware wave (single wave ->
+        shuffle_xor butterfly);
       * VEC even and ``VEC | D`` (GPT-J pairs stay lane-local, lane block inside
         one head);
       * ``(BLOCK_THREADS * VEC) | (H*D)`` (whole tiles) and
@@ -66,8 +69,10 @@ def _pick_tiling(H: int, D: int) -> Optional[Tuple[int, int, int]]:
     Prefer the widest wave, then the widest VEC (fewer, wider 128-bit loads).
     """
     HD = H * D
-    for bt in (64, 32, 16):
+    bt = wave_size
+    while bt >= 16:
         if HD % bt:
+            bt //= 2
             continue
         for vec in (8, 4, 2):
             if D % vec or vec % 2:
@@ -76,6 +81,7 @@ def _pick_tiling(H: int, D: int) -> Optional[Tuple[int, int, int]]:
             if HD % tile or tile % D:
                 continue
             return bt, vec, HD // tile
+        bt //= 2
     return None
 
 
@@ -289,7 +295,11 @@ if _HAS_FLYDSL:
         """
         S, HD = q.shape
         D = HD // heads
-        bt, vec, n_tiles = _pick_tiling(heads, D)  # guaranteed non-None by caller
+        wave_size = get_device_wave_size(q)
+        tiling = _pick_tiling(heads, D, wave_size) if wave_size is not None else None
+        if tiling is None:
+            raise RuntimeError("unsupported WAN FlyDSL QK norm/RoPE tiling")
+        bt, vec, n_tiles = tiling
 
         launcher = _build_kernel(
             HD=HD,
@@ -429,7 +439,8 @@ def fused_qk_norm_rope(
     eps_q, eps_k = norm_q.eps, norm_k.eps
     if eps_q is None or eps_k is None or eps_q != eps_k:
         return _ref()
-    if _pick_tiling(heads, D) is None:
+    wave_size = get_device_wave_size(query)
+    if wave_size is None or _pick_tiling(heads, D, wave_size) is None:
         return _ref()
 
     # freqs: [1, S, 1, D], last dim contiguous (diffusers WanRotaryPosEmbed).

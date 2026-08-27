@@ -9,6 +9,9 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
+    flydsl_fused_qk_norm_rope,
+)
 
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
@@ -22,6 +25,38 @@ from xfuser.core.distributed import (
 
 ADALN_EMBED_DIM = 256
 SEQ_MULTI_OF = 32
+
+
+def _scatter_pad_token(x: torch.Tensor, mask: torch.Tensor, pad_token: torch.Tensor) -> torch.Tensor:
+    """``x[mask] = pad_token`` without the device->host sync.
+
+    Boolean-mask ``index_put_`` lowers to ``nonzero()`` on CUDA, which must read the
+    match count back to the host to size its output -- a full blocking sync on the
+    hot path, twice per denoise step (x tokens and caption tokens).
+
+    ``torch.where`` computes exactly the same result as a data-independent
+    elementwise select: no ``nonzero``, no host round-trip, no dynamic shape (which
+    also removes a torch.compile graph break).  Rows selected by ``mask`` get
+    ``pad_token`` broadcast across the feature dim, all other rows are copied
+    verbatim, so the produced tensor is bit-identical to the in-place form.
+
+    Ungated and selected purely from tensor properties; anything that does not
+    match the expected 2-D (tokens, dim) / 1-D bool-mask layout falls through to
+    the original in-place reference path.
+    """
+    if (
+        x.dim() == 2
+        and mask.dim() == 1
+        and mask.dtype == torch.bool
+        and mask.shape[0] == x.shape[0]
+        and pad_token.dim() == 2
+        and pad_token.shape[0] == 1
+        and pad_token.shape[1] == x.shape[1]
+    ):
+        return torch.where(mask.unsqueeze(-1), pad_token.to(x.dtype), x)
+    # _reference fallback: unchanged upstream behaviour.
+    x[mask] = pad_token
+    return x
 
 class xFuserZSingleStreamAttnProcessor:
     """
@@ -53,23 +88,15 @@ class xFuserZSingleStreamAttnProcessor:
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        # Apply Norms
-        if attn.norm_q is not None:
-            query = attn.norm_q(query)
-        if attn.norm_k is not None:
-            key = attn.norm_k(key)
-
-        # Apply RoPE
-        def apply_rotary_emb(x_in: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-            with torch.amp.autocast("cuda", enabled=False):
-                x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
-                freqs_cis = freqs_cis.unsqueeze(2)
-                x_out = torch.view_as_real(x * freqs_cis).flatten(3)
-                return x_out.type_as(x_in)
-
-        if freqs_cis is not None:
-            query = apply_rotary_emb(query, freqs_cis)
-            key = apply_rotary_emb(key, freqs_cis)
+        # Apply Norms + RoPE.
+        #
+        # The wrapper selects from tensor properties alone and falls back to the
+        # unfused diffusers path (norm then complex rope) whenever the FlyDSL
+        # stack is absent or the shape is out of envelope, so this call is
+        # numerically interchangeable with the code it replaced.
+        query, key = flydsl_fused_qk_norm_rope(
+            query, key, attn.norm_q, attn.norm_k, freqs_cis
+        )
 
         # Cast to correct dtype
         dtype = query.dtype
@@ -179,6 +206,16 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         bsz = len(x)
         device = x[0].device
+        # The pipeline keeps the timestep schedule host-resident so that its
+        # per-step ``t_norm = timestep[0].item()`` is not a blocking D2H sync
+        # (see xfuser/model_executor/models/runner_models/z_image.py::
+        # _keep_timesteps_host_resident).  Pay for that with one cheap
+        # non-blocking H2D copy of the (B,) timestep vector instead of a full
+        # queue drain per denoise step.  Selected purely from tensor properties;
+        # if ``t`` is already on-device this is a no-op and the original
+        # behaviour is preserved byte for byte.
+        if isinstance(t, torch.Tensor) and t.device != device:
+            t = t.to(device, non_blocking=True)
         t = t * self.t_scale
         t = self.t_embedder(t)
 
@@ -202,7 +239,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         # Match t_embedder output dtype to x for layerwise casting compatibility
         adaln_input = t.type_as(x)
-        x[torch.cat(x_inner_pad_mask)] = self.x_pad_token
+        x = _scatter_pad_token(x, torch.cat(x_inner_pad_mask), self.x_pad_token)
         x = list(x.split(x_item_seqlens, dim=0))
         x_freqs_cis = list(self.rope_embedder(torch.cat(x_pos_ids, dim=0)).split([len(_) for _ in x_pos_ids], dim=0))
 
@@ -238,7 +275,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
         cap_feats = torch.cat(cap_feats, dim=0)
         cap_feats = self.cap_embedder(cap_feats)
-        cap_feats[torch.cat(cap_inner_pad_mask)] = self.cap_pad_token
+        cap_feats = _scatter_pad_token(cap_feats, torch.cat(cap_inner_pad_mask), self.cap_pad_token)
         cap_feats = list(cap_feats.split(cap_item_seqlens, dim=0))
         cap_freqs_cis = list(self.rope_embedder(torch.cat(cap_pos_ids, dim=0)).split([len(_) for _ in cap_pos_ids], dim=0))
 

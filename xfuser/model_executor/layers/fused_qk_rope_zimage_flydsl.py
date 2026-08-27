@@ -7,8 +7,8 @@ the head's ``D`` channels with each lane owning ``VEC`` contiguous channels.
 ``VEC`` is even and ``lane = tid * VEC`` is therefore even, so a GPT-J pair
 ``(2k, 2k+1)`` never straddles two lanes and the rotation stays register-local.
 The RMS reduction over ``D`` is a wave-local ``shuffle_xor`` butterfly (no LDS)
-since ``BLOCK_THREADS <= 64``.  The freqs row is loaded once and shared by q
-and k.
+since ``BLOCK_THREADS`` never exceeds the hardware wave size.  The freqs row is
+loaded once and shared by q and k.
 
 Freqs: zero-copy, no repeat_interleave
 --------------------------------------
@@ -57,6 +57,7 @@ from typing import Optional, Tuple
 import torch
 
 from xfuser.logger import init_logger
+from xfuser.model_executor.layers.flydsl_utils import get_device_wave_size
 
 logger = init_logger(__name__)
 
@@ -89,19 +90,21 @@ MAX_GRID_Y = 65535
 MAX_VEC_F32 = 4
 
 
-def _pick_block(d: int) -> Optional[Tuple[int, int]]:
+def _pick_block(d: int, wave_size: int) -> Optional[Tuple[int, int]]:
     """Return ``(BLOCK_THREADS, VEC)`` for head_dim ``d``, or None if unsupported.
 
     Prefer the widest wave (few lanes, more work each) while keeping VEC even
     (GPT-J pairs stay lane-local), VEC <= 4 (128-bit fp32 freqs load) and
-    BLOCK_THREADS a power of two <= 64 (single wave, so the sum-of-squares
-    reduction is a pure shuffle_xor butterfly with no LDS).
+    BLOCK_THREADS no larger than the hardware wave (single wave, so the
+    sum-of-squares reduction is a pure shuffle_xor butterfly with no LDS).
     """
-    for bt in (64, 32, 16, 8, 4, 2):
+    bt = wave_size
+    while bt >= 2:
         if d % bt == 0:
             vec = d // bt
             if vec >= 2 and vec % 2 == 0 and vec <= MAX_VEC_F32:
                 return bt, vec
+        bt //= 2
     return None
 
 
@@ -308,7 +311,11 @@ if _HAS_FLYDSL:
         has_wq = wq is not None
         has_wk = wk is not None
 
-        bt, vec = _pick_block(d)  # guaranteed non-None by the caller's envelope
+        wave_size = get_device_wave_size(q)
+        block = _pick_block(d, wave_size) if wave_size is not None else None
+        if block is None:
+            raise RuntimeError("unsupported Z-Image FlyDSL QK norm/RoPE tiling")
+        bt, vec = block
 
         launcher = _build_kernel(
             H=heads,
@@ -467,7 +474,8 @@ def flydsl_fused_qk_norm_rope(
         return _ref()
 
     b, s, h, d = query.shape
-    if _pick_block(d) is None:
+    wave_size = get_device_wave_size(query)
+    if wave_size is None or _pick_block(d, wave_size) is None:
         return _ref()
 
     # The reference does complex(x) * freqs_cis, so the table must be complex

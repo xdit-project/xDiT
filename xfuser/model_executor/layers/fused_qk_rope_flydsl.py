@@ -42,6 +42,7 @@ import torch
 from diffusers.models.embeddings import apply_rotary_emb
 
 from xfuser.logger import init_logger
+from xfuser.model_executor.layers.flydsl_utils import get_device_wave_size
 
 logger = init_logger(__name__)
 
@@ -87,13 +88,6 @@ def _pick_block(d: int, wave_size: int) -> Optional[Tuple[int, int]]:
         bt //= 2
     return None
 
-
-def _device_wave_size(query: torch.Tensor) -> Optional[int]:
-    properties = torch.cuda.get_device_properties(query.device)
-    wave_size = getattr(properties, "warp_size", None)
-    if not isinstance(wave_size, int) or wave_size < 2 or wave_size & (wave_size - 1):
-        return None
-    return wave_size
 
 
 if _HAS_FLYDSL:
@@ -366,7 +360,7 @@ def _supported(query, key, cos) -> bool:
     if query.dim() != 4:  # [B, S, H, D]
         return False
     d = query.shape[-1]
-    wave_size = _device_wave_size(query)
+    wave_size = get_device_wave_size(query)
     if wave_size is None or _pick_block(d, wave_size) is None:
         return False
     if not isinstance(cos, torch.Tensor) or cos.shape[-1] != d:
@@ -447,7 +441,7 @@ def flydsl_fused_qk_norm_rope(
     if cos2.dtype not in (torch.float32, torch.bfloat16):
         return _reference(query, key, norm_q, norm_k, rotary_emb)
 
-    wave_size = _device_wave_size(query)
+    wave_size = get_device_wave_size(query)
     if wave_size is None:
         return _reference(query, key, norm_q, norm_k, rotary_emb)
     block_vec = _pick_block(d, wave_size)

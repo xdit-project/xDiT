@@ -139,8 +139,6 @@ class ModelCapabilities:
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
     supports_distilled_weights: bool = False
-    # Only models compiled with "reduce-overhead" (CUDA graphs) produce a capture
-    # phase trace; enabling this flag on any other model would silently do nothing.
     profile_capture_phase: bool = False
 
 @dataclass(frozen=True)

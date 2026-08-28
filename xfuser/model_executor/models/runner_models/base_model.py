@@ -2,6 +2,7 @@ import abc
 import torch
 import copy
 import json
+import os
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field, replace
@@ -138,6 +139,7 @@ class ModelCapabilities:
     supports_sparse_attention_backends: bool = False
     supports_sparge_attention_backends: bool = False
     supports_distilled_weights: bool = False
+    profile_capture_phase: bool = False
 
 @dataclass(frozen=True)
 class DefaultInputValues:
@@ -660,7 +662,7 @@ class xFuserModel(abc.ABC):
         warmup_steps = self._get_compile_warmup_steps(input_args)
         if warmup_steps is not None:
             compile_args["num_inference_steps"] = warmup_steps
-        self._run_timed_pipe(compile_args)
+        self._run_compile_warmup(compile_args)
 
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
@@ -745,16 +747,21 @@ class xFuserModel(abc.ABC):
             active=self.config.profile_active,
         )
         num_repetitions = self.config.profile_wait + self.config.profile_warmup + self.config.profile_active
+        with_stack = self.config.profile_with_stack
+        batch_size = self.config.batch_size or 1
+        height = input_args.get("height", 0)
+        width = input_args.get("width", 0)
+        annotation = f"execute_diffusion_{batch_size}_{height}x{width}"
 
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=schedule,
             record_shapes=True,
-            with_stack=False,
+            with_stack=with_stack,
         ) as profile_object:
             for iteration in range(num_repetitions):
                 log(f"Profiling iteration {iteration + 1}/{num_repetitions}")
-                with record_function("model_inference"):
+                with record_function(annotation):
                     if self.config.batch_size: # Run in batched mode
                         output, batch_timings = self._run_pipe_batched(input_args)
                         timing = sum(batch_timings)
@@ -845,6 +852,36 @@ class xFuserModel(abc.ABC):
         torch.cuda.synchronize()
         elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
         return out, elapsed_time
+
+    def _run_compile_warmup(self, compile_args: dict) -> None:
+        """Run compilation warmup, optionally profiling the CUDA graph recording phase."""
+        enable_capture = (
+            self.config.profile_capture_phase
+            and self._get_compile_mode() == "reduce-overhead"
+            and not self.pipe.scheduler.config.shift_terminal
+        )
+        if not enable_capture:
+            self._run_timed_pipe(compile_args)
+            return
+
+        # Phase 1: Dynamo trace + Inductor compile + eager warmup (1 step).
+        compile_args["num_inference_steps"] = 1
+        self._run_timed_pipe(compile_args)
+
+        # Phase 2: CUDA graph recording under profiler (1 step).
+        log("Profiling CUDA graph recording phase for shape trace...")
+        capture_dir = f"{self.config.output_directory}/capture_traces"
+        os.makedirs(capture_dir, exist_ok=True)
+        rank = get_world_group().rank
+        capture_path = f"{capture_dir}/capture_trace_rank_{rank}.json.gz"
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_stack=True,
+            on_trace_ready=lambda prof: prof.export_chrome_trace(capture_path),
+        ) as capture_prof:
+            self._run_timed_pipe(compile_args)
+        log(f"Capture trace saved to {capture_path}")
 
     def get_output_name(self, input_args) -> str:
         """ Generate a unique output name based on model and config """

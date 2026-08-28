@@ -97,6 +97,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        profile_capture_phase=True,
     )
 
     _STG_SCALE = 1.0
@@ -238,7 +239,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         compile_args["num_inference_steps"] = (
             2  # Reduce steps for warmup # TODO: make this more generic
         )
-        self._run_timed_pipe(compile_args)
+        self._run_compile_warmup(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
         pipe_args = output.pipe_args
@@ -315,6 +316,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        profile_capture_phase=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -412,7 +414,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         compile_args["num_inference_steps"] = (
             2  # Reduce steps for warmup # TODO: make this more generic
         )
-        self._run_timed_pipe(compile_args)
+        self._run_compile_warmup(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
         pipe_args = output.pipe_args
@@ -473,6 +475,7 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         use_parallel_vae=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
+        profile_capture_phase=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:

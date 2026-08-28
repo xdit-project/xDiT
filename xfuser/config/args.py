@@ -155,6 +155,8 @@ class xFuserArgs:
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
+    profile_capture_phase: bool = False
+    profile_with_stack: bool = False
     profile_wait: int = 2
     profile_warmup: int = 2
     profile_active: int = 1
@@ -203,6 +205,11 @@ class xFuserArgs:
     distilled_transformer_2_path: Optional[str] = None
 
     def __post_init__(self):
+        if self.profile_with_stack and not self.profile:
+            logger.warning(
+                "--profile_with_stack has no effect without --profile; "
+                "no profiles will be outputted."
+            )
         if self.cache_method is None:
             if self.use_fbcache:
                 warnings.warn(
@@ -837,6 +844,16 @@ class xFuserArgs:
             type=int,
             default=1,
             help="active argument for torch.profiler.schedule. Only used with --profile.",
+        )
+        parser.add_argument(
+            "--profile_capture_phase",
+            action="store_true",
+            help="Profile the CUDA graph recording phase and save the capture trace.",
+        )
+        parser.add_argument(
+            "--profile_with_stack",
+            action="store_true",
+            help="Record call stack info in the profiler. Only used with --profile.",
         )
         parser.add_argument(
             "--warmup_calls",

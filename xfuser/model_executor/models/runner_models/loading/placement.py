@@ -87,6 +87,8 @@ def place_pipeline_components(loader) -> None:
             setup_nvfp4_gemms(loader, local_rank)
         else:
             setup_mxfp4_gemms(loader, local_rank)
+    elif getattr(model.config, "use_fp6_gemms", False):
+        setup_mxfp6_gemms(loader, local_rank)
 
     # FP4 setup owns its own hybrid FP8 path and any declared FP8-only modules, so the generic walk
     # would re-quantize inside the hybrid wrappers it just built.
@@ -102,19 +104,41 @@ def place_pipeline_components(loader) -> None:
 
 
 def setup_mxfp4_gemms(loader, local_rank) -> None:
-    """Quantize the FP4 modules to MXFP4, the format ROCm runs."""
-    _setup_fp4_gemms(loader, local_rank, stream_quant=True)
+    """Apply the selected ROCm MXFP4 conversion plan."""
+    _setup_format_gemms(loader, local_rank, stream_quant=True)
+
+
+def setup_mxfp6_gemms(loader, local_rank) -> None:
+    """Quantize the selected ROCm targets to MXFP6."""
+    _setup_format_gemms(loader, local_rank, stream_quant=True)
 
 
 def setup_nvfp4_gemms(loader, local_rank) -> None:
     """Quantize the FP4 modules to NVFP4, the format CUDA runs."""
-    _setup_fp4_gemms(loader, local_rank, stream_quant=False)
+    _setup_format_gemms(loader, local_rank, stream_quant=False)
 
 
-def _setup_fp4_gemms(loader, local_rank, *, stream_quant) -> None:
+def _setup_format_gemms(loader, local_rank, *, stream_quant) -> None:
     model = loader.model
     adapter = loader.backends.format
-    for module_name in model.settings.fp4_gemm_module_list:
+    format_entries = getattr(loader.backends, "format_entries", None)
+    module_names = (
+        format_entries()
+        if callable(format_entries)
+        else tuple(model.settings.fp4_gemm_module_list or ())
+    )
+    use_fp6 = bool(getattr(model.config, "use_fp6_gemms", False))
+    pure_fp6 = use_fp6 and not model.config.use_fp4_gemms
+    mixed_fp6 = use_fp6 and model.config.use_fp4_gemms
+    offload_requested = any(
+        getattr(model.config, name, False)
+        for name in (
+            "enable_model_cpu_offload",
+            "enable_sequential_cpu_offload",
+            "enable_group_cpu_offload",
+        )
+    )
+    for module_name in module_names:
         component_name = module_name.partition(".")[0]
         convert, filter_fn = conversion_filter(
             module_name,
@@ -130,35 +154,50 @@ def _setup_fp4_gemms(loader, local_rank, *, stream_quant) -> None:
                 component_name=component_name,
                 targets=loader.backends.format_targets_for(component_name),
                 stream_quant=stream_quant,
-                precision_prefixes=(model.settings.fp8_precision_overrides or ()),
-                precision_suffixes=(
-                    model.settings.fp8_precision_override_suffixes or ()
+                precision_prefixes=(
+                    () if pure_fp6 else (model.settings.fp8_precision_overrides or ())
                 ),
-                hybrid=model.config.use_hybrid_gemm_schedule,
+                precision_suffixes=(
+                    ()
+                    if pure_fp6
+                    else (model.settings.fp8_precision_override_suffixes or ())
+                ),
+                hybrid=(False if pure_fp6 else model.config.use_hybrid_gemm_schedule),
             ).descriptor
             log(descriptor.log_message())
         convert_kwargs = {}
         if filter_fn is not None:
             convert_kwargs["filter_fn"] = filter_fn
+        if pure_fp6 and offload_requested:
+            convert_kwargs["offload_to_cpu"] = True
         adapter.convert_module(
             rgetattr(model.pipe, module_name),
-            fp8_layers=model.settings.fp8_precision_overrides,
-            fp8_suffix_layers=model.settings.fp8_precision_override_suffixes,
-            hybrid=model.config.use_hybrid_gemm_schedule,
+            fp8_layers=(None if pure_fp6 else model.settings.fp8_precision_overrides),
+            fp8_suffix_layers=(
+                None if pure_fp6 else model.settings.fp8_precision_override_suffixes
+            ),
+            hybrid=(False if pure_fp6 else model.config.use_hybrid_gemm_schedule),
             device=f"cuda:{local_rank}",
             **convert_kwargs,
         )
-    setup_fp8_only_gemm_modules(loader, local_rank)
+    if not pure_fp6:
+        setup_fp8_only_gemm_modules(loader, local_rank)
 
 
 def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
-    """Quantize to FP8 any module the run names for FP8 but not for FP4.
+    """Quantize any target named for FP8 but not owned by the FP4 target list.
 
     MoE models such as Wan2.2 rely on this: the low-noise transformer generates the fine detail and
-    needs FP8's precision, while the rest of the model can take FP4.
+    needs more precision, while the rest of the model can take FP4. Mixed
+    FP4+FP6 mode gives these targets to MXFP6 rather than an FP8 backend.
     """
 
     model = loader.model
+    config = getattr(model, "config", None)
+    mixed_fp6 = bool(
+        getattr(config, "use_fp6_gemms", False)
+        and getattr(config, "use_fp4_gemms", False)
+    )
     fp4_modules = set(loader.quantization_plan.module_list("fp4"))
     fp8_only_modules = [
         name
@@ -170,10 +209,10 @@ def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
     ]
     if not fp8_only_modules:
         return
-    adapter = loader.backends.blockwise_fp8
+    adapter = loader.backends.fp6 if mixed_fp6 else loader.backends.blockwise_fp8
     for module_name in fp8_only_modules:
         excluded_paths = fp4_modules | loader.quantization_ledger.already_quantized(
-            fp8=True
+            fp8=not mixed_fp6
         )
         convert, filter_fn = conversion_filter(
             module_name,
@@ -182,7 +221,6 @@ def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
         )
         if not convert:
             continue
-        log(f"Quantizing linear layers in {module_name} to FP8...")
         convert_kwargs = {}
         if filter_fn is not None:
             convert_kwargs["filter_fn"] = filter_fn

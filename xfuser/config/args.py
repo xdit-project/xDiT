@@ -11,6 +11,11 @@ import torch.distributed
 
 from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
+from xfuser.config.gemm import (
+    GemmQuantizationSpec,
+    load_gemm_config,
+    parse_gemm_quantization,
+)
 from xfuser.config.config import (
     DEFAULT_FP8_COMMS_SAFETY_FACTOR,
     EngineConfig,
@@ -137,6 +142,24 @@ def _normalize_determinism_check_report_ranks(value: str) -> frozenset[int]:
     return ranks
 
 
+def _add_gemm_profile_args(parser) -> None:
+    parser.add_argument(
+        "--gemm_quantization",
+        type=parse_gemm_quantization,
+        default=None,
+        help=(
+            "Transformer GEMM precision: none, fp8, fp4, fp6, int8, "
+            "low=fp4,high=fp8, or low=fp4,high=fp6."
+        ),
+    )
+    parser.add_argument(
+        "--gemm_config",
+        type=nullable_str,
+        default=None,
+        help="Optional YAML file with advanced GEMM target or schedule settings.",
+    )
+
+
 @dataclass
 class xFuserArgs:
     """Arguments for xFuser engine."""
@@ -214,15 +237,24 @@ class xFuserArgs:
     shard_t5_encoder: bool = False
     attention_backend: Optional[str] = None
     cross_attention_backend: Optional[str] = None
+    gemm_quantization: Union[GemmQuantizationSpec, str, None] = None
+    gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
+    # Alone, route the runner's FP4/FP8 target union to AITER MXFP6. With
+    # use_fp4_gemms, keep MXFP4 primary and use MXFP6 for its remainders.
+    use_fp6_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
     fp8_precision_override_suffix_patterns: Optional[str] = None
     use_fp8_comms: bool = False
     fp8_comms_scale: Optional[float] = None
     fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
+    gemm_high_precision_targets: str = "model"
+    gemm_high_precision_module_patterns: Optional[str] = None
+    gemm_high_precision_prefix_patterns: Optional[str] = None
+    gemm_high_precision_suffix_patterns: Optional[str] = None
     # Model runner specific
     num_iterations: int = 1
     determinism_check: int = 0
@@ -255,6 +287,7 @@ class xFuserArgs:
     # Hybrid GEMM schedule (FP8 high precision + FP4 low precision)
     use_hybrid_gemm_schedule: bool = False
     num_hybrid_gemm_high_precision_steps: Optional[int] = None
+    hybrid_gemm_schedule: Optional[str] = None
     # SSTA arguments
     use_ssta_sparse_text_to_image: Optional[bool] = False
     # Sparge attention
@@ -288,6 +321,7 @@ class xFuserArgs:
                 "--profile_with_stack has no effect without --profile; "
                 "no profiles will be outputted."
             )
+        self._resolve_gemm_quantization()
         if self.cache_method is None:
             if self.use_fbcache:
                 warnings.warn(
@@ -303,6 +337,104 @@ class xFuserArgs:
                     stacklevel=2,
                 )
                 self.cache_method = "teacache"
+
+    @property
+    def gemm_quantization_spec(self) -> GemmQuantizationSpec:
+        return self.gemm_quantization
+
+    def _warn_deprecated_gemm_options(
+        self,
+        names: tuple[str, ...],
+        *,
+        ignored: bool = False,
+    ) -> None:
+        if not names:
+            return
+        action = "ignored" if ignored else "used"
+        message = (
+            f"Deprecated GEMM option(s) {action}: "
+            + ", ".join(f"--{name}" for name in names)
+            + "; use --gemm_quantization and --gemm_config"
+        )
+        warnings.warn(message, FutureWarning, stacklevel=2)
+
+    def _resolve_gemm_quantization(self) -> None:
+        explicit_spec = self.gemm_quantization is not None
+        spec = GemmQuantizationSpec.parse(self.gemm_quantization)
+        legacy_formats = tuple(
+            name
+            for name in (
+                "use_fp8_gemms",
+                "use_fp4_gemms",
+                "use_fp6_gemms",
+                "use_int8_gemms",
+            )
+            if getattr(self, name)
+        )
+        legacy_patterns = tuple(
+            name
+            for name in (
+                "fp8_precision_override_prefix_patterns",
+                "fp8_precision_override_suffix_patterns",
+            )
+            if getattr(self, name) is not None
+        )
+
+        if explicit_spec:
+            self._warn_deprecated_gemm_options(legacy_formats, ignored=True)
+            self.use_fp8_gemms = False
+            self.use_fp4_gemms = False
+            self.use_fp6_gemms = False
+            self.use_int8_gemms = False
+            if spec.is_pure("fp8"):
+                self.use_fp8_gemms = True
+            elif spec.is_pure("fp4"):
+                self.use_fp4_gemms = True
+            elif spec.is_pure("fp6"):
+                self.use_fp6_gemms = True
+            elif spec.is_pure("int8"):
+                self.use_int8_gemms = True
+            elif spec.is_tiered:
+                self.use_fp4_gemms = True
+                self.use_fp6_gemms = spec.high == "fp6"
+        else:
+            if self.use_fp4_gemms and self.use_fp6_gemms:
+                spec = GemmQuantizationSpec("fp4", "fp6")
+            elif self.use_fp6_gemms:
+                spec = GemmQuantizationSpec("fp6")
+            elif self.use_fp4_gemms:
+                spec = GemmQuantizationSpec("fp4", "fp8")
+            elif self.use_fp8_gemms:
+                spec = GemmQuantizationSpec("fp8")
+            elif self.use_int8_gemms:
+                spec = GemmQuantizationSpec("int8")
+            self._warn_deprecated_gemm_options(legacy_formats)
+
+        self._gemm_config_loaded = False
+        if self.gemm_config is not None:
+            advanced = load_gemm_config(self.gemm_config)
+            if advanced.settings.get("hybrid_gemm_schedule") is not None and (
+                self.use_hybrid_gemm_schedule
+                or self.num_hybrid_gemm_high_precision_steps is not None
+            ):
+                raise ValueError(
+                    "YAML hybrid_gemm_schedule cannot be combined with the "
+                    "simple hybrid GEMM schedule flags"
+                )
+            for name, value in advanced.settings.items():
+                setattr(self, name, value)
+            if self.hybrid_gemm_schedule is not None:
+                self.use_hybrid_gemm_schedule = True
+            if legacy_patterns:
+                self.fp8_precision_override_prefix_patterns = None
+                self.fp8_precision_override_suffix_patterns = None
+                self._warn_deprecated_gemm_options(legacy_patterns, ignored=True)
+            self._gemm_config_loaded = True
+            logger.info("Loaded GEMM configuration from %s", advanced.path)
+        else:
+            self._warn_deprecated_gemm_options(legacy_patterns)
+
+        self.gemm_quantization = spec
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser):
@@ -585,6 +717,7 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the T5 text encoder.",
         )
+        _add_gemm_profile_args(runtime_group)
         runtime_group.add_argument(
             "--use_fp8_gemms",
             action="store_true",
@@ -888,6 +1021,7 @@ class xFuserArgs:
                  "--enable_tiling. Must be used with --vae_tile_overlap_height. Height and width "
                  "may differ; use 0 for an inactive strip axis.",
         )
+        _add_gemm_profile_args(parser)
         parser.add_argument(
             "--use_int8_gemms",
             action="store_true",
@@ -910,6 +1044,16 @@ class xFuserArgs:
             "--use_fp4_gemms",
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
+        )
+        parser.add_argument(
+            "--use_fp6_gemms",
+            action="store_true",
+            help=(
+                "On supported ROCm models, quantize the declared transformer "
+                "targets to AITER MXFP6. Combine with --use_fp4_gemms to keep "
+                "MXFP4 primary and replace its FP8 precision overrides and "
+                "FP8-only targets with MXFP6."
+            ),
         )
         parser.add_argument(
             "--fp8_precision_override_prefix_patterns",
@@ -1068,7 +1212,7 @@ class xFuserArgs:
             "--use_hybrid_gemm_schedule",
             action="store_true",
             default=False,
-            help="Enable hybrid GEMM schedule: FP8 at start/end and MXFP4 in the middle.",
+            help="Use the profile's high format at denoising endpoints and FP4 in the middle.",
         )
         parser.add_argument(
             "--num_hybrid_gemm_high_precision_steps",
@@ -1238,6 +1382,50 @@ class xFuserArgs:
 
     def _validate_gemm_quantization_flags(self) -> None:
         """Validate ownership of mutually exclusive generic GEMM quantizers."""
+        spec = self.gemm_quantization_spec
+        has_advanced_targets = (
+            self.gemm_high_precision_targets != "model"
+            or self.gemm_high_precision_module_patterns is not None
+            or self.gemm_high_precision_prefix_patterns is not None
+            or self.gemm_high_precision_suffix_patterns is not None
+        )
+        if has_advanced_targets and not spec.is_tiered:
+            raise ValueError(
+                "Advanced GEMM target settings require a low/high "
+                "--gemm_quantization profile."
+            )
+        if self.use_hybrid_gemm_schedule and not spec.is_tiered:
+            raise ValueError(
+                "Hybrid GEMM scheduling requires a low/high "
+                "--gemm_quantization profile."
+            )
+        if (
+            self.hybrid_gemm_schedule is not None
+            and self.num_hybrid_gemm_high_precision_steps is not None
+        ):
+            raise ValueError(
+                "YAML hybrid_gemm_schedule cannot be combined with "
+                "--num_hybrid_gemm_high_precision_steps."
+            )
+        if self.hybrid_gemm_schedule is not None:
+            scheduled_formats = {
+                token.strip().lower()
+                for token in self.hybrid_gemm_schedule.split(",")
+            }
+            if scheduled_formats - spec.formats:
+                raise ValueError(
+                    "YAML hybrid_gemm_schedule entries must match "
+                    f"--gemm_quantization {spec}."
+                )
+        if self.use_fp6_gemms and self.use_fp8_gemms:
+            raise ValueError(
+                "--use_fp8_gemms cannot be combined with --use_fp6_gemms; "
+                "MXFP6 already owns every declared FP8 target."
+            )
+        if self.use_fp6_gemms and self.use_int8_gemms:
+            raise ValueError(
+                "--use_int8_gemms cannot be combined with --use_fp6_gemms."
+            )
         if self.use_int8_gemms and (self.use_fp8_gemms or self.use_fp4_gemms):
             raise ValueError(
                 "--use_int8_gemms cannot be combined with --use_fp8_gemms or "

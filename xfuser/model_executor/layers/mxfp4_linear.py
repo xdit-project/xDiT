@@ -269,7 +269,7 @@ class xFuserMXFP4Linear(nn.Module):
 class xFuserHybridMXFP4Linear(nn.Module):
     """
     Hybrid linear layer that switches per diffusion step between
-    high precision (FP8-quantized nn.Linear path) and low precision (MXFP4 GEMM path).
+    a configured high-precision path and the MXFP4 low-precision path.
     """
 
     def __init__(

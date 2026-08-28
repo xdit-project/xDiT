@@ -141,6 +141,7 @@ class ModelCapabilities:
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
+    use_fp6_gemms: bool = False
     supports_step_caching: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
@@ -577,6 +578,20 @@ class xFuserModel(abc.ABC):
         if config.use_int8_gemms and _is_hip():
             raise ValueError("Int8 GEMMs on ROCm are not supported.")
             
+        if config.use_fp6_gemms and _is_cuda():
+            raise ValueError(
+                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; "
+                "CUDA is not supported."
+            )
+        if (
+            config.use_fp6_gemms
+            and _is_hip()
+            and not packages_info.get("has_aiter", False)
+        ):
+            raise ValueError(
+                "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
+            )
+
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 GEMMs on ROCm require AITER.")
@@ -1056,18 +1071,42 @@ class xFuserModel(abc.ABC):
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """
-        Setup hybrid GEMM schedule: high precision FP8 GEMMs at start/end, MXFP4 GEMMs in the middle.
+        Use the selected profile's high GEMM format at denoising endpoints.
         """
-        if input_args["num_hybrid_gemm_high_precision_steps"] is None:
-            raise ValueError("You must provide 'num_hybrid_gemm_high_precision_steps' to use the hybrid GEMM schedule.")
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
-        num_high_precision_steps = input_args["num_hybrid_gemm_high_precision_steps"] * multiplier
 
-        gemm_schedule = create_hybrid_gemm_schedule(
-            num_high_precision_steps=num_high_precision_steps,
-            total_steps=total_steps,
-        )
+        if self.config.hybrid_gemm_schedule is not None:
+            from xfuser.core.distributed.attention_schedule import GemmPrecisionSchedule
+
+            denoising_schedule = GemmPrecisionSchedule.from_comma_delimited_string(
+                self.config.hybrid_gemm_schedule,
+                low_format=self.config.gemm_quantization_spec.low,
+                high_format=self.config.gemm_quantization_spec.high,
+            )
+            if denoising_schedule.total_steps != input_args["num_inference_steps"]:
+                raise ValueError(
+                    f"GEMM schedule has {denoising_schedule.total_steps} entries, "
+                    f"expected {input_args['num_inference_steps']} denoising steps."
+                )
+            gemm_schedule = GemmPrecisionSchedule(
+                [
+                    precision
+                    for precision in denoising_schedule.use_high_precision_schedule
+                    for _ in range(multiplier)
+                ]
+            )
+        else:
+            count = input_args["num_hybrid_gemm_high_precision_steps"]
+            if count is None:
+                raise ValueError(
+                    "Hybrid GEMM scheduling requires "
+                    "num_hybrid_gemm_high_precision_steps."
+                )
+            gemm_schedule = create_hybrid_gemm_schedule(
+                num_high_precision_steps=count * multiplier,
+                total_steps=total_steps,
+            )
 
         log("Enabling hybrid GEMM schedule")
         log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision_schedule}", debug=True)

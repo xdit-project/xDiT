@@ -40,7 +40,10 @@ from xfuser.core.distributed import (
     get_runtime_state,
     init_distributed_environment,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_backend import (
+    AITER_MHA_V4_SPARGE_BACKEND_SET,
+    AttentionBackendType,
+)
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
@@ -78,7 +81,7 @@ _SPARGE_ATTENTION_BACKENDS = frozenset({
     AttentionBackendType.AITER_SPARGE_V2,
     AttentionBackendType.AITER_VSA,
     AttentionBackendType.FLEX_BLOCK_SPARGE,
-})
+}) | AITER_MHA_V4_SPARGE_BACKEND_SET
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:

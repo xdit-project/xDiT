@@ -276,22 +276,8 @@ Several different attention backends are supported:
 | [FAv4 FP4](https://github.com/hao-ai-lab/flash-attention-fp4) | flash_4_fp4 |
 | [SAGE](https://github.com/thu-ml/SageAttention) | sage |
 | [AITER](https://github.com/rocm/aiter) | aiter |
-| [AITER I8FP8](https://github.com/rocm/aiter) | aiter_i8fp8 |
-| [AITER FP8](https://github.com/rocm/aiter) | aiter_fp8 |
-| [AITER MXFP8](https://github.com/rocm/aiter) | aiter_mxfp8 |
-| [AITER F8F6](https://github.com/rocm/aiter) | aiter_f8f6 |
-| [AITER MXFP6](https://github.com/rocm/aiter) | aiter_mxfp6 |
-| [AITER F6F4](https://github.com/rocm/aiter) | aiter_f6f4 |
-| [AITER MXFP4](https://github.com/rocm/aiter) | aiter_mxfp4 |
-| [AITER F4F4](https://github.com/rocm/aiter) | aiter_f4f4 |
-| [AITER I8FP8 Sparge](https://github.com/rocm/aiter) | aiter_i8fp8_sparge |
-| [AITER FP8 Sparge](https://github.com/rocm/aiter) | aiter_fp8_sparge |
-| [AITER MXFP8 Sparge](https://github.com/rocm/aiter) | aiter_mxfp8_sparge |
-| [AITER F8F6 Sparge](https://github.com/rocm/aiter) | aiter_f8f6_sparge |
-| [AITER MXFP6 Sparge](https://github.com/rocm/aiter) | aiter_mxfp6_sparge |
-| [AITER F6F4 Sparge](https://github.com/rocm/aiter) | aiter_f6f4_sparge |
-| [AITER MXFP4 Sparge](https://github.com/rocm/aiter) | aiter_mxfp4_sparge |
-| [AITER F4F4 Sparge](https://github.com/rocm/aiter) | aiter_f4f4_sparge |
+| [AITER MHA v4 (dense)](https://github.com/rocm/aiter) | aiter_i8fp8, aiter_fp8, aiter_mxfp8, aiter_f8f6, aiter_mxfp6, aiter_f6f4, aiter_mxfp4, aiter_f4f4 |
+| [AITER MHA v4 Sparge](https://github.com/rocm/aiter) | aiter_i8fp8_sparge, aiter_fp8_sparge, aiter_mxfp8_sparge, aiter_f8f6_sparge, aiter_mxfp6_sparge, aiter_f6f4_sparge, aiter_mxfp4_sparge, aiter_f4f4_sparge |
 | [AITER Sage](https://github.com/rocm/aiter) | aiter_sage |
 | [AITER Sage V2](https://github.com/rocm/aiter) | aiter_sage_v2 |
 | [AITER Sparse Sage](https://github.com/rocm/aiter) | aiter_sparse_sage |

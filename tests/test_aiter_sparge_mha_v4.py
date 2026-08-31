@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 import inspect
 
 import pytest
@@ -23,6 +24,10 @@ _MHA_V4_GFX942_SPARGE_BACKENDS = (
     "AITER_I8FP8_SPARGE",
     "AITER_FP8_SPARGE",
 )
+
+
+def _patch_mha_v4_caps(monkeypatch, ab, **kwargs):
+    monkeypatch.setattr(ab, "_AITER_MHA_V4", replace(ab._AITER_MHA_V4, **kwargs))
 
 
 def _require_mha_v4_sparge_aiter(backend_name):
@@ -115,8 +120,7 @@ def test_fp8_sparge_passes_block_mask_to_mha_v4(monkeypatch):
         captured["used_packed"] = False
         return torch.zeros_like(query)
 
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_HAS_BLOCK_MASK", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_AVAILABLE", True)
+    _patch_mha_v4_caps(monkeypatch, ab, enabled=True, block_mask=True)
     monkeypatch.setattr(ab, "_build_sparge_block_mask", fake_build)
     monkeypatch.setattr(ab, "restore_sparge_output", lambda output, state: output)
     monkeypatch.setattr(ab, "_aiter_mha_v4", fake_mha_v4)
@@ -128,7 +132,7 @@ def test_fp8_sparge_passes_block_mask_to_mha_v4(monkeypatch):
 
     assert lse is None
     assert output.shape == query.shape
-    assert captured["config"] == {"BLOCK_M": 256, "BLOCK_N": ab._AITER_MHA_V4_KV_TILE}
+    assert captured["config"] == {"BLOCK_M": 256, "BLOCK_N": ab._AITER_MHA_V4.kv_tile}
     assert captured["pad_block_divisible"] is True
     assert captured["layout"] == (1, 512, 2, 128)
     assert captured["block_mask"] is not None
@@ -151,10 +155,9 @@ def test_fp8_sparge_uses_gfx942_kv_tile(monkeypatch):
         captured["block_mask"] = block_mask
         return torch.zeros_like(query)
 
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_HAS_BLOCK_MASK", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_AVAILABLE", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_GFX942", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_KV_TILE", 64)
+    _patch_mha_v4_caps(
+        monkeypatch, ab, enabled=True, block_mask=True, is_gfx942=True, kv_tile=64
+    )
     monkeypatch.setattr(ab, "_build_sparge_block_mask", fake_build)
     monkeypatch.setattr(ab, "restore_sparge_output", lambda output, state: output)
     monkeypatch.setattr(ab, "_aiter_mha_v4", fake_mha_v4)
@@ -173,9 +176,7 @@ def test_mxfp8_sparge_rejected_on_gfx942(monkeypatch):
     from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.distributed.attention_backend import AttentionBackendType
 
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_HAS_BLOCK_MASK", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_AVAILABLE", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_GFX942", True)
+    _patch_mha_v4_caps(monkeypatch, ab, enabled=True, block_mask=True, is_gfx942=True)
     monkeypatch.setattr(
         ab,
         "_build_sparge_block_mask",
@@ -204,9 +205,9 @@ def test_mxfp8_sparge_passes_block_mask_to_mha_v4_mxfp8(monkeypatch):
         captured["block_mask"] = block_mask
         return torch.zeros_like(query)
 
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_HAS_BLOCK_MASK", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_SPARSE_AVAILABLE", True)
-    monkeypatch.setattr(ab, "_AITER_MHA_V4_MXFP8_HAS_BLOCK_MASK", True)
+    _patch_mha_v4_caps(
+        monkeypatch, ab, enabled=True, block_mask=True, mxfp8_block_mask=True
+    )
     monkeypatch.setattr(ab, "_build_sparge_block_mask", fake_build)
     monkeypatch.setattr(ab, "restore_sparge_output", lambda output, state: output)
     monkeypatch.setattr(ab, "_aiter_mha_v4_mxfp8", fake_mxfp8)

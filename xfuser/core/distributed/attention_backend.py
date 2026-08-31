@@ -1,4 +1,5 @@
 import functools
+from dataclasses import dataclass, replace
 import torch
 import inspect
 import math
@@ -24,12 +25,41 @@ from xfuser.logger import init_logger
 logger = init_logger(__name__)
 
 ATTENTION_FUNCTION_REGISTRY = {}
-_AITER_MHA_V4_AVAILABLE = False
-_AITER_MHA_V4_SPARSE_AVAILABLE = False
-_AITER_MHA_V4_SPARSE_GFX942 = False
-_AITER_MHA_V4_HAS_BLOCK_MASK = False
-_AITER_MHA_V4_MXFP8_HAS_BLOCK_MASK = False
-_AITER_MHA_V4_KV_TILE = 128
+
+
+@dataclass(frozen=True)
+class _AiterMhaV4Capabilities:
+    enabled: bool = False
+    is_gfx942: bool = False
+    block_mask: bool = False
+    mxfp8_block_mask: bool = False
+    kv_tile: int = 128
+
+
+_AITER_MHA_V4 = _AiterMhaV4Capabilities()
+
+
+def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
+    arch_name = (
+        torch.cuda.get_device_properties(0).gcnArchName
+        if torch.cuda.is_available()
+        else ""
+    )
+    is_gfx942 = "gfx942" in arch_name
+    enabled = is_gfx942 or "gfx950" in arch_name
+    block_mask = inspect.signature(mha_v4_fn).parameters.get("block_mask") is not None
+    try:
+        from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
+        kv_tile = int(_aiter_mha_v4_kv_tile())
+    except ImportError:
+        kv_tile = 64 if is_gfx942 else 128
+    return _AiterMhaV4Capabilities(
+        enabled=enabled,
+        is_gfx942=is_gfx942,
+        block_mask=block_mask,
+        kv_tile=kv_tile,
+    )
+
 
 def _setup_aiter_environment_variables():
     AITER_FP8_STATIC_SCALE_WITH_DESCALE = environment_variables["AITER_FP8_STATIC_SCALE_WITH_DESCALE"]()
@@ -391,31 +421,8 @@ if env_info["has_aiter"]:
             quantize_mxfp8_k as _aiter_quantize_mxfp8_k,
             quantize_mxfp8_q as _aiter_quantize_mxfp8_q,
         )
-        _aiter_arch_name = (
-            torch.cuda.get_device_properties(0).gcnArchName
-            if torch.cuda.is_available()
-            else ""
-        )
-        _AITER_MHA_V4_AVAILABLE = (
-            "gfx942" in _aiter_arch_name or "gfx950" in _aiter_arch_name
-        )
-        _AITER_MHA_V4_SPARSE_GFX942 = "gfx942" in _aiter_arch_name
-        _AITER_MHA_V4_SPARSE_AVAILABLE = (
-            "gfx950" in _aiter_arch_name or _AITER_MHA_V4_SPARSE_GFX942
-        )
-        _AITER_MHA_V4_HAS_BLOCK_MASK = (
-            inspect.signature(_aiter_mha_v4).parameters.get("block_mask") is not None
-        )
-        try:
-            from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
-            _AITER_MHA_V4_KV_TILE = int(_aiter_mha_v4_kv_tile())
-        except ImportError:
-            _AITER_MHA_V4_KV_TILE = 64 if _AITER_MHA_V4_SPARSE_GFX942 else 128
+        _AITER_MHA_V4 = _probe_aiter_mha_v4_capabilities(_aiter_mha_v4)
     except ImportError:
-        _AITER_MHA_V4_AVAILABLE = False
-        _AITER_MHA_V4_SPARSE_AVAILABLE = False
-        _AITER_MHA_V4_SPARSE_GFX942 = False
-        _AITER_MHA_V4_HAS_BLOCK_MASK = False
         pass # Error is raised in runtime_state.py when an MHA v4 backend is selected.
 
     # MXFP8 shipped after the base MHA v4 API; keep it optional for older AITER builds.
@@ -423,12 +430,14 @@ if env_info["has_aiter"]:
         from aiter.ops.mha_v4 import (
             mha_v4_mxfp8 as _aiter_mha_v4_mxfp8,
         )
-        _AITER_MHA_V4_MXFP8_HAS_BLOCK_MASK = (
-            inspect.signature(_aiter_mha_v4_mxfp8).parameters.get("block_mask")
-            is not None
+        _AITER_MHA_V4 = replace(
+            _AITER_MHA_V4,
+            mxfp8_block_mask=(
+                inspect.signature(_aiter_mha_v4_mxfp8).parameters.get("block_mask")
+                is not None
+            ),
         )
     except ImportError:
-        _AITER_MHA_V4_MXFP8_HAS_BLOCK_MASK = False
         pass # Error is raised in runtime_state.py when AITER_MXFP8 is selected.
 
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
@@ -677,7 +686,7 @@ AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_GFX942_SPARGE_BA
 
 def _mha_v4_sparge_tile():
     """Return Sparge tile sizes matching the active MHA v4 sparse KV geometry."""
-    return {"BLOCK_M": 256, "BLOCK_N": _AITER_MHA_V4_KV_TILE}
+    return {"BLOCK_M": 256, "BLOCK_N": _AITER_MHA_V4.kv_tile}
 
 
 def register_attention_function(backend_type):
@@ -1079,7 +1088,7 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal):
 
 def _use_aiter_mha_v4_fp8(query, is_causal):
     return (
-        _AITER_MHA_V4_AVAILABLE
+        _AITER_MHA_V4.enabled
         and query.is_cuda
         and query.shape[-1] == 128
         and not is_causal
@@ -1284,13 +1293,13 @@ def _validate_aiter_mha_v4_sparge_request(
     mxfp8=False,
 ):
     _validate_aiter_mha_v4_request(dropout_p, is_causal)
-    if not _AITER_MHA_V4_HAS_BLOCK_MASK:
+    if not _AITER_MHA_V4.block_mask:
         raise RuntimeError(
             "MHA v4 Sparge requires an AITER build whose mha_v4 accepts block_mask"
         )
-    if not _AITER_MHA_V4_SPARSE_AVAILABLE:
+    if not _AITER_MHA_V4.enabled:
         raise RuntimeError("MHA v4 Sparge attention requires gfx950 or gfx942")
-    if _AITER_MHA_V4_SPARSE_GFX942 and (
+    if _AITER_MHA_V4.is_gfx942 and (
         mxfp8
         or qk_format not in (
             _aiter_native_fp8_format(),
@@ -1384,7 +1393,7 @@ def _aiter_mha_v4_sparge_call(
     k = torch.permute(k, [0, 2, 1, 3]).contiguous()
     v = torch.permute(v, [0, 2, 1, 3]).contiguous()
     if mxfp8:
-        if _AITER_MHA_V4_MXFP8_HAS_BLOCK_MASK:
+        if _AITER_MHA_V4.mxfp8_block_mask:
             output = _aiter_mha_v4_mxfp8(q, k, v, block_mask=block_mask)
         else:
             output = _aiter_launch_mxfp8_sparse(q, k, v, block_mask)

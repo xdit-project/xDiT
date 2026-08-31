@@ -28,6 +28,11 @@ from xfuser.core.distributed.attention_backend import (
     ATTENTION_FUNCTION_REGISTRY,
     AttentionBackendType,
 )
+from xfuser.core.distributed.fp8_comms import (
+    Fp8CommsCall,
+    fp8_comms_input_all_to_all,
+    fp8_comms_output_all_to_all,
+)
 from xfuser.core.sparge_attention.head_balance import (
     apply_head_balance,
     revert_head_balance,
@@ -42,6 +47,9 @@ _HEAD_BALANCE_BACKENDS = frozenset({
     AttentionBackendType.AITER_SPARGE_V2,
     AttentionBackendType.FLEX_BLOCK_SPARGE,
 }) | AITER_MHA_V4_SPARGE_BACKEND_SET
+
+_FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
 
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=None):
@@ -87,10 +95,14 @@ def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
 
 def _sdpa_all_to_all_single(x):
     x_shape = x.shape
+    x_dtype = x.dtype
     x = x.flatten()
+    # NCCL does not support FP8 collectives before PyTorch 2.11, view as uint8 (same width) for the transfer.
+    if _FP8_NCCL_NEEDS_VIEW and x_dtype in _FP8_DTYPES:
+        x = x.view(torch.uint8)
     x = ft_c.all_to_all_single(x, output_split_sizes=None, input_split_sizes=None, group=PROCESS_GROUP.ULYSSES_PG)
     x = _maybe_wait(x)
-    x = x.reshape(x_shape)
+    x = x.view(x_dtype).reshape(x_shape)
     return x
 
 
@@ -260,6 +272,7 @@ def USP(
         backend=None,
         attention_kwargs: dict | None = None,
         head_balance_layer=None,
+        fp8_comms: Fp8CommsCall | None = None,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -303,8 +316,17 @@ def USP(
 
         }
 
+    qkv_amaxes = None
     if get_ulysses_parallel_world_size() > 1:
-        if combine_qkv_a2a and query.shape == key.shape == value.shape:
+        if fp8_comms is not None:
+            fp8_comms_backend = backend if backend is not None else get_runtime_state().attention_backend
+            query, key, value, attn_kwargs_update, qkv_amaxes = fp8_comms_input_all_to_all(
+                query, key, value,
+                fp8_comms.q_scale, fp8_comms.k_scale, fp8_comms.v_scale,
+                fp8_comms_backend,
+            )
+            attention_kwargs = (attention_kwargs or {}) | attn_kwargs_update
+        elif combine_qkv_a2a and query.shape == key.shape == value.shape:
             query, key, value = _combined_qkv_all_to_all(query, key, value)
         else:
             query = _ft_c_input_all_to_all(query)
@@ -351,7 +373,10 @@ def USP(
                             is_causal=is_causal,
                             joint_attn_kwargs=joint_attn_kwargs,
                             attention_kwargs=attention_kwargs)
-        out = _ft_c_output_all_to_all(out)
+        if fp8_comms is not None:
+            out = fp8_comms_output_all_to_all(out, fp8_comms.o_scale, qkv_amaxes)
+        else:
+            out = _ft_c_output_all_to_all(out)
         if hb_applied:
             # Restore global head order on the output, gather this step's per-head
             # costs across the Ulysses group, and plan next step's permutation.
@@ -371,6 +396,7 @@ def attention(
         backend=None,
         attention_kwargs=None,
         head_balance_layer=None,
+        fp8_comms: Fp8CommsCall | None = None,
     ):
     """
     Runs attention call without any parallelism.

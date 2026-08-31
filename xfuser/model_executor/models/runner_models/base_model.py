@@ -44,6 +44,7 @@ from xfuser.core.distributed.attention_backend import (
     AITER_MHA_V4_SPARGE_BACKEND_SET,
     AttentionBackendType,
 )
+from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
@@ -136,6 +137,7 @@ class ModelCapabilities:
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
     supports_step_caching: bool = False
+    use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -346,6 +348,14 @@ class xFuserModel(abc.ABC):
         if self.config.use_parallel_vae:
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
+        setup_fp8_comms(
+            get_runtime_state().fp8_comms,
+            self.pipe,
+            input_args,
+            run_pipe_fn=self._run_timed_pipe,
+            split_prompts_fn=self._split_prompts_for_dp,
+            batch_size=self.config.batch_size,
+        )
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -550,6 +560,8 @@ class xFuserModel(abc.ABC):
             raise ValueError(f"Model {self.settings.model_name} requires a task to be specified. Supported tasks: {self.settings.valid_tasks}")
         if config.dataset_path and not config.batch_size:
             raise ValueError("Dataset path specified without batch size. Please specify batch size for dataset inference.")
+
+        validate_fp8_comms_config(config, self.capabilities, self.settings)
 
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")

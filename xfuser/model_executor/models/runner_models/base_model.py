@@ -199,7 +199,7 @@ class DiffusionOutput:
         self.images = images
         if isinstance(videos, np.ndarray) and videos.ndim == 5:
             videos = list(videos)
-        elif not isinstance(videos, list):
+        elif videos is not None and not isinstance(videos, list):
             videos = [videos]
         self.videos = videos
         if not isinstance(pipe_args, list):

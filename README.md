@@ -276,7 +276,7 @@ Several different attention backends are supported:
 | [FAv4 FP4](https://github.com/hao-ai-lab/flash-attention-fp4) | flash_4_fp4 |
 | [SAGE](https://github.com/thu-ml/SageAttention) | sage |
 | [AITER](https://github.com/rocm/aiter) | aiter |
-| [AITER MHA v4 (dense)](https://github.com/rocm/aiter) | aiter_i8fp8, aiter_fp8, aiter_mxfp8, aiter_f8f6, aiter_mxfp6, aiter_f6f4, aiter_mxfp4, aiter_f4f4 |
+| [AITER MHA v4 (dense)](https://github.com/rocm/aiter) | aiter_bf16, aiter_i8fp8, aiter_fp8, aiter_mxfp8, aiter_f8f6, aiter_mxfp6, aiter_f6f4, aiter_mxfp4, aiter_f4f4 |
 | [AITER MHA v4 Sparge](https://github.com/rocm/aiter) | aiter_i8fp8_sparge, aiter_fp8_sparge, aiter_mxfp8_sparge, aiter_f8f6_sparge, aiter_mxfp6_sparge, aiter_f6f4_sparge, aiter_mxfp4_sparge, aiter_f4f4_sparge |
 | [AITER Sage](https://github.com/rocm/aiter) | aiter_sage |
 | [AITER Sage V2](https://github.com/rocm/aiter) | aiter_sage_v2 |
@@ -293,7 +293,7 @@ xDiT comes with `flash_attn` as an optional install requirement, as it currently
 However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
 On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
 
-The dedicated `aiter_mxfp8`, `aiter_f8f6`, `aiter_mxfp6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4` ASM backends require gfx950 and head dimension 128. `aiter_mxfp8` additionally requires an AITER build that exposes `aiter.ops.mha_v4.mha_v4_mxfp8`. F4F4/F6F4 pad only the packed FP4 V storage for partial final 128-token tiles; the logical attention sequence length is unchanged.
+The dedicated `aiter_bf16`, `aiter_mxfp8`, `aiter_f8f6`, `aiter_mxfp6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4` ASM backends require gfx950 and head dimension 128. `aiter_bf16` selects the BF16 MHA v4 kernel while `aiter` continues to use MHA v3. `aiter_mxfp8` additionally requires an AITER build that exposes `aiter.ops.mha_v4.mha_v4_mxfp8`. F4F4/F6F4 pad only the packed FP4 V storage for partial final 128-token tiles; the logical attention sequence length is unchanged.
 
 Each of those recipes has a Sparge alias (`aiter_fp8_sparge`, `aiter_i8fp8_sparge`, `aiter_mxfp8_sparge`, `aiter_f8f6_sparge`, `aiter_mxfp6_sparge`, `aiter_f6f4_sparge`, `aiter_mxfp4_sparge`, `aiter_f4f4_sparge`) that builds a Sparge block mask at the matching MHA v4 sparse tile and launches the sparse row. gfx950 uses 256×128 for all eight recipes. gfx942 currently supports `aiter_fp8_sparge` and `aiter_i8fp8_sparge` at 256×64. They need head dimension 128 and an AITER `mha_v4` that accepts `block_mask`. Triton Sparge (`aiter_sparge`, `aiter_sparge_v2`) and Flex Sparge (`flex_block_sparge`) are unchanged. Hybrid can switch dense and Sparge per step, for example `--hybrid_attn_high_precision_backend aiter_fp8` with `--hybrid_attn_low_precision_backend aiter_fp8_sparge`.
 

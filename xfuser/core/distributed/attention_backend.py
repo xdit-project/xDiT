@@ -620,6 +620,7 @@ class AttentionBackendType(Enum):
     SAGE = "Sage Attention"
     FLEX_BLOCK_ATTN = "Flex Block Attention"
     AITER = "AITER"
+    AITER_BF16 = "AITER BF16 MHA v4"
     AITER_MLA = "AITER MLA" # deprecated, use AITER_FP8
     AITER_I8FP8 = "AITER I8FP8"
     AITER_FP8 = "AITER FP8"
@@ -671,9 +672,12 @@ AITER_MHA_V4_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_F4F4_SPARGE,
 )
 AITER_MHA_V4_ONLY_BACKENDS = tuple(
-    backend
-    for backend in AITER_LOW_PRECISION_BACKENDS
-    if backend != AttentionBackendType.AITER_FP8
+    [AttentionBackendType.AITER_BF16]
+    + [
+        backend
+        for backend in AITER_LOW_PRECISION_BACKENDS
+        if backend != AttentionBackendType.AITER_FP8
+    ]
 )
 AITER_MHA_V4_ONLY_BACKEND_SET = frozenset(AITER_MHA_V4_ONLY_BACKENDS)
 AITER_MHA_V4_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_SPARGE_BACKENDS)
@@ -1182,6 +1186,20 @@ def _aiter_mixed_attn_call(
     )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, None
+
+
+@register_attention_function(AttentionBackendType.AITER_BF16)
+def _aiter_bf16_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MHA v4 BF16 Q/K/V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.BF16,
+        _AiterAttentionFormat.BF16,
+        dropout_p,
+        is_causal,
+    )
 
 
 @register_attention_function(AttentionBackendType.AITER_I8FP8)

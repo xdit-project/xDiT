@@ -173,7 +173,7 @@ ComfyUI plugin for xDiT is now available: [xdit-comfyui-private](https://github.
 
 About `diffusers` version:
 - Different models may require different diffusers versions. Model implementations can vary between diffusers versions, especially for latest models, which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
-- While we specify a diffusers version in `setup.py`, newer models may require later versions or even need to be installed from main branch.
+- While we specify a diffusers version in `pyproject.toml`, newer models may require later versions or even need to be installed from main branch.
 - Limited list of validated diffusers versions can be seen [here](#7-limitations).
 
 `flash_attn` is an optional library that can be installed with xDiT. More supported attention backends can be seen [here](#6-supported-attention-backends).

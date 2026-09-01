@@ -77,7 +77,7 @@ class TestDiffusersImportErrors(unittest.TestCase):
 
 
 class TestDeclaredFloor(unittest.TestCase):
-    """Floors are resolved from setup.py, never duplicated in runtime code."""
+    """Floors are resolved from project metadata, never duplicated in runtime code."""
 
     def _with_requires(self, requires):
         return patch.object(
@@ -113,12 +113,12 @@ class TestDeclaredFloor(unittest.TestCase):
             self.assertIsNone(declared_floor("diffusers"))
         declared_floor.cache_clear()
 
-    def test_setup_py_floors_are_actually_resolvable(self):
-        # Guards against setup.py being reshaped into something requires() can't
+    def test_pyproject_floors_are_actually_resolvable(self):
+        # Guards against pyproject.toml being reshaped into something requires() can't
         # express, which would silently disable every runtime version check.
-        setup_py = (_repo_root() / "setup.py").read_text()
-        self.assertIn("diffusers>=", setup_py)
-        self.assertIn("flash-attn>=", setup_py)
+        pyproject = (_repo_root() / "pyproject.toml").read_text()
+        self.assertIn("diffusers>=", pyproject)
+        self.assertIn("flash-attn>=", pyproject)
 
 
 def _repo_root():

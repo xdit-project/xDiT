@@ -621,6 +621,7 @@ class AttentionBackendType(Enum):
     FLEX_BLOCK_ATTN = "Flex Block Attention"
     AITER = "AITER"
     AITER_BF16 = "AITER BF16 MHA v4"
+    AITER_BF16FP8 = "AITER BF16/FP8 MHA v4"
     AITER_MLA = "AITER MLA" # deprecated, use AITER_FP8
     AITER_I8FP8 = "AITER I8FP8"
     AITER_FP8 = "AITER FP8"
@@ -672,7 +673,10 @@ AITER_MHA_V4_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_F4F4_SPARGE,
 )
 AITER_MHA_V4_ONLY_BACKENDS = tuple(
-    [AttentionBackendType.AITER_BF16]
+    [
+        AttentionBackendType.AITER_BF16,
+        AttentionBackendType.AITER_BF16FP8,
+    ]
     + [
         backend
         for backend in AITER_LOW_PRECISION_BACKENDS
@@ -1197,6 +1201,20 @@ def _aiter_bf16_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
         value,
         _AiterAttentionFormat.BF16,
         _AiterAttentionFormat.BF16,
+        dropout_p,
+        is_causal,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_BF16FP8)
+def _aiter_bf16fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run the AITER MHA v4 BF16 Q/K and per-tensor FP8 V recipe."""
+    return _aiter_mixed_attn_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.BF16,
+        _aiter_native_fp8_format(),
         dropout_p,
         is_causal,
     )

@@ -233,6 +233,7 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.FLASH_4,
                                  AttentionBackendType.FLASH_4_FP4,
                                  AttentionBackendType.AITER_BF16,
+                                 AttentionBackendType.AITER_BF16FP8,
                                  *AITER_LOW_PRECISION_BACKENDS,
                                  *AITER_MHA_V4_SPARGE_BACKENDS,
                                  AttentionBackendType.AITER_MLA,

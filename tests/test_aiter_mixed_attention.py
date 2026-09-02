@@ -5,13 +5,14 @@ import torch
 import torch.nn.functional as F
 
 
-def test_aiter_bf16_uses_mha_v4_while_aiter_remains_mha_v3(monkeypatch):
+def test_aiter_bf16_backends_use_mha_v4_while_aiter_remains_mha_v3(monkeypatch):
     from xfuser.core.distributed import attention_backend
 
     calls = []
 
     class AttentionFormat:
         BF16 = "bf16"
+        FP8 = "fp8"
 
     def mha_v4(query, key, value, *formats):
         calls.append(("mha_v4", formats))
@@ -23,6 +24,7 @@ def test_aiter_bf16_uses_mha_v4_while_aiter_remains_mha_v3(monkeypatch):
 
     monkeypatch.setattr(attention_backend, "_AiterAttentionFormat", AttentionFormat)
     monkeypatch.setattr(attention_backend, "_aiter_mha_v4", mha_v4)
+    monkeypatch.setattr(attention_backend, "_aiter_native_fp8_format", lambda: AttentionFormat.FP8)
     monkeypatch.setattr(attention_backend, "flash_attn_func_aiter", mha_v3)
     monkeypatch.setattr(attention_backend, "AITER_HAS_ROUND_MODE", False)
 
@@ -33,15 +35,21 @@ def test_aiter_bf16_uses_mha_v4_while_aiter_remains_mha_v3(monkeypatch):
     bf16_output, bf16_lse = attention_backend.ATTENTION_FUNCTION_REGISTRY[
         attention_backend.AttentionBackendType.AITER_BF16
     ](query, key, value, dropout_p=0.0, is_causal=False)
+    bf16fp8_output, bf16fp8_lse = attention_backend.ATTENTION_FUNCTION_REGISTRY[
+        attention_backend.AttentionBackendType.AITER_BF16FP8
+    ](query, key, value, dropout_p=0.0, is_causal=False)
     legacy_output, legacy_lse = attention_backend.ATTENTION_FUNCTION_REGISTRY[
         attention_backend.AttentionBackendType.AITER
     ](query, key, value, dropout_p=0.0, is_causal=False)
 
     assert calls[0] == ("mha_v4", ("bf16", "bf16", "bf16"))
-    assert calls[1][0] == "mha_v3"
+    assert calls[1] == ("mha_v4", ("bf16", "bf16", "fp8"))
+    assert calls[2][0] == "mha_v3"
     assert bf16_output.shape == query.shape
+    assert bf16fp8_output.shape == query.shape
     assert legacy_output.shape == query.shape
     assert bf16_lse is None
+    assert bf16fp8_lse is None
     assert legacy_lse is None
 
 
@@ -85,6 +93,7 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
     "backend_name",
     [
         "AITER_BF16",
+        "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_F6F4",
@@ -129,6 +138,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
     "backend_name",
     [
         "AITER_BF16",
+        "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_F6F4",
@@ -192,6 +202,7 @@ def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
     "backend_name",
     [
         "AITER_BF16",
+        "AITER_BF16FP8",
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_F6F4",
@@ -220,7 +231,14 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
 
 @pytest.mark.parametrize(
     "backend_name",
-    ["AITER_BF16", "AITER_MXFP8", "AITER_F8F6", "AITER_MXFP6", "AITER_MXFP4"],
+    [
+        "AITER_BF16",
+        "AITER_BF16FP8",
+        "AITER_MXFP8",
+        "AITER_F8F6",
+        "AITER_MXFP6",
+        "AITER_MXFP4",
+    ],
 )
 def test_aiter_mixed_cross_attention_compiles_fullgraph(backend_name):
     _require_mha_v4_aiter(backend_name)

@@ -1,6 +1,7 @@
-import sys
 import argparse
 import dataclasses
+import os
+import sys
 import warnings
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Union
@@ -67,6 +68,72 @@ def nullable_str(val: str):
     if not val or val == "None":
         return None
     return val
+
+
+_DETERMINISM_CHECK_HELP = (
+    "Set to a positive failure threshold to compare every timed iteration with "
+    "the first using exact equality, not a tolerance. The failure handler is "
+    "called for each rank enabled by --determinism_check_report_ranks on each "
+    "divergence until the threshold is reached. "
+    "Disabled at 0 or below. Enabling retains and compares full output payloads, "
+    "which adds memory, synchronization, and transfer overhead."
+)
+
+_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT = "last"
+
+_DETERMINISM_CHECK_REPORT_RANKS_HELP = (
+    "Ranks on which determinism failures save serialized outputs. Accepts a "
+    "comma-separated list of integers, an empty value, or one of: all, first, "
+    "last, none. Empty and none select no ranks. "
+    f"Defaults to {_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT}. Many failures "
+    "may produce many large output files; restrict output to selected ranks "
+    "based on model specifics. The none value is useful with a positive "
+    "--determinism_check when only log messages, but no files, are needed."
+)
+
+
+def _normalize_determinism_check_report_ranks(value: str) -> frozenset[int]:
+    """Resolve a rank string; ``none`` and empty values select no ranks."""
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError as exc:
+        raise ValueError("WORLD_SIZE must be a positive integer") from exc
+    if world_size <= 0:
+        raise ValueError("WORLD_SIZE must be a positive integer")
+    if not isinstance(value, str):
+        raise TypeError("determinism_check_report_ranks must be a string")
+
+    value = value.strip()
+    if value == "all":
+        ranks = frozenset(range(world_size))
+    elif value == "first":
+        ranks = frozenset({0})
+    elif value == "last":
+        ranks = frozenset({world_size - 1})
+    elif value in ("none", ""):
+        ranks = frozenset()
+    else:
+        parts = [p.strip() for p in value.split(",")]
+        if any(not part for part in parts):
+            raise ValueError(
+                "determinism_check_report_ranks must be a comma-separated list "
+                "of integers, empty, or one of: all, first, last, none"
+            )
+        try:
+            ranks = frozenset(int(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                "determinism_check_report_ranks must be a comma-separated list "
+                "of integers, empty, or one of: all, first, last, none"
+            ) from exc
+
+    invalid_ranks = sorted(rank for rank in ranks if rank < 0 or rank >= world_size)
+    if invalid_ranks:
+        raise ValueError(
+            "determinism_check_report_ranks contains ranks outside "
+            f"0..{world_size - 1}: {invalid_ranks}"
+        )
+    return ranks
 
 
 @dataclass
@@ -154,6 +221,8 @@ class xFuserArgs:
     fp8_precision_override_suffix_patterns: Optional[str] = None
     # Model runner specific
     num_iterations: int = 1
+    determinism_check: int = 0
+    determinism_check_report_ranks: str | frozenset[int] = "all"
     profile: bool = False
     profile_capture_phase: bool = False
     profile_with_stack: bool = False
@@ -205,6 +274,11 @@ class xFuserArgs:
     distilled_transformer_2_path: Optional[str] = None
 
     def __post_init__(self):
+        self.determinism_check_report_ranks = (
+            _normalize_determinism_check_report_ranks(
+                self.determinism_check_report_ranks
+            )
+        )
         if self.profile_with_stack and not self.profile:
             logger.warning(
                 "--profile_with_stack has no effect without --profile; "
@@ -554,6 +628,18 @@ class xFuserArgs:
             action="store_true",
             help="Use cache config for attention compression.",
         )
+        runtime_group.add_argument(
+            "--determinism_check",
+            type=int,
+            default=0,
+            help=_DETERMINISM_CHECK_HELP,
+        )
+        runtime_group.add_argument(
+            "--determinism_check_report_ranks",
+            type=str,
+            default=_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT,
+            help=_DETERMINISM_CHECK_REPORT_RANKS_HELP,
+        )
 
         return parser
 
@@ -820,6 +906,18 @@ class xFuserArgs:
             type=int,
             default=1,
             help="Number of iterations to run the model."
+        )
+        parser.add_argument(
+            "--determinism_check",
+            type=int,
+            default=0,
+            help=_DETERMINISM_CHECK_HELP,
+        )
+        parser.add_argument(
+            "--determinism_check_report_ranks",
+            type=str,
+            default=_DETERMINISM_CHECK_REPORT_RANKS_DEFAULT,
+            help=_DETERMINISM_CHECK_REPORT_RANKS_HELP,
         )
         parser.add_argument(
             "--profile",

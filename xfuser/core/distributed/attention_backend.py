@@ -144,12 +144,11 @@ def _build_hadamard_matrix(block_r, dtype=torch.bfloat16, allow_sylvester_fallba
 
 def _replicate_hadamard_per_device(hadamard):
     """Replicate a single Hadamard matrix on each available device, keyed by
-    torch.device (all GPUs if CUDA is available, else CPU). A None matrix maps
+    torch.device (CPU plus all GPUs when CUDA is available). A None matrix maps
     to None on every device."""
+    devices = [torch.device("cpu")]
     if torch.cuda.is_available():
-        devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
-    else:
-        devices = [torch.device("cpu")]
+        devices += [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
     return {
         device: (hadamard.to(device) if hadamard is not None else None)
         for device in devices
@@ -389,8 +388,11 @@ def _build_aiter_mla_metadata(batch_size, q_seq_len, kv_seq_len, num_heads, num_
 
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
+AITER_FP8_DTYPE = torch.float8_e4m3fn  # fallback; fp8 comms requires aiter
+FP8_HADAMARD_MATRIX = _aiter_hadamard_matrix(128)
 if env_info["has_aiter"]:
     import aiter
+    AITER_FP8_DTYPE = aiter.dtypes.fp8
     from aiter import flash_attn_func as flash_attn_func_aiter
     from aiter import flash_attn_varlen_func as flash_attn_varlen_func_aiter
     try:
@@ -689,6 +691,13 @@ def _mha_v4_sparge_tile():
     return {"BLOCK_M": 256, "BLOCK_N": _AITER_MHA_V4.kv_tile}
 
 
+_FP8_INPUT_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+
+SUPPORTS_PRE_QUANTIZATION_BACKENDS = {
+    AttentionBackendType.AITER_FP8,
+}
+
+
 def register_attention_function(backend_type):
     """
     Decorator to register attention functions with their corresponding backend type.
@@ -951,6 +960,24 @@ def _fp8_hadamard_rotate(x: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
     return torch.matmul(x.unflatten(-1, (d // block_r, block_r)), R).flatten(-2)
 
 
+def rotate_qk_for_fp8_comms(query, key, backend):
+    """Rotate Q,K exactly as the fp8-comms path does before quantizing them.
+
+    Returns the inputs untouched for backends whose fp8-comms path does not rotate,
+    so callers can apply this unconditionally. Single definition shared by the
+    quantization site in USP and the calibration site in the attention processor:
+    both must measure and quantize the same distribution, otherwise the frozen
+    per-layer scale describes a tensor that is never quantized.
+    """
+    if backend != AttentionBackendType.AITER_FP8:
+        return query, key
+    R = _get_fp8_hadamard_matrix(query.shape[-1], query.device)
+    return (
+        _fp8_hadamard_rotate(query, R).contiguous(),
+        _fp8_hadamard_rotate(key, R).contiguous(),
+    )
+
+
 def _quantize_aiter_fp8_inputs(query, key, value):
     quant_dtype = aiter.dtypes.fp8
     dtype_max = torch.finfo(quant_dtype).max
@@ -1102,9 +1129,28 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     then calls attention through AITER
     """
     _validate_aiter_low_precision_dropout(dropout_p)
+    attention_kwargs = attention_kwargs or {}
+    pre_quantized = attention_kwargs.get("pre_quantized", False)
+
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+
+    if pre_quantized:
+        # Q/K/V arrive already FP8 from fp8 comms (quantized before the Ulysses
+        # all-to-all).
+        output = aiter.flash_attn_fp8_pertensor_func(
+            query,
+            key,
+            value,
+            causal=is_causal,
+            softmax_scale=query.shape[-1] ** -0.5,
+            q_descale=attention_kwargs["q_descale"],
+            k_descale=attention_kwargs["k_descale"],
+            v_descale=attention_kwargs["v_descale"],
+        )
+        output = torch.permute(output, [0, 2, 1, 3])
+        return output, None
 
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     use_mha_v4 = packed is None and _use_aiter_mha_v4_fp8(query, is_causal)

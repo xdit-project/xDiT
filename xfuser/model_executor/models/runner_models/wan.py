@@ -1,5 +1,6 @@
 import re
 import torch
+from dataclasses import replace
 from typing import List, Optional
 from PIL import Image
 from diffusers import FlowMatchEulerDiscreteScheduler
@@ -306,6 +307,8 @@ class xFuserWan22I2VModel(xFuserWan21I2VModel):
     # WAN has no in-tree FBCache adapter (that path is FLUX.2-specific). FBCache is a
     # special case of DBCache (first-block cache), so expose "fbcache" as DBCache with
     # Fn_compute_blocks=1; base_model routes it through the cache-dit (dbcache) engine.
+    capabilities = replace(xFuserWan21I2VModel.capabilities, use_fp8_comms=True)
+
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
@@ -672,6 +675,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     )
 
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
+    capabilities = replace(xFuserWan21T2VModel.capabilities, use_fp8_comms=True)
+
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)
         self.settings.model_name = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
@@ -755,6 +760,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
         use_fp4_gemms=True,
+        use_fp8_comms=True,
         use_hybrid_attn_schedule=True,
         use_hybrid_gemm_schedule=True,
         use_parallel_vae=True,

@@ -11,6 +11,7 @@ import torch.distributed
 from xfuser.logger import init_logger
 from xfuser.core.distributed import init_distributed_environment
 from xfuser.config.config import (
+    DEFAULT_FP8_COMMS_SAFETY_FACTOR,
     EngineConfig,
     FastAttnConfig,
     ParallelConfig,
@@ -152,6 +153,9 @@ class xFuserArgs:
     use_fp4_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
     fp8_precision_override_suffix_patterns: Optional[str] = None
+    use_fp8_comms: bool = False
+    fp8_comms_scale: Optional[float] = None
+    fp8_comms_safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR
     # Model runner specific
     num_iterations: int = 1
     profile: bool = False
@@ -517,6 +521,25 @@ class xFuserArgs:
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
         )
+        runtime_group.add_argument(
+            "--use_fp8_comms",
+            action="store_true",
+            help="Quantize Ulysses all-to-all communication to FP8.",
+        )
+        runtime_group.add_argument(
+            "--fp8_comms_scale",
+            type=float,
+            default=None,
+            help="Override the model-specific FP8 communication scale.",
+        )
+        runtime_group.add_argument(
+            "--fp8_comms_safety_factor",
+            type=float,
+            default=DEFAULT_FP8_COMMS_SAFETY_FACTOR,
+            help="Safety factor for the calibrated FP8 comms scale: scale = amax / "
+                 "(FP8_MAX * safety_factor). LOWER it (e.g. 0.4) to enlarge the scale and "
+                 "leave more headroom before fp8 saturation. Default 0.85.",
+        )
 
         # DiTFastAttn arguments
         fast_attn_group = parser.add_argument_group("DiTFastAttn Options")
@@ -814,7 +837,25 @@ class xFuserArgs:
             default=None,
             help="Comma-delimited FQN suffix patterns to keep in FP8 during FP4 GEMMs.",
         )
-
+        parser.add_argument(
+            "--use_fp8_comms",
+            action="store_true",
+            help="Quantize Ulysses all-to-all communication to FP8.",
+        )
+        parser.add_argument(
+            "--fp8_comms_scale",
+            type=float,
+            default=None,
+            help="Override the model-specific FP8 communication scale.",
+        )
+        parser.add_argument(
+            "--fp8_comms_safety_factor",
+            type=float,
+            default=DEFAULT_FP8_COMMS_SAFETY_FACTOR,
+            help="Safety factor for the calibrated FP8 comms scale: scale = amax / "
+                 "(FP8_MAX * safety_factor). LOWER it (e.g. 0.4) to enlarge the scale and "
+                 "leave more headroom before fp8 saturation. Default 0.85.",
+        )
         parser.add_argument(
             "--num_iterations",
             type=int,
@@ -1201,6 +1242,9 @@ class xFuserArgs:
             use_vsa_static_block_mask=self.use_vsa_static_block_mask,
             use_vsa_first_frame_mask=self.use_vsa_first_frame_mask,
             vsa_collect_density=self.vsa_collect_density,
+            use_fp8_comms=self.use_fp8_comms,
+            fp8_comms_scale=self.fp8_comms_scale,
+            fp8_comms_safety_factor=self.fp8_comms_safety_factor,
         )
 
         parallel_config = ParallelConfig(

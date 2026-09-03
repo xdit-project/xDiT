@@ -841,18 +841,25 @@ class xFuserModel(abc.ABC):
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
-        """ Run a a full pipeline with timing information """
+        """ Run the pipeline and time its latency from the synchronized across all ranks beginning
+        of the model execution, till the moment the current rank finishes.
+        
+        Later, we typically discard timings of all ranks except the last one, which is assumed to
+        be the rank providing model's output.
+        """
 
         self.prepare_run(input_args)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
+
         torch.cuda.synchronize()
+        get_world_group().barrier()     # aligns all ranks as closely as possible
 
         start.record()
         out = self._run_pipe(input_args)
         end.record()
+        end.synchronize()   # we don't care about other streams if there are any
 
-        torch.cuda.synchronize()
         elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
         return out, elapsed_time
 

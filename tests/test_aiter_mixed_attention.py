@@ -74,8 +74,12 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
         try:
             from aiter.ops.mha_v4 import mha_v4_mxfp8
         except ImportError:
-            pytest.skip("AITER does not expose the MHA v4 MXFP8 raw API.")
-        del mha_v4_mxfp8
+            import inspect
+
+            if inspect.signature(mha_v4).parameters.get("q_scale_mode") is None:
+                pytest.skip("AITER does not expose the MHA v4 MXFP8 raw API.")
+        else:
+            del mha_v4_mxfp8
 
     del mha_v4
     kernel_dir = (

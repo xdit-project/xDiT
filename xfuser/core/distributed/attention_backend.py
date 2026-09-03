@@ -438,7 +438,16 @@ if env_info["has_aiter"]:
             ),
         )
     except ImportError:
-        pass # Error is raised in runtime_state.py when AITER_MXFP8 is selected.
+        _aiter_mha_v4_mxfp8 = None
+        if _AITER_MHA_V4.enabled:
+            _AITER_MHA_V4 = replace(
+                _AITER_MHA_V4,
+                mxfp8_block_mask=(
+                    inspect.signature(_aiter_mha_v4).parameters.get("q_scale_mode")
+                    is not None
+                    and _AITER_MHA_V4.block_mask
+                ),
+            )
 
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
@@ -1241,8 +1250,26 @@ def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output = _aiter_mha_v4_mxfp8(query, key, value)
+    output = _aiter_launch_mxfp8(query, key, value)
     return torch.permute(output, [0, 2, 1, 3]), None
+
+
+def _aiter_launch_mxfp8(query, key, value, block_mask=None):
+    if _aiter_mha_v4_mxfp8 is not None:
+        return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask)
+    fp8_format = _aiter_native_fp8_format()
+    return _aiter_mha_v4(
+        query,
+        key,
+        value,
+        fp8_format,
+        fp8_format,
+        fp8_format,
+        block_mask=block_mask,
+        q_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
+        k_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
+        v_scale_mode=_AiterAttentionScaleMode.F32_PER_TENSOR,
+    )
 
 
 @register_attention_function(AttentionBackendType.AITER_F8F6)
@@ -1430,7 +1457,7 @@ def _aiter_mha_v4_sparge_call(
     v = torch.permute(v, [0, 2, 1, 3]).contiguous()
     if mxfp8:
         if _AITER_MHA_V4.mxfp8_block_mask:
-            output = _aiter_mha_v4_mxfp8(q, k, v, block_mask=block_mask)
+            output = _aiter_launch_mxfp8(q, k, v, block_mask=block_mask)
         else:
             output = _aiter_launch_mxfp8_sparse(q, k, v, block_mask)
     else:

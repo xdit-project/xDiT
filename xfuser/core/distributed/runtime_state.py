@@ -320,12 +320,20 @@ class RuntimeState(metaclass=ABCMeta):
                 raise RuntimeError("AITER fp8 flash attention is not available, please update AITER")
         elif attention_backend == AttentionBackendType.AITER_MXFP8:
             try:
-                from aiter.ops.mha_v4 import mha_v4_mxfp8
+                from aiter.ops.mha_v4 import mha_v4
             except ImportError:
                 raise RuntimeError(
                     f"{attention_backend.value} attention is not available, "
                     "please update AITER"
                 ) from None
+            try:
+                from aiter.ops.mha_v4 import mha_v4_mxfp8
+            except ImportError:
+                if inspect.signature(mha_v4).parameters.get("q_scale_mode") is None:
+                    raise RuntimeError(
+                        f"{attention_backend.value} attention is not available, "
+                        "please update AITER"
+                    ) from None
         elif attention_backend in AITER_MHA_V4_ONLY_BACKEND_SET:
             try:
                 from aiter.ops.mha_v4 import mha_v4

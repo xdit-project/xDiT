@@ -8,9 +8,9 @@ import torch
 class LTX2VideoVaeMfmaAttnProcessor:
     """Flash-NA3D attention processor for the LTX-2.5 diffusion decoder.
 
-    Drop-in replacement for LTX2VideoVaeEagerSdpaAttnProcessor.  Uses AITER's
-    BF16-MFMA flash kernel (gfx950 / MI350X, gfx942 / MI300X, B200) and
-    includes a fused QKV GEMM to reduce memory bandwidth.
+    Drop-in replacement for LTX2VideoVaeEagerSdpaAttnProcessor.  Delegates to
+    AITER's BF16-MFMA flash kernel (gfx950 / MI350X, gfx942 / MI300X) with a
+    fused QKV GEMM to reduce memory bandwidth.
     """
 
     def __init__(self):

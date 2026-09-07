@@ -1,3 +1,5 @@
+import functools
+
 import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.model_executor.cache import (
@@ -25,6 +27,54 @@ def _normalize_prompt(prompt_input):
     if isinstance(prompt_input, list):
         return list(prompt_input) # Recreates the list to avoid issues with in-place editing
     raise TypeError(f"prompt must be str or list[str], got {type(prompt_input)}")
+
+
+def _keep_timesteps_host_resident(pipe) -> None:
+    """Elide the per-denoise-step device->host sync in ``ZImagePipeline.__call__``.
+
+    ``pipeline_z_image.py`` computes ``t_norm = ((1000 - t.expand(B)) / 1000)[0].item()``
+    at the top of *every* denoise step.  ``retrieve_timesteps`` hands the scheduler the
+    execution device, so ``scheduler.timesteps`` lives on the GPU and that ``.item()``
+    is a genuine blocking D2H sync which drains the queue of the previous step's
+    transformer work, converting the whole loop from pipelined to lock-step.
+
+    The timestep schedule is a tiny 1-D vector of *host-known* constants; nothing in
+    ``FlowMatchEulerDiscreteScheduler.step`` needs it on the device (``self.sigmas``
+    stays device-resident and ``_init_step_index`` explicitly moves the incoming
+    timestep onto ``self.timesteps.device``).  So we keep ``scheduler.timesteps`` on
+    the host: the ``.item()`` becomes free, and the transformer wrapper performs a
+    single cheap non-blocking H2D copy of the (B,) timestep vector instead.
+
+    Values are bit-identical -- ``(1000 - t) / 1000`` is one IEEE-754 fp32 op either
+    way -- and the whole thing is selected from tensor properties with a hard
+    fallback: if the scheduler does not expose a tensor ``timesteps`` we leave it
+    exactly as it was.
+    """
+    scheduler = getattr(pipe, "scheduler", None)
+    if scheduler is None or getattr(scheduler, "_xfuser_host_timesteps", False):
+        return
+    original_set_timesteps = getattr(scheduler, "set_timesteps", None)
+    if not callable(original_set_timesteps):
+        return
+
+    # ``functools.wraps`` is load-bearing, not cosmetic: ``retrieve_timesteps``
+    # feature-detects scheduler support with
+    # ``"sigmas" in inspect.signature(scheduler.set_timesteps).parameters``.
+    # A bare ``(*args, **kwargs)`` wrapper reports no such parameter and the
+    # pipeline raises "does not support custom sigmas schedules".  ``wraps``
+    # sets ``__wrapped__``, which ``inspect.signature`` follows back to the
+    # scheduler's real signature, so the probe keeps seeing the truth.
+    @functools.wraps(original_set_timesteps)
+    def set_timesteps(*args, **kwargs):
+        out = original_set_timesteps(*args, **kwargs)
+        ts = getattr(scheduler, "timesteps", None)
+        # Fallback path: anything we do not recognise is left untouched.
+        if isinstance(ts, torch.Tensor) and ts.device.type != "cpu" and ts.dim() == 1:
+            scheduler.timesteps = ts.to("cpu")
+        return out
+
+    scheduler.set_timesteps = set_timesteps
+    scheduler._xfuser_host_timesteps = True
 
 
 def _set_effective_heads_for_ulysses(transformer, ulysses_degree: int) -> None:
@@ -137,6 +187,7 @@ class xFuserZImageModel(xFuserModel):
             quantization_config=te_quant,
             **te_kwargs,
         )
+        _keep_timesteps_host_resident(pipe)
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:
@@ -226,6 +277,7 @@ class xFuserZImageTurboModel(xFuserModel):
             quantization_config=te_quant,
             **te_kwargs,
         )
+        _keep_timesteps_host_resident(pipe)
         return pipe
 
     def _run_pipe(self, input_args: dict) -> DiffusionOutput:

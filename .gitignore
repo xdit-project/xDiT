@@ -8,5 +8,6 @@ results/
 profile/
 .vscode/
 xfuser.egg-info/
+xfuser/__version__.py
 dist/*
 *.mp4

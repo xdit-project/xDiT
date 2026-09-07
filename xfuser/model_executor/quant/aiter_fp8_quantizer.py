@@ -27,7 +27,7 @@ Layout difference between the two framework paths:
 
 Importing this module must stay safe on any supported dependency set: it is reachable from the
 runner package, which every model imports. The transformers text-encoder half needs
-``transformers.core_model_loading`` (transformers>=5), well above the floor setup.py declares, so
+``transformers.core_model_loading`` (transformers>=5), well above the floor pyproject.toml declares, so
 that import is deferred to first use. Registration likewise waits for construction: each config
 registers its own quantizer when built, so a run that never quantizes leaves both frameworks'
 global auto-mappings untouched.
@@ -260,7 +260,7 @@ def _has_transformers_conversion_ops() -> bool:
     """Whether the installed transformers exposes the streaming conversion-op API we build on.
 
     ``transformers.core_model_loading`` arrived in transformers 5.0 as part of the parameter-at-a-
-    time loader; setup.py's floor is far below that. Feature detection rather than a version
+    time loader; pyproject.toml's floor is far below that. Feature detection rather than a version
     comparison, so a backport or a rename in either direction is handled by the same check.
     """
     from xfuser.model_executor.models.runner_models.loading.text_encoder_adapter import (
@@ -282,7 +282,7 @@ def _quantize_op_cls() -> type:
     """Build the streaming quantize op class on first use.
 
     Its base, ``transformers.core_model_loading.ConversionOps``, only exists in transformers>=5,
-    above the floor setup.py declares. Deferring the import keeps this module importable on 4.x
+    above the floor pyproject.toml declares. Deferring the import keeps this module importable on 4.x
     (every runner reaches it through the runner package) and confines the requirement to the one
     call path that needs it, which is already gated on the AITER FP8 text-encoder config.
     """

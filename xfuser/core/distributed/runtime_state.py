@@ -26,7 +26,10 @@ if envs._is_npu():
 
 from xfuser.core.distributed.attention_backend import (
     AITER_LOW_PRECISION_BACKENDS,
+    AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET,
     AITER_MHA_V4_ONLY_BACKEND_SET,
+    AITER_MHA_V4_SPARGE_BACKENDS,
+    AITER_MHA_V4_SPARGE_BACKEND_SET,
     AttentionBackendType,
 )
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
@@ -134,6 +137,7 @@ class RuntimeState(metaclass=ABCMeta):
             AttentionBackendType.NVTE_FP8,
             AttentionBackendType.FLASH_4_FP4,
             *AITER_LOW_PRECISION_BACKENDS,
+            *AITER_MHA_V4_SPARGE_BACKENDS,
             AttentionBackendType.AITER_MLA,
             AttentionBackendType.AITER_FLYDSL_FP8,
         ]:
@@ -229,6 +233,7 @@ class RuntimeState(metaclass=ABCMeta):
                                  AttentionBackendType.FLASH_4,
                                  AttentionBackendType.FLASH_4_FP4,
                                  *AITER_LOW_PRECISION_BACKENDS,
+                                 *AITER_MHA_V4_SPARGE_BACKENDS,
                                  AttentionBackendType.AITER_MLA,
                                  AttentionBackendType.AITER_SAGE,
                                  AttentionBackendType.AITER_SPARSE_SAGE,
@@ -276,7 +281,37 @@ class RuntimeState(metaclass=ABCMeta):
                         f"{attention_backend.value} attention is missing {missing} "
                         "required for ring parallelism, please update AITER"
                     )
-        if attention_backend == AttentionBackendType.AITER_FP8:
+        if attention_backend in AITER_MHA_V4_SPARGE_BACKEND_SET:
+            try:
+                from aiter.ops.mha_v4 import mha_v4
+                if inspect.signature(mha_v4).parameters.get("block_mask") is None:
+                    raise RuntimeError(
+                        f"{attention_backend.value} attention requires an AITER "
+                        "build whose mha_v4 accepts block_mask"
+                    )
+            except ImportError:
+                raise RuntimeError(
+                    f"{attention_backend.value} attention is not available, "
+                    "please update AITER"
+                ) from None
+            arch_name = (
+                torch.cuda.get_device_properties(0).gcnArchName
+                if torch.cuda.is_available()
+                else ""
+            )
+            if arch_name:
+                if "gfx942" in arch_name and attention_backend not in (
+                    AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET
+                ):
+                    raise RuntimeError(
+                        f"{attention_backend.value} sparse attention is gfx950-only; "
+                        "gfx942 currently supports aiter_fp8_sparge and aiter_i8fp8_sparge"
+                    )
+                if "gfx950" not in arch_name and "gfx942" not in arch_name:
+                    raise RuntimeError(
+                        f"{attention_backend.value} attention requires gfx950 or gfx942"
+                    )
+        elif attention_backend == AttentionBackendType.AITER_FP8:
             try:
                 from aiter import flash_attn_fp8_pertensor_func
             except ImportError:

@@ -24,6 +24,7 @@ from xfuser.core.distributed import (
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed.attention_backend import (
+    AITER_MHA_V4_SPARGE_BACKEND_SET,
     ATTENTION_FUNCTION_REGISTRY,
     AttentionBackendType,
 )
@@ -40,7 +41,7 @@ _HEAD_BALANCE_BACKENDS = frozenset({
     AttentionBackendType.AITER_SPARGE,
     AttentionBackendType.AITER_SPARGE_V2,
     AttentionBackendType.FLEX_BLOCK_SPARGE,
-})
+}) | AITER_MHA_V4_SPARGE_BACKEND_SET
 
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=None):

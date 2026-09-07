@@ -97,6 +97,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        profile_capture_phase=True,
     )
 
     _STG_SCALE = 1.0
@@ -238,7 +239,7 @@ class xFuserLTX23VideoModel(xFuserModel):
         compile_args["num_inference_steps"] = (
             2  # Reduce steps for warmup # TODO: make this more generic
         )
-        self._run_timed_pipe(compile_args)
+        self._run_compile_warmup(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
         pipe_args = output.pipe_args
@@ -315,6 +316,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         supports_step_caching=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
+        profile_capture_phase=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -412,7 +414,7 @@ class xFuserLTX2VideoModel(xFuserModel):
         compile_args["num_inference_steps"] = (
             2  # Reduce steps for warmup # TODO: make this more generic
         )
-        self._run_timed_pipe(compile_args)
+        self._run_compile_warmup(compile_args)
 
     def save_output(self, output: DiffusionOutput) -> None:
         pipe_args = output.pipe_args
@@ -470,8 +472,10 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
         ulysses_degree=True,
         ring_degree=True,
         enable_tiling=True,
+        use_parallel_vae=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
+        profile_capture_phase=True,
     )
 
     def _load_model(self) -> DiffusionPipeline:
@@ -522,12 +526,15 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
         # Diffusion decoder — replaces convolutional VAE decode for both distilled
         # and full model pipelines.
-        from diffusers import LTX2VideoDiffusionDecoderModel
         from diffusers.pipelines.ltx2.pipeline_ltx2_diffusion_decode import (
             LTX2VideoDiffusionDecodePipeline,
         )
 
-        diff_decoder = LTX2VideoDiffusionDecoderModel.from_pretrained(
+        from xfuser.model_executor.layers.ltx2.diffusion_decoder import (
+            xFuserLTX2VideoDiffusionDecoderWrapper,
+        )
+
+        diff_decoder = xFuserLTX2VideoDiffusionDecoderWrapper.from_pretrained(
             self.settings.model_name,
             subfolder="diffusion_decoder",
             torch_dtype=torch.bfloat16,
@@ -543,13 +550,13 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
             # NATTEN is not available
             # Fall back to tiled PyTorch SDPA
             # Works on CUDA, ROCm and CPU. Ported from LTX-2 EagerSdpaAttention.
-            from xfuser.model_executor.layers.ltx2_na3d_eager_attn import (
+            from xfuser.model_executor.layers.ltx2.na3d_eager_attn import (
                 LTX2VideoVaeEagerSdpaAttnProcessor,
             )
 
             diff_decoder.set_attn_processor(LTX2VideoVaeEagerSdpaAttnProcessor())
             log(
-                "Diffusion decoder: NATTEN unavailable; using Triton na3d attention fallback."
+                "Diffusion decoder: NATTEN unavailable; using tiled PyTorch SDPA fallback."
             )
         self.decode_pipe = LTX2VideoDiffusionDecodePipeline(
             diffusion_decoder=diff_decoder,
@@ -560,9 +567,16 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
     def _enable_options(self) -> None:
         super()._enable_options()
-        if self.config.enable_tiling:
+        # Tiling on the diffusion decoder is enabled when either --enable_tiling is set
+        # (for single-GPU memory savings) or --use_parallel_vae is set (required for
+        # tiled_decode dispatch, which is what activates tile-parallel decode).
+        if self.config.enable_tiling or self.config.use_parallel_vae:
             self.pipe.vae.enable_tiling()
             self.decode_pipe.diffusion_decoder.enable_tiling()
+        # Gate tile-parallel decode behind --use_parallel_vae.  The wrapper's tiled_decode
+        # checks this flag before distributing tiles across SP ranks.
+        if self.config.use_parallel_vae:
+            self.decode_pipe.diffusion_decoder._parallel_decode = True
 
     def _preprocess_args_images(self, input_args: dict) -> dict:
         input_args = super()._preprocess_args_images(input_args)

@@ -21,12 +21,12 @@ logger = init_logger(__name__)
 
 @lru_cache(maxsize=None)
 def declared_floor(name: str) -> Optional[str]:
-    """The minimum version of ``name`` that setup.py declares xfuser needs.
+    """The minimum version of ``name`` that project metadata declares xfuser needs.
 
-    setup.py's ``install_requires``/``extras_require`` are the single place a floor is
-    written down; setuptools copies them into xfuser's distribution metadata, which is
-    what this reads back. Returns the bare version, e.g. ``"0.33.0"`` for
-    ``"diffusers>=0.33.0"``.
+    ``pyproject.toml`` ``dependencies`` / ``optional-dependencies`` are the single
+    place a floor is written down; setuptools copies them into xfuser's distribution
+    metadata, which is what this reads back. Returns the bare version, e.g.
+    ``"0.33.0"`` for ``"diffusers>=0.33.0"``.
 
     Returns None when no floor can be determined: an unrecognised dependency, a
     requirement with no lower bound, or a source tree that was never installed and has
@@ -54,7 +54,7 @@ def declared_floor(name: str) -> Optional[str]:
             if specifier.operator in (">=", "==", "~="):
                 return specifier.version
 
-    logger.debug(f"setup.py declares no version floor for {name}")
+    logger.debug(f"project metadata declares no version floor for {name}")
     return None
 
 

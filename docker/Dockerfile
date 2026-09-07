@@ -6,7 +6,7 @@ FROM nvcr.io/nvidia/pytorch:24.07-py3
 WORKDIR /workspace
 
 # 1. Copy the entire project context into the container.
-# Assumes the xDiT source code (including `setup.py`) is in the build context root.
+# Assumes the xDiT source code (including `pyproject.toml`) is in the build context root.
 COPY . .
 
 # 2. SYSTEM DEPENDENCY INSTALLATION & CLEANUP
@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir opencv-python-headless==4.10.0.84
 # 5. INSTALL THE XDIT PROJECT
 # This is the primary installation step.
 # It installs the project in editable mode (`-e`) with the `flash-attn` extra dependency.
-# The project's own `setup.py` or `pyproject.toml` will manage the correct version of `flash-attn`.
+# The project's `pyproject.toml` will manage the correct version of `flash-attn`.
 RUN pip install --no-cache-dir -e ".[flash-attn]"
 
 # 6. SET THE CONTAINER'S DEFAULT COMMAND

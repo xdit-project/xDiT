@@ -34,7 +34,10 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
         Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
     )
     kernel_name = backend_name.removeprefix("AITER_").lower()
-    if not (kernel_dir / f"fwd_hd128_{kernel_name}.co").exists():
+    candidates = [kernel_dir / f"fwd_hd128_{kernel_name}.co"]
+    if arch == "gfx942":
+        candidates.append(kernel_dir / "MI300" / f"fwd_hd128_{kernel_name}.co")
+    if not any(path.exists() for path in candidates):
         pytest.skip(f"AITER does not include the {arch} {kernel_name} FMHA kernel.")
 
 
@@ -179,7 +182,7 @@ def test_aiter_mixed_cross_attention_compiles_fullgraph(backend_name):
 
 
 def test_aiter_i8fp8_attention_compiles_fullgraph():
-    _require_mha_v4_aiter("AITER_I8FP8")
+    _require_mha_v4_aiter("AITER_I8FP8", supported_arches=("gfx942", "gfx950"))
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,

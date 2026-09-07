@@ -14,6 +14,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 from diffusers.utils import apply_lora_scale
 
 from xfuser.core.distributed import (
+    get_runtime_state,
     get_sp_group,
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
@@ -115,6 +116,10 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                     backend=attention_backend,
                 )
             )
+
+        self.register_forward_pre_hook(
+            lambda module, args: get_runtime_state().increment_step_counter()
+        )
 
     @staticmethod
     def _pad_rows(

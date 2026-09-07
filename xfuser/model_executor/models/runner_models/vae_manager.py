@@ -140,6 +140,13 @@ class VAEManager:
             debug=True,
         )
         for vae in vaes:
+            if type(vae).__name__ == "AutoencoderKLMiniMaxH3":
+                from xfuser.model_executor.models.runner_models.minimax_h3 import (
+                    install_minimax_h3_vae_tile_parallel,
+                )
+
+                install_minimax_h3_vae_tile_parallel(vae)
+                continue
             if self._tiles(vae) and vae_tiling.supports_tile_parallel(vae):
                 mark(vae, tile_context)
                 log(

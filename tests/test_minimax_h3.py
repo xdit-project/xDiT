@@ -278,6 +278,59 @@ def test_text_encoder_tp_requires_model_capability():
     assert xFuserMiniMaxH3Model.capabilities.text_encoder_tp_degree
 
 
+def test_minimax_h3_parallel_vae_uses_native_tile_split(monkeypatch):
+    from xfuser.config import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    model = xFuserMiniMaxH3Model(
+        xFuserArgs(
+            model="MiniMax-H3",
+            task="t2va",
+            use_parallel_vae=True,
+        )
+    )
+
+    assert model.capabilities.use_parallel_vae
+
+    with pytest.raises(ValueError, match="does not support dedicated VAE-only ranks"):
+        xFuserMiniMaxH3Model(
+            xFuserArgs(
+                model="MiniMax-H3",
+                task="t2va",
+                use_parallel_vae=True,
+                vae_parallel_size=1,
+            )
+        )
+
+
+def test_minimax_h3_parallel_vae_single_rank_falls_back(monkeypatch):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    class FakeVae:
+        use_tiling = True
+
+        def __init__(self):
+            self._decode_clip = lambda z: z + 1
+
+    monkeypatch.setattr(
+        minimax_h3,
+        "get_vae_parallel_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+
+    vae = FakeVae()
+    minimax_h3.install_minimax_h3_vae_tile_parallel(vae)
+    actual = vae._decode_clip(torch.zeros(1))
+
+    torch.testing.assert_close(actual, torch.ones(1))
+    assert vae._xfuser_tile_parallel
+
+
 @pytest.mark.parametrize(
     "offload_flag",
     [
@@ -483,16 +536,25 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     transformer = xFuserMiniMaxH3Transformer3DWrapper(**_tiny_config()).eval()
     model = object.__new__(xFuserMiniMaxH3Model)
     model.config = SimpleNamespace(fully_shard_degree=1)
-    model.pipe = SimpleNamespace(transformer=transformer)
+    compile_calls = []
+    vae = SimpleNamespace(
+        compile_repeated_blocks=lambda **kwargs: compile_calls.append(kwargs)
+    )
+    model.pipe = SimpleNamespace(transformer=transformer, vae=vae)
     model._enable_compute_comm_overlap = lambda: None
     model._get_compile_mode = lambda: "default"
     model._run_timed_pipe = lambda input_args: None
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.minimax_h3.log",
+        lambda message: None,
+    )
 
     model._compile_model({"num_inference_steps": 50})
 
     parameters = inspect.signature(model.pipe.transformer.forward).parameters
     assert "token_tags" in parameters
     assert "position_ids" in parameters
+    assert compile_calls == [{"mode": "default", "fullgraph": False}]
 
 
 def test_minimax_h3_ref2va_uses_typed_image_references():

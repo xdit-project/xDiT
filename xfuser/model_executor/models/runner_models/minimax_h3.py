@@ -7,7 +7,11 @@ import numpy as np
 import torch
 
 from xfuser.core.distributed.attention_backend import AttentionBackendType
-from xfuser.core.distributed import get_runtime_state, get_world_group
+from xfuser.core.distributed import (
+    get_runtime_state,
+    get_vae_parallel_group,
+    get_world_group,
+)
 from xfuser.core.utils.runner_utils import log
 from xfuser.core.utils.video_utils import encode_video_with_audio
 from xfuser.model_executor.models.runner_models.base_model import (
@@ -35,6 +39,98 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
 })
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+
+
+def install_minimax_h3_vae_tile_parallel(vae) -> None:
+    """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
+
+    DistVAE does not reimplement MiniMax-H3's clip/tile/stitch decode loop, so
+    this keeps that native loop and only shards complete spatial tiles.
+    """
+    if getattr(vae, "_xfuser_tile_parallel", False):
+        return
+
+    vae_group = get_vae_parallel_group()
+    original_decode_clip = vae._decode_clip
+
+    def parallel_decode_clip(z: torch.Tensor) -> torch.Tensor:
+        if vae_group.world_size == 1 or not vae.use_tiling:
+            return original_decode_clip(z)
+
+        height = z.shape[-2] * vae.spatial_compression_ratio
+        width = z.shape[-1] * vae.spatial_compression_ratio
+        y_indices, y_lengths, y_overlaps = vae._split_tiles(
+            height,
+            vae.tile_sample_min_height,
+            vae.tile_sample_min_overlap_height,
+        )
+        x_indices, x_lengths, x_overlaps = vae._split_tiles(
+            width,
+            vae.tile_sample_min_width,
+            vae.tile_sample_min_overlap_width,
+        )
+
+        ratio = vae.spatial_compression_ratio
+        tile_specs = [
+            (y, tile_height, x, tile_width)
+            for y, tile_height in zip(y_indices, y_lengths)
+            for x, tile_width in zip(x_indices, x_lengths)
+        ]
+        local_tiles = {}
+        for tile_index, (y, tile_height, x, tile_width) in enumerate(tile_specs):
+            if tile_index % vae_group.world_size != vae_group.rank_in_group:
+                continue
+            tile = z[
+                ...,
+                y // ratio : y // ratio + tile_height // ratio,
+                x // ratio : x // ratio + tile_width // ratio,
+            ]
+            local_tiles[tile_index] = vae.decoder(
+                vae.post_quant_conv(tile)
+            ).contiguous()
+
+        # Decode runs under the pipeline's float16 autocast, while the VAE
+        # weights remain float32. Share the actual output dtype instead of
+        # assuming either input or parameter dtype. The VAE process group
+        # does not initialize shm_broadcaster, so use object-list broadcast.
+        dtype_holder = [None]
+        if vae_group.rank_in_group == 0:
+            dtype_holder[0] = local_tiles[0].dtype
+        vae_group.broadcast_object_list(dtype_holder, src=0)
+        output_dtype = dtype_holder[0]
+
+        rows = []
+        tile_index = 0
+        for tile_height in y_lengths:
+            row = []
+            for tile_width in x_lengths:
+                owner = tile_index % vae_group.world_size
+                if vae_group.rank_in_group == owner:
+                    decoded_tile = local_tiles[tile_index]
+                else:
+                    decoded_tile = torch.empty(
+                        (
+                            z.shape[0],
+                            vae.decoder.out_channels,
+                            z.shape[2] * vae.decoder.patch_size_t,
+                            tile_height,
+                            tile_width,
+                        ),
+                        device=z.device,
+                        dtype=output_dtype,
+                    )
+                row.append(vae_group.broadcast(decoded_tile, src=owner))
+                tile_index += 1
+            rows.append(row)
+
+        return vae._stitch_tiles(rows, y_overlaps, x_overlaps)
+
+    vae._decode_clip = parallel_decode_clip
+    vae._xfuser_tile_parallel = True
+    log(
+        "MiniMax-H3 parallel VAE enabled: distributing spatial decode tiles "
+        f"across {vae_group.world_size} ranks."
+    )
 
 
 def _patch_minimax_h3_text_encoder_broadcast() -> None:
@@ -169,7 +265,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         data_parallel_degree=False,
         text_encoder_tp_degree=True,
         use_cfg_parallel=False,
-        use_parallel_vae=False,
+        use_parallel_vae=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp4_gemms=True,
@@ -197,6 +293,12 @@ class xFuserMiniMaxH3Model(xFuserModel):
             else:
                 config.task = "fl2va"
         super()._validate_config(config)
+        if config.use_parallel_vae and config.vae_parallel_size > 0:
+            raise ValueError(
+                "MiniMax-H3 parallel VAE distributes spatial tiles across the "
+                "existing model ranks and does not support dedicated VAE-only "
+                "ranks; leave --vae_parallel_size at 0."
+            )
         if config.use_hybrid_attn_schedule:
             backend_specs = [
                 (
@@ -415,6 +517,15 @@ class xFuserMiniMaxH3Model(xFuserModel):
             )
 
     def _compile_model(self, input_args: dict) -> None:
+        mode = self._get_compile_mode()
+        vae = getattr(self.pipe, "vae", None)
+        if vae is not None:
+            vae.compile_repeated_blocks(mode=mode, fullgraph=False)
+            log(
+                "MiniMax-H3 torch.compile enabled for repeated video VAE "
+                "decoder blocks."
+            )
+
         if self.config.fully_shard_degree > 1:
             super()._compile_model(input_args)
             return
@@ -423,7 +534,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         use_hybrid = get_runtime_state().has_attention_schedule()
         transformer.forward = torch.compile(
             transformer.forward,
-            mode=self._get_compile_mode(),
+            mode=mode,
             fullgraph=not use_hybrid,
         )
         compile_args = copy.deepcopy(input_args)

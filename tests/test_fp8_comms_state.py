@@ -93,9 +93,9 @@ def _outlier_qk(head_dim: int = 128, seq: int = 64, dtype=torch.bfloat16, device
     """
     torch.manual_seed(0)
     q = torch.randn(1, seq, 2, head_dim, dtype=dtype)
-    q[..., 7] *= 30
+    q[..., 7 % head_dim] *= 30
     k = torch.randn(1, seq, 2, head_dim, dtype=dtype)
-    k[..., 19] *= 20
+    k[..., 19 % head_dim] *= 20
     return q.to(device), k.to(device)
 
 

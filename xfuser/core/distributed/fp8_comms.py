@@ -362,18 +362,19 @@ def install_fp8_comms_layer_state(transformer) -> None:
 def fp8_attention_kwargs(fp8_comms, attn, query, key, value, is_cross_attention, backend) -> dict:
     """Extras to splat into the attention call for fp8 comms, or ``{}`` when it does not apply.
 
-    Also accumulates calibration amaxes as a side effect (via observe_qkv), which happens on
-    every self-attn call regardless of the step's backend; fp8 comms is only *applied* once the
-    scales are synced and the current backend supports pre-quantization.
+    Also accumulates calibration amaxes as a side effect (via observe_qkv). Observation is
+    gated on the backend first: only pre-quantization backends rotate Q/K before quantizing,
+    and calibration must measure the rotated distribution. Observing on a hybrid step whose
+    backend does not rotate would record the (larger) unrotated amax and inflate the scale.
     """
     if is_cross_attention or fp8_comms is None:
-        return {}
-    synced = fp8_comms.observe_qkv(attn, query, key, value, backend)
-    if not synced:
         return {}
     from xfuser.core.distributed.attention_backend import SUPPORTS_PRE_QUANTIZATION_BACKENDS
 
     if backend not in SUPPORTS_PRE_QUANTIZATION_BACKENDS:
+        return {}
+    synced = fp8_comms.observe_qkv(attn, query, key, value, backend)
+    if not synced:
         return {}
     return {
         "fp8_comms": Fp8CommsCall(

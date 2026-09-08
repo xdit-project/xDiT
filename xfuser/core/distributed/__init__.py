@@ -1,5 +1,6 @@
 from .parallel_state import (
     get_world_group,
+    get_model_replica_group,
     get_dp_group,
     get_cfg_group,
     get_sp_group,
@@ -41,6 +42,7 @@ from .sharding import shard_dit, shard_t5_encoder, shard_component, children_to_
 
 __all__ = [
     "get_world_group",
+    "get_model_replica_group",
     "get_dp_group",
     "get_cfg_group",
     "get_sp_group",

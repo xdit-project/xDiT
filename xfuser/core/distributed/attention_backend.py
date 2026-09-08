@@ -1139,6 +1139,12 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     if pre_quantized:
         # Q/K/V arrive already FP8 from fp8 comms (quantized before the Ulysses
         # all-to-all).
+        if (attention_kwargs or {}).get("indices_k") is not None:
+            raise NotImplementedError(
+                "fp8 comms pre-quantized attention does not support varlen packing; "
+                "the indices_k mask would be silently dropped and dense attention would "
+                "run over padded keys."
+            )
         output = aiter.flash_attn_fp8_pertensor_func(
             query,
             key,

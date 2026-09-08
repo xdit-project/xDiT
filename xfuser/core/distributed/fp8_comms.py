@@ -82,6 +82,10 @@ class Fp8CommsState:
         fixed_scale: Optional[float] = None,
         safety_factor: float = DEFAULT_FP8_COMMS_SAFETY_FACTOR,
     ):
+        if fixed_scale is not None and fixed_scale <= 0:
+            raise ValueError(f"fp8_comms_scale must be positive, got {fixed_scale}.")
+        if safety_factor <= 0:
+            raise ValueError(f"fp8_comms_safety_factor must be positive, got {safety_factor}.")
         self.fixed_scale = fixed_scale
         # Calibrated per-layer scale = amax / (FP8_MAX * safety_factor). A smaller
         # safety_factor enlarges the scale, so the calibrated amax maps further below
@@ -98,11 +102,7 @@ class Fp8CommsState:
             return None
         ulysses_degree = config.parallel_config.sp_config.ulysses_degree or 1
         if ulysses_degree <= 1:
-            logger.warning(
-                "--use_fp8_comms is set but ulysses_degree <= 1. "
-                "FP8 communication will not be applied."
-            )
-            return None
+            raise ValueError("--use_fp8_comms requires ulysses_degree > 1.")
         scale = runtime_config.fp8_comms_scale
         safety_factor = runtime_config.fp8_comms_safety_factor
         if scale is not None:
@@ -216,6 +216,12 @@ class Fp8CommsState:
             and model_state.k_running_max.max() == 0
             and model_state.v_running_max.max() == 0
         ):
+            logger.warning(
+                f"[fp8_comms] calibration observed no activations for "
+                f"{model.__class__.__name__}; fp8 comms will NOT activate and the run "
+                f"falls back to bf16 communication. The calibration pass never ran a "
+                f"pre-quantization backend (AITER_FP8) on the self-attention layers."
+            )
             return
         from xfuser.core.distributed.attention_backend import AITER_FP8_DTYPE
 
@@ -362,10 +368,9 @@ def install_fp8_comms_layer_state(transformer) -> None:
 def fp8_attention_kwargs(fp8_comms, attn, query, key, value, is_cross_attention, backend) -> dict:
     """Extras to splat into the attention call for fp8 comms, or ``{}`` when it does not apply.
 
-    Also accumulates calibration amaxes as a side effect (via observe_qkv). Observation is
-    gated on the backend first: only pre-quantization backends rotate Q/K before quantizing,
-    and calibration must measure the rotated distribution. Observing on a hybrid step whose
-    backend does not rotate would record the (larger) unrotated amax and inflate the scale.
+    Gates on the backend before observing: calibration must measure the rotated Q/K, and only
+    pre-quantization backends rotate, so observing on a non-rotating hybrid step would inflate
+    the scale with the unrotated amax.
     """
     if is_cross_attention or fp8_comms is None:
         return {}
@@ -490,6 +495,7 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
     if not config.use_fp8_comms:
         return
     from xfuser.core.distributed.attention_backend import (
+        AITER_FP8_HAS_DESCALE,
         AttentionBackendType,
         SUPPORTS_PRE_QUANTIZATION_BACKENDS,
     )
@@ -540,3 +546,13 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
             f"--hybrid_attn_low_precision_backend / --hybrid_attn_high_precision_backend "
             f"so at least one scheduled backend supports pre-quantization."
         )
+    if not AITER_FP8_HAS_DESCALE:
+        raise ValueError(
+            "--use_fp8_comms needs an AITER build whose flash_attn_fp8_pertensor_func "
+            "accepts q_descale/k_descale/v_descale; this build does not. Update AITER."
+        )
+    logger.info(
+        "fp8 comms feeds pre-quantized Q/K/V to the dense FP8 attention kernel; "
+        "AITER MHA v4 is bypassed on the AITER_FP8 self-attention path where it "
+        "would otherwise be selected."
+    )

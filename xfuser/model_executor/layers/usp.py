@@ -303,6 +303,10 @@ def USP(
         attention_kwargs=attention_kwargs,
     )
 
+    if fp8_comms is not None and joint_strategy:
+        # query is fp8-quantized before the all-to-all but joint_key/value stay bf16.
+        raise NotImplementedError("fp8 comms does not support joint attention.")
+
     joint_attn_kwargs = None
     if joint_strategy:
         query = _concat_joint_tensor(query, joint_query, joint_strategy, dim=2)

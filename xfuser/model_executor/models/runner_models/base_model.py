@@ -349,9 +349,6 @@ class xFuserModel(abc.ABC):
         if self.config.use_parallel_vae:
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
-        # Guard the singleton access: fp8 comms lives on the runtime state, so when
-        # it is not initialized (e.g. a lifecycle test that mocks it out) there is
-        # nothing to set up and the feature is simply off.
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
         setup_fp8_comms(
             fp8_comms,

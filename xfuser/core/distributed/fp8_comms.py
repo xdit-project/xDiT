@@ -396,13 +396,14 @@ def fp8_observe_output(fp8_comms, attn, out, is_cross_attention) -> None:
 
 
 def _per_tensor_quant(x: torch.Tensor, scale_t: torch.Tensor):
-    """Quantize x to FP8 using a fixed pre-allocated scale tensor. Returns (x_fp8, descale)."""
+    """Quantize x to FP8 with a fixed pre-allocated scale. Returns (x_fp8, descale)."""
     import aiter
 
     fp8_dtype = aiter.dtypes.fp8
-    return aiter.per_tensor_quant(
-        x, scale=scale_t, quant_dtype=fp8_dtype, dtypeMax=torch.finfo(fp8_dtype).max
-    )
+    dtype_max = torch.finfo(fp8_dtype).max
+    # Clamp before the cast: fp8 has no saturation, so overflow would cast to NaN.
+    x_fp8 = (x.float() / scale_t).clamp(-dtype_max, dtype_max).to(fp8_dtype)
+    return x_fp8, scale_t
 
 
 def fp8_comms_input_all_to_all(query, key, value, q_scale, k_scale, v_scale, backend):

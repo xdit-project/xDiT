@@ -29,14 +29,6 @@ else:
 logger = init_logger(__name__)
 
 _FP8_LOG_SCALES = bool(os.environ.get("XFUSER_FP8_LOG_SCALES"))
-_FP8_DTYPES = (
-    torch.float8_e4m3fn,
-    torch.float8_e4m3fnuz,
-    torch.float8_e5m2,
-    torch.float8_e5m2fnuz,
-)
-
-
 class Fp8CommsCall(NamedTuple):
     """The per-layer fp8-comms scales for one attention call.
 
@@ -56,7 +48,6 @@ class Fp8CommsModelState:
     """Per-transformer FP8 comms calibration state (one entry per self-attn layer)."""
 
     def __init__(self, num_layers: int):
-        self.num_layers = num_layers
         self.q_running_max = torch.zeros(num_layers, dtype=torch.float32)
         self.k_running_max = torch.zeros(num_layers, dtype=torch.float32)
         self.v_running_max = torch.zeros(num_layers, dtype=torch.float32)
@@ -92,7 +83,6 @@ class Fp8CommsState:
         # FP8_MAX and live values above the calibrated peak no longer clip.
         self.safety_factor = safety_factor
         self._models: dict[int, Fp8CommsModelState] = {}
-        self.calibrated_model_ids: set = set()
 
     @classmethod
     def from_config(cls, config) -> "Optional[Fp8CommsState]":
@@ -125,7 +115,6 @@ class Fp8CommsState:
         if self.fixed_scale is not None:
             self.apply_fixed_scales_to_model(model)
             self._models[model_id].synced = True
-            self.calibrated_model_ids.add(model_id)
 
     def get_model_state(self, model) -> Optional[Fp8CommsModelState]:
         return self._models.get(id(model))
@@ -245,7 +234,6 @@ class Fp8CommsState:
         model_state.v_running_max.zero_()
         model_state.o_running_max.zero_()
         model_state.synced = True
-        self.calibrated_model_ids.add(id(model))
         if dist.get_rank() == 0:
             q_scales, k_scales, v_scales, o_scales = scales[0], scales[1], scales[2], scales[3]
             logger.info(
@@ -450,13 +438,8 @@ def fp8_comms_output_all_to_all(out: torch.Tensor, o_scale: torch.Tensor, qkv_am
             f"[fp8_scales rank{rank}] q_amax={q_amax:.4f} k_amax={k_amax:.4f} "
             f"v_amax={v_amax:.4f} out_amax={out_amax:.4f}"
         )
-    if o_scale is None:
-        raise RuntimeError("FP8 comms requires per-layer scale buffers fp8_o_scale")
-    restore_dtype = out.dtype if out.dtype not in _FP8_DTYPES else torch.bfloat16
-    if out.dtype not in _FP8_DTYPES:
-        out_fp8, out_descale = _per_tensor_quant(out, o_scale)
-    else:
-        out_fp8, out_descale = out, o_scale
+    restore_dtype = out.dtype
+    out_fp8, out_descale = _per_tensor_quant(out, o_scale)
     return (_ft_c_output_all_to_all(out_fp8).float() * out_descale).to(restore_dtype)
 
 
@@ -513,6 +496,14 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
         raise ValueError(f"Model {settings.model_name} does not support --use_fp8_comms.")
     if (config.ulysses_degree or 1) <= 1:
         raise ValueError("--use_fp8_comms requires ulysses_degree > 1.")
+    if (
+        config.enable_sequential_cpu_offload
+        or config.enable_model_cpu_offload
+        or config.enable_group_cpu_offload
+    ):
+        # The per-layer scale and running-max buffers cannot be reliably co-located
+        # with the attention tensors when layers move on and off the GPU.
+        raise ValueError("--use_fp8_comms is not supported with CPU offload.")
     effective_backends = set()
     if config.attention_backend:
         effective_backends.add(_parse(config.attention_backend, "attention backend"))

@@ -691,8 +691,6 @@ def _mha_v4_sparge_tile():
     return {"BLOCK_M": 256, "BLOCK_N": _AITER_MHA_V4.kv_tile}
 
 
-_FP8_INPUT_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
-
 SUPPORTS_PRE_QUANTIZATION_BACKENDS = {
     AttentionBackendType.AITER_FP8,
 }

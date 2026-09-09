@@ -10,7 +10,6 @@ from torch.cuda import manual_seed as device_manual_seed
 from torch.cuda import manual_seed_all as device_manual_seed_all
 from diffusers import DiffusionPipeline
 import torch.distributed
-import torch.distributed as dist
 
 try:
     import torch_musa
@@ -22,10 +21,6 @@ except ModuleNotFoundError:
 import xfuser.envs as envs
 from xfuser.envs import PACKAGES_CHECKER
 
-if torch.cuda.is_available() or envs._is_npu():
-    from yunchang.globals import PROCESS_GROUP
-else:
-    PROCESS_GROUP = None
 if envs._is_npu():
     from torch.npu import manual_seed as device_manual_seed
     from torch.npu import manual_seed_all as device_manual_seed_all

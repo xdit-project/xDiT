@@ -93,6 +93,46 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
         pytest.skip(f"AITER does not include the {arch} {kernel_name} FMHA kernel.")
 
 
+# AITER is mid-migration on the MXFP4 rows: dense moved to full MXFP4 Q/K/V while sparse kept
+# MXFP4 Q/K + FP8 V, so aiter_mxfp4 resolves to no dense row on builds in between.
+def _require_mha_v4_recipe(backend_name):
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    probe = torch.zeros((1, 1, 128, 128), device="cuda", dtype=torch.bfloat16)
+    try:
+        with torch.no_grad():
+            ATTENTION_FUNCTION_REGISTRY[AttentionBackendType[backend_name]](
+                probe, probe, probe, dropout_p=0.0, is_causal=False
+            )
+    except NotImplementedError as exc:
+        if "kernel row" not in str(exc):
+            raise
+        pytest.skip(f"Installed AITER has no kernel row for {backend_name}: {exc}")
+
+
+# Dense MXFP4 V returns garbage at any sequence length that is not a multiple of 128 on AITER
+# main: cosine against SDPA measures 0.040 at S=257 and -0.012 at S=129, while FP8 V and MXFP6 V
+# stay correct. AITER's own unaligned-sequence test asserts only eager==compiled and isfinite,
+# so it does not catch this.
+_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4")
+
+
+def _xfail_broken_mxfp4_v(request, backend_name, sequence_length):
+    if backend_name in _MXFP4_V_BACKENDS and sequence_length % 128:
+        request.applymarker(
+            pytest.mark.xfail(
+                reason=(
+                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} "
+                    "(S % 128 != 0); tracked upstream"
+                ),
+                strict=False,
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "backend_name",
     [
@@ -106,8 +146,10 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
     ],
 )
 @pytest.mark.parametrize("sequence_length", [128, 257])
-def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
+def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length, request):
     _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
+    _xfail_broken_mxfp4_v(request, backend_name, sequence_length)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -152,6 +194,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
 )
 def test_aiter_mixed_attention_compiles_fullgraph(backend_name):
     _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -216,6 +259,7 @@ def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
 )
 def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
@@ -246,6 +290,7 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
 )
 def test_aiter_mixed_cross_attention_compiles_fullgraph(backend_name):
     _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
 
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,

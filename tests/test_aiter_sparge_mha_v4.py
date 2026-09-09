@@ -293,6 +293,19 @@ def test_mha_v4_sparge_matches_dense_sibling(backend_name, monkeypatch):
     monkeypatch.setattr(ab, "get_ulysses_parallel_world_size", lambda: 1)
 
     dense_name = backend_name.removesuffix("_SPARGE")
+    # AITER's dense and sparse MXFP4 rows have diverged mid-migration: dense moved to full
+    # MXFP4 Q/K/V while sparse kept MXFP4 Q/K + FP8 V, leaving some builds with no dense sibling.
+    probe = torch.zeros((1, 1, 128, 128), device="cuda", dtype=torch.bfloat16)
+    try:
+        with torch.no_grad():
+            ATTENTION_FUNCTION_REGISTRY[AttentionBackendType[dense_name]](
+                probe, probe, probe, dropout_p=0.0, is_causal=False
+            )
+    except NotImplementedError as exc:
+        if "kernel row" not in str(exc):
+            raise
+        pytest.skip(f"Installed AITER has no dense {dense_name} row to compare against: {exc}")
+
     torch.manual_seed(1234)
     shape = (1, 2, 512, 128)
     query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)

@@ -346,3 +346,36 @@ def test_aiter_low_precision_attention_rejects_dropout():
             ATTENTION_FUNCTION_REGISTRY[backend](
                 tensor, tensor, tensor, dropout_p=0.1, is_causal=False
             )
+
+
+def test_aiter_mha_v4_rejects_varlen_packed_keys():
+    """Dense MHA v4 has no key-padding mask, so a varlen request must fail loudly.
+
+    Silently dropping attention_kwargs lets padded keys contribute to the softmax
+    denominator, which is wrong rather than merely approximate.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        AITER_MHA_V4_ONLY_BACKENDS,
+        ATTENTION_FUNCTION_REGISTRY,
+    )
+
+    tensor = torch.empty((1, 1, 1, 128), device="cuda", dtype=torch.bfloat16)
+    attention_kwargs = {
+        "indices_k": torch.zeros(1, dtype=torch.int64, device="cuda"),
+        "cu_seqlens_k": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
+        "max_seqlen_k": 1,
+    }
+    for backend in AITER_MHA_V4_ONLY_BACKENDS:
+        _require_mha_v4_aiter(backend.name)
+        with pytest.raises(
+            NotImplementedError,
+            match="does not support varlen packed keys",
+        ):
+            ATTENTION_FUNCTION_REGISTRY[backend](
+                tensor,
+                tensor,
+                tensor,
+                dropout_p=0.0,
+                is_causal=False,
+                attention_kwargs=attention_kwargs,
+            )

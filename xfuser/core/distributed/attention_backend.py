@@ -1096,10 +1096,13 @@ def _validate_aiter_low_precision_dropout(dropout_p):
         raise NotImplementedError("AITER low-precision attention does not support dropout")
 
 
-def _validate_aiter_mha_v4_request(dropout_p, is_causal):
+def _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs=None):
     _validate_aiter_low_precision_dropout(dropout_p)
     if is_causal:
         raise NotImplementedError("MHA v4 does not support causal masking")
+    # MHA v4 has no key-padding mask, so honouring these would need packed K/V.
+    if (attention_kwargs or {}).get("indices_k") is not None:
+        raise NotImplementedError("MHA v4 does not support varlen packed keys")
 
 
 def _use_aiter_mha_v4_fp8(query, is_causal):
@@ -1181,9 +1184,9 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
 
 
 def _aiter_mixed_attn_call(
-    query, key, value, qk_format, v_format, dropout_p, is_causal
+    query, key, value, qk_format, v_format, dropout_p, is_causal, attention_kwargs=None
 ):
-    _validate_aiter_mha_v4_request(dropout_p, is_causal)
+    _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -1211,6 +1214,7 @@ def _aiter_bf16_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
         _AiterAttentionFormat.BF16,
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
@@ -1225,6 +1229,7 @@ def _aiter_bf16fp8_attn_call(query, key, value, dropout_p, is_causal, attention_
         _aiter_native_fp8_format(),
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
@@ -1239,13 +1244,14 @@ def _aiter_i8fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
         _aiter_native_fp8_format(),
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
 @register_attention_function(AttentionBackendType.AITER_MXFP8)
 def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """Run the AITER MXFP8 Q/K and per-tensor FP8 V recipe."""
-    _validate_aiter_mha_v4_request(dropout_p, is_causal)
+    _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -1291,6 +1297,7 @@ def _aiter_f8f6_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
         _AiterAttentionFormat.MXFP6,
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
@@ -1305,6 +1312,7 @@ def _aiter_mxfp4_attn_call(query, key, value, dropout_p, is_causal, attention_kw
         _aiter_native_fp8_format(),
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
@@ -1319,6 +1327,7 @@ def _aiter_f4f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
         _AiterAttentionFormat.MXFP4,
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
@@ -1333,6 +1342,7 @@ def _aiter_mxfp6_attn_call(query, key, value, dropout_p, is_causal, attention_kw
         _aiter_native_fp8_format(),
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 
@@ -1347,6 +1357,7 @@ def _aiter_f6f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
         _AiterAttentionFormat.MXFP4,
         dropout_p,
         is_causal,
+        attention_kwargs,
     )
 
 

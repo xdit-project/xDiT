@@ -190,7 +190,13 @@ def test_mxfp8_sparge_rejected_on_gfx942(monkeypatch):
         )
 
 
-def test_mxfp8_sparge_passes_block_mask_to_mha_v4_mxfp8(monkeypatch):
+@pytest.mark.parametrize("scale_modes", [True, False])
+def test_mxfp8_sparge_passes_block_mask_to_selected_launch(monkeypatch, scale_modes):
+    """The block mask must reach whichever MXFP8 entrypoint the build selects.
+
+    Newer AITER deprecates mha_v4_mxfp8 (its DeprecationWarning breaks Dynamo
+    fullgraph), so the generic scale-mode API wins whenever it is available.
+    """
     from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.distributed.attention_backend import AttentionBackendType
 
@@ -201,25 +207,38 @@ def test_mxfp8_sparge_passes_block_mask_to_mha_v4_mxfp8(monkeypatch):
         return query, key, value, SimpleNamespace(), mask, query.shape[1]
 
     def fake_mxfp8(query, key, value, block_mask=None):
+        captured["entrypoint"] = "mha_v4_mxfp8"
         captured["layout"] = tuple(query.shape)
         captured["block_mask"] = block_mask
         return torch.zeros_like(query)
 
+    def fake_mha_v4(query, key, value, *formats, block_mask=None, **kwargs):
+        captured["entrypoint"] = "mha_v4"
+        captured["layout"] = tuple(query.shape)
+        captured["block_mask"] = block_mask
+        captured["scale_modes"] = (
+            kwargs.get("q_scale_mode"),
+            kwargs.get("k_scale_mode"),
+            kwargs.get("v_scale_mode"),
+        )
+        return torch.zeros_like(query)
+
     _patch_mha_v4_caps(
-        monkeypatch, ab, enabled=True, block_mask=True, mxfp8_block_mask=True
+        monkeypatch,
+        ab,
+        enabled=True,
+        block_mask=True,
+        mxfp8_block_mask=True,
+        scale_modes=scale_modes,
     )
     monkeypatch.setattr(ab, "_build_sparge_block_mask", fake_build)
     monkeypatch.setattr(ab, "restore_sparge_output", lambda output, state: output)
     monkeypatch.setattr(ab, "_aiter_mha_v4_mxfp8", fake_mxfp8)
+    monkeypatch.setattr(ab, "_aiter_mha_v4", fake_mha_v4)
     monkeypatch.setattr(
         ab,
         "_aiter_launch_mxfp8_sparse",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("packed fallback")),
-    )
-    monkeypatch.setattr(
-        ab,
-        "_aiter_mha_v4",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("raw mha_v4")),
     )
 
     query = torch.zeros((1, 2, 128, 128), dtype=torch.bfloat16)
@@ -227,9 +246,17 @@ def test_mxfp8_sparge_passes_block_mask_to_mha_v4_mxfp8(monkeypatch):
         query, query, query, dropout_p=0.0, is_causal=False
     )
     assert output.shape == query.shape
+    assert captured["entrypoint"] == ("mha_v4" if scale_modes else "mha_v4_mxfp8")
     assert captured["layout"] == (1, 128, 2, 128)
     assert captured["block_mask"] is not None
     assert tuple(captured["block_mask"].shape) == (1, 2, 1, 1)
+    if scale_modes:
+        mode = ab._AiterAttentionScaleMode
+        assert captured["scale_modes"] == (
+            mode.E8M0_PER_1X32,
+            mode.E8M0_PER_1X32,
+            mode.F32_PER_TENSOR,
+        )
 
 
 @pytest.mark.parametrize("backend_name", _MHA_V4_SPARGE_BACKENDS)

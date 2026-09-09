@@ -33,6 +33,7 @@ class _AiterMhaV4Capabilities:
     is_gfx942: bool = False
     block_mask: bool = False
     mxfp8_block_mask: bool = False
+    scale_modes: bool = False
     kv_tile: int = 128
 
 
@@ -47,7 +48,9 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     )
     is_gfx942 = "gfx942" in arch_name
     enabled = is_gfx942 or "gfx950" in arch_name
-    block_mask = inspect.signature(mha_v4_fn).parameters.get("block_mask") is not None
+    parameters = inspect.signature(mha_v4_fn).parameters
+    block_mask = parameters.get("block_mask") is not None
+    scale_modes = parameters.get("q_scale_mode") is not None
     try:
         from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
         kv_tile = int(_aiter_mha_v4_kv_tile())
@@ -57,6 +60,8 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
         enabled=enabled,
         is_gfx942=is_gfx942,
         block_mask=block_mask,
+        scale_modes=scale_modes,
+        mxfp8_block_mask=scale_modes and block_mask,
         kv_tile=kv_tile,
     )
 
@@ -425,29 +430,23 @@ if env_info["has_aiter"]:
     except ImportError:
         pass # Error is raised in runtime_state.py when an MHA v4 backend is selected.
 
-    # MXFP8 shipped after the base MHA v4 API; keep it optional for older AITER builds.
+    # The generic scale-mode API supersedes mha_v4_mxfp8, which newer AITER deprecated; keep the
+    # old entrypoint only for builds that predate the scale-mode arguments.
     try:
         from aiter.ops.mha_v4 import (
             mha_v4_mxfp8 as _aiter_mha_v4_mxfp8,
         )
+    except ImportError:
+        _aiter_mha_v4_mxfp8 = None
+    if _AITER_MHA_V4.enabled and not _AITER_MHA_V4.scale_modes:
         _AITER_MHA_V4 = replace(
             _AITER_MHA_V4,
             mxfp8_block_mask=(
-                inspect.signature(_aiter_mha_v4_mxfp8).parameters.get("block_mask")
+                _aiter_mha_v4_mxfp8 is not None
+                and inspect.signature(_aiter_mha_v4_mxfp8).parameters.get("block_mask")
                 is not None
             ),
         )
-    except ImportError:
-        _aiter_mha_v4_mxfp8 = None
-        if _AITER_MHA_V4.enabled:
-            _AITER_MHA_V4 = replace(
-                _AITER_MHA_V4,
-                mxfp8_block_mask=(
-                    inspect.signature(_aiter_mha_v4).parameters.get("q_scale_mode")
-                    is not None
-                    and _AITER_MHA_V4.block_mask
-                ),
-            )
 
     AITER_FP8_STATIC_SCALE_WITH_DESCALE, AITER_FP8_STATIC_SCALE_NO_DESCALE, AITER_SAGE_V2_BLOCK_R = _setup_aiter_environment_variables()
     AITER_HAS_ROUND_MODE, HOW_V3_BF16_CVT = _check_aiter_round_mode()
@@ -1255,21 +1254,29 @@ def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
 
 
 def _aiter_launch_mxfp8(query, key, value, block_mask=None):
-    if _aiter_mha_v4_mxfp8 is not None:
-        return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask)
-    fp8_format = _aiter_native_fp8_format()
-    return _aiter_mha_v4(
-        query,
-        key,
-        value,
-        fp8_format,
-        fp8_format,
-        fp8_format,
-        block_mask=block_mask,
-        q_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
-        k_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
-        v_scale_mode=_AiterAttentionScaleMode.F32_PER_TENSOR,
-    )
+    # Prefer the generic API: AITER deprecated mha_v4_mxfp8, and its DeprecationWarning is
+    # untraceable by Dynamo, which breaks torch.compile(fullgraph=True).
+    if _AITER_MHA_V4.scale_modes:
+        fp8_format = _aiter_native_fp8_format()
+        return _aiter_mha_v4(
+            query,
+            key,
+            value,
+            fp8_format,
+            fp8_format,
+            fp8_format,
+            block_mask=block_mask,
+            q_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
+            k_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
+            v_scale_mode=_AiterAttentionScaleMode.F32_PER_TENSOR,
+        )
+    if _aiter_mha_v4_mxfp8 is None:
+        raise RuntimeError(
+            "AITER MXFP8 MHA v4 is not available, please update AITER."
+        )
+    if block_mask is None:
+        return _aiter_mha_v4_mxfp8(query, key, value)
+    return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask)
 
 
 @register_attention_function(AttentionBackendType.AITER_F8F6)

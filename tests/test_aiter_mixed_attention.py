@@ -393,28 +393,29 @@ def test_aiter_low_precision_attention_rejects_dropout():
             )
 
 
-def test_aiter_mha_v4_rejects_varlen_packed_keys():
-    """Dense MHA v4 has no key-padding mask, so a varlen request must fail loudly.
+def test_aiter_mha_v4_rejects_multi_sequence_varlen_packed_keys():
+    """MHA v4 has no key-padding mask, so several ragged sequences must fail loudly.
 
     Silently dropping attention_kwargs lets padded keys contribute to the softmax
-    denominator, which is wrong rather than merely approximate.
+    denominator, which is wrong rather than merely approximate. A single sequence is
+    served densely instead (see test_aiter_mha_v4_serves_single_sequence_padding).
     """
     from xfuser.core.distributed.attention_backend import (
         AITER_MHA_V4_ONLY_BACKENDS,
         ATTENTION_FUNCTION_REGISTRY,
     )
 
-    tensor = torch.empty((1, 1, 1, 128), device="cuda", dtype=torch.bfloat16)
+    tensor = torch.empty((2, 1, 4, 128), device="cuda", dtype=torch.bfloat16)
     attention_kwargs = {
-        "indices_k": torch.zeros(1, dtype=torch.int64, device="cuda"),
-        "cu_seqlens_k": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
-        "max_seqlen_k": 1,
+        "indices_k": torch.tensor([0, 4, 5], dtype=torch.int64, device="cuda"),
+        "cu_seqlens_k": torch.tensor([0, 1, 3], dtype=torch.int32, device="cuda"),
+        "max_seqlen_k": 2,
     }
     for backend in AITER_MHA_V4_ONLY_BACKENDS:
         _require_mha_v4_aiter(backend.name)
         with pytest.raises(
             NotImplementedError,
-            match="does not support varlen packed keys",
+            match="batch size > 1",
         ):
             ATTENTION_FUNCTION_REGISTRY[backend](
                 tensor,
@@ -424,3 +425,45 @@ def test_aiter_mha_v4_rejects_varlen_packed_keys():
                 is_causal=False,
                 attention_kwargs=attention_kwargs,
             )
+
+
+def test_aiter_mha_v4_serves_single_sequence_padding():
+    """One sequence needs no key-padding mask: the valid keys are just a shorter K/V."""
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+    _require_mha_v4_recipe(AttentionBackendType.AITER_BF16.name)
+
+    torch.manual_seed(1234)
+    valid, padded, heads = 300, 384, 4
+    shape = (1, heads, padded, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    attention_kwargs = {
+        "indices_k": torch.arange(valid, dtype=torch.int64, device="cuda"),
+        "cu_seqlens_k": torch.tensor([0, valid], dtype=torch.int32, device="cuda"),
+        "max_seqlen_k": valid,
+    }
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(
+            query, key[:, :, :valid], value[:, :, :valid]
+        )
+        output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )
+
+    assert output.shape == reference.shape
+    cosine = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    )
+    assert cosine > 0.99, f"cosine {cosine.item()}"

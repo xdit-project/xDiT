@@ -6,7 +6,10 @@ from types import MethodType, SimpleNamespace
 import numpy as np
 import torch
 
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_backend import (
+    AITER_MHA_V4_ONLY_BACKENDS,
+    AttentionBackendType,
+)
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,
@@ -36,6 +39,8 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.CUDNN,
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
+    # The packed sequence is a single batch row, so MHA v4 can serve its key padding densely.
+    *AITER_MHA_V4_ONLY_BACKENDS,
 })
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})

@@ -1119,9 +1119,28 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs=None):
     _validate_aiter_low_precision_dropout(dropout_p)
     if is_causal:
         raise NotImplementedError("MHA v4 does not support causal masking")
-    # MHA v4 has no key-padding mask, so honouring these would need packed K/V.
-    if (attention_kwargs or {}).get("indices_k") is not None:
-        raise NotImplementedError("MHA v4 does not support varlen packed keys")
+
+
+def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs):
+    """Fold a key-padding request into a plain dense call.
+
+    MHA v4 has no key-padding mask, but a single sequence does not need one: its packed
+    keys are simply a shorter dense K/V, so attending over the valid length is exact.
+    Several sequences would need the per-batch key lengths the kernels cannot express.
+    """
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+    if packed is None:
+        return query, key, value
+    q_flat, k_packed, v_packed, _cu_q, _cu_k, _max_k, batch, seqlen, heads, head_dim = packed
+    if batch != 1:
+        raise NotImplementedError(
+            "MHA v4 does not support varlen packed keys with batch size > 1"
+        )
+    return (
+        q_flat.reshape(1, seqlen, heads, head_dim),
+        k_packed.reshape(1, -1, heads, head_dim),
+        v_packed.reshape(1, -1, heads, head_dim),
+    )
 
 
 def _use_aiter_mha_v4_fp8(query, is_causal):
@@ -1209,6 +1228,9 @@ def _aiter_mixed_attn_call(
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    query, key, value = _aiter_mha_v4_gather_padded_keys(
+        query, key, value, attention_kwargs
+    )
 
     output = _aiter_mha_v4(
         query,
@@ -1274,6 +1296,9 @@ def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    query, key, value = _aiter_mha_v4_gather_padded_keys(
+        query, key, value, attention_kwargs
+    )
     output = _aiter_launch_mxfp8(query, key, value)
     return torch.permute(output, [0, 2, 1, 3]), None
 

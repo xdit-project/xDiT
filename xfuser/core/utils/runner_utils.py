@@ -29,6 +29,11 @@ def log(message: str, debug=False, log_from_all_processes: bool = False) -> None
         else:
             logger.info(message)
 
+def log_error(message: str, log_from_all_processes: bool = False) -> None:
+    """Log error. By default, only from the last process to avoid duplicates."""
+    if log_from_all_processes or is_last_process():
+        logger.error(message)
+
 def is_last_process() -> bool:
     """
     Checks based on env rank and world size if this is last process in

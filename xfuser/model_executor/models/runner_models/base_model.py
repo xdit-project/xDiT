@@ -3,6 +3,7 @@ import torch
 import copy
 import json
 import os
+from pathlib import Path
 from PIL.Image import Image
 from typing import Callable, List, Optional, Tuple, Generator
 from dataclasses import dataclass, field, replace
@@ -18,8 +19,10 @@ from xfuser.envs import (
     _is_hip,
     _is_cuda,
 )
+from xfuser.core.utils.outputs_equal import outputs_equal
 from xfuser.core.utils.runner_utils import (
     log,
+    log_error,
     load_dataset_prompts,
     rgetattr,
 )
@@ -31,6 +34,7 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
 from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
 from xfuser.core.distributed import (
     get_world_group,
+    get_model_replica_group,
     get_data_parallel_rank,
     get_data_parallel_world_size,
     get_sequence_parallel_rank,
@@ -236,6 +240,7 @@ class DiffusionOutput:
         elif self.videos:
             for video, single_pipe_args in zip(self.videos, self.pipe_args):
                 yield (video, single_pipe_args)
+
 
 class xFuserModel(abc.ABC):
     """ Base class for xFuser models """
@@ -667,19 +672,90 @@ class xFuserModel(abc.ABC):
             compile_args["num_inference_steps"] = warmup_steps
         self._run_compile_warmup(compile_args)
 
+    def _save_determinism_check_failed_outputs(
+        self,
+        output: DiffusionOutput,
+        iteration: int,
+        rank: int,
+    ) -> None:
+        if not output or (not output.images and not output.videos):
+            return  # otherwise save_output() will throw or die
+
+        orig_get_output_name = self.get_output_name
+        def _get_output_name(*args, **kwargs):
+            return (
+                orig_get_output_name(*args, **kwargs)
+                + f"_rank_{rank:02d}_iteration_{iteration:03d}"
+                # WARNING: xfuser/core/utils/determinism_check_results.py depends on the
+                # specific format of the filename, keep it in sync.
+            )
+
+        self.get_output_name = _get_output_name
+        try:
+            self.save_output(output)
+        finally:
+            self.get_output_name = orig_get_output_name
+
+
+    def _determinism_check(
+        self,
+        iteration: int,
+        expected_output: DiffusionOutput,
+        output: DiffusionOutput,
+        determinism_failures: int,
+    ) -> tuple[int, DiffusionOutput]:
+        """Determinism check implementation."""
+        if iteration == 0:
+            expected_output = copy.deepcopy(output)
+        elif not outputs_equal(expected_output, output):
+            rank = get_world_group().rank
+            # WARNING: xfuser/core/utils/determinism_check_results.py depends on this log
+            # message format, keep it in sync.
+            log_error(
+                f"determinism_check[rank {rank}]: iteration {iteration + 1} diverged!",
+                log_from_all_processes=True,
+            )
+            determinism_failures += 1
+
+            if (
+                determinism_failures <= self.config.determinism_check
+                and rank in self.config.determinism_check_report_ranks
+            ):
+                if determinism_failures == 1:
+                    self._save_determinism_check_failed_outputs(expected_output, 0, rank)
+                self._save_determinism_check_failed_outputs(output, iteration, rank)
+            # else: do nothing, above is enough
+
+        return determinism_failures, expected_output
+
 
     def run(self, input_args: dict) -> Tuple[DiffusionOutput, list]:
-        """ Run the model with given input arguments and return output and timings """
+        """Run the model and optionally check repeated outputs for determinism.
+
+        A positive ``determinism_check`` value enables exact comparisons against
+        the first timed output and sets the failure count at which the failure
+        handler starts being called.
+        """
         self._validate_args(input_args)
         input_args = self._split_prompts_for_dp(input_args)
         timings = []
         output: DiffusionOutput = None
+        expected_output = None
+        determinism_failures = 0
 
         if self.config.warmup_calls:
             warmup_args = copy.deepcopy(input_args)
             if self.config.batch_size and isinstance(warmup_args.get("prompt"), list):
                 warmup_args["prompt"] = warmup_args["prompt"][: self.config.batch_size]
             self._run_warmup_calls(warmup_args)
+
+        if self.config.determinism_check > 0:
+            log(
+                f"Since determinism check is enabled ({self.config.determinism_check}), "
+                "'Total time spent' reported at the end of all iterations will be "
+                "inflated and include the time spent on the check. "
+                "Individual iteration timings will not be affected."
+            )
 
         inference_start = torch.cuda.Event(enable_timing=True)
         inference_end = torch.cuda.Event(enable_timing=True)
@@ -696,6 +772,14 @@ class xFuserModel(abc.ABC):
                 output, timing = self._run_timed_pipe(input_args)
                 timings.append(timing)
                 log(f"Iteration {iteration + 1} completed in {timing:.2f}s")
+
+            if self.config.determinism_check > 0:
+                determinism_failures, expected_output = self._determinism_check(
+                    iteration,
+                    expected_output,
+                    output,
+                    determinism_failures,
+                )
 
         inference_end.record()
         torch.cuda.synchronize()
@@ -841,18 +925,27 @@ class xFuserModel(abc.ABC):
         self._vae_manager.prepare_run(self._decoding_vaes(), input_args)
 
     def _run_timed_pipe(self, input_args: dict) -> Tuple[DiffusionOutput, float]:
-        """ Run a a full pipeline with timing information """
+        """ Run the pipeline and time its latency from the synchronized across all ranks beginning
+        of the model execution, till the moment the current rank finishes.
+        
+        Later, we typically discard timings of all ranks except the last one, which is assumed to
+        be the rank providing model's output.
+        """
 
         self.prepare_run(input_args)
+        replica = get_model_replica_group()
+
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
+
         torch.cuda.synchronize()
+        replica.barrier()     # aligns all ranks in the replica as closely as possible
 
         start.record()
         out = self._run_pipe(input_args)
         end.record()
+        end.synchronize()   # we don't care about other streams if there are any
 
-        torch.cuda.synchronize()
         elapsed_time = start.elapsed_time(end) / 1000  # Convert to seconds
         return out, elapsed_time
 

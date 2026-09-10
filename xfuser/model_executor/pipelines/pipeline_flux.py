@@ -641,13 +641,6 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
                         prompt_embeds = callback_outputs.pop(
                             "prompt_embeds", prompt_embeds
                         )
-                        negative_prompt_embeds = callback_outputs.pop(
-                            "negative_prompt_embeds", negative_prompt_embeds
-                        )
-                        negative_pooled_prompt_embeds = callback_outputs.pop(
-                            "negative_pooled_prompt_embeds",
-                            negative_pooled_prompt_embeds,
-                        )
 
                     if i != len(timesteps) - 1:
                         get_pp_group().pipeline_isend(

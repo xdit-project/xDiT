@@ -331,6 +331,188 @@ def test_minimax_h3_parallel_vae_single_rank_falls_back(monkeypatch):
     assert vae._xfuser_tile_parallel
 
 
+class _FakeTileDecoder:
+    def __init__(self, calls):
+        self.out_channels = 3
+        self.patch_size_t = 1
+        self.calls = calls
+
+    def __call__(self, tile):
+        self.calls.append(tile.detach().clone())
+        batch, _, frames, latent_h, latent_w = tile.shape
+        value = tile.flatten()[0]
+        return torch.full(
+            (
+                batch,
+                self.out_channels,
+                frames * self.patch_size_t,
+                latent_h * 2,
+                latent_w * 2,
+            ),
+            fill_value=float(value),
+            dtype=torch.float32,
+        )
+
+
+class _FakeTiledVae:
+    use_tiling = True
+    spatial_compression_ratio = 2
+    tile_sample_min_height = 4
+    tile_sample_min_width = 4
+    tile_sample_min_overlap_height = 0
+    tile_sample_min_overlap_width = 0
+
+    def __init__(self):
+        self.decode_calls = []
+        self.decoder = _FakeTileDecoder(self.decode_calls)
+        self.post_quant_conv = lambda tile: tile
+        self._decode_clip = lambda z: z
+
+    def _split_tiles(self, size, min_size, overlap):
+        count = size // min_size
+        indices = [index * min_size for index in range(count)]
+        lengths = [min_size] * count
+        overlaps = [0] * count
+        return indices, lengths, overlaps
+
+    def _stitch_tiles(self, rows, y_overlaps, x_overlaps):
+        return torch.cat([torch.cat(row, dim=-1) for row in rows], dim=-2)
+
+
+class _FakeVaeGroup:
+    def __init__(self, world_size, rank, peer_tiles, output_dtype):
+        self.world_size = world_size
+        self.rank_in_group = rank
+        self._peer_tiles = peer_tiles
+        self._output_dtype = output_dtype
+        self._broadcast_index = 0
+        self.object_broadcasts = 0
+
+    def broadcast_object_list(self, object_list, src=0):
+        self.object_broadcasts += 1
+        if self.rank_in_group != src:
+            object_list[0] = self._output_dtype
+
+    def broadcast(self, tensor, src):
+        tile_index = self._broadcast_index
+        self._broadcast_index += 1
+        if self.rank_in_group == src:
+            return tensor
+        return self._peer_tiles[tile_index % len(self._peer_tiles)]
+
+
+def test_minimax_h3_parallel_vae_shards_complete_tiles(monkeypatch):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    world_size = 2
+    latent = torch.zeros(1, 4, 2, 2, 4)
+    for y in range(latent.shape[-2]):
+        for x in range(latent.shape[-1]):
+            latent[..., y, x] = y * 10 + x
+
+    sequential = _FakeTiledVae()
+    expected_inputs = {}
+    expected_tiles = {}
+    ratio = sequential.spatial_compression_ratio
+    y_indices, y_lengths, _ = sequential._split_tiles(
+        latent.shape[-2] * ratio,
+        sequential.tile_sample_min_height,
+        sequential.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, _ = sequential._split_tiles(
+        latent.shape[-1] * ratio,
+        sequential.tile_sample_min_width,
+        sequential.tile_sample_min_overlap_width,
+    )
+    tile_index = 0
+    for y, tile_height in zip(y_indices, y_lengths):
+        for x, tile_width in zip(x_indices, x_lengths):
+            tile = latent[
+                ...,
+                y // ratio : y // ratio + tile_height // ratio,
+                x // ratio : x // ratio + tile_width // ratio,
+            ]
+            expected_inputs[tile_index] = tile.clone()
+            expected_tiles[tile_index] = sequential.decoder(
+                sequential.post_quant_conv(tile)
+            )
+            tile_index += 1
+    expected = sequential._stitch_tiles(
+        [[expected_tiles[0], expected_tiles[1]]],
+        [0],
+        [0, 0],
+    )
+
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+
+    for rank in range(world_size):
+        vae = _FakeTiledVae()
+        group = _FakeVaeGroup(
+            world_size,
+            rank,
+            expected_tiles,
+            expected_tiles[0].dtype,
+        )
+        monkeypatch.setattr(
+            minimax_h3,
+            "get_vae_parallel_group",
+            lambda group=group: group,
+        )
+        minimax_h3.install_minimax_h3_vae_tile_parallel(vae)
+        actual = vae._decode_clip(latent)
+        second = vae._decode_clip(latent)
+
+        owned = [index for index in expected_tiles if index % world_size == rank]
+        assert group.object_broadcasts == 0
+        assert len(vae.decode_calls) == 2 * len(owned)
+        for call, index in zip(vae.decode_calls[: len(owned)], owned):
+            torch.testing.assert_close(call, expected_inputs[index])
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(second, expected)
+
+
+def test_minimax_h3_parallel_vae_caches_dtype_broadcast(monkeypatch):
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    latent = torch.zeros(1, 4, 2, 2, 4)
+    sequential = _FakeTiledVae()
+    expected_tiles = {}
+    ratio = sequential.spatial_compression_ratio
+    y_indices, y_lengths, _ = sequential._split_tiles(
+        latent.shape[-2] * ratio,
+        sequential.tile_sample_min_height,
+        sequential.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, _ = sequential._split_tiles(
+        latent.shape[-1] * ratio,
+        sequential.tile_sample_min_width,
+        sequential.tile_sample_min_overlap_width,
+    )
+    tile_index = 0
+    for y, tile_height in zip(y_indices, y_lengths):
+        for x, tile_width in zip(x_indices, x_lengths):
+            tile = latent[
+                ...,
+                y // ratio : y // ratio + tile_height // ratio,
+                x // ratio : x // ratio + tile_width // ratio,
+            ]
+            expected_tiles[tile_index] = sequential.decoder(
+                sequential.post_quant_conv(tile)
+            )
+            tile_index += 1
+
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+    vae = _FakeTiledVae()
+    group = _FakeVaeGroup(3, 2, expected_tiles, expected_tiles[0].dtype)
+    monkeypatch.setattr(minimax_h3, "get_vae_parallel_group", lambda: group)
+    minimax_h3.install_minimax_h3_vae_tile_parallel(vae)
+
+    vae._decode_clip(latent)
+    assert group.object_broadcasts == 1
+    vae._decode_clip(latent)
+    assert group.object_broadcasts == 1
+
+
 @pytest.mark.parametrize(
     "offload_flag",
     [

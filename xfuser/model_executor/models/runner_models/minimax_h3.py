@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import torch
@@ -41,6 +41,85 @@ _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 
 
+def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
+    vae_group = get_vae_parallel_group()
+    if vae_group.world_size == 1 or not self.use_tiling:
+        return self._xfuser_original_decode_clip(z)
+
+    height = z.shape[-2] * self.spatial_compression_ratio
+    width = z.shape[-1] * self.spatial_compression_ratio
+    y_indices, y_lengths, y_overlaps = self._split_tiles(
+        height,
+        self.tile_sample_min_height,
+        self.tile_sample_min_overlap_height,
+    )
+    x_indices, x_lengths, x_overlaps = self._split_tiles(
+        width,
+        self.tile_sample_min_width,
+        self.tile_sample_min_overlap_width,
+    )
+
+    ratio = self.spatial_compression_ratio
+    tile_specs = [
+        (y, tile_height, x, tile_width)
+        for y, tile_height in zip(y_indices, y_lengths)
+        for x, tile_width in zip(x_indices, x_lengths)
+    ]
+    local_tiles = {}
+    for tile_index, (y, tile_height, x, tile_width) in enumerate(tile_specs):
+        if tile_index % vae_group.world_size != vae_group.rank_in_group:
+            continue
+        tile = z[
+            ...,
+            y // ratio : y // ratio + tile_height // ratio,
+            x // ratio : x // ratio + tile_width // ratio,
+        ]
+        local_tiles[tile_index] = self.decoder(
+            self.post_quant_conv(tile)
+        ).contiguous()
+
+    # Decode runs under the pipeline's float16 autocast, while the VAE
+    # weights remain float32. Empty receive buffers must match that output
+    # dtype. Cache it so we do not broadcast_object_list on every clip.
+    output_dtype = getattr(self, "_xfuser_tile_decode_dtype", None)
+    if output_dtype is None:
+        if len(tile_specs) >= vae_group.world_size:
+            output_dtype = next(iter(local_tiles.values())).dtype
+        else:
+            dtype_holder = [None]
+            if vae_group.rank_in_group == 0:
+                dtype_holder[0] = local_tiles[0].dtype
+            vae_group.broadcast_object_list(dtype_holder, src=0)
+            output_dtype = dtype_holder[0]
+        self._xfuser_tile_decode_dtype = output_dtype
+
+    rows = []
+    tile_index = 0
+    for tile_height in y_lengths:
+        row = []
+        for tile_width in x_lengths:
+            owner = tile_index % vae_group.world_size
+            if vae_group.rank_in_group == owner:
+                decoded_tile = local_tiles[tile_index]
+            else:
+                decoded_tile = torch.empty(
+                    (
+                        z.shape[0],
+                        self.decoder.out_channels,
+                        z.shape[2] * self.decoder.patch_size_t,
+                        tile_height,
+                        tile_width,
+                    ),
+                    device=z.device,
+                    dtype=output_dtype,
+                )
+            row.append(vae_group.broadcast(decoded_tile, src=owner))
+            tile_index += 1
+        rows.append(row)
+
+    return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+
+
 def install_minimax_h3_vae_tile_parallel(vae) -> None:
     """Distribute MiniMax-H3 spatial VAE tiles across the existing VAE ranks.
 
@@ -50,86 +129,12 @@ def install_minimax_h3_vae_tile_parallel(vae) -> None:
     if getattr(vae, "_xfuser_tile_parallel", False):
         return
 
-    vae_group = get_vae_parallel_group()
-    original_decode_clip = vae._decode_clip
-
-    def parallel_decode_clip(z: torch.Tensor) -> torch.Tensor:
-        if vae_group.world_size == 1 or not vae.use_tiling:
-            return original_decode_clip(z)
-
-        height = z.shape[-2] * vae.spatial_compression_ratio
-        width = z.shape[-1] * vae.spatial_compression_ratio
-        y_indices, y_lengths, y_overlaps = vae._split_tiles(
-            height,
-            vae.tile_sample_min_height,
-            vae.tile_sample_min_overlap_height,
-        )
-        x_indices, x_lengths, x_overlaps = vae._split_tiles(
-            width,
-            vae.tile_sample_min_width,
-            vae.tile_sample_min_overlap_width,
-        )
-
-        ratio = vae.spatial_compression_ratio
-        tile_specs = [
-            (y, tile_height, x, tile_width)
-            for y, tile_height in zip(y_indices, y_lengths)
-            for x, tile_width in zip(x_indices, x_lengths)
-        ]
-        local_tiles = {}
-        for tile_index, (y, tile_height, x, tile_width) in enumerate(tile_specs):
-            if tile_index % vae_group.world_size != vae_group.rank_in_group:
-                continue
-            tile = z[
-                ...,
-                y // ratio : y // ratio + tile_height // ratio,
-                x // ratio : x // ratio + tile_width // ratio,
-            ]
-            local_tiles[tile_index] = vae.decoder(
-                vae.post_quant_conv(tile)
-            ).contiguous()
-
-        # Decode runs under the pipeline's float16 autocast, while the VAE
-        # weights remain float32. Share the actual output dtype instead of
-        # assuming either input or parameter dtype. The VAE process group
-        # does not initialize shm_broadcaster, so use object-list broadcast.
-        dtype_holder = [None]
-        if vae_group.rank_in_group == 0:
-            dtype_holder[0] = local_tiles[0].dtype
-        vae_group.broadcast_object_list(dtype_holder, src=0)
-        output_dtype = dtype_holder[0]
-
-        rows = []
-        tile_index = 0
-        for tile_height in y_lengths:
-            row = []
-            for tile_width in x_lengths:
-                owner = tile_index % vae_group.world_size
-                if vae_group.rank_in_group == owner:
-                    decoded_tile = local_tiles[tile_index]
-                else:
-                    decoded_tile = torch.empty(
-                        (
-                            z.shape[0],
-                            vae.decoder.out_channels,
-                            z.shape[2] * vae.decoder.patch_size_t,
-                            tile_height,
-                            tile_width,
-                        ),
-                        device=z.device,
-                        dtype=output_dtype,
-                    )
-                row.append(vae_group.broadcast(decoded_tile, src=owner))
-                tile_index += 1
-            rows.append(row)
-
-        return vae._stitch_tiles(rows, y_overlaps, x_overlaps)
-
-    vae._decode_clip = parallel_decode_clip
+    vae._xfuser_original_decode_clip = vae._decode_clip
+    vae._decode_clip = MethodType(_minimax_h3_parallel_decode_clip, vae)
     vae._xfuser_tile_parallel = True
     log(
         "MiniMax-H3 parallel VAE enabled: distributing spatial decode tiles "
-        f"across {vae_group.world_size} ranks."
+        f"across {get_vae_parallel_group().world_size} ranks."
     )
 
 

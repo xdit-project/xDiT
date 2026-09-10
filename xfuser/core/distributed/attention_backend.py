@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import torch
 import inspect
 import math
+import typing
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
@@ -1632,6 +1633,97 @@ def _aiter_f6f4_sparge_attn_call(query, key, value, dropout_p, is_causal, attent
     )
 
 
+# AITER's varlen signature uses `X | None` annotations, which Dynamo cannot wrap sourcelessly
+# ("SourcelessBuilder.create does not know how to wrap types.UnionType"). Keep it opaque to compile.
+@torch.library.custom_op("xfuser::aiter_varlen_attention", mutates_args=())
+def _aiter_varlen_attention_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    dropout_p: float,
+    is_causal: bool,
+) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+    kwargs = {}
+    if AITER_HAS_ROUND_MODE:
+        kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+    output, softmax_lse = flash_attn_varlen_func_aiter(
+        query,
+        key,
+        value,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_lse=True,
+        return_attn_probs=False,
+        **kwargs,
+    )
+    return output, softmax_lse
+
+
+@_aiter_varlen_attention_kernel.register_fake
+def _aiter_varlen_attention_kernel_fake(
+    query,
+    key,
+    value,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    dropout_p,
+    is_causal,
+):
+    total_q, num_heads, _ = query.shape
+    return (
+        torch.empty_like(query),
+        query.new_empty((num_heads, total_q), dtype=torch.float32),
+    )
+
+
+# Same UnionType problem as the varlen entrypoint, reached through `_validate_cu` in
+# aiter/ops/mha.py::_flash_attn_forward.
+@torch.library.custom_op("xfuser::aiter_dense_attention", mutates_args=())
+def _aiter_dense_attention_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    dropout_p: float,
+    is_causal: bool,
+) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+    kwargs = {}
+    if AITER_HAS_ROUND_MODE:
+        kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+    output, softmax_lse = flash_attn_func_aiter(
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_lse=True,
+        return_attn_probs=False,
+        **kwargs,
+    )
+    return output, softmax_lse
+
+
+@_aiter_dense_attention_kernel.register_fake
+def _aiter_dense_attention_kernel_fake(query, key, value, dropout_p, is_causal):
+    batch, seqlen, num_heads, _ = query.shape
+    return (
+        torch.empty_like(query),
+        query.new_empty((batch, num_heads, seqlen), dtype=torch.float32),
+    )
+
+
 @register_attention_function(AttentionBackendType.AITER)
 def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
@@ -1646,38 +1738,28 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
 
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
-        varlen_kwargs = {
-            "softmax_scale": D ** -0.5,
-            "dropout_p": dropout_p,
-            "causal": is_causal,
-            "return_lse": True,
-            "return_attn_probs": False,
-        }
-        if AITER_HAS_ROUND_MODE:
-            varlen_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-        output, softmax_lse = flash_attn_varlen_func_aiter(
-            q_flat, k_packed, v_packed,
-            cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
-            **varlen_kwargs,
+        output, softmax_lse = _aiter_varlen_attention_kernel(
+            q_flat,
+            k_packed,
+            v_packed,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            S,
+            max_seqlen_k,
+            D ** -0.5,
+            dropout_p,
+            is_causal,
         )
         output = output.reshape(B, S, H, D)
         output = torch.permute(output, [0, 2, 1, 3])
 
     else:
-        kwargs = {
-            "dropout_p": dropout_p,
-            "causal": is_causal,
-            "return_attn_probs": False,
-            "return_lse": True,
-        }
-        if AITER_HAS_ROUND_MODE:
-            kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-        output, softmax_lse = flash_attn_func_aiter(
+        output, softmax_lse = _aiter_dense_attention_kernel(
             query,
             key,
             value,
-            **kwargs
+            dropout_p,
+            is_causal,
         )
         output = torch.permute(output, [0, 2, 1, 3])
 

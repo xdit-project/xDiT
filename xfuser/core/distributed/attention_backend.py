@@ -143,10 +143,9 @@ def _build_hadamard_matrix(block_r, dtype=torch.bfloat16, allow_sylvester_fallba
 
 
 def _replicate_hadamard_per_device(hadamard):
-    """Replicate a single Hadamard matrix on each available device, keyed by
-    torch.device (CPU plus all GPUs when CUDA is available). A None matrix maps
-    to None on every device."""
-    devices = [torch.device("cpu")]
+    """Replicate a single Hadamard matrix on each visible GPU, keyed by
+    torch.device. A None matrix maps to None on every device."""
+    devices = []
     if torch.cuda.is_available():
         devices += [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
     return {
@@ -389,7 +388,7 @@ def _build_aiter_mla_metadata(batch_size, q_seq_len, kv_seq_len, num_heads, num_
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
 AITER_FP8_DTYPE = torch.float8_e4m3fn  # fallback; fp8 comms requires aiter
-FP8_HADAMARD_MATRIX = _aiter_hadamard_matrix(128)
+FP8_HADAMARD_MATRIX = {}
 if env_info["has_aiter"]:
     import aiter
     AITER_FP8_DTYPE = aiter.dtypes.fp8

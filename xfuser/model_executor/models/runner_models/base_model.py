@@ -350,14 +350,15 @@ class xFuserModel(abc.ABC):
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
         fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
-        setup_fp8_comms(
-            fp8_comms,
-            self.pipe,
-            input_args,
-            run_pipe_fn=self._run_timed_pipe,
-            split_prompts_fn=self._split_prompts_for_dp,
-            batch_size=self.config.batch_size,
-        )
+        if fp8_comms is not None:
+            setup_fp8_comms(
+                fp8_comms,
+                self.pipe,
+                input_args,
+                run_pipe_fn=self._run_timed_pipe,
+                split_prompts_fn=self._split_prompts_for_dp,
+                batch_size=self.config.batch_size,
+            )
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.

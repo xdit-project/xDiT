@@ -75,8 +75,10 @@ class Fp8CommsState:
     ):
         if fixed_scale is not None and fixed_scale <= 0:
             raise ValueError(f"fp8_comms_scale must be positive, got {fixed_scale}.")
-        if safety_factor <= 0:
-            raise ValueError(f"fp8_comms_safety_factor must be positive, got {safety_factor}.")
+        if not 0 < safety_factor <= 1:
+            raise ValueError(
+                f"fp8_comms_safety_factor must be in (0, 1], got {safety_factor}."
+            )
         self.fixed_scale = fixed_scale
         # Calibrated per-layer scale = amax / (FP8_MAX * safety_factor). A smaller
         # safety_factor enlarges the scale, so the calibrated amax maps further below

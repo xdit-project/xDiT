@@ -9,8 +9,6 @@ from xfuser.core.distributed.attention_backend import (
 )
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
 
-# FP8_HADAMARD_MATRIX is keyed per device and only holds cuda entries on a GPU
-# host (no cpu key), so rotation tests must use whatever device it was built for.
 _HB_DEVICE = next(iter(FP8_HADAMARD_MATRIX))
 
 

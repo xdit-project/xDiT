@@ -467,3 +467,28 @@ def test_aiter_mha_v4_serves_single_sequence_padding():
         output.float().flatten(), reference.float().flatten(), dim=0
     )
     assert cosine > 0.99, f"cosine {cosine.item()}"
+
+
+def test_aiter_mha_v4_falls_back_below_head_dim_128():
+    """LTX-2 pairs 128-wide video blocks with 64-wide audio ones in a single backend selection."""
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+
+    torch.manual_seed(1234)
+    shape = (1, 4, 256, 64)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(query, key, value)
+        output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
+            query, key, value, dropout_p=0.0, is_causal=False
+        )
+
+    assert output.shape == reference.shape
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)

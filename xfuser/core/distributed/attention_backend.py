@@ -1224,6 +1224,12 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
 def _aiter_mixed_attn_call(
     query, key, value, qk_format, v_format, dropout_p, is_causal, attention_kwargs=None
 ):
+    # MHA v4 is head_dim 128 only. LTX-2 pairs 128-wide video blocks with 64-wide audio ones, so
+    # the odd sizes fall through rather than making the whole backend unselectable.
+    if query.shape[-1] != 128:
+        return _sdpa_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
     _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
@@ -1292,6 +1298,10 @@ def _aiter_i8fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
 @register_attention_function(AttentionBackendType.AITER_MXFP8)
 def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """Run the AITER MXFP8 Q/K and per-tensor FP8 V recipe."""
+    if query.shape[-1] != 128:
+        return _sdpa_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
     _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()

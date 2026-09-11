@@ -29,8 +29,8 @@ from xfuser.core.vsa_h3_attention import (
 from xfuser.model_executor.layers.usp import (
     USP,
     attention,
-    ulysses_input_all_to_all,
-    ulysses_output_all_to_all,
+    _combined_qkv_all_to_all,
+    _ft_c_output_all_to_all,
 )
 
 
@@ -91,7 +91,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             gate = attn.to_gate_compress(hidden_states).unflatten(
                 -1, (attn.heads, -1)
             )
-            query, key, value, gate = ulysses_input_all_to_all(
+            query, key, value, gate = _combined_qkv_all_to_all(
                 query.transpose(1, 2),
                 key.transpose(1, 2),
                 value.transpose(1, 2),
@@ -136,7 +136,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 )
                 padded_output[:, :, :sequence_length] = packed_output
                 packed_output = padded_output
-            hidden_states = ulysses_output_all_to_all(packed_output).transpose(
+            hidden_states = _ft_c_output_all_to_all(packed_output).transpose(
                 1, 2
             )
             hidden_states = hidden_states.flatten(2, 3).type_as(query)

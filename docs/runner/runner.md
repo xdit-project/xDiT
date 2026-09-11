@@ -107,6 +107,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-2.5 Distilled | `LTX-2.5`, `LTX-2.5-distilled`, `Lightricks/LTX-2.5-Diffusers` |
 | LTX-2.5 Full | `LTX-2.5-full` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
+| FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree` |
 | Qwen-Image | `Qwen-Image`, `Qwen/Qwen-Image`, `Qwen-Image-2512`, `Qwen/Qwen-Image-2512` |
 | Qwen-Image-Edit | `Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit`, `Qwen-Image-Edit-2509`, `Qwen/Qwen-Image-Edit-2509`, `Qwen-Image-Edit-2511`, `Qwen/Qwen-Image-Edit-2511` |
 | Stable Diffusion 3.5 | `SD3.5`, `stable-diffusion-3.5-large`, `stabilityai/stable-diffusion-3.5-large` |

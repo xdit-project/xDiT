@@ -121,31 +121,35 @@ def _ft_c_input_all_to_all(x):
     return x
 
 
-def _combined_qkv_all_to_all(q, k, v):
-    """Concatenate query, key, value tensors and perform a single all-to-all communication."""
+def _combined_qkv_all_to_all(q, k, v, *extra):
+    """Concatenate query, key, value tensors and perform a single all-to-all communication.
+
+    Extra tensors shaped like q (FastH3 passes its compression gate) ride the
+    same exchange and are returned after v.
+    """
     world_size = get_ulysses_parallel_world_size()
     if world_size <= 1:
-        return q, k, v
+        return (q, k, v, *extra)
 
     assert q.ndim == 4, f"q must have 4 dimensions, got {q.ndim}"
     b, h, s, d = q.shape
     assert h % world_size == 0, f"h must be divisible by world_size, got {h} and {world_size}"
 
-    # [3, b, h, s, d]
-    qkv = torch.stack([q, k, v], dim=0)
-    # [3, b, P, h/P, s, d]
-    qkv = qkv.view(3, b, world_size, h // world_size, s, d)
-    # [P, 3, b, h/P, s, d]
+    n = 3 + len(extra)
+    # [n, b, h, s, d]
+    qkv = torch.stack([q, k, v, *extra], dim=0)
+    # [n, b, P, h/P, s, d]
+    qkv = qkv.view(n, b, world_size, h // world_size, s, d)
+    # [P, n, b, h/P, s, d]
     qkv = qkv.permute(2, 0, 1, 3, 4, 5).contiguous()
 
     qkv = _sdpa_all_to_all_single(qkv)
 
-    # [3, b, h/P, P*s, d]  — reshape directly avoids the intermediate
+    # [n, b, h/P, P*s, d]  — reshape directly avoids the intermediate
     # contiguous copy that the separate permute+view required.
-    qkv = qkv.permute(1, 2, 3, 0, 4, 5).reshape(3, b, h // world_size, -1, d)
+    qkv = qkv.permute(1, 2, 3, 0, 4, 5).reshape(n, b, h // world_size, -1, d)
 
-    q, k, v = torch.unbind(qkv, dim=0)
-    return q, k, v
+    return torch.unbind(qkv, dim=0)
 
 
 def _ft_c_output_all_to_all(x):

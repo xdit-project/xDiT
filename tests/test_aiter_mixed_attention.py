@@ -15,6 +15,8 @@ def test_aiter_bf16_backends_use_mha_v4_while_aiter_remains_mha_v3(monkeypatch):
         FP8 = "fp8"
 
     def mha_v4(query, key, value, *formats):
+        # No seqlens_k parameter on purpose: a dense request must stay callable against an
+        # AITER that predates per-batch key lengths.
         calls.append(("mha_v4", formats))
         return torch.empty_like(query)
 
@@ -393,38 +395,59 @@ def test_aiter_low_precision_attention_rejects_dropout():
             )
 
 
-def test_aiter_mha_v4_rejects_multi_sequence_varlen_packed_keys():
-    """MHA v4 has no key-padding mask, so several ragged sequences must fail loudly.
+def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
+    """Several ragged sequences ride as a padded batch with their lengths in seqlens_k.
 
-    Silently dropping attention_kwargs lets padded keys contribute to the softmax
-    denominator, which is wrong rather than merely approximate. A single sequence is
-    served densely instead (see test_aiter_mha_v4_serves_single_sequence_padding).
+    The padded tail must not reach the softmax denominator, which a cosine against a
+    per-sequence reference would catch: padding that contributed would pull every row.
     """
     from xfuser.core.distributed.attention_backend import (
-        AITER_MHA_V4_ONLY_BACKENDS,
         ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
     )
 
-    tensor = torch.empty((2, 1, 4, 128), device="cuda", dtype=torch.bfloat16)
+    _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+
+    torch.manual_seed(7)
+    batch, heads, head_dim = 2, 4, 128
+    padded, valid = 384, (300, 137)
+    query = torch.randn(
+        (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
+    )
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+
+    # indices_k names the surviving rows of the flattened (batch * padded) key tensor.
+    indices_k = torch.cat(
+        [torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)]
+    )
     attention_kwargs = {
-        "indices_k": torch.tensor([0, 4, 5], dtype=torch.int64, device="cuda"),
-        "cu_seqlens_k": torch.tensor([0, 1, 3], dtype=torch.int32, device="cuda"),
-        "max_seqlen_k": 2,
+        "indices_k": indices_k,
+        "cu_seqlens_k": torch.tensor(
+            [0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"
+        ),
+        "max_seqlen_k": max(valid),
     }
-    for backend in AITER_MHA_V4_ONLY_BACKENDS:
-        _require_mha_v4_aiter(backend.name)
-        with pytest.raises(
-            NotImplementedError,
-            match="batch size > 1",
-        ):
-            ATTENTION_FUNCTION_REGISTRY[backend](
-                tensor,
-                tensor,
-                tensor,
-                dropout_p=0.0,
-                is_causal=False,
-                attention_kwargs=attention_kwargs,
-            )
+
+    with torch.no_grad():
+        output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )
+
+    assert output.shape == query.shape
+    for b, n in enumerate(valid):
+        reference = F.scaled_dot_product_attention(
+            query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n]
+        )
+        cosine = F.cosine_similarity(
+            output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0
+        )
+        assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
 
 
 def test_aiter_mha_v4_serves_single_sequence_padding():

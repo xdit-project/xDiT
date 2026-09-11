@@ -35,6 +35,7 @@ class _AiterMhaV4Capabilities:
     block_mask: bool = False
     mxfp8_block_mask: bool = False
     scale_modes: bool = False
+    seqlens_k: bool = False
     kv_tile: int = 128
 
 
@@ -52,6 +53,7 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     parameters = inspect.signature(mha_v4_fn).parameters
     block_mask = parameters.get("block_mask") is not None
     scale_modes = parameters.get("q_scale_mode") is not None
+    seqlens_k = parameters.get("seqlens_k") is not None
     try:
         from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
         kv_tile = int(_aiter_mha_v4_kv_tile())
@@ -62,6 +64,7 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
         is_gfx942=is_gfx942,
         block_mask=block_mask,
         scale_modes=scale_modes,
+        seqlens_k=seqlens_k,
         mxfp8_block_mask=scale_modes and block_mask,
         kv_tile=kv_tile,
     )
@@ -1122,25 +1125,44 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs=None):
 
 
 def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs):
-    """Fold a key-padding request into a plain dense call.
+    """Fold a key-padding request into a dense call, carrying key lengths when there are several.
 
-    MHA v4 has no key-padding mask, but a single sequence does not need one: its packed
-    keys are simply a shorter dense K/V, so attending over the valid length is exact.
-    Several sequences would need the per-batch key lengths the kernels cannot express.
+    MHA v4 has no key-padding mask. One sequence does not need one: its packed keys are simply
+    a shorter dense K/V, so attending over the valid length is exact. Several sequences are
+    regrouped into a padded batch and their true lengths travel in seqlens_k, which the kernels
+    read per batch; the padding is never visited, so its contents do not reach the softmax.
     """
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     if packed is None:
-        return query, key, value
-    q_flat, k_packed, v_packed, _cu_q, _cu_k, _max_k, batch, seqlen, heads, head_dim = packed
-    if batch != 1:
-        raise NotImplementedError(
-            "MHA v4 does not support varlen packed keys with batch size > 1"
+        return query, key, value, None
+    q_flat, k_packed, v_packed, _cu_q, cu_k, max_k, batch, seqlen, heads, head_dim = packed
+    query = q_flat.reshape(batch, seqlen, heads, head_dim)
+    if batch == 1:
+        return (
+            query,
+            k_packed.reshape(1, -1, heads, head_dim),
+            v_packed.reshape(1, -1, heads, head_dim),
+            None,
         )
-    return (
-        q_flat.reshape(1, seqlen, heads, head_dim),
-        k_packed.reshape(1, -1, heads, head_dim),
-        v_packed.reshape(1, -1, heads, head_dim),
+    if not _AITER_MHA_V4.seqlens_k:
+        raise NotImplementedError(
+            "this AITER build cannot express per-batch key lengths for MHA v4, "
+            "so varlen packed keys with batch size > 1 are unsupported"
+        )
+    cu_k = cu_k.to(device=k_packed.device, dtype=torch.int32)
+    lengths = (cu_k[1:] - cu_k[:-1]).contiguous()
+    counts = lengths.to(torch.int64)
+    starts = cu_k[:-1].to(torch.int64)
+    rows = torch.arange(k_packed.shape[0], device=k_packed.device)
+    slot = rows - torch.repeat_interleave(starts, counts)
+    row_batch = torch.repeat_interleave(
+        torch.arange(batch, device=k_packed.device), counts
     )
+    key = k_packed.new_zeros((batch, int(max_k), heads, head_dim))
+    value = v_packed.new_zeros((batch, int(max_k), heads, head_dim))
+    key[row_batch, slot] = k_packed
+    value[row_batch, slot] = v_packed
+    return query, key, value, lengths
 
 
 def _use_aiter_mha_v4_fp8(query, is_causal):
@@ -1234,18 +1256,16 @@ def _aiter_mixed_attn_call(
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    query, key, value = _aiter_mha_v4_gather_padded_keys(
+    query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
         query, key, value, attention_kwargs
     )
 
-    output = _aiter_mha_v4(
-        query,
-        key,
-        value,
-        qk_format,
-        qk_format,
-        v_format,
-    )
+    if seqlens_k is None:
+        output = _aiter_mha_v4(query, key, value, qk_format, qk_format, v_format)
+    else:
+        output = _aiter_mha_v4(
+            query, key, value, qk_format, qk_format, v_format, seqlens_k=seqlens_k
+        )
     output = torch.permute(output, [0, 2, 1, 3])
     return output, None
 
@@ -1306,14 +1326,14 @@ def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    query, key, value = _aiter_mha_v4_gather_padded_keys(
+    query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
         query, key, value, attention_kwargs
     )
-    output = _aiter_launch_mxfp8(query, key, value)
+    output = _aiter_launch_mxfp8(query, key, value, seqlens_k=seqlens_k)
     return torch.permute(output, [0, 2, 1, 3]), None
 
 
-def _aiter_launch_mxfp8(query, key, value, block_mask=None):
+def _aiter_launch_mxfp8(query, key, value, block_mask=None, seqlens_k=None):
     # Prefer the generic API: AITER deprecated mha_v4_mxfp8, and its DeprecationWarning is
     # untraceable by Dynamo, which breaks torch.compile(fullgraph=True).
     if _AITER_MHA_V4.scale_modes:
@@ -1329,10 +1349,15 @@ def _aiter_launch_mxfp8(query, key, value, block_mask=None):
             q_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
             k_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
             v_scale_mode=_AiterAttentionScaleMode.F32_PER_TENSOR,
+            **({} if seqlens_k is None else {"seqlens_k": seqlens_k}),
         )
     if _aiter_mha_v4_mxfp8 is None:
         raise RuntimeError(
             "AITER MXFP8 MHA v4 is not available, please update AITER."
+        )
+    if seqlens_k is not None:
+        raise NotImplementedError(
+            "the deprecated AITER mha_v4_mxfp8 entry point cannot carry per-batch key lengths"
         )
     if block_mask is None:
         return _aiter_mha_v4_mxfp8(query, key, value)

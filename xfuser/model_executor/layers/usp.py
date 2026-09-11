@@ -121,31 +121,42 @@ def _ft_c_input_all_to_all(x):
     return x
 
 
-def _combined_qkv_all_to_all(q, k, v):
-    """Concatenate query, key, value tensors and perform a single all-to-all communication."""
+def ulysses_input_all_to_all(*tensors):
+    """Gather sequence and scatter heads for equally shaped BHSD tensors."""
+    if not tensors:
+        return ()
     world_size = get_ulysses_parallel_world_size()
     if world_size <= 1:
-        return q, k, v
+        return tensors
 
-    assert q.ndim == 4, f"q must have 4 dimensions, got {q.ndim}"
-    b, h, s, d = q.shape
+    first = tensors[0]
+    assert first.ndim == 4, f"input must have 4 dimensions, got {first.ndim}"
+    assert all(
+        tensor.shape == first.shape for tensor in tensors
+    ), "combined Ulysses inputs must have equal shapes"
+    b, h, s, d = first.shape
     assert h % world_size == 0, f"h must be divisible by world_size, got {h} and {world_size}"
 
-    # [3, b, h, s, d]
-    qkv = torch.stack([q, k, v], dim=0)
-    # [3, b, P, h/P, s, d]
-    qkv = qkv.view(3, b, world_size, h // world_size, s, d)
-    # [P, 3, b, h/P, s, d]
-    qkv = qkv.permute(2, 0, 1, 3, 4, 5).contiguous()
+    count = len(tensors)
+    combined = torch.stack(tensors, dim=0)
+    combined = combined.view(
+        count, b, world_size, h // world_size, s, d
+    )
+    combined = combined.permute(2, 0, 1, 3, 4, 5).contiguous()
 
-    qkv = _sdpa_all_to_all_single(qkv)
+    combined = _sdpa_all_to_all_single(combined)
 
-    # [3, b, h/P, P*s, d]  — reshape directly avoids the intermediate
+    # [N, b, h/P, P*s, d] — reshape directly avoids the intermediate
     # contiguous copy that the separate permute+view required.
-    qkv = qkv.permute(1, 2, 3, 0, 4, 5).reshape(3, b, h // world_size, -1, d)
+    combined = combined.permute(1, 2, 3, 0, 4, 5).reshape(
+        count, b, h // world_size, -1, d
+    )
+    return tuple(torch.unbind(combined, dim=0))
 
-    q, k, v = torch.unbind(qkv, dim=0)
-    return q, k, v
+
+def _combined_qkv_all_to_all(q, k, v):
+    """Perform one Ulysses all-to-all for query, key, and value."""
+    return ulysses_input_all_to_all(q, k, v)
 
 
 def _ft_c_output_all_to_all(x):
@@ -161,6 +172,11 @@ def _ft_c_output_all_to_all(x):
     x = _sdpa_all_to_all_single(x)
     x = x.reshape(world_size, s // world_size, b, -1, d).permute(2, 0, 3, 1, 4).reshape(b, -1, s // world_size, d)
     return x
+
+
+def ulysses_output_all_to_all(x):
+    """Scatter sequence and gather heads, reversing Ulysses input exchange."""
+    return _ft_c_output_all_to_all(x)
 
 
 def _preprocess_joint_tensors(joint_key, joint_value):

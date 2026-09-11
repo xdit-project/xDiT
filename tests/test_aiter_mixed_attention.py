@@ -395,6 +395,22 @@ def test_aiter_low_precision_attention_rejects_dropout():
             )
 
 
+def test_krea2_can_select_the_mha_v4_backends():
+    """Krea-2 gates on varlen support, which MHA v4 now has for its shape.
+
+    Its guidance runs the transformer once per branch rather than as one batched pair, so every
+    call is a single padded sequence -- the case served by gathering the keys into a dense call.
+    """
+    from xfuser.core.distributed.attention_backend import AITER_MHA_V4_ONLY_BACKENDS
+    from xfuser.model_executor.models.runner_models.krea2 import (
+        _KREA2_SUPPORTED_ATTN_BACKENDS,
+    )
+
+    unsupported = [b.name for b in AITER_MHA_V4_ONLY_BACKENDS
+                   if b not in _KREA2_SUPPORTED_ATTN_BACKENDS]
+    assert not unsupported, unsupported
+
+
 def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
     """Several ragged sequences ride as a padded batch with their lengths in seqlens_k.
 

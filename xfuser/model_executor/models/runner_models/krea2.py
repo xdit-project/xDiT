@@ -7,7 +7,10 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.envs import _is_hip
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_backend import (
+    AITER_MHA_V4_ONLY_BACKENDS,
+    AttentionBackendType,
+)
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,
@@ -37,6 +40,9 @@ _KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,
+        # Guidance runs the transformer twice rather than as one batched pair, so each call is a
+        # single sequence and MHA v4 can serve its key padding densely.
+        *AITER_MHA_V4_ONLY_BACKENDS,
     }
 )
 

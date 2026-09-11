@@ -28,7 +28,7 @@ else:
 
 logger = init_logger(__name__)
 
-_FP8_LOG_SCALES = bool(os.environ.get("XFUSER_FP8_LOG_SCALES"))
+_FP8_LOG_SCALES = os.environ.get("XFUSER_FP8_LOG_SCALES", "").lower() in ("1", "true")
 class Fp8CommsCall(NamedTuple):
     """The per-layer fp8-comms scales for one attention call.
 
@@ -479,8 +479,8 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
     """Raise if --use_fp8_comms is requested but unsupported by the model/config; no-op if off."""
     if not config.use_fp8_comms:
         return
+    from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.distributed.attention_backend import (
-        AITER_FP8_HAS_DESCALE,
         AttentionBackendType,
         SUPPORTS_PRE_QUANTIZATION_BACKENDS,
     )
@@ -539,10 +539,10 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
             f"--hybrid_attn_low_precision_backend / --hybrid_attn_high_precision_backend "
             f"so at least one scheduled backend supports pre-quantization."
         )
-    if not AITER_FP8_HAS_DESCALE:
+    if not getattr(ab, "AITER_FP8_HAS_DESCALE", False):
         raise ValueError(
             "--use_fp8_comms needs an AITER build whose flash_attn_fp8_pertensor_func "
-            "accepts q_descale/k_descale/v_descale; this build does not. Update AITER."
+            "accepts q_descale/k_descale/v_descale."
         )
     logger.info(
         "fp8 comms feeds pre-quantized Q/K/V to the dense FP8 attention kernel; "

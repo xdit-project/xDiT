@@ -238,6 +238,10 @@ def test_fasth3_defaults_match_inference_contract():
 
     assert xFuserFastH3Model.settings.model_name == FASTH3_MODEL_ID
     assert xFuserFastH3Model.settings.valid_tasks == ["t2va"]
+    assert (
+        xFuserFastH3Model.settings.default_attention_backend
+        == AttentionBackendType.FLEX_VSA_H3.name
+    )
     assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
     assert xFuserFastH3Model._warmup_num_inference_steps == 5
     assert xFuserFastH3Model._enable_fasth3_vsa
@@ -311,11 +315,16 @@ def test_fasth3_wrapper_runs_vsa_attention(monkeypatch):
     assert torch.isfinite(output.audio_sample).all()
 
 
-def test_fasth3_accepts_vsa_and_dense_attention_backends():
+def test_fasth3_accepts_vsa_and_dense_attention_backends(monkeypatch):
     from xfuser import xFuserArgs
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3Model,
     )
+
+    # Announcing the default backend goes through runner_utils.log, which reads
+    # RANK/WORLD_SIZE straight from the env.
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
 
     for backend in ("AITER", "FLEX_VSA_H3"):
         config = xFuserArgs(
@@ -329,6 +338,36 @@ def test_fasth3_accepts_vsa_and_dense_attention_backends():
     defaulted = xFuserArgs(model="FastH3", task="t2va")
     xFuserFastH3Model(defaulted)
     assert defaulted.attention_backend == "FLEX_VSA_H3"
+
+
+def test_default_attention_backend_is_reusable_by_any_model(monkeypatch):
+    """The default backend lives in ModelSettings, so it is not a FastH3-only feature."""
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    model = xFuserMiniMaxH3Model(
+        xFuserArgs(model="MiniMax-H3", task="t2va", attention_backend="AITER")
+    )
+    model.settings.default_attention_backend = "AITER_FP8"
+
+    explicit = xFuserArgs(model="MiniMax-H3", task="t2va", attention_backend="AITER")
+    model._apply_default_attention_backend(explicit)
+    assert explicit.attention_backend == "AITER"
+
+    defaulted = xFuserArgs(model="MiniMax-H3", task="t2va")
+    model._apply_default_attention_backend(defaulted)
+    assert defaulted.attention_backend == "AITER_FP8"
+
+    model.settings.default_attention_backend = "NOT_A_BACKEND"
+    with pytest.raises(ValueError, match="default attention backend"):
+        model._apply_default_attention_backend(
+            xFuserArgs(model="MiniMax-H3", task="t2va")
+        )
 
 
 def test_fasth3_rejects_unsupported_attention_backend():

@@ -313,3 +313,28 @@ class TestUSPCombinedQKV(unittest.TestCase):
         torch.testing.assert_close(
             extra_out, usp._ft_c_input_all_to_all(extra), msg="extra tensor mismatch"
         )
+
+    def test_ulysses_extra_inputs_are_named_by_the_caller(self):
+        """USP exchanges whatever keys a backend lists, without knowing their meaning."""
+        query = torch.randn(1, 2, 8, 4)
+        gate = torch.randn_like(query)
+        attention_kwargs = {
+            usp.ULYSSES_EXTRA_INPUTS_KEY: ("some_backend_tensor",),
+            "some_backend_tensor": gate,
+        }
+
+        self.assertEqual(
+            usp._ulysses_extra_inputs(attention_kwargs, query),
+            [("some_backend_tensor", gate)],
+        )
+        self.assertEqual(usp._ulysses_extra_inputs({}, query), [])
+        self.assertEqual(
+            usp._ulysses_extra_inputs(
+                {usp.ULYSSES_EXTRA_INPUTS_KEY: ("missing",)}, query
+            ),
+            [],
+        )
+
+        attention_kwargs["some_backend_tensor"] = torch.randn(1, 2, 8, 5)
+        with self.assertRaisesRegex(ValueError, "some_backend_tensor"):
+            usp._ulysses_extra_inputs(attention_kwargs, query)

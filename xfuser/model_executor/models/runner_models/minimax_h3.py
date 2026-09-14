@@ -632,14 +632,13 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     settings.model_name = FASTH3_MODEL_ID
     settings.output_name = "fasth3"
     settings.valid_tasks = ["t2va"]
+    settings.default_attention_backend = AttentionBackendType.FLEX_VSA_H3.name
 
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
     _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _validate_config(self, config) -> None:
-        if config.attention_backend is None:
-            config.attention_backend = AttentionBackendType.FLEX_VSA_H3.name
         backend = _parse_attention_backend(
             config.attention_backend, "attention backend"
         )

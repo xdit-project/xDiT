@@ -22,7 +22,11 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
-from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.model_executor.layers.usp import (
+    ULYSSES_EXTRA_INPUTS_KEY,
+    USP,
+    attention,
+)
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
@@ -93,6 +97,9 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             self.attention_kwargs["vsa_h3_gate"] = attn.to_gate_compress(
                 hidden_states
             ).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
+            # The gate is per-head like QKV, so it has to follow them through
+            # the Ulysses exchange before FLEX_VSA_H3 consumes it.
+            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
 
         use_ulysses = (
             self.use_ulysses_parallel_attention
@@ -118,6 +125,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         finally:
             if use_vsa_h3 and self.attention_kwargs is not None:
                 self.attention_kwargs.pop("vsa_h3_gate", None)
+                self.attention_kwargs.pop(ULYSSES_EXTRA_INPUTS_KEY, None)
 
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
         hidden_states = attn.to_out[0](hidden_states)

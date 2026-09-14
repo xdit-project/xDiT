@@ -324,9 +324,18 @@ def USP(
 
         }
 
+    extra_bhsd = None
+    if attention_kwargs is not None:
+        extra_bhsd = attention_kwargs.get("vsa_h3_gate")
+
     qkv_amaxes = None
     if get_ulysses_parallel_world_size() > 1:
         if fp8_comms is not None:
+            if extra_bhsd is not None:
+                raise NotImplementedError(
+                    "fp8 comms does not support extra Ulysses tensors such as "
+                    "the FastH3 VSA-H3 compression gate."
+                )
             fp8_comms_backend = backend if backend is not None else get_runtime_state().attention_backend
             query, key, value, attn_kwargs_update, qkv_amaxes = fp8_comms_input_all_to_all(
                 query, key, value,
@@ -335,11 +344,25 @@ def USP(
             )
             attention_kwargs = (attention_kwargs or {}) | attn_kwargs_update
         elif combine_qkv_a2a and query.shape == key.shape == value.shape:
-            query, key, value = _combined_qkv_all_to_all(query, key, value)
+            extras = ()
+            if extra_bhsd is not None:
+                if extra_bhsd.shape != query.shape:
+                    raise ValueError(
+                        "vsa_h3_gate must match QKV shape for combined Ulysses "
+                        f"all-to-all, got {tuple(extra_bhsd.shape)} vs "
+                        f"{tuple(query.shape)}."
+                    )
+                extras = (extra_bhsd,)
+            exchanged = _combined_qkv_all_to_all(query, key, value, *extras)
+            query, key, value = exchanged[:3]
+            if extras:
+                attention_kwargs["vsa_h3_gate"] = exchanged[3]
         else:
             query = _ft_c_input_all_to_all(query)
             key = _ft_c_input_all_to_all(key)
             value = _ft_c_input_all_to_all(value)
+            if extra_bhsd is not None:
+                attention_kwargs["vsa_h3_gate"] = _ft_c_input_all_to_all(extra_bhsd)
 
     if attn_layer:
         key, value = _update_and_get_kv_cache(key, value, attn_layer)

@@ -37,6 +37,7 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
 })
+_FASTH3_ATTN_BACKENDS = frozenset({AttentionBackendType.FLEX_VSA_H3})
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 FASTH3_MODEL_ID = (
@@ -284,6 +285,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
     _transformer_component_name = "transformer"
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
@@ -329,13 +331,13 @@ class xFuserMiniMaxH3Model(xFuserModel):
             if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
-            if backend not in _SUPPORTED_ATTN_BACKENDS:
+            if backend not in self._supported_attn_backends:
                 supported = ", ".join(
-                    sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS)
+                    sorted(item.name for item in self._supported_attn_backends)
                 )
                 raise ValueError(
-                    f"MiniMax-H3 does not support attention backend {backend.name}. "
-                    f"Supported backends: {supported}."
+                    f"{self.settings.output_name} does not support attention "
+                    f"backend {backend.name}. Supported backends: {supported}."
                 )
             if backend == AttentionBackendType.AITER_FP8:
                 try:
@@ -610,12 +612,11 @@ class xFuserMiniMaxH3Model(xFuserModel):
 @register_model(FASTH3_MODEL_ID)
 @register_model("FastH3")
 class xFuserFastH3Model(xFuserMiniMaxH3Model):
-    """FastH3 Preview v1 runner scaffold.
+    """FastH3 Preview v1 runner.
 
-    The checkpoint and four-forward schedule are wired here, but execution is
-    intentionally blocked until xDiT has FastVideo-compatible VSA-H3
-    attention. Running these sparse-distilled weights through dense attention
-    is not a supported fallback.
+    Transformer attention goes through USP's backend selector. ``FLEX_VSA_H3``
+    is the default and runs the sparse-distilled VSA-H3 kernel; other
+    MiniMax-H3 backends stay dense when selected explicitly.
     """
 
     default_input_values = DefaultInputValues(
@@ -634,20 +635,27 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _validate_config(self, config) -> None:
+        if config.attention_backend is None:
+            config.attention_backend = AttentionBackendType.FLEX_VSA_H3.name
+        backend = _parse_attention_backend(
+            config.attention_backend, "attention backend"
+        )
+        if backend == AttentionBackendType.FLEX_VSA_H3:
+            if config.use_hybrid_attn_schedule:
+                raise ValueError(
+                    "FLEX_VSA_H3 uses VSA-H3 for every transformer step and "
+                    "does not support xDiT's hybrid attention schedule."
+                )
+            if config.use_torch_compile:
+                raise ValueError(
+                    "FLEX_VSA_H3 does not support wrapping the full transformer "
+                    "with --use_torch_compile yet. Its FlexAttention kernel is "
+                    "compiled independently."
+                )
         super()._validate_config(config)
-        if config.use_hybrid_attn_schedule:
-            raise ValueError(
-                "FastH3 uses VSA-H3 for every transformer step and does not "
-                "support xDiT's hybrid attention schedule."
-            )
-        if config.use_torch_compile:
-            raise ValueError(
-                "FastH3 VSA-H3 does not support wrapping the full transformer "
-                "with --use_torch_compile yet. Its FlexAttention kernel is "
-                "compiled independently."
-            )
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)

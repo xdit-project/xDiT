@@ -100,15 +100,22 @@ def _tiny_inputs(device):
     }
 
 
-def _patch_minimax_runtime_state(monkeypatch, *, track_steps=False):
+def _patch_minimax_runtime_state(
+    monkeypatch, *, track_steps=False, attention_backend=None
+):
     from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
 
     calls = []
+    selected_backend = (
+        AttentionBackendType.SDPA
+        if attention_backend is None
+        else attention_backend
+    )
 
     class _RuntimeState:
-        attention_backend = AttentionBackendType.SDPA
+        attention_backend = selected_backend
 
         def has_attention_schedule(self):
             return False
@@ -222,9 +229,11 @@ def test_minimax_h3_runner_registration():
 
 
 def test_fasth3_defaults_match_inference_contract():
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_MODEL_ID,
         xFuserFastH3Model,
+        xFuserMiniMaxH3Model,
     )
 
     assert xFuserFastH3Model.settings.model_name == FASTH3_MODEL_ID
@@ -232,6 +241,10 @@ def test_fasth3_defaults_match_inference_contract():
     assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
     assert xFuserFastH3Model._warmup_num_inference_steps == 5
     assert xFuserFastH3Model._enable_fasth3_vsa
+    assert xFuserFastH3Model._supported_attn_backends == (
+        xFuserMiniMaxH3Model._supported_attn_backends
+        | {AttentionBackendType.FLEX_VSA_H3}
+    )
 
 
 def test_fasth3_wrapper_defines_checkpoint_compression_gates(monkeypatch):
@@ -271,7 +284,11 @@ def test_fasth3_wrapper_runs_vsa_attention(monkeypatch):
         lambda: 0,
     )
     monkeypatch.setattr(usp, "get_ulysses_parallel_world_size", lambda: 1)
-    _patch_minimax_runtime_state(monkeypatch)
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    _patch_minimax_runtime_state(
+        monkeypatch,
+        attention_backend=AttentionBackendType.FLEX_VSA_H3,
+    )
     model = (
         xFuserMiniMaxH3Transformer3DWrapper(
             **_tiny_config(),
@@ -294,7 +311,27 @@ def test_fasth3_wrapper_runs_vsa_attention(monkeypatch):
     assert torch.isfinite(output.audio_sample).all()
 
 
-def test_fasth3_accepts_vsa_runtime_configuration():
+def test_fasth3_accepts_vsa_and_dense_attention_backends():
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3Model,
+    )
+
+    for backend in ("AITER", "FLEX_VSA_H3"):
+        config = xFuserArgs(
+            model="FastH3",
+            task="t2va",
+            attention_backend=backend,
+        )
+        xFuserFastH3Model(config)
+        assert config.attention_backend == backend
+
+    defaulted = xFuserArgs(model="FastH3", task="t2va")
+    xFuserFastH3Model(defaulted)
+    assert defaulted.attention_backend == "FLEX_VSA_H3"
+
+
+def test_fasth3_rejects_unsupported_attention_backend():
     from xfuser import xFuserArgs
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3Model,
@@ -303,10 +340,11 @@ def test_fasth3_accepts_vsa_runtime_configuration():
     config = xFuserArgs(
         model="FastH3",
         task="t2va",
-        attention_backend="AITER",
+        attention_backend="FLASH_3",
     )
 
-    xFuserFastH3Model(config)
+    with pytest.raises(ValueError, match="does not support attention backend"):
+        xFuserFastH3Model(config)
 
 
 @pytest.mark.parametrize(
@@ -329,11 +367,11 @@ def test_fasth3_rejects_unsupported_compile_modes(unsupported):
     config = xFuserArgs(
         model="FastH3",
         task="t2va",
-        attention_backend="AITER",
+        attention_backend="FLEX_VSA_H3",
         **unsupported,
     )
 
-    with pytest.raises(ValueError, match="FastH3"):
+    with pytest.raises(ValueError, match="FLEX_VSA_H3"):
         xFuserFastH3Model(config)
 
 

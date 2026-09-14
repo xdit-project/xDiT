@@ -20,18 +20,9 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
-from xfuser.core.vsa_h3_attention import (
-    build_h3_vsa_metadata,
-    flex_h3_vsa_attention,
-    tile_h3_vsa_tensor,
-    untile_h3_vsa_tensor,
-)
-from xfuser.model_executor.layers.usp import (
-    USP,
-    attention,
-    _combined_qkv_all_to_all,
-    _ft_c_output_all_to_all,
-)
+from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+from xfuser.model_executor.layers.usp import USP, attention
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
@@ -50,6 +41,17 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         self.attention_kwargs = attention_kwargs
         self.backend = backend
         self.use_fasth3_vsa = use_fasth3_vsa
+
+    def _selected_backend(self):
+        if self.backend is not None:
+            return self.backend
+        return get_runtime_state().attention_backend
+
+    def _use_vsa_h3_backend(self) -> bool:
+        return (
+            self.use_fasth3_vsa
+            and self._selected_backend() == AttentionBackendType.FLEX_VSA_H3
+        )
 
     def __call__(
         self,
@@ -82,67 +84,15 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             query = _apply_rotary_emb(query, *rotary_emb)
             key = _apply_rotary_emb(key, *rotary_emb)
 
-        if self.use_fasth3_vsa:
+        use_vsa_h3 = self._use_vsa_h3_backend()
+        if use_vsa_h3:
             if self.attention_kwargs is None:
                 raise RuntimeError("FastH3 VSA metadata was not configured.")
-            metadata = self.attention_kwargs.get("vsa_h3_metadata")
-            if metadata is None:
+            if self.attention_kwargs.get("vsa_h3_metadata") is None:
                 raise RuntimeError("FastH3 VSA metadata was not prepared.")
-            gate = attn.to_gate_compress(hidden_states).unflatten(
-                -1, (attn.heads, -1)
-            )
-            query, key, value, gate = _combined_qkv_all_to_all(
-                query.transpose(1, 2),
-                key.transpose(1, 2),
-                value.transpose(1, 2),
-                gate.transpose(1, 2),
-            )
-            sequence_length = metadata.total_seq_length
-            gathered_length = query.shape[2]
-            query = query[:, :, :sequence_length]
-            key = key[:, :, :sequence_length]
-            value = value[:, :, :sequence_length]
-            gate = gate[:, :, :sequence_length]
-
-            def tile_bhsd(tensor):
-                return tile_h3_vsa_tensor(
-                    tensor.transpose(1, 2),
-                    metadata,
-                ).transpose(1, 2).contiguous()
-
-            tiled_query = tile_bhsd(query)
-            tiled_key = tile_bhsd(key)
-            tiled_value = tile_bhsd(value)
-            tiled_gate = tile_bhsd(gate)
-            sparse_output, compressed_output = flex_h3_vsa_attention(
-                tiled_query,
-                tiled_key,
-                tiled_value,
-                metadata,
-            )
-            tiled_output = sparse_output + (
-                compressed_output.to(sparse_output.dtype) * tiled_gate
-            )
-            packed_output = untile_h3_vsa_tensor(
-                tiled_output.transpose(1, 2),
-                metadata,
-            ).transpose(1, 2)
-            if gathered_length > sequence_length:
-                padded_output = packed_output.new_zeros(
-                    packed_output.shape[0],
-                    packed_output.shape[1],
-                    gathered_length,
-                    packed_output.shape[3],
-                )
-                padded_output[:, :, :sequence_length] = packed_output
-                packed_output = padded_output
-            hidden_states = _ft_c_output_all_to_all(packed_output).transpose(
-                1, 2
-            )
-            hidden_states = hidden_states.flatten(2, 3).type_as(query)
-            hidden_states = attn.to_out[0](hidden_states)
-            hidden_states = attn.to_out[1](hidden_states)
-            return hidden_states
+            self.attention_kwargs["vsa_h3_gate"] = attn.to_gate_compress(
+                hidden_states
+            ).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
 
         use_ulysses = (
             self.use_ulysses_parallel_attention
@@ -158,12 +108,16 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         }
         if use_ulysses:
             attention_args["combine_qkv_a2a"] = True
-        hidden_states = attention_function(
-            query.transpose(1, 2),
-            key.transpose(1, 2),
-            value.transpose(1, 2),
-            **attention_args,
-        ).transpose(1, 2)
+        try:
+            hidden_states = attention_function(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                **attention_args,
+            ).transpose(1, 2)
+        finally:
+            if use_vsa_h3 and self.attention_kwargs is not None:
+                self.attention_kwargs.pop("vsa_h3_gate", None)
 
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
         hidden_states = attn.to_out[0](hidden_states)
@@ -217,6 +171,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         )
         self._usp_attention_kwargs: dict[str, Any] = {}
         self.enable_fasth3_vsa = enable_fasth3_vsa
+        self.attention_backend = attention_backend
 
         if enable_fasth3_vsa:
             for block in self.transformer_blocks:
@@ -251,6 +206,18 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
 
         self.register_forward_pre_hook(
             lambda module, args: get_runtime_state().increment_step_counter()
+        )
+
+    def _selected_attention_backend(self):
+        if self.attention_backend is not None:
+            return self.attention_backend
+        return get_runtime_state().attention_backend
+
+    def _use_vsa_h3_backend(self) -> bool:
+        return (
+            self.enable_fasth3_vsa
+            and self._selected_attention_backend()
+            == AttentionBackendType.FLEX_VSA_H3
         )
 
     @staticmethod
@@ -332,7 +299,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 f"and {list(timestep_indices.shape)} for seq_len={sequence_length}."
             )
 
-        if self.enable_fasth3_vsa:
+        if self._use_vsa_h3_backend():
             text_count = text_indices.numel()
             audio_count = audio_indices.numel()
             expected_text = torch.arange(text_count, device=text_indices.device)
@@ -372,6 +339,8 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                     position_ids.device,
                 )
             )
+        else:
+            self._usp_attention_kwargs.pop("vsa_h3_metadata", None)
 
         video_embeds = self.proj_in(hidden_states.to(self.proj_in.weight.dtype))
         audio_embeds = self.audio_proj_in(

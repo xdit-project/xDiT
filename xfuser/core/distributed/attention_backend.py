@@ -1748,7 +1748,6 @@ def _dense_h3_fallback_attn_call(
 
 
 @register_attention_function(AttentionBackendType.FLEX_VSA_H3)
-@torch.compiler.disable
 def _flex_vsa_h3_attn_call(
     query,
     key,

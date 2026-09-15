@@ -404,6 +404,10 @@ class xFuserMiniMaxH3Model(xFuserModel):
             subfolder="transformer",
             dtype=torch.bfloat16,
             enable_fasth3_vsa=self._enable_fasth3_vsa,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
@@ -716,6 +720,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             self.settings.model_name,
             subfolder="transformer_ref",
             dtype=torch.bfloat16,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer_ref=transformer)
         pipe.load_components(dtype=torch.bfloat16)

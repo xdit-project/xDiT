@@ -915,6 +915,7 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
                 "subfolder": "transformer",
                 "dtype": torch.bfloat16,
                 "enable_fasth3_vsa": True,
+                "attention_backend": None,
             },
         )
     ]

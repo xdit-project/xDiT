@@ -44,17 +44,8 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         self.use_ulysses_parallel_attention = use_ulysses_parallel_attention
         self.attention_kwargs = attention_kwargs
         self.backend = backend
-        self.use_fasth3_vsa = use_fasth3_vsa
-
-    def _selected_backend(self):
-        if self.backend is not None:
-            return self.backend
-        return get_runtime_state().attention_backend
-
-    def _use_vsa_h3_backend(self) -> bool:
-        return (
-            self.use_fasth3_vsa
-            and self._selected_backend() == AttentionBackendType.FLEX_VSA_H3
+        self.use_vsa_h3 = (
+            use_fasth3_vsa and backend == AttentionBackendType.FLEX_VSA_H3
         )
 
     def __call__(
@@ -88,7 +79,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             query = _apply_rotary_emb(query, *rotary_emb)
             key = _apply_rotary_emb(key, *rotary_emb)
 
-        use_vsa_h3 = self._use_vsa_h3_backend()
+        use_vsa_h3 = self.use_vsa_h3
         if use_vsa_h3:
             if self.attention_kwargs is None:
                 raise RuntimeError("FastH3 VSA metadata was not configured.")
@@ -115,17 +106,15 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         }
         if use_ulysses:
             attention_args["combine_qkv_a2a"] = True
-        try:
-            hidden_states = attention_function(
-                query.transpose(1, 2),
-                key.transpose(1, 2),
-                value.transpose(1, 2),
-                **attention_args,
-            ).transpose(1, 2)
-        finally:
-            if use_vsa_h3 and self.attention_kwargs is not None:
-                self.attention_kwargs.pop("vsa_h3_gate", None)
-                self.attention_kwargs.pop(ULYSSES_EXTRA_INPUTS_KEY, None)
+        hidden_states = attention_function(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            **attention_args,
+        ).transpose(1, 2)
+        if use_vsa_h3 and self.attention_kwargs is not None:
+            self.attention_kwargs.pop("vsa_h3_gate", None)
+            self.attention_kwargs.pop(ULYSSES_EXTRA_INPUTS_KEY, None)
 
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
         hidden_states = attn.to_out[0](hidden_states)
@@ -179,7 +168,16 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         )
         self._usp_attention_kwargs: dict[str, Any] = {}
         self.enable_fasth3_vsa = enable_fasth3_vsa
+        if attention_backend is None:
+            try:
+                attention_backend = get_runtime_state().attention_backend
+            except AssertionError:
+                attention_backend = None
         self.attention_backend = attention_backend
+        self.use_vsa_h3 = (
+            enable_fasth3_vsa
+            and attention_backend == AttentionBackendType.FLEX_VSA_H3
+        )
 
         if enable_fasth3_vsa:
             for block in self.transformer_blocks:
@@ -198,7 +196,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             block.attn.set_processor(
                 xFuserMiniMaxH3AttnProcessor(
                     use_ulysses_parallel_attention=False,
-                    backend=attention_backend,
+                    backend=self.attention_backend,
                 )
             )
 
@@ -207,25 +205,13 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 xFuserMiniMaxH3AttnProcessor(
                     use_ulysses_parallel_attention=True,
                     attention_kwargs=self._usp_attention_kwargs,
-                    backend=attention_backend,
+                    backend=self.attention_backend,
                     use_fasth3_vsa=enable_fasth3_vsa,
                 )
             )
 
         self.register_forward_pre_hook(
             lambda module, args: get_runtime_state().increment_step_counter()
-        )
-
-    def _selected_attention_backend(self):
-        if self.attention_backend is not None:
-            return self.attention_backend
-        return get_runtime_state().attention_backend
-
-    def _use_vsa_h3_backend(self) -> bool:
-        return (
-            self.enable_fasth3_vsa
-            and self._selected_attention_backend()
-            == AttentionBackendType.FLEX_VSA_H3
         )
 
     @staticmethod
@@ -307,7 +293,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 f"and {list(timestep_indices.shape)} for seq_len={sequence_length}."
             )
 
-        if self._use_vsa_h3_backend():
+        if self.use_vsa_h3:
             text_count = text_indices.numel()
             audio_count = audio_indices.numel()
             expected_text = torch.arange(text_count, device=text_indices.device)

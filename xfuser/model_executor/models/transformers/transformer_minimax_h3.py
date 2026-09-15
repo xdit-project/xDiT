@@ -98,7 +98,14 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
     def __init__(self, *args, attention_backend=None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._usp_attention_kwargs: dict[str, Any] = {}
+        # Keys are always present, carrying None when the packed sequence needs no
+        # padding. torch.compile guards on this dict's key set, so adding or removing
+        # entries between forwards forces a recompile.
+        self._usp_attention_kwargs: dict[str, Any] = {
+            "indices_k": None,
+            "cu_seqlens_k": None,
+            "max_seqlen_k": None,
+        }
 
         for block in self.token_refiner.refiner_blocks:
             block.attn.set_processor(
@@ -273,21 +280,24 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 dtype=torch.long,
                 device=packed_hidden_states.device,
             )
-            self._usp_attention_kwargs.update(
-                {
-                    "indices_k": indices_k,
-                    "cu_seqlens_k": torch.tensor(
-                        [0, sequence_length],
-                        dtype=torch.int32,
-                        device=packed_hidden_states.device,
-                    ),
-                    "max_seqlen_k": sequence_length,
-                }
+            cu_seqlens_k = torch.tensor(
+                [0, sequence_length],
+                dtype=torch.int32,
+                device=packed_hidden_states.device,
             )
+            max_seqlen_k = sequence_length
         else:
-            self._usp_attention_kwargs.pop("indices_k", None)
-            self._usp_attention_kwargs.pop("cu_seqlens_k", None)
-            self._usp_attention_kwargs.pop("max_seqlen_k", None)
+            indices_k = None
+            cu_seqlens_k = None
+            max_seqlen_k = None
+
+        self._usp_attention_kwargs.update(
+            {
+                "indices_k": indices_k,
+                "cu_seqlens_k": cu_seqlens_k,
+                "max_seqlen_k": max_seqlen_k,
+            }
+        )
 
         for block in self.transformer_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:

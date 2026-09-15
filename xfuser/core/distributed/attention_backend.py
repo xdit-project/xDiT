@@ -655,6 +655,7 @@ class AttentionBackendType(Enum):
     AITER_SPARGE = "AITER Sparge"
     AITER_SPARGE_V2 = "AITER Sparge V2"
     AITER_VSA = "AITER VSA CK"
+    FLEX_VSA_H3 = "Flex VSA-H3"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
@@ -1731,6 +1732,96 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
         output = torch.permute(output, [0, 2, 1, 3])
 
     return output, softmax_lse
+
+
+def _dense_h3_fallback_attn_call(
+    query, key, value, dropout_p, is_causal, attention_kwargs=None
+):
+    """Dense kernel used by FastH3's token refiner (no VSA-H3 metadata)."""
+    if env_info["has_aiter"]:
+        return _aiter_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
+    return _sdpa_attn_call(
+        query, key, value, dropout_p, is_causal, attention_kwargs
+    )
+
+
+@register_attention_function(AttentionBackendType.FLEX_VSA_H3)
+def _flex_vsa_h3_attn_call(
+    query,
+    key,
+    value,
+    dropout_p,
+    is_causal,
+    attention_kwargs=None,
+):
+    """FastH3 64-token VSA-H3 through FlexAttention.
+
+    USP gathers sequence before this runs. The compression gate rides the
+    same Ulysses exchange in ``attention_kwargs['vsa_h3_gate']``. Calls
+    without that metadata, including the MiniMax-H3 token refiner, fall
+    back to dense attention the same way AITER_VSA falls back without
+    Wan ``thw``.
+    """
+    attention_kwargs = attention_kwargs or {}
+    metadata = attention_kwargs.get("vsa_h3_metadata")
+    gate = attention_kwargs.get("vsa_h3_gate")
+    if metadata is None or gate is None:
+        return _dense_h3_fallback_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
+    if is_causal:
+        raise ValueError("FLEX_VSA_H3 does not support causal attention")
+    if dropout_p not in (None, 0.0):
+        raise ValueError("FLEX_VSA_H3 does not support attention dropout")
+
+    from xfuser.core.vsa_h3_attention import (
+        flex_h3_vsa_attention,
+        tile_h3_vsa_tensor,
+        untile_h3_vsa_tensor,
+    )
+
+    sequence_length = metadata.total_seq_length
+    gathered_length = query.shape[2]
+    query = query[:, :, :sequence_length]
+    key = key[:, :, :sequence_length]
+    value = value[:, :, :sequence_length]
+    gate = gate[:, :, :sequence_length]
+
+    def tile_bhsd(tensor):
+        return tile_h3_vsa_tensor(
+            tensor.transpose(1, 2),
+            metadata,
+        ).transpose(1, 2).contiguous()
+
+    tiled_query = tile_bhsd(query)
+    tiled_key = tile_bhsd(key)
+    tiled_value = tile_bhsd(value)
+    tiled_gate = tile_bhsd(gate)
+    sparse_output, compressed_output = flex_h3_vsa_attention(
+        tiled_query,
+        tiled_key,
+        tiled_value,
+        metadata,
+    )
+    tiled_output = sparse_output + (
+        compressed_output.to(sparse_output.dtype) * tiled_gate
+    )
+    packed_output = untile_h3_vsa_tensor(
+        tiled_output.transpose(1, 2),
+        metadata,
+    ).transpose(1, 2)
+    if gathered_length > sequence_length:
+        padded_output = packed_output.new_zeros(
+            packed_output.shape[0],
+            packed_output.shape[1],
+            gathered_length,
+            packed_output.shape[3],
+        )
+        padded_output[:, :, :sequence_length] = packed_output
+        packed_output = padded_output
+    return packed_output, None
 
 
 @register_attention_function(AttentionBackendType.AITER_VSA)

@@ -37,8 +37,12 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
 })
+_FASTH3_ATTN_BACKENDS = frozenset({AttentionBackendType.FLEX_VSA_H3})
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+FASTH3_MODEL_ID = (
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
+)
 
 
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
@@ -279,6 +283,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
         enable_tiling=False,
     )
     _transformer_component_name = "transformer"
+    _warmup_num_inference_steps = 3
+    _enable_fasth3_vsa = False
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
@@ -324,13 +331,13 @@ class xFuserMiniMaxH3Model(xFuserModel):
             if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
-            if backend not in _SUPPORTED_ATTN_BACKENDS:
+            if backend not in self._supported_attn_backends:
                 supported = ", ".join(
-                    sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS)
+                    sorted(item.name for item in self._supported_attn_backends)
                 )
                 raise ValueError(
-                    f"MiniMax-H3 does not support attention backend {backend.name}. "
-                    f"Supported backends: {supported}."
+                    f"{self.settings.output_name} does not support attention "
+                    f"backend {backend.name}. Supported backends: {supported}."
                 )
             if backend == AttentionBackendType.AITER_FP8:
                 try:
@@ -396,6 +403,11 @@ class xFuserMiniMaxH3Model(xFuserModel):
             self.settings.model_name,
             subfolder="transformer",
             dtype=torch.bfloat16,
+            enable_fasth3_vsa=self._enable_fasth3_vsa,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
@@ -544,7 +556,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
         )
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = 3
+            compile_args["num_inference_steps"] = (
+                self._warmup_num_inference_steps
+            )
         self._run_timed_pipe(compile_args)
 
     def _run_warmup_calls(self, input_args: dict) -> None:
@@ -552,10 +566,10 @@ class xFuserMiniMaxH3Model(xFuserModel):
             return
         log(
             f"Warming up MiniMax-H3 with {self.config.warmup_calls} "
-            "three-point calls..."
+            f"{self._warmup_num_inference_steps}-point calls..."
         )
         warmup_args = copy.deepcopy(input_args)
-        warmup_args["num_inference_steps"] = 3
+        warmup_args["num_inference_steps"] = self._warmup_num_inference_steps
         for iteration in range(self.config.warmup_calls):
             log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
             self._run_timed_pipe(warmup_args)
@@ -597,6 +611,62 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 output_path=output_path,
             )
             log(f"Output video with audio saved to {output_path}")
+
+
+@register_model(FASTH3_MODEL_ID)
+@register_model("FastH3")
+class xFuserFastH3Model(xFuserMiniMaxH3Model):
+    """FastH3 Preview v1 runner.
+
+    Transformer attention goes through USP's backend selector. ``FLEX_VSA_H3``
+    is the default and runs the sparse-distilled VSA-H3 kernel; other
+    MiniMax-H3 backends stay dense when selected explicitly.
+    """
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # MiniMaxH3Scheduler includes the terminal zero sigma, so five points
+        # produce the four transformer forwards used to train FastH3.
+        num_inference_steps=5,
+    )
+
+    settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
+    settings.model_name = FASTH3_MODEL_ID
+    settings.output_name = "fasth3"
+    settings.valid_tasks = ["t2va"]
+    settings.default_attention_backend = AttentionBackendType.FLEX_VSA_H3.name
+
+    _warmup_num_inference_steps = 5
+    _enable_fasth3_vsa = True
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+
+    def _validate_config(self, config) -> None:
+        backend = _parse_attention_backend(
+            config.attention_backend, "attention backend"
+        )
+        if backend == AttentionBackendType.FLEX_VSA_H3:
+            if config.use_hybrid_attn_schedule:
+                raise ValueError(
+                    "FLEX_VSA_H3 uses VSA-H3 for every transformer step and "
+                    "does not support xDiT's hybrid attention schedule."
+                )
+            if config.use_torch_compile:
+                raise ValueError(
+                    "FLEX_VSA_H3 does not support wrapping the full transformer "
+                    "with --use_torch_compile yet. Its FlexAttention kernel is "
+                    "compiled independently."
+                )
+        super()._validate_config(config)
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        if input_args["num_inference_steps"] != 5:
+            raise ValueError(
+                "FastH3 Preview v1 requires 5 scheduler points, which produce "
+                "the checkpoint's trained 4 transformer forwards."
+            )
 
 
 @register_model("MiniMax-H3-Ref2VA")
@@ -650,6 +720,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             self.settings.model_name,
             subfolder="transformer_ref",
             dtype=torch.bfloat16,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer_ref=transformer)
         pipe.load_components(dtype=torch.bfloat16)

@@ -510,6 +510,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                 value,
                 dropout_p=0.0,
                 is_causal=False,
+                attn_layer=attn,
             )
 
             hidden_states = hidden_states.transpose(1, 2)

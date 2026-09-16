@@ -10,6 +10,7 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 from xfuser.model_executor.layers.usp import USP
+from xfuser.core.distributed.fp8_comms import bind_fp8_comms_attn_modules
 from xfuser.core.distributed import (
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
@@ -118,6 +119,7 @@ class xFuserQwenDoubleStreamAttnProcessor:
             joint_value.transpose(1, 2),
             dropout_p=0.0,
             is_causal=False,
+            attn_layer=attn,
         ).transpose(1, 2)
 
         # Reshape back
@@ -172,6 +174,9 @@ class xFuserQwenImageTransformerWrapper(QwenImageTransformer2DModel):
 
         for block in self.transformer_blocks:
             block.attn.processor = xFuserQwenDoubleStreamAttnProcessor()
+        bind_fp8_comms_attn_modules(
+            self, [block.attn for block in self.transformer_blocks]
+        )
 
     def forward(
         self,

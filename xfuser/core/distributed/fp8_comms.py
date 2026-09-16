@@ -127,7 +127,7 @@ class Fp8CommsState:
     def apply_fixed_scales_to_model(self, model) -> None:
         """Broadcast a fixed scale to all self-attention layer buffers."""
         scale = float(self.fixed_scale)
-        for attn in resolve_fp8_comms_attn_modules(model):
+        for attn in resolve_fp8_comms_eligible_modules(model):
             attn.fp8_q_scale.fill_(scale)
             attn.fp8_k_scale.fill_(scale)
             attn.fp8_v_scale.fill_(scale)
@@ -191,7 +191,7 @@ class Fp8CommsState:
     ):
         # Same order as install_fp8_comms_layer_state, so index i is the layer that
         # carries fp8_comms_layer_idx == i.
-        for i, attn in enumerate(resolve_fp8_comms_attn_modules(model)):
+        for i, attn in enumerate(resolve_fp8_comms_eligible_modules(model)):
             attn.fp8_q_scale.copy_(q_scales[i : i + 1])
             attn.fp8_k_scale.copy_(k_scales[i : i + 1])
             attn.fp8_v_scale.copy_(v_scales[i : i + 1])
@@ -262,21 +262,23 @@ class Fp8CommsState:
     def register_models(self, pipe) -> None:
         """Register the pipe's transformer(s) and move running-max buffers to GPU.
 
-        A transformer opts in by calling ``bind_fp8_comms_attn_modules`` (usually
-        next to installing USP processors). That order fixes each layer's scale
-        index, so it must match between the calibration pass and inference.
+        A transformer declares candidate layers by calling
+        ``register_fp8_comms_eligible_modules`` (usually next to installing USP
+        processors). That order fixes each layer's scale index, so it must match
+        between the calibration pass and inference.
         """
         for name in ("transformer", "transformer_2"):
             transformer = getattr(pipe, name, None)
             if transformer is None:
                 continue
-            attn_modules = resolve_fp8_comms_attn_modules(transformer)
+            attn_modules = resolve_fp8_comms_eligible_modules(transformer)
             if not attn_modules:
                 raise RuntimeError(
-                    f"[fp8_comms] {transformer.__class__.__name__} ({name}) bound no "
-                    f"self-attention modules, so fp8 comms cannot activate for it. The "
-                    f"transformer wrapper must call bind_fp8_comms_attn_modules() where "
-                    f"it installs its USP attention processors."
+                    f"[fp8_comms] {transformer.__class__.__name__} ({name}) registered "
+                    f"no eligible attention modules, so fp8 comms cannot activate for "
+                    f"it. The transformer wrapper must call "
+                    f"register_fp8_comms_eligible_modules() where it installs its USP "
+                    f"attention processors."
                 )
             install_fp8_comms_layer_state(transformer, attn_modules)
             self.register_model(transformer, len(attn_modules))
@@ -357,24 +359,26 @@ class Fp8CommsState:
 # hybrid path can splat extras without a `fp8_comms is None` guard.
 
 
-_FP8_COMMS_ATTN_ATTR = "_fp8_comms_attn_modules"
+_FP8_COMMS_ELIGIBLE_MODULES_ATTR = "_fp8_comms_eligible_modules"
 
 
-def bind_fp8_comms_attn_modules(transformer, modules) -> None:
-    """Record which self-attention modules participate in Ulysses FP8 comms.
+def register_fp8_comms_eligible_modules(transformer, modules) -> None:
+    """Record attention modules eligible for Ulysses FP8 communications.
 
-    Call this next to installing USP processors. The order is the per-layer
-    scale index for calibration and scatter. Include every self-attention
-    module that executes an eligible Ulysses collective, including refiners;
-    omit cross-attention and modules without that collective.
+    Registration provides per-layer calibration state but does not force FP8:
+    hybrid schedules still gate communications on the effective backend for
+    each call. The order is the per-layer scale index for calibration and
+    scatter. Include every self-attention module that executes an eligible
+    Ulysses collective, including refiners; omit cross-attention and modules
+    without that collective.
 
     Walking ``named_modules()`` is the wrong default for the same reason.
     """
-    object.__setattr__(transformer, _FP8_COMMS_ATTN_ATTR, tuple(modules))
+    object.__setattr__(transformer, _FP8_COMMS_ELIGIBLE_MODULES_ATTR, tuple(modules))
 
 
-def resolve_fp8_comms_attn_modules(transformer) -> list:
-    return list(getattr(transformer, _FP8_COMMS_ATTN_ATTR, ()))
+def resolve_fp8_comms_eligible_modules(transformer) -> list:
+    return list(getattr(transformer, _FP8_COMMS_ELIGIBLE_MODULES_ATTR, ()))
 
 
 def install_fp8_comms_layer_state(transformer, attn_modules) -> None:

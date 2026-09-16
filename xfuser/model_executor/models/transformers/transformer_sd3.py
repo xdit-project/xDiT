@@ -13,7 +13,7 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
-from xfuser.core.distributed.fp8_comms import bind_fp8_comms_attn_modules
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
@@ -49,7 +49,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
         ]
-        bind_fp8_comms_attn_modules(self, sd3_attn_modules(self))
+        register_fp8_comms_eligible_modules(self, sd3_attn_modules(self))
 
     def forward(
         self,

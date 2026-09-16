@@ -11,7 +11,7 @@ from xfuser.model_executor.layers.usp import (
     USP,
     attention,
 )
-from xfuser.core.distributed.fp8_comms import bind_fp8_comms_attn_modules
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -249,7 +249,9 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
                 persistent=False,
             )
         # attn2 is cross-attention over the text encoder: no Ulysses collective.
-        bind_fp8_comms_attn_modules(self, [block.attn1 for block in self.blocks])
+        register_fp8_comms_eligible_modules(
+            self, [block.attn1 for block in self.blocks]
+        )
 
 
     def _update_vsa_attention_kwargs(

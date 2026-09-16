@@ -9,7 +9,7 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
 from xfuser.model_executor.layers.usp import USP
-from xfuser.core.distributed.fp8_comms import bind_fp8_comms_attn_modules
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
     flydsl_fused_qk_norm_rope,
 )
@@ -170,7 +170,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         )
         for layer in self.layers + self.context_refiner + self.noise_refiner:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
-        bind_fp8_comms_attn_modules(self, z_image_attn_modules(self))
+        register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

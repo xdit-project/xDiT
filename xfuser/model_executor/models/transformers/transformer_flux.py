@@ -53,7 +53,7 @@ from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister
 )
 from xfuser.model_executor.layers.usp import USP
-from xfuser.core.distributed.fp8_comms import bind_fp8_comms_attn_modules
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_flydsl import (
     flydsl_fused_qk_norm_rope,
     _HAS_FLYDSL,
@@ -349,7 +349,7 @@ class xFuserFlux1Transformer2DWrapper(FluxTransformer2DModel):
 
         for block in self.transformer_blocks + self.single_transformer_blocks:
             block.attn.processor = xFuserFluxAttnProcessor()
-        bind_fp8_comms_attn_modules(self, flux_attn_modules(self))
+        register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def pad_to_sp_divisible(self, tensor: torch.Tensor, padding_length: int, dim: int) -> torch.Tensor:
         padding =  torch.zeros(
@@ -450,7 +450,7 @@ class xFuserFluxTransformer2DWrapper(xFuserTransformerBaseWrapper):
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
         ]
-        bind_fp8_comms_attn_modules(self, flux_attn_modules(self))
+        register_fp8_comms_eligible_modules(self, flux_attn_modules(self))
 
     def forward(
         self,

@@ -9,11 +9,12 @@ from xfuser.core.distributed.attention_backend import (
     FP8_HADAMARD_MATRIX,
     rotate_qk_for_fp8_comms,
 )
+from xfuser.core.distributed.attention_schedule import AttentionSchedule
 from xfuser.core.distributed.fp8_comms import (
     Fp8CommsCall,
     Fp8CommsState,
-    bind_fp8_comms_attn_modules,
     fp8_attention_kwargs,
+    register_fp8_comms_eligible_modules,
     validate_fp8_comms_config,
 )
 from xfuser.model_executor.models.transformers.transformer_sd3 import (
@@ -42,7 +43,9 @@ class _FakeTransformer(nn.Module):
             block.attn1.register_buffer(
                 "fp8_comms_layer_idx", torch.tensor([i], dtype=torch.long)
             )
-        bind_fp8_comms_attn_modules(self, [block.attn1 for block in self.blocks])
+        register_fp8_comms_eligible_modules(
+            self, [block.attn1 for block in self.blocks]
+        )
 
 
 def _attach_fp8_owner(model):
@@ -233,6 +236,33 @@ def test_fp8_attention_kwargs_returns_call_when_synced():
     assert "fp8_comms" in extras
     assert isinstance(extras["fp8_comms"], Fp8CommsCall)
     assert extras["fp8_comms"].q_scale.item() == 0.5
+
+
+def test_hybrid_schedule_gates_fp8_comms_by_active_backend():
+    fp8 = Fp8CommsState(fixed_scale=0.5)
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+    attn = model.blocks[0].attn1
+    q = torch.ones(1, 2, 2, 4)
+    schedule = AttentionSchedule(
+        [
+            AttentionBackendType.AITER_FLYDSL_FP8,
+            AttentionBackendType.SDPA,
+            AttentionBackendType.AITER_FP8,
+        ]
+    )
+
+    extras_by_step = [
+        fp8_attention_kwargs(
+            fp8, attn, q, q, q, False, schedule.get_backend(step)
+        )
+        for step in range(schedule.total_steps)
+    ]
+
+    assert isinstance(extras_by_step[0]["fp8_comms"], Fp8CommsCall)
+    assert extras_by_step[1] == {}
+    assert isinstance(extras_by_step[2]["fp8_comms"], Fp8CommsCall)
 
 
 def test_hadamard_matrix_is_orthonormal():

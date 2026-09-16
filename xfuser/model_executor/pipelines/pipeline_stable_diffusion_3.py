@@ -441,18 +441,26 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         if get_runtime_state().split_text_embed_in_sp:
             # pooled_prompt_embeds has no sequence dim; only the token stream is
             # sharded. CFG already folded negative embeds into prompt_embeds.
-            prompt_embeds = self._pad_and_chunk_text_for_sp(prompt_embeds)
+            prompt_embeds = self._chunk_text_for_sp(prompt_embeds)
 
         return latents, prompt_embeds
 
-    def _pad_and_chunk_text_for_sp(self, prompt_embeds: torch.Tensor) -> torch.Tensor:
+    def _chunk_text_for_sp(self, prompt_embeds: torch.Tensor) -> torch.Tensor:
         sp_size = get_sequence_parallel_world_size()
         seq_len = prompt_embeds.shape[-2]
         pad = (sp_size - seq_len % sp_size) % sp_size
+        get_runtime_state().text_embed_sp_pad = pad
         if pad:
-            # Keep text in the Ulysses shard (concatenated self-attn) so fp8
-            # comms can quantize Q/K/V. Disabling split_text_embed_in_sp would
-            # take the joint-strategy USP path, which fp8 comms cannot handle.
+            if get_runtime_state().fp8_comms is None:
+                # Preserve the established joint-attention path unless FP8
+                # communication requires text to share the Q/K/V exchange.
+                get_runtime_state().split_text_embed_in_sp = False
+                get_runtime_state().text_embed_sp_pad = 0
+                return prompt_embeds
+
+            # Keep text in the Ulysses shard so it can share the Q/K/V exchange.
+            # The joint attention processor removes these synthetic tokens from
+            # K/V after all-to-all without varlen packing.
             zeros = torch.zeros(
                 *prompt_embeds.shape[:-2],
                 pad,

@@ -27,7 +27,9 @@ except ImportError:
 
 
 from xfuser.core.distributed import (
+    get_ring_parallel_world_size,
     get_sequence_parallel_world_size,
+    get_ulysses_parallel_world_size,
     get_pipeline_parallel_world_size,
 )
 from xfuser.core.fast_attention import (
@@ -54,6 +56,22 @@ env_info = PACKAGES_CHECKER.get_packages_info()
 HAS_AITER = env_info["has_aiter"]
 HAS_LONG_CTX_ATTN = env_info["has_long_ctx_attn"]
 HAS_FLASH_ATTN = env_info["has_flash_attn"]
+
+
+def _joint_sp_padding_attention_kwargs(query, encoder_query):
+    """Describe the valid K/V prefix after sharded joint attention is gathered."""
+    pad = getattr(get_runtime_state(), "text_embed_sp_pad", 0)
+    if not pad:
+        return None
+    if get_ring_parallel_world_size() > 1:
+        raise NotImplementedError(
+            "Masked text padding with joint attention requires ring_degree=1."
+        )
+
+    ulysses_size = get_ulysses_parallel_world_size()
+    local_sequence = query.shape[1] + encoder_query.shape[1]
+    return {"valid_kv_len": ulysses_size * local_sequence - pad}
+
 
 if HAS_LONG_CTX_ATTN:
     from yunchang.kernels import AttnType
@@ -444,8 +462,12 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+            attention_kwargs = None
             if encoder_hidden_states is not None:
                 if get_runtime_state().split_text_embed_in_sp:
+                    attention_kwargs = _joint_sp_padding_attention_kwargs(
+                        query, encoder_hidden_states_query_proj
+                    )
                     query = torch.cat([query, encoder_hidden_states_query_proj], dim=1)
                     key = torch.cat([key, encoder_hidden_states_key_proj], dim=1)
                     value = torch.cat([value, encoder_hidden_states_value_proj], dim=1)
@@ -489,6 +511,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                 joint_value=encoder_hidden_states_value_proj,
                 joint_strategy=joint_strategy,
                 attn_layer=attn,
+                attention_kwargs=attention_kwargs,
             )
 
             hidden_states = hidden_states.transpose(1, 2)

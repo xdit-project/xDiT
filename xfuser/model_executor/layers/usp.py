@@ -250,6 +250,18 @@ def _has_kv_cache(attn_layer) -> bool:
     )
 
 
+def _trim_trailing_kv_padding(key, value, attention_kwargs):
+    """Slice a uniform padded K/V suffix while retaining every query row."""
+    valid_kv_len = (attention_kwargs or {}).get("valid_kv_len")
+    if valid_kv_len is None:
+        return key, value
+    if not 0 < valid_kv_len <= key.shape[2]:
+        raise ValueError(
+            f"valid_kv_len must be in [1, {key.shape[2]}], got {valid_kv_len}."
+        )
+    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
+
+
 def _get_attention_function(backend=None):
     """
     Get the attention function based on the runtime state or from a given explicit backend.
@@ -432,6 +444,11 @@ def USP(
 
     if _has_kv_cache(attn_layer):
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
+
+    # Uniform trailing padding needs no mask or varlen packing. Keeping all Q
+    # rows but slicing K/V is equivalent to masking those keys and lets dense
+    # backends retain their optimized cross-attention path.
+    key, value = _trim_trailing_kv_padding(key, value, attention_kwargs)
 
     if get_sequence_parallel_world_size() == 1: # No SP
         out, _ = attention_function(query,

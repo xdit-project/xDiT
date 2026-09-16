@@ -16,6 +16,12 @@ from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     validate_fp8_comms_config,
 )
+from xfuser.model_executor.models.transformers.transformer_sd3 import (
+    sd3_attn_modules,
+)
+from xfuser.model_executor.models.transformers.transformer_z_image import (
+    z_image_attn_modules,
+)
 
 _HB_DEVICE = next(iter(FP8_HADAMARD_MATRIX))
 
@@ -107,6 +113,29 @@ def test_fp8_comms_rejects_pipefusion():
 
     with pytest.raises(ValueError, match="does not support PipeFusion"):
         validate_fp8_comms_config(config, capabilities, settings)
+
+
+def test_sd3_registration_includes_dual_attention_layers():
+    attn, attn2, final_attn = nn.Module(), nn.Module(), nn.Module()
+    transformer = SimpleNamespace(
+        transformer_blocks=[
+            SimpleNamespace(attn=attn, attn2=attn2),
+            SimpleNamespace(attn=final_attn, attn2=None),
+        ]
+    )
+
+    assert sd3_attn_modules(transformer) == [attn, attn2, final_attn]
+
+
+def test_z_image_registration_includes_refiners():
+    noise, context, main = nn.Module(), nn.Module(), nn.Module()
+    transformer = SimpleNamespace(
+        noise_refiner=[SimpleNamespace(attention=noise)],
+        context_refiner=[SimpleNamespace(attention=context)],
+        layers=[SimpleNamespace(attention=main)],
+    )
+
+    assert z_image_attn_modules(transformer) == [noise, context, main]
 
 
 def _outlier_qk(head_dim: int = 128, seq: int = 64, dtype=torch.bfloat16, device=_HB_DEVICE):

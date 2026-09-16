@@ -364,9 +364,9 @@ def bind_fp8_comms_attn_modules(transformer, modules) -> None:
     """Record which self-attention modules participate in Ulysses FP8 comms.
 
     Call this next to installing USP processors. The order is the per-layer
-    scale index for calibration and scatter. Omit cross-attn, refiners, and
-    other extras: they either have no Ulysses collective or a different
-    activation distribution.
+    scale index for calibration and scatter. Include every self-attention
+    module that executes an eligible Ulysses collective, including refiners;
+    omit cross-attention and modules without that collective.
 
     Walking ``named_modules()`` is the wrong default for the same reason.
     """

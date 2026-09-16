@@ -30,7 +30,6 @@ from xfuser.core.distributed.attention_backend import (
     AttentionBackendType,
 )
 from xfuser.core.distributed.fp8_comms import (
-    Fp8CommsCall,
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
     fp8_comms_output_all_to_all,
@@ -328,18 +327,17 @@ def USP(
         backend=None,
         attention_kwargs: dict | None = None,
         head_balance_layer=None,
-        fp8_comms: Fp8CommsCall | None = None,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     Explicit backend can be provided to specify the attention backend to use.
 
-    ``attn_layer`` (optional): the attention module. Used to attach Ulysses FP8
-    communication when ``fp8_comms`` is omitted, and to update the pipefusion KV
-    cache for modules that registered one. Callers just pass the module; USP
-    no-ops when FP8 comms is off, the module has no scales, or ``joint_strategy``
-    is set, and it skips the KV cache outside pipefusion, where no entry exists.
+    ``attn_layer`` (optional): the attention module. Used to resolve Ulysses FP8
+    communication state and to update the PipeFusion KV cache for modules that
+    registered one. Callers only pass the module; USP no-ops when FP8 comms is
+    off, the module has no scales, or ``joint_strategy`` is set, and it skips
+    the KV cache outside PipeFusion, where no entry exists.
 
     ``head_balance_layer`` (optional): a stable per-layer handle (e.g. the
     attention module). When provided and --use_spargeattn_head_balance is set, the
@@ -355,8 +353,8 @@ def USP(
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer
-    auto_fp8 = fp8_comms is None
-    if auto_fp8 and not joint_strategy:
+    fp8_comms = None
+    if not joint_strategy:
         if fp8_module is None:
             _warn_fp8_comms_missing_attn()
         else:
@@ -483,7 +481,7 @@ def USP(
                 out, attention_kwargs, head_balance_layer, hb_uly
             )
 
-    if auto_fp8 and fp8_module is not None and not joint_strategy:
+    if fp8_module is not None and not joint_strategy:
         fp8_observe_output(get_runtime_state().fp8_comms, fp8_module, out, False)
 
     return out
@@ -499,7 +497,6 @@ def attention(
         attention_kwargs=None,
         head_balance_layer=None,
         attn_layer=None,
-        fp8_comms: Fp8CommsCall | None = None,
     ):
     """
     Runs attention call without any parallelism.

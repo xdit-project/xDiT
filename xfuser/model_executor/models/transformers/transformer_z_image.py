@@ -146,6 +146,19 @@ class xFuserZSingleStreamAttnProcessor:
 
         return output
 
+
+def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
+    """Return every Z-Image attention module that executes USP."""
+    return [
+        layer.attention
+        for layer in (
+            *transformer.noise_refiner,
+            *transformer.context_refiner,
+            *transformer.layers,
+        )
+    ]
+
+
 class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
     def __init__(
@@ -157,11 +170,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         )
         for layer in self.layers + self.context_refiner + self.noise_refiner:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
-        # Refiners share the USP processor but not the scale list: they see
-        # different sequence stats and may not run on the calibration prompt.
-        bind_fp8_comms_attn_modules(
-            self, [layer.attention for layer in self.layers]
-        )
+        bind_fp8_comms_attn_modules(self, z_image_attn_modules(self))
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

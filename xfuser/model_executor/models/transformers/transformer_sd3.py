@@ -24,6 +24,17 @@ from .base_transformer import xFuserTransformerBaseWrapper
 logger = init_logger(__name__)
 
 
+def sd3_attn_modules(transformer) -> list[nn.Module]:
+    """Return every SD3 self-attention module that executes USP."""
+    modules = []
+    for block in transformer.transformer_blocks:
+        modules.append(block.attn)
+        attn2 = getattr(block, "attn2", None)
+        if attn2 is not None:
+            modules.append(attn2)
+    return modules
+
+
 @xFuserTransformerWrappersRegister.register(SD3Transformer2DModel)
 class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
     def __init__(
@@ -38,9 +49,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
         ]
-        bind_fp8_comms_attn_modules(
-            self, [block.attn for block in self.transformer_blocks]
-        )
+        bind_fp8_comms_attn_modules(self, sd3_attn_modules(self))
 
     def forward(
         self,

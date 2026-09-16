@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -12,6 +14,7 @@ from xfuser.core.distributed.fp8_comms import (
     Fp8CommsState,
     bind_fp8_comms_attn_modules,
     fp8_attention_kwargs,
+    validate_fp8_comms_config,
 )
 
 _HB_DEVICE = next(iter(FP8_HADAMARD_MATRIX))
@@ -92,6 +95,18 @@ def test_unexercised_model_has_zero_running_max():
     model_state = fp8.get_model_state(model)
     assert model_state.synced is False
     assert model_state.q_running_max.max() == 0
+
+
+def test_fp8_comms_rejects_pipefusion():
+    config = SimpleNamespace(
+        use_fp8_comms=True,
+        pipefusion_parallel_degree=2,
+    )
+    capabilities = SimpleNamespace(use_fp8_comms=True)
+    settings = SimpleNamespace(model_name="test-model")
+
+    with pytest.raises(ValueError, match="does not support PipeFusion"):
+        validate_fp8_comms_config(config, capabilities, settings)
 
 
 def _outlier_qk(head_dim: int = 128, seq: int = 64, dtype=torch.bfloat16, device=_HB_DEVICE):

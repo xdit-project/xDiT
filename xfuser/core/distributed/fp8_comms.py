@@ -543,6 +543,11 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
 
     if not capabilities.use_fp8_comms:
         raise ValueError(f"Model {settings.model_name} does not support --use_fp8_comms.")
+    if getattr(config, "pipefusion_parallel_degree", 1) > 1:
+        raise ValueError(
+            "--use_fp8_comms does not support PipeFusion because its joint-attention "
+            "path cannot mix FP8 communication tensors with BF16 joint tensors."
+        )
     if (config.ulysses_degree or 1) <= 1:
         raise ValueError("--use_fp8_comms requires ulysses_degree > 1.")
     if (

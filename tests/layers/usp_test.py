@@ -26,6 +26,25 @@ def _init_environment():
     initialize_runtime_state()
     initialize_model_parallel(ring_degree=1, ulysses_degree=1)
 
+
+class TestUSPKvCacheSelection(unittest.TestCase):
+
+    @unittest.mock.patch("xfuser.model_executor.layers.usp.get_cache_manager")
+    def test_cache_update_requires_registered_layer(self, mock_get_cache_manager):
+        cache_manager = mock_get_cache_manager.return_value
+        layer = object()
+
+        cache_manager.has_cache_entry.return_value = False
+        self.assertFalse(usp._has_kv_cache(layer))
+
+        cache_manager.has_cache_entry.return_value = True
+        self.assertTrue(usp._has_kv_cache(layer))
+
+        cache_manager.has_cache_entry.reset_mock()
+        self.assertFalse(usp._has_kv_cache(None))
+        cache_manager.has_cache_entry.assert_not_called()
+
+
 class TestUSP(unittest.TestCase):
 
     def setUp(self):

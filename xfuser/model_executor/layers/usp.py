@@ -242,6 +242,15 @@ def _update_and_get_kv_cache(key, value, attn_layer):
     value = value.transpose(1, 2).contiguous()
     return key, value
 
+
+def _has_kv_cache(attn_layer) -> bool:
+    """Return whether PipeFusion registered a KV cache for this attention layer."""
+    return (
+        attn_layer is not None
+        and get_cache_manager().has_cache_entry(attn_layer)
+    )
+
+
 def _get_attention_function(backend=None):
     """
     Get the attention function based on the runtime state or from a given explicit backend.
@@ -423,7 +432,7 @@ def USP(
             for name, tensor in extra_inputs:
                 attention_kwargs[name] = _ft_c_input_all_to_all(tensor)
 
-    if attn_layer is not None and get_cache_manager().has_cache_entry(attn_layer):
+    if _has_kv_cache(attn_layer):
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
     if get_sequence_parallel_world_size() == 1: # No SP

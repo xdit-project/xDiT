@@ -202,9 +202,8 @@ def test_aiter_mxfp6_probe_requires_gfx950(monkeypatch):
     monkeypatch.setattr(
         format_backends,
         "import_module",
-        lambda name: api if name == "aiter.ops.gemm_op_a6w6" else real_import(name),
+        lambda name: api if name == "aiter" else real_import(name),
     )
-    monkeypatch.delenv("AITER_TRITON_ONLY", raising=False)
 
     assert format_backends._probe_aiter_mxfp6_apis(lambda: "gfx950") == (
         True,

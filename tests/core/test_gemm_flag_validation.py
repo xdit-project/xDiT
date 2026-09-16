@@ -266,6 +266,7 @@ def test_runner_parser_accepts_explicit_gemm_profile(runtime):
     from xfuser.config.args import FlexibleArgumentParser
 
     parser = runtime.args_cls.add_runner_args(FlexibleArgumentParser())
+    assert "--use_fp6_gemms" not in parser._option_string_actions
     parsed = parser.parse_args(
         ["--model", "test/model", "--gemm-quantization", "low=fp4,high=fp6"]
     )
@@ -273,6 +274,22 @@ def test_runner_parser_accepts_explicit_gemm_profile(runtime):
 
     assert config.use_fp4_gemms is True
     assert config.use_fp6_gemms is True
+
+
+def test_tiered_fp8_profile_supports_text_encoder_fp8(runtime):
+    config = _args(
+        runtime,
+        gemm_quantization="low=fp4,high=fp8",
+        use_fp8_text_encoder=True,
+    )
+    config._validate_gemm_quantization_flags()
+
+    with pytest.raises(ValueError, match="profile containing FP8"):
+        _args(
+            runtime,
+            gemm_quantization="low=fp4,high=fp6",
+            use_fp8_text_encoder=True,
+        )._validate_gemm_quantization_flags()
 
 
 def test_advanced_yaml_maps_to_existing_wan_target_settings(runtime, tmp_path):

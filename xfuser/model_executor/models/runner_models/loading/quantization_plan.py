@@ -140,7 +140,11 @@ class QuantizationPlan:
     def log_gemm_plan(self) -> None:
         """Log the resolved transformer target-to-format mapping."""
 
-        spec = self.model.config.gemm_quantization_spec
+        spec = getattr(self.model.config, "gemm_quantization_spec", None)
+        if spec is None:
+            if self.model.config.use_fp4_gemms:
+                self.log_fp8_overrides()
+            return
         if spec.is_pure("none"):
             return
 

@@ -50,7 +50,12 @@ from xfuser.core.distributed.attention_backend import (
     AttentionBackendType,
 )
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
-from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+from xfuser.core.distributed.attention_schedule import (
+    AttentionSchedule,
+    GemmPrecisionSchedule,
+    create_hybrid_attn_schedule,
+    create_hybrid_gemm_schedule,
+)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -1077,8 +1082,6 @@ class xFuserModel(abc.ABC):
         total_steps = input_args["num_inference_steps"] * multiplier
 
         if self.config.hybrid_gemm_schedule is not None:
-            from xfuser.core.distributed.attention_schedule import GemmPrecisionSchedule
-
             denoising_schedule = GemmPrecisionSchedule.from_comma_delimited_string(
                 self.config.hybrid_gemm_schedule,
                 low_format=self.config.gemm_quantization_spec.low,

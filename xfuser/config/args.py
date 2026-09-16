@@ -243,8 +243,7 @@ class xFuserArgs:
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
-    # Alone, route the runner's FP4/FP8 target union to AITER MXFP6. With
-    # use_fp4_gemms, keep MXFP4 primary and use MXFP6 for its remainders.
+    # Internal compatibility bridge derived from gemm_quantization.
     use_fp6_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
     fp8_precision_override_suffix_patterns: Optional[str] = None
@@ -366,7 +365,6 @@ class xFuserArgs:
             for name in (
                 "use_fp8_gemms",
                 "use_fp4_gemms",
-                "use_fp6_gemms",
                 "use_int8_gemms",
             )
             if getattr(self, name)
@@ -379,6 +377,11 @@ class xFuserArgs:
             )
             if getattr(self, name) is not None
         )
+
+        if not explicit_spec and self.use_fp6_gemms:
+            raise ValueError(
+                "MXFP6 must be selected through gemm_quantization."
+            )
 
         if explicit_spec:
             self._warn_deprecated_gemm_options(legacy_formats, ignored=True)
@@ -398,11 +401,7 @@ class xFuserArgs:
                 self.use_fp4_gemms = True
                 self.use_fp6_gemms = spec.high == "fp6"
         else:
-            if self.use_fp4_gemms and self.use_fp6_gemms:
-                spec = GemmQuantizationSpec("fp4", "fp6")
-            elif self.use_fp6_gemms:
-                spec = GemmQuantizationSpec("fp6")
-            elif self.use_fp4_gemms:
+            if self.use_fp4_gemms:
                 spec = GemmQuantizationSpec("fp4", "fp8")
             elif self.use_fp8_gemms:
                 spec = GemmQuantizationSpec("fp8")
@@ -1036,7 +1035,7 @@ class xFuserArgs:
             "--use_fp8_text_encoder",
             action="store_true",
             help="Also quantize the text encoder's linear layers to FP8 (selected models only). "
-                 "Requires --use_fp8_gemms, which covers the transformer alone. Frees several GB "
+                 "Requires a GEMM profile containing FP8. Frees several GB "
                  "for large bf16 text encoders, at whatever output-quality cost FP8 carries for "
                  "the encoder; off by default because that is a quality trade-off, not a free win.",
         )
@@ -1044,16 +1043,6 @@ class xFuserArgs:
             "--use_fp4_gemms",
             action="store_true",
             help="Quantize the transformer linear layers (selected models only).",
-        )
-        parser.add_argument(
-            "--use_fp6_gemms",
-            action="store_true",
-            help=(
-                "On supported ROCm models, quantize the declared transformer "
-                "targets to AITER MXFP6. Combine with --use_fp4_gemms to keep "
-                "MXFP4 primary and replace its FP8 precision overrides and "
-                "FP8-only targets with MXFP6."
-            ),
         )
         parser.add_argument(
             "--fp8_precision_override_prefix_patterns",
@@ -1383,6 +1372,11 @@ class xFuserArgs:
     def _validate_gemm_quantization_flags(self) -> None:
         """Validate ownership of mutually exclusive generic GEMM quantizers."""
         spec = self.gemm_quantization_spec
+        if self.use_fp8_text_encoder and "fp8" not in spec.formats:
+            raise ValueError(
+                "--use_fp8_text_encoder requires a gemm_quantization profile "
+                "containing FP8."
+            )
         has_advanced_targets = (
             self.gemm_high_precision_targets != "model"
             or self.gemm_high_precision_module_patterns is not None
@@ -1480,12 +1474,6 @@ class xFuserArgs:
             raise ValueError(
                 "--group_offload_low_cpu_mem only affects group CPU offload; pass "
                 "--enable_group_cpu_offload too."
-            )
-
-        if self.use_fp8_text_encoder and not self.use_fp8_gemms:
-            raise ValueError(
-                "--use_fp8_text_encoder extends --use_fp8_gemms, which covers the transformer "
-                "alone, to the text encoder; pass --use_fp8_gemms too."
             )
 
         if (

@@ -167,9 +167,9 @@ Individual model classes that inherit from `xFuserModel`:
 | `--use_torch_compile` | Enable torch.compile acceleration | False |
 | `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `int8`, `low=fp4,high=fp8`, or `low=fp4,high=fp6` | none |
 | `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit FP8/FP4 schedule | None |
-| `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_fp6_gemms`, `--use_int8_gemms` | Deprecated format selectors retained for compatibility | False |
-| `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well (requires `--use_fp8_gemms`). Frees several GB for models with large bf16 text encoders. | False |
-| `--use_hybrid_gemm_schedule` | Enable the simple FP8/FP4 endpoint schedule; requires an FP4/FP8 profile | False |
+| `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms` | Deprecated format selectors retained for compatibility | False |
+| `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well; requires a profile containing FP8 | False |
+| `--use_hybrid_gemm_schedule` | Use the profile's FP8 or FP6 high format at the endpoints and FP4 in the middle | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |
 | `--enable_model_cpu_offload` | Enable model CPU offload | False |

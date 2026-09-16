@@ -74,14 +74,7 @@ class xFuserModelRunner:
 
     def preprocess_args(self, input_args: dict) -> dict:
         """ Preprocess input arguments before passing them to the model """
-        resolved = dict(input_args)
-        for name in (
-            "use_hybrid_gemm_schedule",
-            "num_hybrid_gemm_high_precision_steps",
-            "hybrid_gemm_schedule",
-        ):
-            resolved[name] = getattr(self.config, name)
-        return self.model.preprocess_args(resolved)
+        return self.model.preprocess_args(input_args)
 
     def profile(self, input_args: dict) -> Tuple[DiffusionOutput, list, torch.profiler.profiler.profile]:
         """ Profile the model execution """

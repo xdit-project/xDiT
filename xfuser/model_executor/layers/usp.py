@@ -174,6 +174,81 @@ def _combined_qkv_all_to_all(q, k, v, *extra):
     return torch.unbind(qkv, dim=0)
 
 
+def _combined_gqa_qkv_all_to_all(q, k, v, *extra):
+    """Exchange GQA Q/K/V in one collective without expanding KV heads.
+
+    Every destination receives its contiguous query-head shard and the
+    corresponding compact KV-head shard from every source rank. Query-shaped
+    extra tensors can share the same collective.
+    """
+    world_size = get_ulysses_parallel_world_size()
+    if world_size <= 1:
+        return (q, k, v, *extra)
+
+    tensors = (q, k, v, *extra)
+    if any(tensor.ndim != 4 for tensor in tensors):
+        raise ValueError("GQA all-to-all inputs must all have four dimensions.")
+    if k.shape != v.shape:
+        raise ValueError(
+            "GQA key and value tensors must have identical shapes, got "
+            f"{tuple(k.shape)} and {tuple(v.shape)}."
+        )
+
+    batch_size, _, _, head_dim = q.shape
+    if any(
+        tensor.shape[0] != batch_size or tensor.shape[-1] != head_dim
+        for tensor in tensors
+    ):
+        raise ValueError("GQA all-to-all inputs must share batch and head dimensions.")
+    if any(tensor.shape[1] % world_size != 0 for tensor in tensors):
+        raise ValueError(
+            "Every GQA head count must be divisible by the Ulysses world size."
+        )
+    if any(tensor.shape != q.shape for tensor in extra):
+        raise ValueError("Extra GQA all-to-all inputs must match the query shape.")
+
+    packed_chunks = []
+    metadata = []
+    for tensor in tensors:
+        _, heads, sequence_length, tensor_head_dim = tensor.shape
+        local_heads = heads // world_size
+        # Match _ft_c_input_all_to_all's destination-major layout, then pack
+        # unequal Q and KV payloads into one equally split collective.
+        packed_chunks.append(
+            tensor.permute(1, 0, 2, 3).contiguous().reshape(world_size, -1)
+        )
+        metadata.append((local_heads, sequence_length, tensor_head_dim))
+
+    chunk_sizes = [chunk.shape[1] for chunk in packed_chunks]
+    exchanged = _sdpa_all_to_all_single(torch.cat(packed_chunks, dim=1))
+
+    outputs = []
+    for chunk, (local_heads, sequence_length, tensor_head_dim) in zip(
+        exchanged.split(chunk_sizes, dim=1), metadata
+    ):
+        outputs.append(
+            chunk.view(
+                world_size,
+                local_heads,
+                batch_size,
+                sequence_length,
+                tensor_head_dim,
+            )
+            .permute(2, 1, 0, 3, 4)
+            .reshape(batch_size, local_heads, -1, tensor_head_dim)
+        )
+    return tuple(outputs)
+
+
+def _repeat_kv_heads(key, value, repeats):
+    if repeats == 1:
+        return key, value
+    return (
+        key.repeat_interleave(repeats, dim=1),
+        value.repeat_interleave(repeats, dim=1),
+    )
+
+
 def _ft_c_output_all_to_all(x):
     world_size = get_ulysses_parallel_world_size()
     if world_size <= 1:
@@ -339,6 +414,7 @@ def USP(
         backend=None,
         attention_kwargs: dict | None = None,
         head_balance_layer=None,
+        kv_head_repeat: int = 1,
     ):
     """
     Unified Sequence Parallelism (USP) attention call, supporting combinations of Ulysses and
@@ -358,10 +434,36 @@ def USP(
     output. No-op for non-sparse backends (no cost is published) and for ring/
     joint paths. Also used as the FP8-comms module when ``attn_layer`` is None
     (KV cache already updated by the caller).
+
+    ``kv_head_repeat`` keeps grouped-query attention K/V heads compact during
+    the Ulysses input all-to-all, then repeats each local KV head immediately
+    before attention. With ``combine_qkv_a2a=True``, unequal Q and KV payloads
+    are packed into one collective.
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
-
+    if isinstance(kv_head_repeat, bool) or not isinstance(kv_head_repeat, int):
+        raise TypeError("kv_head_repeat must be an integer.")
+    if kv_head_repeat < 1:
+        raise ValueError("kv_head_repeat must be at least 1.")
+    if kv_head_repeat > 1:
+        if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+            raise ValueError("GQA query, key, and value must have four dimensions.")
+        if key.shape[1] != value.shape[1]:
+            raise ValueError("GQA key and value must have the same head count.")
+        if query.shape[1] != key.shape[1] * kv_head_repeat:
+            raise ValueError(
+                f"Query heads ({query.shape[1]}) must equal KV heads "
+                f"({key.shape[1]}) times kv_head_repeat ({kv_head_repeat})."
+            )
+        ulysses_world_size = get_ulysses_parallel_world_size()
+        if ulysses_world_size > 1 and key.shape[1] % ulysses_world_size != 0:
+            raise ValueError(
+                f"KV heads ({key.shape[1]}) must be divisible by the Ulysses "
+                f"world size ({ulysses_world_size})."
+            )
+        if joint_strategy is not None:
+            raise NotImplementedError("GQA KV repetition does not support joint tensors.")
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer
@@ -382,11 +484,19 @@ def USP(
                 fp8_backend,
             ).get("fp8_comms")
 
+    if kv_head_repeat > 1 and fp8_comms is not None:
+        raise NotImplementedError(
+            "GQA KV repetition does not support FP8 communication."
+        )
+
     hb_uly = get_ulysses_parallel_world_size()
     hb_backend = backend if backend is not None else get_runtime_state().attention_backend
     query, key, value, hb_applied, attention_kwargs = apply_head_balance(
         query, key, value, head_balance_layer,
-        enabled=get_runtime_state().runtime_config.use_spargeattn_head_balance,
+        enabled=(
+            get_runtime_state().runtime_config.use_spargeattn_head_balance
+            and kv_head_repeat == 1
+        ),
         ulysses_world_size=hb_uly,
         ring_world_size=get_ring_parallel_world_size(),
         is_sparge_backend=hb_backend in _HEAD_BALANCE_BACKENDS,
@@ -428,6 +538,13 @@ def USP(
                 fp8_comms_backend,
             )
             attention_kwargs = (attention_kwargs or {}) | attn_kwargs_update
+        elif combine_qkv_a2a and kv_head_repeat > 1:
+            exchanged = _combined_gqa_qkv_all_to_all(
+                query, key, value, *(tensor for _, tensor in extra_inputs)
+            )
+            query, key, value = exchanged[:3]
+            for (name, _), tensor in zip(extra_inputs, exchanged[3:]):
+                attention_kwargs[name] = tensor
         elif combine_qkv_a2a and query.shape == key.shape == value.shape:
             exchanged = _combined_qkv_all_to_all(
                 query, key, value, *(tensor for _, tensor in extra_inputs)
@@ -449,6 +566,9 @@ def USP(
     # rows but slicing K/V is equivalent to masking those keys and lets dense
     # backends retain their optimized cross-attention path.
     key, value = _trim_trailing_kv_padding(key, value, attention_kwargs)
+
+    if kv_head_repeat > 1:
+        key, value = _repeat_kv_heads(key, value, kv_head_repeat)
 
     if get_sequence_parallel_world_size() == 1: # No SP
         out, _ = attention_function(query,

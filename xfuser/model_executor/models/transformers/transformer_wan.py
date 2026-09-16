@@ -11,16 +11,12 @@ from xfuser.model_executor.layers.usp import (
     USP,
     attention,
 )
+from xfuser.core.distributed.fp8_comms import bind_fp8_comms_attn_modules
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
     get_sp_group,
     get_runtime_state,
-)
-from xfuser.core.distributed.fp8_comms import (
-    fp8_attention_kwargs,
-    fp8_observe_output,
-    install_fp8_comms_layer_state,
 )
 from xfuser.model_executor.layers.attention_processor import (
     xFuserAttentionProcessorRegister
@@ -123,12 +119,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
         else:
             query, key, value = self._qk_norm_rope_reference(attn, query, key, value, rotary_emb)
 
-        runtime_state = get_runtime_state()
-        fp8_kwargs = fp8_attention_kwargs(
-            runtime_state.fp8_comms, attn, query, key, value,
-            self.is_cross_attention, runtime_state.attention_backend,
-        )
-
         # I2V task
         hidden_states_img = None
         if encoder_hidden_states_img is not None:
@@ -144,7 +134,6 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
                 value_img.transpose(1, 2),
                 backend=backend,
                 attention_kwargs=self.attention_kwargs,
-                **fp8_kwargs,
             ).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.to(activation_dtype)
@@ -156,12 +145,8 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             backend=backend,
             attention_kwargs=self.attention_kwargs,
             head_balance_layer=attn,
-            **fp8_kwargs,
+            attn_layer=None if self.is_cross_attention else attn,
         ).transpose(1, 2)
-
-        fp8_observe_output(
-            runtime_state.fp8_comms, attn, hidden_states, self.is_cross_attention
-        )
 
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(activation_dtype)
@@ -263,6 +248,8 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
                 torch.arange(num_attention_heads, dtype=torch.long),
                 persistent=False,
             )
+        # attn2 is cross-attention over the text encoder: no Ulysses collective.
+        bind_fp8_comms_attn_modules(self, [block.attn1 for block in self.blocks])
 
 
     def _update_vsa_attention_kwargs(
@@ -288,15 +275,6 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         )
         self.attention_kwargs["vsa_effective_drop_rate"] = effective_drop_rate
         self.attention_kwargs["vsa_use_dense"] = effective_drop_rate <= 0.25
-
-    def register_fp8_comms_state(self, fp8_comms) -> None:
-        """Install per-layer fp8 buffers and register running-max state (called only when fp8
-        comms is enabled, before compile). No buffers are added when fp8 comms is off."""
-        if fp8_comms is None:
-            return
-        install_fp8_comms_layer_state(self)
-        fp8_comms.register_model(self, len(self.blocks))
-
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
         if pad_amount > 0:

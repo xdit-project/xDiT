@@ -51,11 +51,13 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     parameters = inspect.signature(mha_v4_fn).parameters
     block_mask = parameters.get("block_mask") is not None
     scale_modes = parameters.get("q_scale_mode") is not None
-    try:
-        from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
-        kv_tile = int(_aiter_mha_v4_kv_tile())
-    except ImportError:
-        kv_tile = 64 if is_gfx942 else 128
+    kv_tile = 64 if is_gfx942 else 128
+    if enabled:
+        try:
+            from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
+            kv_tile = int(_aiter_mha_v4_kv_tile())
+        except ImportError:
+            pass
     return _AiterMhaV4Capabilities(
         enabled=enabled,
         is_gfx942=is_gfx942,
@@ -586,6 +588,40 @@ if env_info["has_aiter"]:
         ) -> torch.Tensor:
             return torch.empty_like(query)
 
+        @custom_op("xfuser::flydsl_attn_fp8_prequant", mutates_args=())
+        def _flydsl_attn_fp8_prequant_kernel(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            q_descale: torch.Tensor,
+            k_descale: torch.Tensor,
+            v_descale: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return flydsl_flash_attn_func_aiter(
+                query,
+                key,
+                value,
+                causal=is_causal,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                waves_per_eu=2,
+                daz=True,
+            )
+
+        @register_fake("xfuser::flydsl_attn_fp8_prequant")
+        def _flydsl_attn_fp8_prequant_fake(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            q_descale: torch.Tensor,
+            k_descale: torch.Tensor,
+            v_descale: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return torch.empty_like(query, dtype=torch.bfloat16)
+
     except ImportError:
         pass
 if env_info["has_flash_attn"]:
@@ -709,6 +745,7 @@ def _mha_v4_sparge_tile():
 
 SUPPORTS_PRE_QUANTIZATION_BACKENDS = {
     AttentionBackendType.AITER_FP8,
+    AttentionBackendType.AITER_FLYDSL_FP8,
 }
 
 
@@ -983,7 +1020,10 @@ def rotate_qk_for_fp8_comms(query, key, backend):
     both must measure and quantize the same distribution, otherwise the frozen
     per-layer scale describes a tensor that is never quantized.
     """
-    if backend != AttentionBackendType.AITER_FP8:
+    if backend not in (
+        AttentionBackendType.AITER_FP8,
+        AttentionBackendType.AITER_FLYDSL_FP8,
+    ):
         return query, key
     R = _get_fp8_hadamard_matrix(query.shape[-1], query.device)
     return (
@@ -2293,8 +2333,38 @@ def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_k
     )
 
 
+def _aiter_flydsl_fp8_prequant_call(query, key, value, dropout_p, is_causal, attention_kwargs):
+    """FlyDSL fp8 attention on Q/K/V that fp8 comms already quantized (and rotated)."""
+    _validate_aiter_low_precision_dropout(dropout_p)
+    if attention_kwargs.get("indices_k") is not None:
+        raise NotImplementedError(
+            "fp8 comms pre-quantized attention does not support varlen packing; "
+            "the indices_k mask would be silently dropped and dense attention would "
+            "run over padded keys."
+        )
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output = torch.ops.xfuser.flydsl_attn_fp8_prequant(
+        query,
+        key,
+        value,
+        attention_kwargs["q_descale"],
+        attention_kwargs["k_descale"],
+        attention_kwargs["v_descale"],
+        is_causal,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, None
+
+
 @register_attention_function(AttentionBackendType.AITER_FLYDSL_FP8)
 def _aiter_flydsl_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    attention_kwargs = attention_kwargs or {}
+    if attention_kwargs.get("pre_quantized", False):
+        return _aiter_flydsl_fp8_prequant_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
     return _aiter_flydsl_dispatch(
         query, key, value, dropout_p, is_causal, attention_kwargs, torch.ops.xfuser.flydsl_attn_fp8
     )

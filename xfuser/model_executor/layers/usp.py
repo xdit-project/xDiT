@@ -23,6 +23,7 @@ from xfuser.core.distributed import (
 
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
+from xfuser.logger import init_logger
 from xfuser.core.distributed.attention_backend import (
     AITER_MHA_V4_SPARGE_BACKEND_SET,
     ATTENTION_FUNCTION_REGISTRY,
@@ -30,8 +31,10 @@ from xfuser.core.distributed.attention_backend import (
 )
 from xfuser.core.distributed.fp8_comms import (
     Fp8CommsCall,
+    fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
     fp8_comms_output_all_to_all,
+    fp8_observe_output,
 )
 from xfuser.core.sparge_attention.head_balance import (
     apply_head_balance,
@@ -50,6 +53,22 @@ _HEAD_BALANCE_BACKENDS = frozenset({
 
 _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
+_warned_fp8_comms_missing_attn = False
+logger = init_logger(__name__)
+
+
+def _warn_fp8_comms_missing_attn():
+    global _warned_fp8_comms_missing_attn
+    if _warned_fp8_comms_missing_attn:
+        return
+    runtime_state = get_runtime_state()
+    if runtime_state.fp8_comms is None or get_ulysses_parallel_world_size() <= 1:
+        return
+    _warned_fp8_comms_missing_attn = True
+    logger.warning(
+        "use_fp8_comms is enabled but USP was called without attn_layer "
+        "(or a module with fp8 scale buffers). FP8 all-to-all will not run on this path."
+    )
 
 # A backend that needs per-head tensors of its own alongside query/key/value
 # lists their ``attention_kwargs`` keys under this one, and USP carries them
@@ -307,17 +326,42 @@ def USP(
     Ring attention. Also supports joint tensors and key-value caching for pipeline parallelism.
     Explicit backend can be provided to specify the attention backend to use.
 
+    ``attn_layer`` (optional): the attention module. Used to attach Ulysses FP8
+    communication when ``fp8_comms`` is omitted, and to update the pipefusion KV
+    cache for modules that registered one. Callers just pass the module; USP
+    no-ops when FP8 comms is off, the module has no scales, or ``joint_strategy``
+    is set, and it skips the KV cache outside pipefusion, where no entry exists.
+
     ``head_balance_layer`` (optional): a stable per-layer handle (e.g. the
     attention module). When provided and --use_spargeattn_head_balance is set, the
     Ulysses head dimension is permuted so each rank gets a cost-balanced subset
     of heads (block-sparse load balancing); the permutation is inverted on the
     output. No-op for non-sparse backends (no cost is published) and for ring/
-    joint paths.
+    joint paths. Also used as the FP8-comms module when ``attn_layer`` is None
+    (KV cache already updated by the caller).
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
 
     attention_function = _get_attention_function(backend=backend)
+
+    fp8_module = attn_layer if attn_layer is not None else head_balance_layer
+    auto_fp8 = fp8_comms is None
+    if auto_fp8 and not joint_strategy:
+        if fp8_module is None:
+            _warn_fp8_comms_missing_attn()
+        else:
+            runtime_state = get_runtime_state()
+            fp8_backend = backend if backend is not None else runtime_state.attention_backend
+            fp8_comms = fp8_attention_kwargs(
+                runtime_state.fp8_comms,
+                fp8_module,
+                query,
+                key,
+                value,
+                False,
+                fp8_backend,
+            ).get("fp8_comms")
 
     hb_uly = get_ulysses_parallel_world_size()
     hb_backend = backend if backend is not None else get_runtime_state().attention_backend
@@ -379,7 +423,7 @@ def USP(
             for name, tensor in extra_inputs:
                 attention_kwargs[name] = _ft_c_input_all_to_all(tensor)
 
-    if attn_layer:
+    if attn_layer is not None and get_cache_manager().has_cache_entry(attn_layer):
         key, value = _update_and_get_kv_cache(key, value, attn_layer)
 
     if get_sequence_parallel_world_size() == 1: # No SP
@@ -430,6 +474,9 @@ def USP(
                 out, attention_kwargs, head_balance_layer, hb_uly
             )
 
+    if auto_fp8 and fp8_module is not None and not joint_strategy:
+        fp8_observe_output(get_runtime_state().fp8_comms, fp8_module, out, False)
+
     return out
 
 
@@ -442,6 +489,7 @@ def attention(
         backend=None,
         attention_kwargs=None,
         head_balance_layer=None,
+        attn_layer=None,
         fp8_comms: Fp8CommsCall | None = None,
     ):
     """
@@ -449,9 +497,9 @@ def attention(
     This can be used when the logic necessitates no Ulysses or Ring parallelism in any case.
     Explicit backend can be provided to specify the attention backend to use.
 
-    ``head_balance_layer`` is accepted for call-site signature parity with
-    ``USP`` but ignored here: with no Ulysses parallelism there is no head
-    sharding to balance.
+    ``attn_layer`` and ``head_balance_layer`` are accepted for call-site signature
+    parity with ``USP`` but ignored here: with no Ulysses parallelism there is
+    no head sharding or FP8 all-to-all.
     """
     attention_function = _get_attention_function(backend=backend)
     out, _ = attention_function(

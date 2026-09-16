@@ -52,6 +52,9 @@ class Fp8CommsModelState:
         self.k_running_max = torch.zeros(num_layers, dtype=torch.float32)
         self.v_running_max = torch.zeros(num_layers, dtype=torch.float32)
         self.o_running_max = torch.zeros(num_layers, dtype=torch.float32)
+        # `synced` means calibrated scales were scattered into the attn buffers
+        # and USP should quantize from here on. Calibration that measures nothing
+        # raises rather than leaving the model unsynced.
         self.synced = False
 
     def to_device_(self, device: torch.device):
@@ -64,8 +67,8 @@ class Fp8CommsModelState:
 class Fp8CommsState:
     """Holds all state for FP8 Ulysses all-to-all communication.
 
-    Per-layer scales live on each attn1 module as compile-friendly buffers; this class
-    holds per-model running amaxes during calibration only.
+    Per-layer scales live on each self-attention module as compile-friendly buffers;
+    this class holds per-model running amaxes during calibration only.
     """
 
     def __init__(
@@ -124,11 +127,11 @@ class Fp8CommsState:
     def apply_fixed_scales_to_model(self, model) -> None:
         """Broadcast a fixed scale to all self-attention layer buffers."""
         scale = float(self.fixed_scale)
-        for block in model.blocks:
-            block.attn1.fp8_q_scale.fill_(scale)
-            block.attn1.fp8_k_scale.fill_(scale)
-            block.attn1.fp8_v_scale.fill_(scale)
-            block.attn1.fp8_o_scale.fill_(scale)
+        for attn in resolve_fp8_comms_attn_modules(model):
+            attn.fp8_q_scale.fill_(scale)
+            attn.fp8_k_scale.fill_(scale)
+            attn.fp8_v_scale.fill_(scale)
+            attn.fp8_o_scale.fill_(scale)
 
     def to_device_(self, device: torch.device):
         for model_state in self._models.values():
@@ -186,14 +189,16 @@ class Fp8CommsState:
         v_scales: torch.Tensor,
         o_scales: torch.Tensor,
     ):
-        for i, block in enumerate(model.blocks):
-            block.attn1.fp8_q_scale.copy_(q_scales[i : i + 1])
-            block.attn1.fp8_k_scale.copy_(k_scales[i : i + 1])
-            block.attn1.fp8_v_scale.copy_(v_scales[i : i + 1])
-            block.attn1.fp8_o_scale.copy_(o_scales[i : i + 1])
+        # Same order as install_fp8_comms_layer_state, so index i is the layer that
+        # carries fp8_comms_layer_idx == i.
+        for i, attn in enumerate(resolve_fp8_comms_attn_modules(model)):
+            attn.fp8_q_scale.copy_(q_scales[i : i + 1])
+            attn.fp8_k_scale.copy_(k_scales[i : i + 1])
+            attn.fp8_v_scale.copy_(v_scales[i : i + 1])
+            attn.fp8_o_scale.copy_(o_scales[i : i + 1])
 
     def sync(self, model) -> None:
-        """All-reduce per-layer running amaxes and scatter scales into attn1 buffers.
+        """All-reduce per-layer running amaxes and scatter scales into the attn buffers.
 
         Call outside the compiled region after a calibration forward pass.
         """
@@ -207,13 +212,17 @@ class Fp8CommsState:
             and model_state.k_running_max.max() == 0
             and model_state.v_running_max.max() == 0
         ):
-            logger.warning(
+            # Degrading to bf16 here would silently turn --use_fp8_comms into a no-op
+            # and make the run indistinguishable from one without the flag. Every
+            # other way fp8 comms cannot apply is rejected up front by
+            # validate_fp8_comms_config, so refuse this one too.
+            raise RuntimeError(
                 f"[fp8_comms] calibration observed no activations for "
-                f"{model.__class__.__name__}; fp8 comms will NOT activate and the run "
-                f"falls back to bf16 communication. The calibration pass never ran a "
-                f"pre-quantization backend (AITER_FP8) on the self-attention layers."
+                f"{model.__class__.__name__}, so there are no scales to apply. The "
+                f"calibration pass never ran a pre-quantization backend (AITER_FP8 or "
+                f"AITER_FLYDSL_FP8) on the self-attention layers: check that the bound "
+                f"attention modules are the ones USP actually runs."
             )
-            return
         from xfuser.core.distributed.attention_backend import AITER_FP8_DTYPE
 
         dtype_max = torch.finfo(AITER_FP8_DTYPE).max
@@ -251,11 +260,26 @@ class Fp8CommsState:
     # ---- lifecycle hooks (called from base_model, thin) --------------------
 
     def register_models(self, pipe) -> None:
-        """Register the pipe's transformer(s) and move running-max buffers to GPU."""
+        """Register the pipe's transformer(s) and move running-max buffers to GPU.
+
+        A transformer opts in by calling ``bind_fp8_comms_attn_modules`` (usually
+        next to installing USP processors). That order fixes each layer's scale
+        index, so it must match between the calibration pass and inference.
+        """
         for name in ("transformer", "transformer_2"):
             transformer = getattr(pipe, name, None)
-            if transformer is not None and hasattr(transformer, "register_fp8_comms_state"):
-                transformer.register_fp8_comms_state(self)
+            if transformer is None:
+                continue
+            attn_modules = resolve_fp8_comms_attn_modules(transformer)
+            if not attn_modules:
+                raise RuntimeError(
+                    f"[fp8_comms] {transformer.__class__.__name__} ({name}) bound no "
+                    f"self-attention modules, so fp8 comms cannot activate for it. The "
+                    f"transformer wrapper must call bind_fp8_comms_attn_modules() where "
+                    f"it installs its USP attention processors."
+                )
+            install_fp8_comms_layer_state(transformer, attn_modules)
+            self.register_model(transformer, len(attn_modules))
         if torch.cuda.is_available():
             self.to_device_(torch.device("cuda", torch.cuda.current_device()))
 
@@ -297,8 +321,8 @@ class Fp8CommsState:
         """During calibration, measure amaxes on the tensors USP will quantize.
 
         USP Hadamard-rotates Q,K before the fp8 all-to-all, so measure rotated copies
-        (measurement-only; the flowing tensors are untouched). Returns whether this
-        model's scales are already synced (i.e. fp8 comms may be applied this step).
+        (measurement-only; the flowing tensors are untouched). Returns True when this
+        model's calibrated scales are ready to apply on this step.
         """
         fp8_owner = getattr(attn, "fp8_comms_owner", None)
         if fp8_owner is None or not hasattr(attn, "fp8_comms_layer_idx"):
@@ -306,40 +330,63 @@ class Fp8CommsState:
         model_state = self.get_model_state(fp8_owner)
         if model_state is None:
             return False
-        if not model_state.synced:
-            from xfuser.core.distributed.attention_backend import rotate_qk_for_fp8_comms
+        if model_state.synced:
+            return True
+        from xfuser.core.distributed.attention_backend import rotate_qk_for_fp8_comms
 
-            calib_query, calib_key = rotate_qk_for_fp8_comms(query, key, backend)
-            self.update_running_max(
-                fp8_owner, attn.fp8_comms_layer_idx, calib_query, calib_key, value
-            )
-        return model_state.synced
+        calib_query, calib_key = rotate_qk_for_fp8_comms(query, key, backend)
+        self.update_running_max(
+            fp8_owner, attn.fp8_comms_layer_idx, calib_query, calib_key, value
+        )
+        return False
 
     def observe_output(self, attn, out) -> None:
         """During calibration, measure the attention-output amax for one layer."""
         fp8_owner = getattr(attn, "fp8_comms_owner", None)
         if fp8_owner is None or not hasattr(attn, "fp8_comms_layer_idx"):
             return
+        model_state = self.get_model_state(fp8_owner)
+        if model_state is None or model_state.synced:
+            return
         self.update_o_running_max(fp8_owner, attn.fp8_comms_layer_idx, out)
 
 
-# ---- attention-processor hooks (called from the transformer, thin) ---------
+# ---- attention hooks (called from USP / Wan) -------------------------------
 #
-# Free functions (not methods) so callers never need a `fp8_comms is None` guard,
-# and so the transformer never touches fp8 buffer names or the backend gate.
+# Free functions so USP can attach FP8 comms without a wrapper, and so Wan's
+# hybrid path can splat extras without a `fp8_comms is None` guard.
 
 
-def install_fp8_comms_layer_state(transformer) -> None:
+_FP8_COMMS_ATTN_ATTR = "_fp8_comms_attn_modules"
+
+
+def bind_fp8_comms_attn_modules(transformer, modules) -> None:
+    """Record which self-attention modules participate in Ulysses FP8 comms.
+
+    Call this next to installing USP processors. The order is the per-layer
+    scale index for calibration and scatter. Omit cross-attn, refiners, and
+    other extras: they either have no Ulysses collective or a different
+    activation distribution.
+
+    Walking ``named_modules()`` is the wrong default for the same reason.
+    """
+    object.__setattr__(transformer, _FP8_COMMS_ATTN_ATTR, tuple(modules))
+
+
+def resolve_fp8_comms_attn_modules(transformer) -> list:
+    return list(getattr(transformer, _FP8_COMMS_ATTN_ATTR, ()))
+
+
+def install_fp8_comms_layer_state(transformer, attn_modules) -> None:
     """Register the per-layer fp8-comms buffers on each self-attention module.
 
     Owns the buffer contract (names/shapes + owner link). Buffers are non-persistent
     (kept out of the state_dict) and registered pre-compile so torch.compile captures
     them as graph inputs. Called after the model is loaded/moved to its device (via
-    register_fp8_comms_state), so each buffer is placed on its module's device rather
-    than defaulting to CPU.
+    register_models), so each buffer is placed on its module's device rather than
+    defaulting to CPU.
     """
-    for layer_idx, block in enumerate(transformer.blocks):
-        attn = block.attn1
+    for layer_idx, attn in enumerate(attn_modules):
         device = next(attn.parameters()).device
         for name in ("fp8_q_scale", "fp8_k_scale", "fp8_v_scale", "fp8_o_scale"):
             attn.register_buffer(

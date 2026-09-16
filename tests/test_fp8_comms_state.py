@@ -7,7 +7,12 @@ from xfuser.core.distributed.attention_backend import (
     FP8_HADAMARD_MATRIX,
     rotate_qk_for_fp8_comms,
 )
-from xfuser.core.distributed.fp8_comms import Fp8CommsState
+from xfuser.core.distributed.fp8_comms import (
+    Fp8CommsCall,
+    Fp8CommsState,
+    bind_fp8_comms_attn_modules,
+    fp8_attention_kwargs,
+)
 
 _HB_DEVICE = next(iter(FP8_HADAMARD_MATRIX))
 
@@ -28,6 +33,12 @@ class _FakeTransformer(nn.Module):
             block.attn1.register_buffer(
                 "fp8_comms_layer_idx", torch.tensor([i], dtype=torch.long)
             )
+        bind_fp8_comms_attn_modules(self, [block.attn1 for block in self.blocks])
+
+
+def _attach_fp8_owner(model):
+    for block in model.blocks:
+        object.__setattr__(block.attn1, "fp8_comms_owner", model)
 
 
 def test_per_layer_running_max_and_scatter():
@@ -118,11 +129,66 @@ def test_rotation_shrinks_outlier_amax():
 
 
 def test_rotation_is_a_noop_for_backends_that_do_not_rotate():
-    # Only AITER_FP8 rotates; any other backend returns the inputs untouched, so
-    # the head_dim never reaches the rotation and device does not matter here.
+    # AITER_FP8 and AITER_FLYDSL_FP8 rotate; any other backend returns the
+    # inputs untouched, so the head_dim never reaches the rotation and device
+    # does not matter here.
     q, k = _outlier_qk(head_dim=8, seq=4, device="cpu")
     q_out, k_out = rotate_qk_for_fp8_comms(q, k, AttentionBackendType.SDPA)
     assert q_out is q and k_out is k
+
+
+def test_flydsl_fp8_rotates_like_aiter_fp8():
+    q, k = _outlier_qk()
+    q_aiter, k_aiter = rotate_qk_for_fp8_comms(q, k, AttentionBackendType.AITER_FP8)
+    q_fly, k_fly = rotate_qk_for_fp8_comms(q, k, AttentionBackendType.AITER_FLYDSL_FP8)
+    torch.testing.assert_close(q_fly, q_aiter)
+    torch.testing.assert_close(k_fly, k_aiter)
+    assert q_fly.abs().amax() < q.abs().amax()
+
+
+def test_calibration_that_measures_nothing_raises():
+    # Falling back to bf16 here would make --use_fp8_comms a silent no-op, so a
+    # calibration pass that observed no activations is an error, not a downgrade.
+    fp8 = Fp8CommsState()
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+
+    with pytest.raises(RuntimeError, match="observed no activations"):
+        fp8.sync(model)
+    assert fp8.get_model_state(model).synced is False
+
+
+def test_observe_output_records_only_during_calibration():
+    fp8 = Fp8CommsState()
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+    attn = model.blocks[0].attn1
+
+    out = torch.tensor([[[[3.0, -4.0]]]])
+    fp8.observe_output(attn, out)
+    assert fp8.get_model_state(model).o_running_max[0].item() == 4.0
+
+    fp8.get_model_state(model).synced = True
+    fp8.observe_output(attn, out * 10)
+    assert fp8.get_model_state(model).o_running_max[0].item() == 4.0
+
+
+def test_fp8_attention_kwargs_returns_call_when_synced():
+    fp8 = Fp8CommsState(fixed_scale=0.5)
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+    attn = model.blocks[0].attn1
+    q = torch.ones(1, 2, 2, 4)
+
+    extras = fp8_attention_kwargs(
+        fp8, attn, q, q, q, False, AttentionBackendType.AITER_FLYDSL_FP8
+    )
+    assert "fp8_comms" in extras
+    assert isinstance(extras["fp8_comms"], Fp8CommsCall)
+    assert extras["fp8_comms"].q_scale.item() == 0.5
 
 
 def test_hadamard_matrix_is_orthonormal():

@@ -113,8 +113,8 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             **attention_args,
         ).transpose(1, 2)
         if use_vsa_h3 and self.attention_kwargs is not None:
-            self.attention_kwargs.pop("vsa_h3_gate", None)
-            self.attention_kwargs.pop(ULYSSES_EXTRA_INPUTS_KEY, None)
+            self.attention_kwargs["vsa_h3_gate"] = None
+            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = None
 
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
         hidden_states = attn.to_out[0](hidden_states)
@@ -166,7 +166,17 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             qk_norm_eps=qk_norm_eps,
             final_norm_eps=final_norm_eps,
         )
-        self._usp_attention_kwargs: dict[str, Any] = {}
+        # Keys are always present, carrying None when unused. torch.compile
+        # guards on this dict's key set, so adding or removing entries between
+        # forwards forces a recompile.
+        self._usp_attention_kwargs: dict[str, Any] = {
+            "indices_k": None,
+            "cu_seqlens_k": None,
+            "max_seqlen_k": None,
+            "vsa_h3_metadata": None,
+            "vsa_h3_gate": None,
+            ULYSSES_EXTRA_INPUTS_KEY: None,
+        }
         self.enable_fasth3_vsa = enable_fasth3_vsa
         if attention_backend is None:
             try:
@@ -334,7 +344,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 )
             )
         else:
-            self._usp_attention_kwargs.pop("vsa_h3_metadata", None)
+            self._usp_attention_kwargs["vsa_h3_metadata"] = None
 
         video_embeds = self.proj_in(hidden_states.to(self.proj_in.weight.dtype))
         audio_embeds = self.audio_proj_in(
@@ -409,21 +419,24 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 dtype=torch.long,
                 device=packed_hidden_states.device,
             )
-            self._usp_attention_kwargs.update(
-                {
-                    "indices_k": indices_k,
-                    "cu_seqlens_k": torch.tensor(
-                        [0, sequence_length],
-                        dtype=torch.int32,
-                        device=packed_hidden_states.device,
-                    ),
-                    "max_seqlen_k": sequence_length,
-                }
+            cu_seqlens_k = torch.tensor(
+                [0, sequence_length],
+                dtype=torch.int32,
+                device=packed_hidden_states.device,
             )
+            max_seqlen_k = sequence_length
         else:
-            self._usp_attention_kwargs.pop("indices_k", None)
-            self._usp_attention_kwargs.pop("cu_seqlens_k", None)
-            self._usp_attention_kwargs.pop("max_seqlen_k", None)
+            indices_k = None
+            cu_seqlens_k = None
+            max_seqlen_k = None
+
+        self._usp_attention_kwargs.update(
+            {
+                "indices_k": indices_k,
+                "cu_seqlens_k": cu_seqlens_k,
+                "max_seqlen_k": max_seqlen_k,
+            }
+        )
 
         for block in self.transformer_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:

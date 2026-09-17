@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -549,11 +550,42 @@ class xFuserMiniMaxH3Model(xFuserModel):
         self._enable_compute_comm_overlap()
         transformer = getattr(self.pipe, self._transformer_component_name)
         use_hybrid = get_runtime_state().has_attention_schedule()
-        transformer.forward = torch.compile(
-            transformer.forward,
+        original_forward = transformer.forward
+        compiled_forward = torch.compile(
+            original_forward,
             mode=mode,
             fullgraph=not use_hybrid,
         )
+
+        # The below fixes a recompile: avoids more than one graph realizing
+        # after compile-warmup.
+
+        # mark_unbacked is only exposed on torch._dynamo.decorators, not on
+        # torch._dynamo itself. mark_dynamic is the weaker fallback: it avoids
+        # specializing on the exact size but still splits 1 from >1.
+        from torch._dynamo import decorators as dynamo_decorators
+
+        mark_timestep = getattr(
+            dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
+        )
+
+        def forward_with_dynamic_timestep(*args, **kwargs):
+            # Marking must happen outside the compiled region. Without it dynamo
+            # specializes on timestep shape 1 vs >1 and recompiles when it changes.
+            # Remember that the timestep is a 1D tensor of variable length along
+            # the denoising steps.
+            timestep = kwargs.get("timestep")
+            if timestep is None and len(args) > 3:
+                timestep = args[3]
+            if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
+                mark_timestep(timestep, 0)
+            return compiled_forward(*args, **kwargs)
+
+        # The denoise block selects which layout fields to pass by inspecting
+        # signature(transformer.forward), so the wrapper must expose the real
+        # parameter list rather than (*args, **kwargs).
+        functools.update_wrapper(forward_with_dynamic_timestep, original_forward)
+        transformer.forward = forward_with_dynamic_timestep
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = (

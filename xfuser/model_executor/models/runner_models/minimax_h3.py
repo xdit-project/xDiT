@@ -556,7 +556,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
 
         def forward_with_dynamic_timestep(*args, **kwargs):
             # Marking must happen outside the compiled region. Without it dynamo
-            # specializes on timestep batch 1 vs >1 and recompiles when it changes.
+            # specializes on timestep shape 1 vs >1 and recompiles when it changes.
+            # Remember that the timestep is a 1D tensor of variable length along
+            # the denoising steps.
             timestep = kwargs.get("timestep")
             if timestep is None and len(args) > 3:
                 timestep = args[3]
@@ -570,8 +572,8 @@ class xFuserMiniMaxH3Model(xFuserModel):
         functools.update_wrapper(forward_with_dynamic_timestep, original_forward)
         transformer.forward = forward_with_dynamic_timestep
         compile_args = copy.deepcopy(input_args)
-#        if not get_runtime_state().has_attention_schedule():
-        compile_args["num_inference_steps"] = 50
+        if not get_runtime_state().has_attention_schedule():
+            compile_args["num_inference_steps"] = 3
         self._run_timed_pipe(compile_args)
 
     def _run_warmup_calls(self, input_args: dict) -> None:

@@ -334,6 +334,21 @@ def torchao_float8_fsdp2_patches_available() -> tuple[bool, str | None]:
         )
     return True, None
 
+def _weight_is_torchao_quantized(module) -> bool:
+    """Whether ``module.weight`` is one of torchao's quantized tensor subclasses.
+
+    torchao installs those through ``nn.Parameter``, which returns a tensor subclass as itself
+    rather than wrapping it, so the weight is the quantized tensor and a plain isinstance answers.
+    False when torchao is absent, since nothing can then be holding one of its tensors.
+    """
+    try:
+        # torchao is an optional extra
+        from torchao.utils import TorchAOBaseTensor
+    except ImportError:
+        return False
+
+    return isinstance(getattr(module, "weight", None), TorchAOBaseTensor)
+
 
 def quantize_linear_layers_to_int8(
     module_or_module_list: torch.nn.Module | torch.nn.ModuleList,
@@ -352,7 +367,7 @@ def quantize_linear_layers_to_int8(
     requested_filter = filter_fn
 
     def filter_fn(mod, fqn):
-        if not _is_linear(mod, fqn):
+        if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
             return False
         if requested_filter is not None and not requested_filter(mod, fqn):
             return False
@@ -389,7 +404,7 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
     requested_filter = filter_fn
 
     def filter_fn(mod, fqn):
-        if not _is_linear(mod, fqn):
+        if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
             return False
         if requested_filter is not None:
             return requested_filter(mod, fqn)
@@ -592,6 +607,8 @@ def quantize_linear_layers_to_fp4(
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
+            if _weight_is_torchao_quantized(module):
+                continue
             if filter_fn is not None and not filter_fn(module, full_name):
                 continue
             if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
@@ -708,6 +725,8 @@ def quantize_linear_layers_to_nvfp4(
         for fqn, submodule in module.named_modules():
             if not isinstance(submodule, torch.nn.Linear):
                 continue
+            if _weight_is_torchao_quantized(submodule):
+                continue
             if filter_fn is not None and not filter_fn(submodule, fqn):
                 continue
 
@@ -723,7 +742,7 @@ def quantize_linear_layers_to_nvfp4(
             quantized_count += 1
 
         def nvfp4_filter_fn(mod, fqn):
-            if not _is_linear(mod, fqn):
+            if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
                 return False
             if filter_fn is not None and not filter_fn(mod, fqn):
                 return False
@@ -749,7 +768,7 @@ def quantize_linear_layers_to_nvfp4(
             )
 
             def fp8_filter_fn(mod, fqn):
-                if not _is_linear(mod, fqn):
+                if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
                     return False
                 if filter_fn is not None and not filter_fn(mod, fqn):
                     return False

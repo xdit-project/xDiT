@@ -667,6 +667,13 @@ class xFuserModel(abc.ABC):
         pipeline-parallel models that don't respect the SPMD assumption and could
         deadlock in torch's compiler spmd_check()."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
+        # Restore the list of compute-communication overlap passes that was
+        # default in torch<2.10
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+            "reorder_compute_for_overlap",
+            "sink_waits",
+            "raise_comms",
+        ]
 
         # torch >= ~2.13: enabling the overlap machinery activates an SPMD
         # graph-consistency check that issues a WORLD-group all_gather_object at

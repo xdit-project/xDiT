@@ -63,6 +63,16 @@ def _build_scm_mask(
         return None
 
 
+def _resolve_enable_separate_cfg(requested: bool) -> bool:
+    """Resolve the requested cache mode against the active CFG topology."""
+    if not requested:
+        return False
+
+    from xfuser.core.distributed import get_classifier_free_guidance_world_size
+
+    return get_classifier_free_guidance_world_size() == 1
+
+
 def _build_config(
     num_steps: int,
     preset_kwargs,
@@ -119,10 +129,19 @@ def _build_config(
         config_kwargs["steps_computation_mask"] = scm_mask
         config_kwargs.setdefault("steps_computation_policy", "dynamic")
 
+    valid_fields = {f.name for f in dataclasses.fields(DBCacheConfig)}
+    enable_separate_cfg = _resolve_enable_separate_cfg(
+        config_kwargs.get("enable_separate_cfg", enable_separate_cfg)
+    )
     if enable_separate_cfg:
         config_kwargs.setdefault("enable_separate_cfg", True)
+    elif "enable_separate_cfg" in valid_fields:
+        # Preset and CLI overrides must not restore alternating two-call mode
+        # when each CFG-parallel rank executes only one branch.
+        config_kwargs["enable_separate_cfg"] = False
+    else:
+        config_kwargs.pop("enable_separate_cfg", None)
 
-    valid_fields = {f.name for f in dataclasses.fields(DBCacheConfig)}
     unknown = set(config_kwargs) - valid_fields
     if unknown:
         raise ValueError(
@@ -315,7 +334,7 @@ def apply_cache_dit_cache(
             f"F{db_config.Fn_compute_blocks}B{db_config.Bn_compute_blocks} "
             f"threshold={db_config.residual_diff_threshold} "
             f"calibrator={calib_name} "
-            f"enable_separate_cfg={enable_separate_cfg}"
+            f"enable_separate_cfg={getattr(db_config, 'enable_separate_cfg', False)}"
         )
     return transformer
 
@@ -425,6 +444,6 @@ def apply_cache_dit_cache_multi(
             f"F{db_config.Fn_compute_blocks}B{db_config.Bn_compute_blocks} "
             f"threshold={db_config.residual_diff_threshold} "
             f"calibrator={calib_name} "
-            f"enable_separate_cfg={enable_separate_cfg} "
+            f"enable_separate_cfg={getattr(db_config, 'enable_separate_cfg', False)} "
             f"warmup_steps={[p.max_warmup_steps for p in presets]}"
         )

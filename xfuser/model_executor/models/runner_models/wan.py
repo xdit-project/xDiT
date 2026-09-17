@@ -165,7 +165,7 @@ class xFuserWan21I2VModel(xFuserWanModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
-        if do_cfg:
+        if do_cfg and not self.config.use_cfg_parallel:
             return 2
         return 1
 
@@ -548,7 +548,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
 
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
-        if do_cfg:
+        if do_cfg and not self.config.use_cfg_parallel:
             return 2
         return 1
 
@@ -760,6 +760,7 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         ulysses_degree=True,
         ring_degree=True,
         fully_shard_degree=True,
+        use_cfg_parallel=True,
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
         use_fp4_gemms=True,
@@ -775,6 +776,14 @@ class xFuserWan22TI2VModel(xFuserWan21T2VModel):
         enable_slicing=True,
         supports_step_caching=True,
     )
+
+    def _validate_config(self, config: xFuserArgs) -> None:
+        super()._validate_config(config)
+        if config.use_cfg_parallel and config.task != "i2v":
+            raise ValueError(
+                "Wan2.2-TI2V supports CFG parallelism only for the i2v task."
+            )
+
     default_input_values = DefaultInputValues(
         height=736,
         width=1280,

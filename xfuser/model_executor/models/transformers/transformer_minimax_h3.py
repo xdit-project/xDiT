@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
@@ -19,7 +20,13 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
-from xfuser.model_executor.layers.usp import USP, attention
+from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+from xfuser.model_executor.layers.usp import (
+    ULYSSES_EXTRA_INPUTS_KEY,
+    USP,
+    attention,
+)
 
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
@@ -31,11 +38,15 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         use_ulysses_parallel_attention: bool,
         attention_kwargs: dict[str, Any] | None = None,
         backend=None,
+        use_fasth3_vsa: bool = False,
     ) -> None:
         super().__init__()
         self.use_ulysses_parallel_attention = use_ulysses_parallel_attention
         self.attention_kwargs = attention_kwargs
         self.backend = backend
+        self.use_vsa_h3 = (
+            use_fasth3_vsa and backend == AttentionBackendType.FLEX_VSA_H3
+        )
 
     def __call__(
         self,
@@ -68,6 +79,19 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             query = _apply_rotary_emb(query, *rotary_emb)
             key = _apply_rotary_emb(key, *rotary_emb)
 
+        use_vsa_h3 = self.use_vsa_h3
+        if use_vsa_h3:
+            if self.attention_kwargs is None:
+                raise RuntimeError("FastH3 VSA metadata was not configured.")
+            if self.attention_kwargs.get("vsa_h3_metadata") is None:
+                raise RuntimeError("FastH3 VSA metadata was not prepared.")
+            self.attention_kwargs["vsa_h3_gate"] = attn.to_gate_compress(
+                hidden_states
+            ).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
+            # The gate is per-head like QKV, so it has to follow them through
+            # the Ulysses exchange before FLEX_VSA_H3 consumes it.
+            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
+
         use_ulysses = (
             self.use_ulysses_parallel_attention
             and get_ulysses_parallel_world_size() > 1
@@ -88,6 +112,9 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
             value.transpose(1, 2),
             **attention_args,
         ).transpose(1, 2)
+        if use_vsa_h3 and self.attention_kwargs is not None:
+            self.attention_kwargs["vsa_h3_gate"] = None
+            self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = None
 
         hidden_states = hidden_states.flatten(2, 3).type_as(query)
         hidden_states = attn.to_out[0](hidden_states)
@@ -96,22 +123,90 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
 
 
 class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
-    def __init__(self, *args, attention_backend=None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Keys are always present, carrying None when the packed sequence needs no
-        # padding. torch.compile guards on this dict's key set, so adding or removing
-        # entries between forwards forces a recompile.
+    def __init__(
+        self,
+        num_attention_heads: int = 56,
+        attention_head_dim: int = 128,
+        hidden_size: int = 5376,
+        num_layers: int = 50,
+        num_refiner_layers: int = 2,
+        ffn_dim: int = 14336,
+        in_channels: int = 24,
+        audio_in_channels: int = 32,
+        patch_size: tuple[int, int, int] = (1, 2, 2),
+        text_dim: int = 5120,
+        freq_dim: int = 256,
+        time_embed_hidden_dim: int = 5376,
+        time_embed_dim: int = 2688,
+        rope_freq_dim: int = 16,
+        rope_theta: float = 10000.0,
+        norm_eps: float = 1e-5,
+        qk_norm_eps: float = 1e-5,
+        final_norm_eps: float = 1e-5,
+        attention_backend=None,
+        enable_fasth3_vsa: bool = False,
+    ) -> None:
+        super().__init__(
+            num_attention_heads=num_attention_heads,
+            attention_head_dim=attention_head_dim,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            num_refiner_layers=num_refiner_layers,
+            ffn_dim=ffn_dim,
+            in_channels=in_channels,
+            audio_in_channels=audio_in_channels,
+            patch_size=patch_size,
+            text_dim=text_dim,
+            freq_dim=freq_dim,
+            time_embed_hidden_dim=time_embed_hidden_dim,
+            time_embed_dim=time_embed_dim,
+            rope_freq_dim=rope_freq_dim,
+            rope_theta=rope_theta,
+            norm_eps=norm_eps,
+            qk_norm_eps=qk_norm_eps,
+            final_norm_eps=final_norm_eps,
+        )
+        # Keys are always present, carrying None when unused. torch.compile
+        # guards on this dict's key set, so adding or removing entries between
+        # forwards forces a recompile.
         self._usp_attention_kwargs: dict[str, Any] = {
             "indices_k": None,
             "cu_seqlens_k": None,
             "max_seqlen_k": None,
+            "vsa_h3_metadata": None,
+            "vsa_h3_gate": None,
+            ULYSSES_EXTRA_INPUTS_KEY: None,
         }
+        self.enable_fasth3_vsa = enable_fasth3_vsa
+        if attention_backend is None:
+            try:
+                attention_backend = get_runtime_state().attention_backend
+            except AssertionError:
+                attention_backend = None
+        self.attention_backend = attention_backend
+        self.use_vsa_h3 = (
+            enable_fasth3_vsa
+            and attention_backend == AttentionBackendType.FLEX_VSA_H3
+        )
+
+        if enable_fasth3_vsa:
+            for block in self.transformer_blocks:
+                attn = block.attn
+                # FastH3 VSA checkpoints carry one learned compression gate
+                # per transformer block. Defining the module here makes those
+                # checkpoint keys loadable; the VSA-H3 processor will consume
+                # its output once that backend is enabled.
+                attn.to_gate_compress = torch.nn.Linear(
+                    attn.to_q.in_features,
+                    attn.to_q.out_features,
+                    bias=False,
+                )
 
         for block in self.token_refiner.refiner_blocks:
             block.attn.set_processor(
                 xFuserMiniMaxH3AttnProcessor(
                     use_ulysses_parallel_attention=False,
-                    backend=attention_backend,
+                    backend=self.attention_backend,
                 )
             )
 
@@ -120,7 +215,8 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 xFuserMiniMaxH3AttnProcessor(
                     use_ulysses_parallel_attention=True,
                     attention_kwargs=self._usp_attention_kwargs,
-                    backend=attention_backend,
+                    backend=self.attention_backend,
+                    use_fasth3_vsa=enable_fasth3_vsa,
                 )
             )
 
@@ -206,6 +302,49 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 f"tensors matching `position_ids`, got {list(token_tags.shape)} "
                 f"and {list(timestep_indices.shape)} for seq_len={sequence_length}."
             )
+
+        if self.use_vsa_h3:
+            text_count = text_indices.numel()
+            audio_count = audio_indices.numel()
+            expected_text = torch.arange(text_count, device=text_indices.device)
+            expected_audio = torch.arange(
+                text_count,
+                text_count + audio_count,
+                device=audio_indices.device,
+            )
+            expected_video = torch.arange(
+                text_count + audio_count,
+                sequence_length,
+                device=video_indices.device,
+            )
+            if not (
+                torch.equal(text_indices, expected_text)
+                and torch.equal(audio_indices, expected_audio)
+                and torch.equal(video_indices, expected_video)
+            ):
+                raise ValueError(
+                    "FastH3 Preview v1 VSA requires the T2VA packed order "
+                    "[text | audio | generated video]."
+                )
+            video_positions = position_ids.index_select(0, video_indices)
+            video_shape = tuple(
+                int(torch.unique(video_positions[:, axis]).numel())
+                for axis in range(3)
+            )
+            if math.prod(video_shape) != video_indices.numel():
+                raise ValueError(
+                    "Could not recover FastH3's generated-video grid from "
+                    f"position_ids: shape={video_shape}, rows={video_indices.numel()}."
+                )
+            self._usp_attention_kwargs["vsa_h3_metadata"] = (
+                build_h3_vsa_metadata(
+                    (text_count, audio_count),
+                    video_shape,
+                    position_ids.device,
+                )
+            )
+        else:
+            self._usp_attention_kwargs["vsa_h3_metadata"] = None
 
         video_embeds = self.proj_in(hidden_states.to(self.proj_in.weight.dtype))
         audio_embeds = self.audio_proj_in(

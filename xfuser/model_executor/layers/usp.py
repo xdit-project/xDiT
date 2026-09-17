@@ -51,6 +51,11 @@ _HEAD_BALANCE_BACKENDS = frozenset({
 _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
 
+# A backend that needs per-head tensors of its own alongside query/key/value
+# lists their ``attention_kwargs`` keys under this one, and USP carries them
+# through the same Ulysses exchange without knowing what they mean.
+ULYSSES_EXTRA_INPUTS_KEY = "ulysses_extra_inputs"
+
 
 def ring_attn(attention_function, query, key, value, dropout_p=0.0, is_causal=False, joint_attn_kwargs=None, attention_kwargs=None):
     kwargs = {
@@ -121,31 +126,34 @@ def _ft_c_input_all_to_all(x):
     return x
 
 
-def _combined_qkv_all_to_all(q, k, v):
-    """Concatenate query, key, value tensors and perform a single all-to-all communication."""
+def _combined_qkv_all_to_all(q, k, v, *extra):
+    """Concatenate query, key, value tensors and perform a single all-to-all communication.
+
+    Extra tensors shaped like q ride the same exchange and are returned after v.
+    """
     world_size = get_ulysses_parallel_world_size()
     if world_size <= 1:
-        return q, k, v
+        return (q, k, v, *extra)
 
     assert q.ndim == 4, f"q must have 4 dimensions, got {q.ndim}"
     b, h, s, d = q.shape
     assert h % world_size == 0, f"h must be divisible by world_size, got {h} and {world_size}"
 
-    # [3, b, h, s, d]
-    qkv = torch.stack([q, k, v], dim=0)
-    # [3, b, P, h/P, s, d]
-    qkv = qkv.view(3, b, world_size, h // world_size, s, d)
-    # [P, 3, b, h/P, s, d]
+    n = 3 + len(extra)
+    # [n, b, h, s, d]
+    qkv = torch.stack([q, k, v, *extra], dim=0)
+    # [n, b, P, h/P, s, d]
+    qkv = qkv.view(n, b, world_size, h // world_size, s, d)
+    # [P, n, b, h/P, s, d]
     qkv = qkv.permute(2, 0, 1, 3, 4, 5).contiguous()
 
     qkv = _sdpa_all_to_all_single(qkv)
 
-    # [3, b, h/P, P*s, d]  — reshape directly avoids the intermediate
+    # [n, b, h/P, P*s, d]  — reshape directly avoids the intermediate
     # contiguous copy that the separate permute+view required.
-    qkv = qkv.permute(1, 2, 3, 0, 4, 5).reshape(3, b, h // world_size, -1, d)
+    qkv = qkv.permute(1, 2, 3, 0, 4, 5).reshape(n, b, h // world_size, -1, d)
 
-    q, k, v = torch.unbind(qkv, dim=0)
-    return q, k, v
+    return torch.unbind(qkv, dim=0)
 
 
 def _ft_c_output_all_to_all(x):
@@ -257,6 +265,26 @@ def concat_joint_tensors_decorator(func):
         return func(query, key, value, dropout_p=dropout_p, is_causal=is_causal, attention_kwargs=attention_kwargs)
     return wrapper
 
+
+def _ulysses_extra_inputs(attention_kwargs, query):
+    """Return the (name, tensor) pairs the backend asked to join the Ulysses exchange."""
+    if not attention_kwargs:
+        return []
+
+    extras = []
+    for name in attention_kwargs.get(ULYSSES_EXTRA_INPUTS_KEY) or ():
+        tensor = attention_kwargs.get(name)
+        if tensor is None:
+            continue
+        if tensor.shape != query.shape:
+            raise ValueError(
+                f"attention_kwargs['{name}'] must match the query shape to be "
+                f"exchanged with it, got {tuple(tensor.shape)} vs {tuple(query.shape)}."
+            )
+        extras.append((name, tensor))
+    return extras
+
+
 def USP(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -320,9 +348,16 @@ def USP(
 
         }
 
+    extra_inputs = _ulysses_extra_inputs(attention_kwargs, query)
+
     qkv_amaxes = None
     if get_ulysses_parallel_world_size() > 1:
         if fp8_comms is not None:
+            if extra_inputs:
+                raise NotImplementedError(
+                    "fp8 comms does not support extra Ulysses inputs: "
+                    f"{', '.join(name for name, _ in extra_inputs)}."
+                )
             fp8_comms_backend = backend if backend is not None else get_runtime_state().attention_backend
             query, key, value, attn_kwargs_update, qkv_amaxes = fp8_comms_input_all_to_all(
                 query, key, value,
@@ -331,11 +366,18 @@ def USP(
             )
             attention_kwargs = (attention_kwargs or {}) | attn_kwargs_update
         elif combine_qkv_a2a and query.shape == key.shape == value.shape:
-            query, key, value = _combined_qkv_all_to_all(query, key, value)
+            exchanged = _combined_qkv_all_to_all(
+                query, key, value, *(tensor for _, tensor in extra_inputs)
+            )
+            query, key, value = exchanged[:3]
+            for (name, _), tensor in zip(extra_inputs, exchanged[3:]):
+                attention_kwargs[name] = tensor
         else:
             query = _ft_c_input_all_to_all(query)
             key = _ft_c_input_all_to_all(key)
             value = _ft_c_input_all_to_all(value)
+            for name, tensor in extra_inputs:
+                attention_kwargs[name] = _ft_c_input_all_to_all(tensor)
 
     if attn_layer:
         key, value = _update_and_get_kv_cache(key, value, attn_layer)

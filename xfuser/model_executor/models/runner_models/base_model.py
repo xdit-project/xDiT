@@ -197,6 +197,9 @@ class ModelSettings:
         }
     })
     valid_tasks: List[str] = field(default_factory=list)
+    # Attention backend used when --attention_backend is omitted. Leave None to
+    # keep the global default.
+    default_attention_backend: Optional[str] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
@@ -278,6 +281,7 @@ class xFuserModel(abc.ABC):
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
         self._vae_manager = VAEManager(config, self.capabilities, self.settings)
+        self._apply_default_attention_backend(config)
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -486,6 +490,15 @@ class xFuserModel(abc.ABC):
         return self._vae_manager.decoding_vaes(
             [self.pipe, getattr(self, "second_pipe", None)]
         )
+
+    def _apply_default_attention_backend(self, config: xFuserArgs) -> None:
+        """Fill in the model's preferred attention backend when the CLI left it unset."""
+        default = self.settings.default_attention_backend
+        if default is None or config.attention_backend is not None:
+            return
+        _parse_attention_backend(default, f"default attention backend for {self.settings.model_name}")
+        config.attention_backend = default
+        log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
 
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """

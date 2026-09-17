@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -7,7 +9,20 @@ from xfuser.core.distributed.attention_backend import (
     FP8_HADAMARD_MATRIX,
     rotate_qk_for_fp8_comms,
 )
-from xfuser.core.distributed.fp8_comms import Fp8CommsState
+from xfuser.core.distributed.attention_schedule import AttentionSchedule
+from xfuser.core.distributed.fp8_comms import (
+    Fp8CommsCall,
+    Fp8CommsState,
+    fp8_attention_kwargs,
+    register_fp8_comms_eligible_modules,
+    validate_fp8_comms_config,
+)
+from xfuser.model_executor.models.transformers.transformer_sd3 import (
+    sd3_attn_modules,
+)
+from xfuser.model_executor.models.transformers.transformer_z_image import (
+    z_image_attn_modules,
+)
 
 _HB_DEVICE = next(iter(FP8_HADAMARD_MATRIX))
 
@@ -28,6 +43,14 @@ class _FakeTransformer(nn.Module):
             block.attn1.register_buffer(
                 "fp8_comms_layer_idx", torch.tensor([i], dtype=torch.long)
             )
+        register_fp8_comms_eligible_modules(
+            self, [block.attn1 for block in self.blocks]
+        )
+
+
+def _attach_fp8_owner(model):
+    for block in model.blocks:
+        object.__setattr__(block.attn1, "fp8_comms_owner", model)
 
 
 def test_per_layer_running_max_and_scatter():
@@ -83,6 +106,41 @@ def test_unexercised_model_has_zero_running_max():
     assert model_state.q_running_max.max() == 0
 
 
+def test_fp8_comms_rejects_pipefusion():
+    config = SimpleNamespace(
+        use_fp8_comms=True,
+        pipefusion_parallel_degree=2,
+    )
+    capabilities = SimpleNamespace(use_fp8_comms=True)
+    settings = SimpleNamespace(model_name="test-model")
+
+    with pytest.raises(ValueError, match="does not support PipeFusion"):
+        validate_fp8_comms_config(config, capabilities, settings)
+
+
+def test_sd3_registration_includes_dual_attention_layers():
+    attn, attn2, final_attn = nn.Module(), nn.Module(), nn.Module()
+    transformer = SimpleNamespace(
+        transformer_blocks=[
+            SimpleNamespace(attn=attn, attn2=attn2),
+            SimpleNamespace(attn=final_attn, attn2=None),
+        ]
+    )
+
+    assert sd3_attn_modules(transformer) == [attn, attn2, final_attn]
+
+
+def test_z_image_registration_includes_refiners():
+    noise, context, main = nn.Module(), nn.Module(), nn.Module()
+    transformer = SimpleNamespace(
+        noise_refiner=[SimpleNamespace(attention=noise)],
+        context_refiner=[SimpleNamespace(attention=context)],
+        layers=[SimpleNamespace(attention=main)],
+    )
+
+    assert z_image_attn_modules(transformer) == [noise, context, main]
+
+
 def _outlier_qk(head_dim: int = 128, seq: int = 64, dtype=torch.bfloat16, device=_HB_DEVICE):
     """Q/K with a per-channel outlier, the distribution the rotation exists to fix.
 
@@ -118,11 +176,93 @@ def test_rotation_shrinks_outlier_amax():
 
 
 def test_rotation_is_a_noop_for_backends_that_do_not_rotate():
-    # Only AITER_FP8 rotates; any other backend returns the inputs untouched, so
-    # the head_dim never reaches the rotation and device does not matter here.
+    # AITER_FP8 and AITER_FLYDSL_FP8 rotate; any other backend returns the
+    # inputs untouched, so the head_dim never reaches the rotation and device
+    # does not matter here.
     q, k = _outlier_qk(head_dim=8, seq=4, device="cpu")
     q_out, k_out = rotate_qk_for_fp8_comms(q, k, AttentionBackendType.SDPA)
     assert q_out is q and k_out is k
+
+
+def test_flydsl_fp8_rotates_like_aiter_fp8():
+    q, k = _outlier_qk()
+    q_aiter, k_aiter = rotate_qk_for_fp8_comms(q, k, AttentionBackendType.AITER_FP8)
+    q_fly, k_fly = rotate_qk_for_fp8_comms(q, k, AttentionBackendType.AITER_FLYDSL_FP8)
+    torch.testing.assert_close(q_fly, q_aiter)
+    torch.testing.assert_close(k_fly, k_aiter)
+    assert q_fly.abs().amax() < q.abs().amax()
+
+
+def test_calibration_that_measures_nothing_raises():
+    # Falling back to bf16 here would make --use_fp8_comms a silent no-op, so a
+    # calibration pass that observed no activations is an error, not a downgrade.
+    fp8 = Fp8CommsState()
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+
+    with pytest.raises(RuntimeError, match="observed no activations"):
+        fp8.sync(model)
+    assert fp8.get_model_state(model).synced is False
+
+
+def test_observe_output_records_only_during_calibration():
+    fp8 = Fp8CommsState()
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+    attn = model.blocks[0].attn1
+
+    out = torch.tensor([[[[3.0, -4.0]]]])
+    fp8.observe_output(attn, out)
+    assert fp8.get_model_state(model).o_running_max[0].item() == 4.0
+
+    fp8.get_model_state(model).synced = True
+    fp8.observe_output(attn, out * 10)
+    assert fp8.get_model_state(model).o_running_max[0].item() == 4.0
+
+
+def test_fp8_attention_kwargs_returns_call_when_synced():
+    fp8 = Fp8CommsState(fixed_scale=0.5)
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+    attn = model.blocks[0].attn1
+    q = torch.ones(1, 2, 2, 4)
+
+    extras = fp8_attention_kwargs(
+        fp8, attn, q, q, q, False, AttentionBackendType.AITER_FLYDSL_FP8
+    )
+    assert "fp8_comms" in extras
+    assert isinstance(extras["fp8_comms"], Fp8CommsCall)
+    assert extras["fp8_comms"].q_scale.item() == 0.5
+
+
+def test_hybrid_schedule_gates_fp8_comms_by_active_backend():
+    fp8 = Fp8CommsState(fixed_scale=0.5)
+    model = _FakeTransformer(num_layers=1)
+    fp8.register_model(model, num_layers=1)
+    _attach_fp8_owner(model)
+    attn = model.blocks[0].attn1
+    q = torch.ones(1, 2, 2, 4)
+    schedule = AttentionSchedule(
+        [
+            AttentionBackendType.AITER_FLYDSL_FP8,
+            AttentionBackendType.SDPA,
+            AttentionBackendType.AITER_FP8,
+        ]
+    )
+
+    extras_by_step = [
+        fp8_attention_kwargs(
+            fp8, attn, q, q, q, False, schedule.get_backend(step)
+        )
+        for step in range(schedule.total_steps)
+    ]
+
+    assert isinstance(extras_by_step[0]["fp8_comms"], Fp8CommsCall)
+    assert extras_by_step[1] == {}
+    assert isinstance(extras_by_step[2]["fp8_comms"], Fp8CommsCall)
 
 
 def test_hadamard_matrix_is_orthonormal():

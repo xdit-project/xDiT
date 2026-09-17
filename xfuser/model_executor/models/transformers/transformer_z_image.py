@@ -9,6 +9,7 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 
 
 from xfuser.model_executor.layers.usp import USP
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.model_executor.layers.fused_qk_rope_zimage_flydsl import (
     flydsl_fused_qk_norm_rope,
 )
@@ -120,13 +121,13 @@ class xFuserZSingleStreamAttnProcessor:
                 key = self._pad_heads(key, pad_heads)
                 value = self._pad_heads(value, pad_heads)
 
-        # Compute joint attention
         hidden_states = USP(
             query,
             key,
             value,
             dropout_p=0.0,
             is_causal=False,
+            attn_layer=attn,
         )
 
         if pad_heads:
@@ -145,6 +146,19 @@ class xFuserZSingleStreamAttnProcessor:
 
         return output
 
+
+def z_image_attn_modules(transformer) -> list[torch.nn.Module]:
+    """Return every Z-Image attention module that executes USP."""
+    return [
+        layer.attention
+        for layer in (
+            *transformer.noise_refiner,
+            *transformer.context_refiner,
+            *transformer.layers,
+        )
+    ]
+
+
 class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
 
     def __init__(
@@ -156,6 +170,7 @@ class xFuserZImageTransformer2DWrapper(ZImageTransformer2DModel):
         )
         for layer in self.layers + self.context_refiner + self.noise_refiner:
             layer.attention.processor = xFuserZSingleStreamAttnProcessor()
+        register_fp8_comms_eligible_modules(self, z_image_attn_modules(self))
 
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:

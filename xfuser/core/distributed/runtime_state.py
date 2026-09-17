@@ -452,6 +452,7 @@ class DiTRuntimeState(RuntimeState):
     pp_patches_token_num: Optional[List[int]]
     max_condition_sequence_length: int
     split_text_embed_in_sp: bool
+    text_embed_sp_pad: int
 
     def __init__(self, pipeline: DiffusionPipeline, config: EngineConfig):
         self.attention_schedule: Optional[AttentionSchedule] = None
@@ -619,6 +620,7 @@ class DiTRuntimeState(RuntimeState):
         )
         self.max_condition_sequence_length = max_condition_sequence_length
         self.split_text_embed_in_sp = split_text_embed_in_sp
+        self.text_embed_sp_pad = 0
         if self.runtime_config.warmup_steps > self.input_config.num_inference_steps:
             self.runtime_config.warmup_steps = self.input_config.num_inference_steps
         if seed is not None and seed != self.input_config.seed:

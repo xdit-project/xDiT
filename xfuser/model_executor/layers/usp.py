@@ -249,6 +249,40 @@ def _repeat_kv_heads(key, value, repeats):
     )
 
 
+def _validate_gqa_params(
+    query,
+    key,
+    value,
+    kv_head_repeat,
+    joint_strategy,
+):
+    if isinstance(kv_head_repeat, bool) or not isinstance(kv_head_repeat, int):
+        raise TypeError("kv_head_repeat must be an integer.")
+    if kv_head_repeat < 1:
+        raise ValueError("kv_head_repeat must be at least 1.")
+    if kv_head_repeat == 1:
+        return
+
+    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+        raise ValueError("GQA query, key, and value must have four dimensions.")
+    if key.shape[1] != value.shape[1]:
+        raise ValueError("GQA key and value must have the same head count.")
+    if query.shape[1] != key.shape[1] * kv_head_repeat:
+        raise ValueError(
+            f"Query heads ({query.shape[1]}) must equal KV heads "
+            f"({key.shape[1]}) times kv_head_repeat ({kv_head_repeat})."
+        )
+
+    ulysses_world_size = get_ulysses_parallel_world_size()
+    if ulysses_world_size > 1 and key.shape[1] % ulysses_world_size != 0:
+        raise ValueError(
+            f"KV heads ({key.shape[1]}) must be divisible by the Ulysses "
+            f"world size ({ulysses_world_size})."
+        )
+    if joint_strategy is not None:
+        raise NotImplementedError("GQA KV repetition does not support joint tensors.")
+
+
 def _ft_c_output_all_to_all(x):
     world_size = get_ulysses_parallel_world_size()
     if world_size <= 1:
@@ -442,28 +476,10 @@ def USP(
     """
     if combine_qkv_a2a is None:
         combine_qkv_a2a = False
-    if isinstance(kv_head_repeat, bool) or not isinstance(kv_head_repeat, int):
-        raise TypeError("kv_head_repeat must be an integer.")
-    if kv_head_repeat < 1:
-        raise ValueError("kv_head_repeat must be at least 1.")
-    if kv_head_repeat > 1:
-        if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
-            raise ValueError("GQA query, key, and value must have four dimensions.")
-        if key.shape[1] != value.shape[1]:
-            raise ValueError("GQA key and value must have the same head count.")
-        if query.shape[1] != key.shape[1] * kv_head_repeat:
-            raise ValueError(
-                f"Query heads ({query.shape[1]}) must equal KV heads "
-                f"({key.shape[1]}) times kv_head_repeat ({kv_head_repeat})."
-            )
-        ulysses_world_size = get_ulysses_parallel_world_size()
-        if ulysses_world_size > 1 and key.shape[1] % ulysses_world_size != 0:
-            raise ValueError(
-                f"KV heads ({key.shape[1]}) must be divisible by the Ulysses "
-                f"world size ({ulysses_world_size})."
-            )
-        if joint_strategy is not None:
-            raise NotImplementedError("GQA KV repetition does not support joint tensors.")
+    _validate_gqa_params(
+        query, key, value, kv_head_repeat, joint_strategy
+    )
+
     attention_function = _get_attention_function(backend=backend)
 
     fp8_module = attn_layer if attn_layer is not None else head_balance_layer

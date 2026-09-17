@@ -10,6 +10,8 @@ class QuantizationFormat(str, Enum):
     FP8 = "fp8"
     FP4 = "fp4"
     FP8_FP4 = "fp8_fp4"
+    FP6 = "fp6"
+    FP4_FP6 = "fp4_fp6"
     INT8 = "int8"
 
 
@@ -126,6 +128,8 @@ class LoadDeclaration:
         formats = frozenset(quantization_formats or {QuantizationFormat.NONE})
         if QuantizationFormat.FP8 in formats and QuantizationFormat.FP4 in formats:
             formats = formats | {QuantizationFormat.FP8_FP4}
+        if QuantizationFormat.FP4 in formats and QuantizationFormat.FP6 in formats:
+            formats = formats | {QuantizationFormat.FP4_FP6}
         backends = frozenset(quantization_backends or {QuantizationBackend.NONE})
         contracts = {
             (format_, backend)
@@ -133,6 +137,10 @@ class LoadDeclaration:
             for backend in backends
             if (format_ is QuantizationFormat.NONE)
             == (backend is QuantizationBackend.NONE)
+            and (
+                format_ not in (QuantizationFormat.FP6, QuantizationFormat.FP4_FP6)
+                or backend is QuantizationBackend.AITER
+            )
         }
         return cls(
             fsdp_meta_transformers=tuple(transformers),
@@ -185,6 +193,12 @@ class LoadDeclaration:
                     ),
                 }
             )
+        supports_fp4 = getattr(model_capabilities, "use_fp4_gemms", False)
+        supports_fp6 = getattr(model_capabilities, "use_fp6_gemms", False)
+        if supports_fp6:
+            contracts.add((QuantizationFormat.FP6, QuantizationBackend.AITER))
+        if supports_fp4 and supports_fp6:
+            contracts.add((QuantizationFormat.FP4_FP6, QuantizationBackend.AITER))
         if getattr(model_capabilities, "use_int8_gemms", False):
             contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
 
@@ -309,7 +323,13 @@ def assert_offload_is_compatible_with_format(
     requested_format: QuantizationFormat,
     selected_backend: QuantizationBackend,
 ) -> None:
-    """Refuse group offload with AITER FP4, which aborts the process instead of failing.
+    """Refuse CPU-offload contracts that AITER FP4 cannot honor safely.
+
+    Mixed FP4+FP6 still uses the inherited MXFP4 walker for its primary weights.
+    That walker derives the packing device from each source parameter, so every
+    CPU-offload mode leaves the primary weights on an unsupported CPU packing
+    path. Pure FP6 is different: its walker packs on the requested GPU and can
+    evict each packed leaf immediately, so it remains allowed.
 
     Group offloading moves a module's parameters between host and device around each
     call. AITER FP4 weights survive neither leg. With --group_offload_low_cpu_mem the
@@ -326,6 +346,24 @@ def assert_offload_is_compatible_with_format(
 
     if selected_backend is not QuantizationBackend.AITER:
         return
+    if requested_format is QuantizationFormat.FP4_FP6:
+        offload_flags = tuple(
+            flag
+            for flag in (
+                "enable_model_cpu_offload",
+                "enable_sequential_cpu_offload",
+                "enable_group_cpu_offload",
+            )
+            if getattr(config, flag, False)
+        )
+        if offload_flags:
+            named_flags = ", ".join(f"--{flag}" for flag in offload_flags)
+            raise UnsupportedLoadContract(
+                f"{named_flags} cannot be combined with FP4_FP6 on the AITER backend: "
+                "the primary MXFP4 packing path is unsupported when CPU offload keeps "
+                "its source weights on the host. Use pure FP6, or run FP4_FP6 without "
+                "CPU offload."
+            )
     if requested_format not in (QuantizationFormat.FP4, QuantizationFormat.FP8_FP4):
         return
     if not getattr(config, "enable_group_cpu_offload", False):
@@ -470,20 +508,40 @@ def select_runtime_quantization(
 ) -> tuple[QuantizationFormat, QuantizationBackend]:
     """Translate current flags/platform selection into the explicit contract."""
 
-    if config.use_int8_gemms and (config.use_fp8_gemms or config.use_fp4_gemms):
+    use_fp8 = bool(getattr(config, "use_fp8_gemms", False))
+    use_fp4 = bool(getattr(config, "use_fp4_gemms", False))
+    use_int8 = bool(getattr(config, "use_int8_gemms", False))
+    use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
+
+    if use_fp6 and use_fp8:
+        raise UnsupportedLoadContract(
+            "FP8 cannot be combined with an FP6 mode; FP6 owns the declared "
+            "FP8 targets"
+        )
+    if use_fp6 and use_int8:
+        raise UnsupportedLoadContract("INT8 cannot be combined with an FP6 mode")
+    if use_fp6 and cuda_active:
+        raise UnsupportedLoadContract(
+            "AITER MXFP6 requires ROCm gfx950; CUDA is not supported"
+        )
+
+    if use_int8 and (use_fp8 or use_fp4):
         others = (
             "FP8 + FP4"
-            if (config.use_fp8_gemms and config.use_fp4_gemms)
-            else ("FP8" if config.use_fp8_gemms else "FP4")
+            if (use_fp8 and use_fp4)
+            else ("FP8" if use_fp8 else "FP4")
         )
         raise UnsupportedLoadContract(f"INT8 cannot be combined with {others}")
-    if config.use_fp8_gemms and config.use_fp4_gemms:
+    if use_fp6:
+        format_ = QuantizationFormat.FP4_FP6 if use_fp4 else QuantizationFormat.FP6
+        return format_, QuantizationBackend.AITER
+    if use_fp8 and use_fp4:
         format_ = QuantizationFormat.FP8_FP4
-    elif config.use_fp8_gemms:
+    elif use_fp8:
         format_ = QuantizationFormat.FP8
-    elif config.use_fp4_gemms:
+    elif use_fp4:
         format_ = QuantizationFormat.FP4
-    elif config.use_int8_gemms:
+    elif use_int8:
         format_ = QuantizationFormat.INT8
     else:
         return QuantizationFormat.NONE, QuantizationBackend.NONE

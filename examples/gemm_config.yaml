@@ -1,0 +1,24 @@
+# GEMM precision stays explicit on the command line, for example:
+#   --gemm_quantization low=fp4,high=fp6
+#
+# "model" starts with the runner's built-in high-precision targets.
+# Use "none" to start with an empty high-precision target set.
+gemm_high_precision_targets: model
+
+# Module entries must exactly match model-declared target roots, such as
+# transformer_2.blocks. Prefixes are relative to each selected low-precision
+# root, matching existing MXFP4 overrides; suffixes match layer-path endings.
+gemm_high_precision_module_patterns: []
+gemm_high_precision_prefix_patterns: []
+gemm_high_precision_suffix_patterns: []
+
+# For an explicit schedule, uncomment this key and provide exactly one entry
+# per denoising step using the selected profile's format names. Use fp6 instead
+# of fp8 below with --gemm_quantization low=fp4,high=fp6. Do not combine this
+# with the simple hybrid schedule CLI flags.
+#
+# hybrid_gemm_schedule:
+#   - fp8
+#   - fp4
+#   - fp4
+#   - fp8

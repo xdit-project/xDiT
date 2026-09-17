@@ -166,11 +166,11 @@ Individual model classes that inherit from `xFuserModel`:
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--use_torch_compile` | Enable torch.compile acceleration | False |
-| `--use_fp8_gemms` | Enable FP8 GEMM quantization for the transformer | False |
-| `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well (requires `--use_fp8_gemms`). Frees several GB for models with large bf16 text encoders. | False |
-| `--use_fp4_gemms` | Enable FP4 GEMM quantization for declared transformer targets (ROCm MXFP4 or CUDA NVFP4) | False |
-| `--use_hybrid_gemm_schedule` | Enable the explicit FP8/FP4 hybrid schedule. Requires `--use_fp4_gemms`; also required when `--use_fp8_gemms` and `--use_fp4_gemms` are both set. | False |
-| `--use_int8_gemms` | Enable torchao W8A8 INT8 quantization for declared transformer targets. Cannot be combined with FP8, FP4, or hybrid FP8/FP4 mode. | False |
+| `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `int8`, `low=fp4,high=fp8`, or `low=fp4,high=fp6` | none |
+| `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit FP8/FP4 schedule | None |
+| `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms` | Deprecated format selectors retained for compatibility | False |
+| `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well; requires a profile containing FP8 | False |
+| `--use_hybrid_gemm_schedule` | Use the profile's FP8 or FP6 high format at the endpoints and FP4 in the middle | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |
 | `--enable_model_cpu_offload` | Enable model CPU offload | False |
@@ -201,6 +201,21 @@ apply on top of whatever a row allows.
 | CUDA capability 10.0+ (Blackwell) | torchao FP8 | torchao NVFP4 with dynamic per-tensor activation scaling; native Diffusers streams the NVFP4 leaves while explicit FP8 overrides stay full precision for post-load FP8 conversion; hybrid ownership is excluded | torchao W8A8 INT8; native streaming preserves the target and minimum-size exclusions |
 | CUDA capability 8.9 through 9.x | torchao FP8 | Excluded: NVFP4 requires capability 10.0+ | torchao W8A8 INT8; native streaming where accepted |
 | CUDA capability below 8.9 | Excluded: rejected in backend preflight before allocation | Excluded: NVFP4 requires capability 10.0+ | torchao W8A8 INT8; whether the kernels run stays hardware-dependent |
+
+MXFP6 is available only for the audited Wan runners on ROCm `gfx950` with
+AITER's A6W6 ASM kernels. Pure `fp6` converts Wan's existing FP4/FP8 target
+union. `low=fp4,high=fp6` preserves the existing MXFP4 target policy and routes
+its quality overrides and Wan 2.2 second transformer to MXFP6. Hybrid scheduling
+can use either FP8 or FP6 as the profile's temporal high format.
+
+Advanced YAML settings are documented in
+[`examples/gemm_config.yaml`](../../examples/gemm_config.yaml). The YAML does
+not select precision; pass it separately, for example:
+
+```bash
+--gemm_quantization low=fp4,high=fp6 \
+--gemm_config examples/gemm_config.yaml
+```
 
 INT8 uses per-row symmetric scaling and skips linear layers smaller than 512 in
 either dimension. To keep the declared targets and that 512 minimum while

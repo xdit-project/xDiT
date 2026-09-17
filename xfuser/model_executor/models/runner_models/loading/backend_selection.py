@@ -35,8 +35,17 @@ class QuantizationBackends:
         """Resolve and validate only the adapters required by this run."""
         _ = self.fp8
         _ = self.format
+        if self._uses_mxfp6_contract():
+            _ = self.fp6
         if self.uses_blockwise_fp8():
             _ = self.blockwise_fp8
+
+    def _format_value(self) -> str | None:
+        contract = getattr(getattr(self, "loader", None), "load_contract", None)
+        return None if contract is None else contract.requested_format.value
+
+    def _uses_mxfp6_contract(self) -> bool:
+        return self._format_value() in {"fp6", "fp4_fp6"}
 
     @functools.cached_property
     def fp8(self):
@@ -55,22 +64,33 @@ class QuantizationBackends:
         )
 
     @functools.cached_property
+    def format_capabilities(self):
+        """Probe format capabilities once, and only include MXFP6 when requested."""
+
+        from .format_backends import probe_format_backend_capabilities
+
+        return probe_format_backend_capabilities(
+            require_mxfp6=self._uses_mxfp6_contract()
+        )
+
+    @functools.cached_property
     def format(self):
-        """Primary FP4/INT8 implementation, validated before allocation."""
+        """Primary FP4/FP6/INT8 implementation, validated before allocation."""
         contract = self.loader.load_contract
         if contract is None or contract.requested_format.value not in {
             "fp4",
             "fp8_fp4",
+            "fp6",
+            "fp4_fp6",
             "int8",
         }:
             return None
         from .format_backends import (
-            probe_format_backend_capabilities,
             select_format_backend,
             validate_format_fsdp_placement,
         )
 
-        capabilities = probe_format_backend_capabilities()
+        capabilities = self.format_capabilities
         adapter = select_format_backend(
             contract,
             capabilities=capabilities,
@@ -81,6 +101,35 @@ class QuantizationBackends:
             adapter,
             capabilities=capabilities,
             required=self.places_format_backend_under_fsdp2(),
+        )
+        return adapter
+
+    @functools.cached_property
+    def fp6(self):
+        """MXFP6 owner for pure mode or the mixed mode's FP8 remainder."""
+
+        contract = self.loader.load_contract
+        if contract is None:
+            return None
+        format_value = contract.requested_format.value
+        if format_value == "fp6":
+            return self.format
+        if format_value != "fp4_fp6":
+            return None
+        from .format_backends import (
+            select_mxfp6_backend,
+            validate_format_fsdp_placement,
+        )
+
+        adapter = select_mxfp6_backend(
+            contract,
+            capabilities=self.format_capabilities,
+        )
+        validate_format_fsdp_placement(
+            contract,
+            adapter,
+            capabilities=self.format_capabilities,
+            required=self.places_mxfp6_backend_under_fsdp2(),
         )
         return adapter
 
@@ -148,6 +197,8 @@ class QuantizationBackends:
         fsdp_target_paths = self._fsdp_target_paths()
         if not fsdp_target_paths:
             return False
+        if self._uses_mxfp6_contract():
+            return False
 
         settings, config = self.model.settings, self.model.config
         fp4_targets = set(settings.fp4_gemm_module_list or ())
@@ -197,8 +248,40 @@ class QuantizationBackends:
             for fsdp_path in fsdp_target_paths
         )
 
+    def places_mxfp6_backend_under_fsdp2(self) -> bool:
+        """Whether pure/mixed MXFP6 creates packed parameters inside FSDP2."""
+
+        fsdp_target_paths = self._fsdp_target_paths()
+        if not fsdp_target_paths or not self._uses_mxfp6_contract():
+            return False
+        settings = self.model.settings
+        if self._format_value() == "fp6":
+            fp6_targets = set(self.loader.quantization_plan.module_list("fp6"))
+        else:
+            fp4_targets = set(settings.fp4_gemm_module_list or ())
+            fp6_targets = {
+                target
+                for target in self.loader.quantization_plan.module_list()
+                if not any(
+                    module_path_is_covered(target, fp4_target)
+                    for fp4_target in fp4_targets
+                )
+            }
+            if (
+                settings.fp8_precision_overrides
+                or settings.fp8_precision_override_suffixes
+            ):
+                fp6_targets.update(fp4_targets)
+        return any(
+            module_paths_overlap(target, fsdp_path)
+            for target in fp6_targets
+            for fsdp_path in fsdp_target_paths
+        )
+
     def requires_blockwise_fp8(self) -> bool:
         """Whether FP4 mode declares whole components owned only by FP8."""
+        if self._uses_mxfp6_contract():
+            return False
         if not self.model.config.use_fp4_gemms:
             return False
         fp4_targets = set(self.model.settings.fp4_gemm_module_list or ())
@@ -212,6 +295,8 @@ class QuantizationBackends:
 
     def uses_blockwise_fp8(self) -> bool:
         contract = self.loader.load_contract
+        if contract is None or self._uses_mxfp6_contract():
+            return False
         if self.requires_blockwise_fp8():
             return True
         if self.places_torchao_tensor_subclass_under_fsdp2(None):
@@ -228,16 +313,23 @@ class QuantizationBackends:
         )
 
     def _format_entries(self):
-        """This run's FP4/INT8 target list, whichever format the contract asked for."""
+        """This run's primary-format targets."""
         format_value = self.loader.load_contract.requested_format.value
-        if format_value in {"fp4", "fp8_fp4"}:
+        if format_value in {"fp4", "fp8_fp4", "fp4_fp6"}:
             return self.loader.quantization_plan.module_list("fp4")
+        if format_value == "fp6":
+            return self.loader.quantization_plan.module_list("fp6")
         if format_value == "int8":
             return self.loader.quantization_plan.module_list("int8")
         return ()
 
+    def format_entries(self):
+        """Public stable view used by eager placement."""
+
+        return tuple(self._format_entries())
+
     def format_targets_for(self, component_name: str) -> tuple:
-        """This run's FP4/INT8 targets under one component, with the component prefix stripped."""
+        """Primary-format targets under one component, with its prefix stripped."""
         prefix = f"{component_name}."
         return tuple(
             "" if entry == component_name else entry[len(prefix) :]
@@ -259,4 +351,6 @@ class QuantizationBackends:
         )
         if not fp8_targets:
             return None, ()
+        if self._format_value() == "fp4_fp6":
+            return self.fp6, fp8_targets
         return self.fp8_adapter_for_contract(), fp8_targets

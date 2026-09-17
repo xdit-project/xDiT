@@ -557,6 +557,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
             fullgraph=not use_hybrid,
         )
 
+        # The below fixes a recompile: avoids more than one graph realizing
+        # after compile-warmup.
+
         # mark_unbacked is only exposed on torch._dynamo.decorators, not on
         # torch._dynamo itself. mark_dynamic is the weaker fallback: it avoids
         # specializing on the exact size but still splits 1 from >1.

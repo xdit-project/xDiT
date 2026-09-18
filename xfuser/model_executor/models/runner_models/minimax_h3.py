@@ -41,9 +41,18 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
 _FASTH3_ATTN_BACKENDS = frozenset({AttentionBackendType.FLEX_VSA_H3})
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
-FASTH3_MODEL_ID = (
+FASTH3_V1_DATAFREE_MODEL_ID = (
     "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 )
+FASTH3_V2_MODEL_ID = "FastVideo/FastVideo-FastH3-8-Step-V2"
+FASTH3_MODEL_IDS = (FASTH3_V1_DATAFREE_MODEL_ID, FASTH3_V2_MODEL_ID)
+# Full set of FastH3 V1-VSA IDs. Used in _customize_settings to route the
+# correct checkpoint into from_pretrained when a weight variant is requested.
+FASTH3_V1_MODEL_IDS = frozenset({
+    FASTH3_V1_DATAFREE_MODEL_ID,
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300",
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
+})
 
 
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
@@ -645,7 +654,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
             log(f"Output video with audio saved to {output_path}")
 
 
-@register_model(FASTH3_MODEL_ID)
+@register_model(FASTH3_V1_DATAFREE_MODEL_ID)
+@register_model("FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300")
+@register_model("FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900")
 @register_model("FastH3")
 class xFuserFastH3Model(xFuserMiniMaxH3Model):
     """FastH3 Preview v1 runner.
@@ -665,7 +676,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     )
 
     settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
-    settings.model_name = FASTH3_MODEL_ID
+    settings.model_name = FASTH3_V1_DATAFREE_MODEL_ID
     settings.output_name = "fasth3"
     settings.valid_tasks = ["t2va"]
     settings.default_attention_backend = AttentionBackendType.FLEX_VSA_H3.name
@@ -673,6 +684,13 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
     _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # Use the caller-supplied HF ID so variant weights load correctly.
+        # Fall back to the primary DataFree checkpoint for short aliases ("FastH3").
+        if config.model in FASTH3_V1_MODEL_IDS:
+            self.settings.model_name = config.model
 
     def _validate_config(self, config) -> None:
         backend = _parse_attention_backend(
@@ -698,6 +716,36 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
             raise ValueError(
                 "FastH3 Preview v1 requires 5 scheduler points, which produce "
                 "the checkpoint's trained 4 transformer forwards."
+            )
+
+
+@register_model(FASTH3_V2_MODEL_ID)
+class xFuserFastH3V2Model(xFuserFastH3Model):
+    """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 9
+    scheduler points (8 transformer forwards)."""
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # MiniMaxH3Scheduler includes the terminal zero sigma, so nine points
+        # produce the eight transformer forwards used to train FastH3 V2.
+        num_inference_steps=9,
+    )
+
+    settings = copy.deepcopy(xFuserFastH3Model.settings)
+    settings.model_name = FASTH3_V2_MODEL_ID
+    settings.output_name = "fasth3_v2"
+
+    _warmup_num_inference_steps = 9
+
+    def _validate_args(self, input_args: dict) -> None:
+        # Skip the V1 step-count check; delegate to xFuserMiniMaxH3Model.
+        xFuserMiniMaxH3Model._validate_args(self, input_args)
+        if input_args["num_inference_steps"] != 9:
+            raise ValueError(
+                "FastH3 V2 requires 9 scheduler points, which produce "
+                "the checkpoint's trained 8 transformer forwards."
             )
 
 

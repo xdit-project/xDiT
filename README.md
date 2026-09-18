@@ -132,6 +132,8 @@ The following open-sourced DiT Models are released with xDiT in day 1.
 | [🟢 Krea2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🟢 Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🎬 MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 FastH3 Preview v1](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
+| [🎬 FastH3 V2](https://huggingface.co/FastVideo/FastVideo-FastH3-8-Step-V2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
 | [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
 | [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
 | [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/sd3.md) |

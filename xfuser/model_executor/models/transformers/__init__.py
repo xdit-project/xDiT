@@ -15,6 +15,7 @@ from .hunyuan_transformer_2d import xFuserHunyuanDiT2DWrapper
 from .cogvideox_transformer_3d import xFuserCogVideoXTransformer3DWrapper
 from .consisid_transformer_3d import xFuserConsisIDTransformer3DWrapper
 from .sana_transformer_2d import xFuserSanaTransformer2DWrapper
+from .transformer_lumina2 import xFuserLumina2Transformer2DWrapper
 
 __all__ = [
     "xFuserTransformerWrappersRegister",
@@ -26,4 +27,5 @@ __all__ = [
     "xFuserHunyuanDiT2DWrapper",
     "xFuserConsisIDTransformer3DWrapper",
     "xFuserSanaTransformer2DWrapper",
+    "xFuserLumina2Transformer2DWrapper",
 ]

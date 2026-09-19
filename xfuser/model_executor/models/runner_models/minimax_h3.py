@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import inspect
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -219,6 +220,41 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
 
     encoders.get_qwen3vl_prompt_embeds = distributed_get_prompt_embeds
     encoders._xfuser_broadcast_patched = True
+
+
+def _wrap_compiled_forward_for_vsa_h3(
+    transformer, original_forward, compiled_forward
+):
+    """Prime VSA-H3's tile geometry outside the compiled region.
+
+    The geometry is recovered from ``position_ids`` *values*, which forces
+    device syncs and cannot be traced, so ``fullgraph=True`` would reject it.
+    It is constant for a run, so priming the cache here leaves the lookup
+    inside ``forward`` as a branch that folds against the shape guards.
+
+    Returns ``compiled_forward`` unchanged for every non-VSA-H3 backend.
+    """
+    if not getattr(transformer, "use_vsa_h3", False):
+        return compiled_forward
+
+    signature = inspect.signature(original_forward)
+
+    def forward_with_vsa_h3_metadata(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        transformer.prepare_vsa_h3_metadata(
+            bound.arguments["position_ids"],
+            bound.arguments["video_indices"],
+            bound.arguments["audio_indices"],
+            bound.arguments["text_indices"],
+        )
+        return compiled_forward(*args, **kwargs)
+
+    # The denoise block picks which layout fields to pass by inspecting
+    # signature(transformer.forward), so the wrapper has to expose the real
+    # parameter list rather than (*args, **kwargs).
+    functools.update_wrapper(forward_with_vsa_h3_metadata, original_forward)
+    return forward_with_vsa_h3_metadata
 
 
 class MiniMaxH3DiffusionOutput(DiffusionOutput):
@@ -594,7 +630,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
         # signature(transformer.forward), so the wrapper must expose the real
         # parameter list rather than (*args, **kwargs).
         functools.update_wrapper(forward_with_dynamic_timestep, original_forward)
-        transformer.forward = forward_with_dynamic_timestep
+        transformer.forward = _wrap_compiled_forward_for_vsa_h3(
+            transformer, original_forward, forward_with_dynamic_timestep
+        )
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = (
@@ -716,12 +754,6 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
                 raise ValueError(
                     "FLEX_VSA_H3 uses VSA-H3 for every transformer step and "
                     "does not support xDiT's hybrid attention schedule."
-                )
-            if config.use_torch_compile:
-                raise ValueError(
-                    "FLEX_VSA_H3 does not support wrapping the full transformer "
-                    "with --use_torch_compile yet. Its FlexAttention kernel is "
-                    "compiled independently."
                 )
         super()._validate_config(config)
 

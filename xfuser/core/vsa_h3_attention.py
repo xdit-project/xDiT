@@ -59,6 +59,19 @@ _compiled_flex_attention = torch.compile(flex_attention, dynamic=False)
 _KV_BLOCK_WORKSPACE_CACHE: dict[tuple, tuple[torch.Tensor, ...]] = {}
 
 
+def _flex_attention_call(*args, **kwargs):
+    """Dispatch FlexAttention without nesting torch.compile inside a graph.
+
+    Calling a compiled wrapper from inside an outer compiled region is what
+    stops the MiniMax-H3 transformer from tracing at ``fullgraph=True``.
+    ``flex_attention`` is itself a traceable higher-order op, so hand the outer
+    compile the raw call and keep the pre-compiled wrapper for eager runs.
+    """
+    if torch.compiler.is_compiling():
+        return flex_attention(*args, **kwargs)
+    return _compiled_flex_attention(*args, **kwargs)
+
+
 @dataclass(frozen=True, eq=False)
 class MiniMaxH3VSAMetadata:
     """Cached mapping between packed H3 rows and the padded tile buffer.
@@ -664,7 +677,7 @@ def flex_h3_vsa_attention(
         compute_q_blocks=False,
     )
 
-    sparse_output = _compiled_flex_attention(
+    sparse_output = _flex_attention_call(
         query,
         key,
         value,

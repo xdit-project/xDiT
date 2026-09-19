@@ -1816,11 +1816,7 @@ def _flex_vsa_h3_attn_call(
     if dropout_p not in (None, 0.0):
         raise ValueError("FLEX_VSA_H3 does not support attention dropout")
 
-    from xfuser.core.vsa_h3_attention import (
-        flex_h3_vsa_attention,
-        tile_h3_vsa_tensor,
-        untile_h3_vsa_tensor,
-    )
+    from xfuser.core.vsa_h3_attention import h3_vsa_attention
 
     sequence_length = metadata.total_seq_length
     gathered_length = query.shape[2]
@@ -1829,29 +1825,10 @@ def _flex_vsa_h3_attn_call(
     value = value[:, :, :sequence_length]
     gate = gate[:, :, :sequence_length]
 
-    def tile_bhsd(tensor):
-        return tile_h3_vsa_tensor(
-            tensor.transpose(1, 2),
-            metadata,
-        ).transpose(1, 2).contiguous()
-
-    tiled_query = tile_bhsd(query)
-    tiled_key = tile_bhsd(key)
-    tiled_value = tile_bhsd(value)
-    tiled_gate = tile_bhsd(gate)
-    sparse_output, compressed_output = flex_h3_vsa_attention(
-        tiled_query,
-        tiled_key,
-        tiled_value,
-        metadata,
-    )
-    tiled_output = sparse_output + (
-        compressed_output.to(sparse_output.dtype) * tiled_gate
-    )
-    packed_output = untile_h3_vsa_tensor(
-        tiled_output.transpose(1, 2),
-        metadata,
-    ).transpose(1, 2)
+    # Nothing is permuted here. The padded tile buffers the FlexAttention
+    # kernel needs are built inside h3_vsa_attention, which keeps the gate and
+    # the compression branch out of tile order entirely.
+    packed_output = h3_vsa_attention(query, key, value, gate, metadata)
     if gathered_length > sequence_length:
         padded_output = packed_output.new_zeros(
             packed_output.shape[0],

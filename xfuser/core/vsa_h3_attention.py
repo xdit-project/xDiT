@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 
 import torch
@@ -34,6 +35,13 @@ FASTH3_VSA_SPARSITY = 0.9
 # the knob to raise if a geometry ever gets large enough that the chunk falls to
 # a handful of tiles and selection turns launch-bound.
 FASTH3_VSA_SELECTION_SCORE_BYTES = 64 * 2**20
+
+# The Triton kernel unrolls its KV loop by a tunable factor. Padding the index
+# list to a multiple of the largest factor, with a sentinel tile whose slots are
+# all invalid, removes the loop's tail guard entirely. Every sentinel tile is a
+# tile's worth of key/value traffic the kernel does for nothing, so this tracks
+# the largest unroll factor in the autotune space and no more.
+FASTH3_VSA_KV_LIST_ALIGNMENT = 4
 
 # FlexAttention kernel configuration. BLOCK_M/BLOCK_N are pinned by the 64-token
 # tile: the Triton template asserts SPARSE_Q_BLOCK_SIZE >= BLOCK_M and
@@ -100,6 +108,7 @@ class MiniMaxH3VSAMetadata:
     pad_slot_index: torch.Tensor
     packed_token_tile: torch.Tensor
     tiled_slot_valid: torch.Tensor
+    tiled_to_packed_row: torch.Tensor
     prefix_partial_first_keys: torch.Tensor
     prefix_full_first_keys: torch.Tensor
     padding_mask_mod: object
@@ -284,6 +293,19 @@ def build_h3_vsa_metadata(
         total_seq_length, device=device
     )
     pad_slot_index = (~tiled_slot_valid).nonzero(as_tuple=True)[0]
+    # Output-side mapping for the Triton kernel, which writes packed rows
+    # directly. Padded slots point one past the end and are masked off.
+    # One extra all-padding tile, so the Triton kernel's sentinel tile id is in
+    # bounds and reads as padding.
+    tiled_to_packed_row = torch.full(
+        (padded_seq_length + tile_elements,),
+        total_seq_length,
+        dtype=torch.int32,
+        device=device,
+    )
+    tiled_to_packed_row[packed_to_tiled] = torch.arange(
+        total_seq_length, dtype=torch.int32, device=device
+    )
 
     num_prefix_tiles = len(prefix_sizes)
     prefix_sizes_tensor = variable_block_sizes[:num_prefix_tiles]
@@ -338,6 +360,7 @@ def build_h3_vsa_metadata(
         pad_slot_index=pad_slot_index,
         packed_token_tile=packed_to_tiled // tile_elements,
         tiled_slot_valid=tiled_slot_valid,
+        tiled_to_packed_row=tiled_to_packed_row,
         prefix_partial_first_keys=prefix_partial_first_keys,
         prefix_full_first_keys=prefix_full_first_keys,
         padding_mask_mod=padding_mask_mod,
@@ -526,6 +549,44 @@ def _selection_chunk_tiles(batch: int, heads: int, num_tiles: int) -> int:
     return max(1, min(num_tiles, budget))
 
 
+def _kv_list_workspace(
+    batch: int,
+    heads: int,
+    num_tiles: int,
+    width: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Single-buffer sibling of ``_kv_block_workspace`` for the Triton path.
+
+    Same single-live-consumer contract and same lifetime; see that function.
+    """
+    def allocate():
+        return torch.empty(
+            (batch, heads, num_tiles, width), dtype=torch.int32, device=device
+        )
+
+    if torch.compiler.is_compiling():
+        return allocate()
+
+    key = (
+        "list",
+        device.type,
+        device.index,
+        torch.cuda.current_stream(device).cuda_stream
+        if device.type == "cuda"
+        else 0,
+        batch,
+        heads,
+        num_tiles,
+        width,
+    )
+    workspace = _KV_BLOCK_WORKSPACE_CACHE.get(key)
+    if workspace is None:
+        workspace = allocate()
+        _KV_BLOCK_WORKSPACE_CACHE[key] = workspace
+    return workspace
+
+
 def build_h3_vsa_kv_blocks(
     pooled_query: torch.Tensor,
     pooled_key: torch.Tensor,
@@ -607,6 +668,67 @@ def build_h3_vsa_kv_blocks(
         full_kv_num_blocks[:, :, start:stop] = width - partial_count
 
     return kv_num_blocks, kv_indices, full_kv_num_blocks, full_kv_indices
+
+
+def build_h3_vsa_kv_list(
+    pooled_query: torch.Tensor,
+    pooled_key: torch.Tensor,
+    metadata: MiniMaxH3VSAMetadata,
+    sparsity: float = FASTH3_VSA_SPARSITY,
+) -> torch.Tensor:
+    """Select VSA-H3 key tiles as one ascending ``[B, H, tiles, P + K]`` list.
+
+    Same policy and same retained set as ``build_h3_vsa_kv_blocks``, without the
+    full/partial split. The split only exists to keep FlexAttention's padding
+    ``mask_mod`` off the full blocks; the Triton kernel masks padding per tile
+    from the tile map instead, so it wants the plain sorted list and saves one
+    sort per call.
+
+    The list is padded out to ``FASTH3_VSA_KV_LIST_ALIGNMENT`` with the sentinel
+    tile id ``num_tiles``, whose slots read as invalid.
+    """
+    batch, heads, num_tiles, head_dim = pooled_query.shape
+    if num_tiles != metadata.num_tiles:
+        raise ValueError(
+            "VSA-H3 pooled tensors must have one row per tile, expected "
+            f"{metadata.num_tiles}, got {num_tiles}."
+        )
+
+    num_prefix = metadata.num_prefix_tiles
+    video_topk = compute_h3_vsa_topk(sparsity, metadata.num_video_tiles)
+    width = num_prefix + video_topk
+    alignment = FASTH3_VSA_KV_LIST_ALIGNMENT
+    padded_width = -(-width // alignment) * alignment
+    kv_indices = _kv_list_workspace(
+        batch, heads, num_tiles, padded_width, pooled_query.device
+    )
+    if padded_width > width:
+        kv_indices[..., width:] = num_tiles
+
+    prefix = torch.arange(
+        num_prefix, dtype=torch.int32, device=pooled_query.device
+    ).view(1, 1, 1, num_prefix)
+    pooled_key_t = pooled_key.transpose(-2, -1)
+    scale = head_dim**-0.5
+    chunk = _selection_chunk_tiles(batch, heads, num_tiles)
+    for start in range(0, num_tiles, chunk):
+        stop = min(start + chunk, num_tiles)
+        scores = torch.matmul(pooled_query[:, :, start:stop], pooled_key_t)
+        scores.mul_(scale)
+        video = (
+            scores[..., num_prefix:]
+            .topk(video_topk, dim=-1)
+            .indices.to(torch.int32)
+        )
+        video += num_prefix
+        # Ascending order is not needed for correctness, only for the locality
+        # of the kernel's key/value loads. Only the video half is sorted: the
+        # prefix half is arange(num_prefix) and every video id is >= num_prefix,
+        # so concatenating the two is already the sort of the whole.
+        kv_indices[:, :, start:stop, :num_prefix] = prefix
+        kv_indices[:, :, start:stop, num_prefix:width] = video.sort(dim=-1).values
+
+    return kv_indices
 
 
 def pool_h3_vsa_tiles(
@@ -700,6 +822,31 @@ def flex_h3_vsa_attention(
     return sparse_output, compressed
 
 
+def _use_triton_kernel(device: torch.device) -> bool:
+    """Whether to run the hand-written kernel instead of FlexAttention."""
+    choice = os.environ.get("XFUSER_VSA_H3_BACKEND", "auto").lower()
+    if choice == "flex":
+        return False
+    from xfuser.core import vsa_h3_triton
+
+    # The kernel is launched on the tensors' own device, so a CPU tensor cannot
+    # use it however Triton is built.
+    on_gpu = device.type == "cuda"
+    if choice == "triton":
+        if not (on_gpu and vsa_h3_triton.is_available()):
+            raise RuntimeError(
+                "XFUSER_VSA_H3_BACKEND=triton but Triton is unavailable for "
+                f"device {device}."
+            )
+        return True
+    if choice != "auto":
+        raise ValueError(
+            "XFUSER_VSA_H3_BACKEND must be one of auto, triton, flex; got "
+            f"{choice!r}."
+        )
+    return on_gpu and vsa_h3_triton.is_available()
+
+
 def h3_vsa_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -711,9 +858,36 @@ def h3_vsa_attention(
     """VSA-H3 attention, gate applied, everything in packed row order.
 
     ``query``/``key``/``value``, ``gate`` and the result are all packed
-    ``[B, H, S, D]``. FlexAttention needs the padded tile buffers, so they are
-    built here and undone on the way out.
+    ``[B, H, S, D]``.
+
+    Prefers the hand-written Triton kernel, which reads packed rows through the
+    tile map and folds the compression branch and the gate into its epilogue,
+    so tile order is never materialised. FlexAttention needs the padded tile
+    buffers, so the fallback builds them; both select the same key tiles. Set
+    ``XFUSER_VSA_H3_BACKEND=flex`` to force the fallback.
     """
+    if _use_triton_kernel(query.device):
+        from xfuser.core.vsa_h3_triton import (
+            triton_h3_vsa_attention,
+            triton_pool_h3_vsa_tiles,
+        )
+
+        pooled_query = triton_pool_h3_vsa_tiles(query, metadata)
+        pooled_key = triton_pool_h3_vsa_tiles(key, metadata)
+        pooled_value = triton_pool_h3_vsa_tiles(value, metadata)
+        kv_indices = build_h3_vsa_kv_list(
+            pooled_query, pooled_key, metadata, sparsity
+        )
+        # Model dtype, for the reason given in flex_h3_vsa_attention.
+        compressed = F.scaled_dot_product_attention(
+            pooled_query.to(query.dtype),
+            pooled_key.to(query.dtype),
+            pooled_value.to(query.dtype),
+        )
+        return triton_h3_vsa_attention(
+            query, key, value, kv_indices, compressed, gate, metadata
+        )
+
     sparse_output, compressed = flex_h3_vsa_attention(
         tile_h3_vsa_bhsd(query, metadata),
         tile_h3_vsa_bhsd(key, metadata),

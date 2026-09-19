@@ -2,13 +2,16 @@ import pytest
 import torch
 
 from xfuser.core.vsa_h3_attention import (
+    FASTH3_VSA_KV_LIST_ALIGNMENT,
     FASTH3_VSA_SPARSITY,
     FASTH3_VSA_TILE_ELEMENTS,
     build_h3_vsa_block_mask,
     build_h3_vsa_kv_blocks,
+    build_h3_vsa_kv_list,
     build_h3_vsa_metadata,
     compute_h3_vsa_topk,
     flex_h3_vsa_attention,
+    h3_vsa_attention,
     pool_h3_vsa_tiles,
     tile_h3_vsa_bhsd,
     tile_h3_vsa_tensor,
@@ -328,3 +331,180 @@ def test_flex_h3_vsa_attention_matches_the_dense_reference():
     torch.testing.assert_close(
         compressed.float(), compressed_ref.float(), rtol=2e-2, atol=2e-2
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("backend", ["flex", "triton"])
+def test_h3_vsa_attention_backends_agree_with_the_dense_reference(
+    monkeypatch, backend
+):
+    """Both kernels must produce the same gated, packed-order output."""
+    from xfuser.core import vsa_h3_triton
+
+    if backend == "triton" and not vsa_h3_triton.is_available():
+        pytest.skip("Triton is unavailable")
+    monkeypatch.setenv("XFUSER_VSA_H3_BACKEND", backend)
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    metadata = build_h3_vsa_metadata(
+        prefix_segments=(65, 3), video_shape=(5, 6, 7), device=device
+    )
+    shape = (1, 4, metadata.total_seq_length, 64)
+    query, key, value, gate = (
+        torch.randn(shape, device=device, dtype=torch.bfloat16) for _ in range(4)
+    )
+
+    actual = h3_vsa_attention(query, key, value, gate, metadata)
+
+    sparse_ref, compressed_ref = _reference_vsa_h3_attention(
+        tile_h3_vsa_bhsd(query, metadata),
+        tile_h3_vsa_bhsd(key, metadata),
+        tile_h3_vsa_bhsd(value, metadata),
+        metadata,
+        FASTH3_VSA_SPARSITY,
+    )
+    expected = untile_h3_vsa_bhsd(sparse_ref, metadata) + (
+        compressed_ref.to(gate.dtype).index_select(
+            2, metadata.packed_token_tile
+        )
+        * gate
+    )
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(
+        actual.float(), expected.float(), rtol=2e-2, atol=2e-2
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix_segments,video_shape,sparsity",
+    [((3, 2), (5, 5, 5), FASTH3_VSA_SPARSITY), ((65, 3), (5, 6, 7), 0.75)],
+)
+def test_h3_vsa_kv_list_matches_the_block_lists(
+    prefix_segments, video_shape, sparsity
+):
+    """The Triton list and the Flex block lists must retain the same tiles."""
+    torch.manual_seed(0)
+    metadata = build_h3_vsa_metadata(
+        prefix_segments=prefix_segments, video_shape=video_shape, device=CPU
+    )
+    num_tiles = metadata.num_tiles
+    pooled_query = torch.randn(2, 3, num_tiles, 16)
+    pooled_key = torch.randn(2, 3, num_tiles, 16)
+    width = metadata.num_prefix_tiles + compute_h3_vsa_topk(
+        sparsity, metadata.num_video_tiles
+    )
+
+    kv_list = build_h3_vsa_kv_list(pooled_query, pooled_key, metadata, sparsity)
+    kv_num_blocks, kv_indices, full_kv_num_blocks, full_kv_indices = (
+        build_h3_vsa_kv_blocks(pooled_query, pooled_key, metadata, sparsity)
+    )
+
+    assert kv_list.shape[-1] % FASTH3_VSA_KV_LIST_ALIGNMENT == 0
+    assert kv_list.shape[-1] >= width
+    # The alignment tail is the sentinel tile, which reads back as all-invalid.
+    assert (kv_list[..., width:] == num_tiles).all()
+    # The sentinel tile must be addressable and read back as pure padding.
+    sentinel = metadata.tiled_to_packed_row[metadata.padded_seq_length :]
+    assert sentinel.numel() == metadata.tile_elements
+    assert (sentinel == metadata.total_seq_length).all()
+
+    ranks = torch.arange(width).view(1, 1, 1, -1)
+    both = torch.cat(
+        (
+            torch.where(ranks < kv_num_blocks.unsqueeze(-1), kv_indices, -1),
+            torch.where(
+                ranks < full_kv_num_blocks.unsqueeze(-1), full_kv_indices, -1
+            ),
+        ),
+        dim=-1,
+    )
+    from_blocks = both.sort(dim=-1, descending=True).values[..., :width]
+    assert torch.equal(
+        kv_list[..., :width].sort(dim=-1, descending=True).values, from_blocks
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_h3_vsa_triton_pooling_selects_the_same_tiles_as_torch():
+    """The gather-based pool must not move the top-k boundary.
+
+    It sums in a different order than the torch reduction it replaces, so the
+    tile means differ by an ULP or so; the contract is that the *selection*
+    that reads them is unchanged.
+    """
+    from xfuser.core import vsa_h3_triton
+
+    if not vsa_h3_triton.is_available():
+        pytest.skip("Triton is unavailable")
+
+    device = torch.device("cuda")
+    metadata = build_h3_vsa_metadata(
+        prefix_segments=(11, 90), video_shape=(9, 8, 11), device=device
+    )
+    for seed in range(8):
+        torch.manual_seed(seed)
+        packed = [
+            torch.randn(
+                (1, 3, metadata.total_seq_length, 64),
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            for _ in range(2)
+        ]
+        reference = [
+            pool_h3_vsa_tiles(tile_h3_vsa_bhsd(tensor, metadata), metadata)
+            for tensor in packed
+        ]
+        gathered = [
+            vsa_h3_triton.triton_pool_h3_vsa_tiles(tensor, metadata)
+            for tensor in packed
+        ]
+        torch.testing.assert_close(gathered[0], reference[0], rtol=0, atol=1e-6)
+        assert torch.equal(
+            build_h3_vsa_kv_list(*gathered, metadata).sort(dim=-1).values,
+            build_h3_vsa_kv_list(*reference, metadata).sort(dim=-1).values,
+        )
+
+
+def test_h3_vsa_tiled_to_packed_row_marks_padding_out_of_range():
+    metadata = build_h3_vsa_metadata(
+        prefix_segments=(3, 2), video_shape=(5, 5, 5), device=CPU
+    )
+    rows = metadata.tiled_to_packed_row
+
+    assert rows.dtype == torch.int32
+    assert rows.shape == (
+        metadata.padded_seq_length + metadata.tile_elements,
+    )
+    rows = rows[: metadata.padded_seq_length]
+    # Real slots address their packed row; padded slots are masked off by
+    # pointing one past the end of the packed sequence.
+    assert (rows[metadata.pad_slot_index] == metadata.total_seq_length).all()
+    real = rows[metadata.tiled_slot_valid]
+    assert torch.equal(real.sort().values, torch.arange(
+        metadata.total_seq_length, dtype=torch.int32
+    ))
+    assert torch.equal(
+        rows[metadata.packed_to_tiled_index],
+        torch.arange(metadata.total_seq_length, dtype=torch.int32),
+    )
+
+
+def test_h3_vsa_backend_env_rejects_unknown_values(monkeypatch):
+    from xfuser.core.vsa_h3_attention import _use_triton_kernel
+
+    monkeypatch.setenv("XFUSER_VSA_H3_BACKEND", "cutlass")
+    with pytest.raises(ValueError, match="auto, triton, flex"):
+        _use_triton_kernel(torch.device("cuda"))
+
+
+def test_h3_vsa_backend_declines_triton_on_cpu(monkeypatch):
+    from xfuser.core.vsa_h3_attention import _use_triton_kernel
+
+    monkeypatch.setenv("XFUSER_VSA_H3_BACKEND", "auto")
+    assert not _use_triton_kernel(torch.device("cpu"))
+    monkeypatch.setenv("XFUSER_VSA_H3_BACKEND", "triton")
+    with pytest.raises(RuntimeError, match="Triton is unavailable"):
+        _use_triton_kernel(torch.device("cpu"))

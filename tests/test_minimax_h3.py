@@ -1185,9 +1185,16 @@ def test_minimax_h3_forward_increments_hybrid_step_counter(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="VSA-H3 needs a GPU")
-def test_fasth3_vsa_transformer_compiles_fullgraph(monkeypatch):
-    """The VSA-H3 backend must trace without graph breaks under fullgraph."""
+@pytest.mark.parametrize("vsa_backend", ["flex", "triton"])
+def test_fasth3_vsa_transformer_compiles_fullgraph(monkeypatch, vsa_backend):
+    """Both VSA-H3 kernels must trace without graph breaks under fullgraph."""
     import torch._dynamo
+
+    from xfuser.core import vsa_h3_triton
+
+    if vsa_backend == "triton" and not vsa_h3_triton.is_available():
+        pytest.skip("Triton is unavailable")
+    monkeypatch.setenv("XFUSER_VSA_H3_BACKEND", vsa_backend)
 
     from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata

@@ -495,7 +495,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "generator": torch.Generator(device="cuda").manual_seed(
                 input_args["seed"]
             ),
-            "output_type": "np",
+            "output_type": "pt",
         }
         images = input_args.get("input_images") or []
         task = input_args.get("task")
@@ -523,7 +523,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         state = self.pipe(
             **pipe_args,
         )
-        videos = state.get("videos")
+        videos = self._decoded_videos_to_frames(state.get("videos"))
         audio = state.get("audio")
         sampling_rate = int(state.get("sampling_rate"))
         return MiniMaxH3DiffusionOutput(
@@ -615,6 +615,21 @@ class xFuserMiniMaxH3Model(xFuserModel):
             log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
             self._run_timed_pipe(warmup_args)
         log("Warmup complete.")
+
+    @staticmethod
+    def _decoded_videos_to_frames(videos) -> list[torch.Tensor]:
+        # postprocess_video(output_type="np") copies the float video to the host
+        # and transposes it there. At 768x1344x124 that is a 1.43 GiB transfer
+        # plus a single-threaded 1.43 GiB NumPy transpose with the GPU idle.
+        # Quantizing and transposing on the device makes it a 366 MiB transfer
+        # already in the [F, H, W, C] layout encode_video_with_audio wants.
+        frames = []
+        for video in videos:
+            if video.dtype != torch.uint8:
+                video = video.float().mul(255).round_().clamp_(0, 255)
+                video = video.to(torch.uint8)
+            frames.append(video.permute(0, 2, 3, 1).contiguous().cpu())
+        return frames
 
     @staticmethod
     def _video_to_uint8(video) -> torch.Tensor:
@@ -837,10 +852,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             generator=torch.Generator(device="cuda").manual_seed(
                 input_args["seed"]
             ),
-            output_type="np",
+            output_type="pt",
         )
         return MiniMaxH3DiffusionOutput(
-            videos=state.get("videos"),
+            videos=self._decoded_videos_to_frames(state.get("videos")),
             audio=state.get("audio"),
             audio_sample_rate=int(state.get("sampling_rate")),
             pipe_args=input_args,

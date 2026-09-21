@@ -37,6 +37,7 @@ class xFuserQwenImageEditModel(xFuserModel):
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,
+        use_cfg_parallel=True,
         fully_shard_degree=True,
         use_fp8_gemms=True,
         use_fp8_text_encoder=True,
@@ -87,14 +88,16 @@ class xFuserQwenImageEditModel(xFuserModel):
             self.settings.output_name = "qwen_image_edit_2509"
 
     def _load_model(self) -> DiffusionPipeline:
-        from diffusers import QwenImageEditPipeline
+        from xfuser.model_executor.pipelines.pipeline_qwen_image_edit import (
+            xFuserQwenImageEditPipeline,
+        )
         from xfuser.model_executor.models.transformers.transformer_qwen import (
             xFuserQwenImageTransformerWrapper,
         )
 
         transformer = self.loader.load_transformer(xFuserQwenImageTransformerWrapper)
         te_kwargs, te_quant = self.loader.plan_text_encoders()
-        pipe = QwenImageEditPipeline.from_pretrained(
+        pipe = xFuserQwenImageEditPipeline.from_pretrained(
             pretrained_model_name_or_path=self.settings.model_name,
             transformer=transformer,
             torch_dtype=torch.bfloat16,

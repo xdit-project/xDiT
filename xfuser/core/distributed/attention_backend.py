@@ -1220,16 +1220,36 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
                 "the indices_k mask would be silently dropped and dense attention would "
                 "run over padded keys."
             )
-        output = aiter.flash_attn_fp8_pertensor_func(
-            query,
-            key,
-            value,
-            causal=is_causal,
-            softmax_scale=query.shape[-1] ** -0.5,
-            q_descale=attention_kwargs["q_descale"],
-            k_descale=attention_kwargs["k_descale"],
-            v_descale=attention_kwargs["v_descale"],
-        )
+        softmax_scale = query.shape[-1] ** -0.5
+        if _use_aiter_mha_v4_fp8(query, is_causal):
+            fp8_format = _aiter_native_fp8_format()
+            per_tensor = _AiterAttentionScaleMode.F32_PER_TENSOR
+            output = _aiter_mha_v4_packed(
+                query,
+                key,
+                value,
+                attention_kwargs["q_descale"],
+                attention_kwargs["k_descale"],
+                attention_kwargs["v_descale"],
+                fp8_format,
+                fp8_format,
+                fp8_format,
+                per_tensor,
+                per_tensor,
+                per_tensor,
+                softmax_scale=softmax_scale,
+            )
+        else:
+            output = aiter.flash_attn_fp8_pertensor_func(
+                query,
+                key,
+                value,
+                causal=is_causal,
+                softmax_scale=softmax_scale,
+                q_descale=attention_kwargs["q_descale"],
+                k_descale=attention_kwargs["k_descale"],
+                v_descale=attention_kwargs["v_descale"],
+            )
         output = torch.permute(output, [0, 2, 1, 3])
         return output, None
 

@@ -503,6 +503,13 @@ class DiTRuntimeState(RuntimeState):
                 backbone_inner_dim=pipeline.transformer.config.n_heads
                 * pipeline.transformer.config.axes_dims[-1]
             )
+        elif pipeline.__class__.__name__.startswith(("Lumina2", "xFuserLumina2")):
+            self._set_model_parameters(
+                vae_scale_factor=pipeline.vae_scale_factor,
+                backbone_patch_size=pipeline.transformer.config.patch_size,
+                backbone_in_channel=pipeline.transformer.config.in_channels,
+                backbone_inner_dim=pipeline.transformer.config.hidden_size,
+            )
         else:
             vae_scale_factor = getattr(pipeline, "vae_scale_factor", 0)
             if pipeline.__class__.__name__.startswith(("Flux", "xFuserFlux")):

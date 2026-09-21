@@ -333,6 +333,46 @@ class TestUSPCombinedQKV(unittest.TestCase):
             extra_out, usp._ft_c_input_all_to_all(extra), msg="extra tensor mismatch"
         )
 
+    @unittest.mock.patch('xfuser.model_executor.layers.usp.get_ulysses_parallel_world_size')
+    @unittest.mock.patch('xfuser.model_executor.layers.usp._sdpa_all_to_all_single')
+    def test_combined_gqa_qkv_all_to_all(self, mock_all_to_all, mock_world_size):
+        """Compact GQA exchange matches separate Q/K/V all-to-all calls."""
+        world_size = 2
+        mock_world_size.return_value = world_size
+        mock_all_to_all.side_effect = lambda x: x
+
+        batch, query_heads, kv_heads, sequence, head_dim = 2, 6, 2, 8, 4
+        query = torch.randn(batch, query_heads, sequence, head_dim)
+        key = torch.randn(batch, kv_heads, sequence, head_dim)
+        value = torch.randn(batch, kv_heads, sequence, head_dim)
+        extra = torch.randn_like(query)
+
+        expected = (
+            usp._ft_c_input_all_to_all(query),
+            usp._ft_c_input_all_to_all(key),
+            usp._ft_c_input_all_to_all(value),
+            usp._ft_c_input_all_to_all(extra),
+        )
+        actual = usp._combined_gqa_qkv_all_to_all(query, key, value, extra)
+
+        self.assertEqual(mock_all_to_all.call_count, 5)
+        for expected_tensor, actual_tensor in zip(expected, actual):
+            torch.testing.assert_close(actual_tensor, expected_tensor)
+
+    def test_repeat_kv_heads_preserves_gqa_order(self):
+        key = torch.tensor([[[[0.0]], [[1.0]]]])
+        value = key + 10
+
+        repeated_key, repeated_value = usp._repeat_kv_heads(key, value, repeats=3)
+
+        torch.testing.assert_close(
+            repeated_key.flatten(), torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+        )
+        torch.testing.assert_close(
+            repeated_value.flatten(),
+            torch.tensor([10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
+        )
+
     def test_ulysses_extra_inputs_are_named_by_the_caller(self):
         """USP exchanges whatever keys a backend lists, without knowing their meaning."""
         query = torch.randn(1, 2, 8, 4)

@@ -106,6 +106,7 @@ Individual model classes that inherit from `xFuserModel`:
 | LTX-2.3 | `LTX-2.3`, `dg845/LTX-2.3-Diffusers` |
 | LTX-2.5 Distilled | `LTX-2.5`, `LTX-2.5-distilled`, `Lightricks/LTX-2.5-Diffusers` |
 | LTX-2.5 Full | `LTX-2.5-full` |
+| Lumina-Image-2.0 | `Lumina2`, `Lumina-Image-2.0`, `Alpha-VLLM/Lumina-Image-2.0` |
 | MiniMax-H3 | `MiniMaxAI/MiniMax-H3`, `MiniMax-H3`, `MiniMax-H3-Ref2VA` |
 | FastH3 Preview v1 | `FastH3`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300`, `FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900` |
 | FastH3 V2 | `FastVideo/FastVideo-FastH3-8-Step-V2` |

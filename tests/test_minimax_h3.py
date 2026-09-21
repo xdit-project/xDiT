@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import inspect
-import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -231,12 +230,12 @@ def test_minimax_h3_runner_registration():
 def test_fasth3_defaults_match_inference_contract():
     from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        FASTH3_MODEL_ID,
+        FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
         xFuserMiniMaxH3Model,
     )
 
-    assert xFuserFastH3Model.settings.model_name == FASTH3_MODEL_ID
+    assert xFuserFastH3Model.settings.model_name == FASTH3_V1_DATAFREE_MODEL_ID
     assert xFuserFastH3Model.settings.valid_tasks == ["t2va"]
     assert (
         xFuserFastH3Model.settings.default_attention_backend
@@ -863,7 +862,7 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
 
     from xfuser.model_executor.models.runner_models import minimax_h3
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        FASTH3_MODEL_ID,
+        FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
     )
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
@@ -907,10 +906,10 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
     actual = model._load_model()
 
     assert actual is pipe
-    assert pipeline_loads == [(FASTH3_MODEL_ID, "t2va")]
+    assert pipeline_loads == [(FASTH3_V1_DATAFREE_MODEL_ID, "t2va")]
     assert transformer_loads == [
         (
-            FASTH3_MODEL_ID,
+            FASTH3_V1_DATAFREE_MODEL_ID,
             {
                 "subfolder": "transformer",
                 "dtype": torch.bfloat16,
@@ -1048,7 +1047,7 @@ def test_minimax_h3_ref2va_uses_typed_image_references():
     def fake_pipe(**kwargs):
         captured.update(kwargs)
         return {
-            "videos": np.zeros((1, 1, 1, 1, 3), dtype=np.float32),
+            "videos": torch.zeros((1, 1, 3, 1, 1), dtype=torch.float32),
             "audio": torch.zeros(1, 2, 1),
             "sampling_rate": 24_000,
         }
@@ -1072,6 +1071,40 @@ def test_minimax_h3_ref2va_uses_typed_image_references():
     assert len(captured["references"]) == 1
     assert isinstance(captured["references"][0], MiniMaxH3ImageReference)
     assert captured["references"][0].image is image
+    assert captured["output_type"] == "pt"
+
+
+def test_minimax_h3_decoded_videos_convert_to_uint8_frames_on_device():
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    # [B, F, C, H, W] denormalized to [0, 1], as postprocess_video leaves it.
+    videos = torch.tensor([0.0, 0.5, 1.0]).view(1, 1, 3, 1, 1).expand(1, 2, 3, 4, 5)
+
+    frames = xFuserMiniMaxH3Model._decoded_videos_to_frames(videos)
+
+    assert isinstance(frames, list) and len(frames) == 1
+    frame = frames[0]
+    assert frame.shape == (2, 4, 5, 3)
+    assert frame.dtype == torch.uint8
+    assert frame.is_contiguous()
+    assert frame[..., 0].unique().tolist() == [0]
+    assert frame[..., 1].unique().tolist() == [128]
+    assert frame[..., 2].unique().tolist() == [255]
+
+
+def test_minimax_h3_decoded_videos_do_not_rescale_uint8():
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    videos = torch.full((1, 2, 3, 4, 5), 7, dtype=torch.uint8)
+
+    frames = xFuserMiniMaxH3Model._decoded_videos_to_frames(videos)
+
+    assert frames[0].shape == (2, 4, 5, 3)
+    assert frames[0].unique().tolist() == [7]
 
 
 def test_minimax_h3_supports_hybrid_attention_capability():

@@ -439,12 +439,42 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
         latents = torch.cat(latents_list, dim=-2)
 
         if get_runtime_state().split_text_embed_in_sp:
-            if prompt_embeds.shape[-2] % get_sequence_parallel_world_size() == 0:
-                prompt_embeds = torch.chunk(prompt_embeds, get_sequence_parallel_world_size(), dim=-2)[get_sequence_parallel_rank()]
-            else:
-                get_runtime_state().split_text_embed_in_sp = False                
+            # pooled_prompt_embeds has no sequence dim; only the token stream is
+            # sharded. CFG already folded negative embeds into prompt_embeds.
+            prompt_embeds = self._chunk_text_for_sp(prompt_embeds)
 
         return latents, prompt_embeds
+
+    def _chunk_text_for_sp(self, prompt_embeds: torch.Tensor) -> torch.Tensor:
+        sp_size = get_sequence_parallel_world_size()
+        seq_len = prompt_embeds.shape[-2]
+        pad = (sp_size - seq_len % sp_size) % sp_size
+        get_runtime_state().text_embed_sp_pad = pad
+        if pad:
+            if get_runtime_state().fp8_comms is None:
+                # Preserve the established joint-attention path unless FP8
+                # communication requires text to share the Q/K/V exchange.
+                get_runtime_state().split_text_embed_in_sp = False
+                get_runtime_state().text_embed_sp_pad = 0
+                return prompt_embeds
+
+            # Keep text in the Ulysses shard so it can share the Q/K/V exchange.
+            # The joint attention processor removes these synthetic tokens from
+            # K/V after all-to-all without varlen packing.
+            zeros = torch.zeros(
+                *prompt_embeds.shape[:-2],
+                pad,
+                prompt_embeds.shape[-1],
+                dtype=prompt_embeds.dtype,
+                device=prompt_embeds.device,
+            )
+            prompt_embeds = torch.cat([prompt_embeds, zeros], dim=-2)
+        chunks = torch.chunk(prompt_embeds, sp_size, dim=-2)
+        assert chunks[0].shape[-2] * sp_size == prompt_embeds.shape[-2], (
+            f"text sequence {prompt_embeds.shape[-2]} is not divisible by "
+            f"sequence-parallel size {sp_size} after padding"
+        )
+        return chunks[get_sequence_parallel_rank()]
 
     # synchronized compute the whole feature map in each pp stage
     def _sync_pipeline(

@@ -42,13 +42,20 @@ from xfuser.core.distributed import (
     get_pipeline_parallel_world_size,
     initialize_runtime_state,
     get_runtime_state,
+    runtime_state_is_initialized,
     init_distributed_environment,
 )
 from xfuser.core.distributed.attention_backend import (
     AITER_MHA_V4_SPARGE_BACKEND_SET,
     AttentionBackendType,
 )
-from xfuser.core.distributed.attention_schedule import AttentionSchedule, create_hybrid_attn_schedule, create_hybrid_gemm_schedule
+from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
+from xfuser.core.distributed.attention_schedule import (
+    AttentionSchedule,
+    GemmPrecisionSchedule,
+    create_hybrid_attn_schedule,
+    create_hybrid_gemm_schedule,
+)
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -139,7 +146,9 @@ class ModelCapabilities:
     use_fp8_gemms: bool = False
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
+    use_fp6_gemms: bool = False
     supports_step_caching: bool = False
+    use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
     use_hybrid_gemm_schedule: bool = False
     cross_attention_backend: bool = False
@@ -194,6 +203,9 @@ class ModelSettings:
         }
     })
     valid_tasks: List[str] = field(default_factory=list)
+    # Attention backend used when --attention_backend is omitted. Leave None to
+    # keep the global default.
+    default_attention_backend: Optional[str] = None
     resolution_divisor: Optional[int] = None
     transformer_attr_names: List[str] = field(default_factory=lambda: ["transformer"])
 
@@ -275,6 +287,7 @@ class xFuserModel(abc.ABC):
         self.settings = copy.deepcopy(self.__class__.settings)
         self._customize_settings(config)
         self._vae_manager = VAEManager(config, self.capabilities, self.settings)
+        self._apply_default_attention_backend(config)
         self._validate_config(config)
         self._update_model_settings(config)
         self.config = config
@@ -351,6 +364,16 @@ class xFuserModel(abc.ABC):
         if self.config.use_parallel_vae:
             self._vae_manager.setup_parallel_vae(self._decoding_vaes())
         self._enable_options()
+        fp8_comms = get_runtime_state().fp8_comms if runtime_state_is_initialized() else None
+        if fp8_comms is not None:
+            setup_fp8_comms(
+                fp8_comms,
+                self.pipe,
+                input_args,
+                run_pipe_fn=self._run_timed_pipe,
+                split_prompts_fn=self._split_prompts_for_dp,
+                batch_size=self.config.batch_size,
+            )
 
         # Compile and warm the original blocks before cache adapters replace or
         # patch them, keeping stateful cross-step cache logic out of traced graphs.
@@ -474,6 +497,15 @@ class xFuserModel(abc.ABC):
             [self.pipe, getattr(self, "second_pipe", None)]
         )
 
+    def _apply_default_attention_backend(self, config: xFuserArgs) -> None:
+        """Fill in the model's preferred attention backend when the CLI left it unset."""
+        default = self.settings.default_attention_backend
+        if default is None or config.attention_backend is not None:
+            return
+        _parse_attention_backend(default, f"default attention backend for {self.settings.model_name}")
+        config.attention_backend = default
+        log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
+
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         config._validate_gemm_quantization_flags()
@@ -556,12 +588,28 @@ class xFuserModel(abc.ABC):
         if config.dataset_path and not config.batch_size:
             raise ValueError("Dataset path specified without batch size. Please specify batch size for dataset inference.")
 
+        validate_fp8_comms_config(config, self.capabilities, self.settings)
+
         if self.model_output_type == "video" and not self.fps:
             raise ValueError(f"Model {self.settings.model_name} produces video output but fps is not set.")
 
         if config.use_int8_gemms and _is_hip():
             raise ValueError("Int8 GEMMs on ROCm are not supported.")
             
+        if config.use_fp6_gemms and _is_cuda():
+            raise ValueError(
+                "--use_fp6_gemms requires the AITER MXFP6 ASM backend on ROCm gfx950; "
+                "CUDA is not supported."
+            )
+        if (
+            config.use_fp6_gemms
+            and _is_hip()
+            and not packages_info.get("has_aiter", False)
+        ):
+            raise ValueError(
+                "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
+            )
+
         if config.use_fp4_gemms:
             if _is_hip() and not packages_info.get("has_aiter", False):
                 raise ValueError("FP4 GEMMs on ROCm require AITER.")
@@ -619,6 +667,13 @@ class xFuserModel(abc.ABC):
         pipeline-parallel models that don't respect the SPMD assumption and could
         deadlock in torch's compiler spmd_check()."""
         torch._inductor.config.reorder_for_compute_comm_overlap = True
+        # Restore the list of compute-communication overlap passes that was
+        # default in torch<2.10
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+            "reorder_compute_for_overlap",
+            "sink_waits",
+            "raise_comms",
+        ]
 
         # torch >= ~2.13: enabling the overlap machinery activates an SPMD
         # graph-consistency check that issues a WORLD-group all_gather_object at
@@ -1041,18 +1096,40 @@ class xFuserModel(abc.ABC):
 
     def _setup_hybrid_gemm_schedule(self, input_args: dict) -> None:
         """
-        Setup hybrid GEMM schedule: high precision FP8 GEMMs at start/end, MXFP4 GEMMs in the middle.
+        Use the selected profile's high GEMM format at denoising endpoints.
         """
-        if input_args["num_hybrid_gemm_high_precision_steps"] is None:
-            raise ValueError("You must provide 'num_hybrid_gemm_high_precision_steps' to use the hybrid GEMM schedule.")
         multiplier = self._calculate_hybrid_attention_step_multiplier(input_args)
         total_steps = input_args["num_inference_steps"] * multiplier
-        num_high_precision_steps = input_args["num_hybrid_gemm_high_precision_steps"] * multiplier
 
-        gemm_schedule = create_hybrid_gemm_schedule(
-            num_high_precision_steps=num_high_precision_steps,
-            total_steps=total_steps,
-        )
+        if self.config.hybrid_gemm_schedule is not None:
+            denoising_schedule = GemmPrecisionSchedule.from_comma_delimited_string(
+                self.config.hybrid_gemm_schedule,
+                low_format=self.config.gemm_quantization_spec.low,
+                high_format=self.config.gemm_quantization_spec.high,
+            )
+            if denoising_schedule.total_steps != input_args["num_inference_steps"]:
+                raise ValueError(
+                    f"GEMM schedule has {denoising_schedule.total_steps} entries, "
+                    f"expected {input_args['num_inference_steps']} denoising steps."
+                )
+            gemm_schedule = GemmPrecisionSchedule(
+                [
+                    precision
+                    for precision in denoising_schedule.use_high_precision_schedule
+                    for _ in range(multiplier)
+                ]
+            )
+        else:
+            count = input_args["num_hybrid_gemm_high_precision_steps"]
+            if count is None:
+                raise ValueError(
+                    "Hybrid GEMM scheduling requires "
+                    "num_hybrid_gemm_high_precision_steps."
+                )
+            gemm_schedule = create_hybrid_gemm_schedule(
+                num_high_precision_steps=count * multiplier,
+                total_steps=total_steps,
+            )
 
         log("Enabling hybrid GEMM schedule")
         log(f"Hybrid GEMM schedule (high precision=True): {gemm_schedule.use_high_precision_schedule}", debug=True)

@@ -26,6 +26,25 @@ def _init_environment():
     initialize_runtime_state()
     initialize_model_parallel(ring_degree=1, ulysses_degree=1)
 
+
+class TestUSPKvCacheSelection(unittest.TestCase):
+
+    @unittest.mock.patch("xfuser.model_executor.layers.usp.get_cache_manager")
+    def test_cache_update_requires_registered_layer(self, mock_get_cache_manager):
+        cache_manager = mock_get_cache_manager.return_value
+        layer = object()
+
+        cache_manager.has_cache_entry.return_value = False
+        self.assertFalse(usp._has_kv_cache(layer))
+
+        cache_manager.has_cache_entry.return_value = True
+        self.assertTrue(usp._has_kv_cache(layer))
+
+        cache_manager.has_cache_entry.reset_mock()
+        self.assertFalse(usp._has_kv_cache(None))
+        cache_manager.has_cache_entry.assert_not_called()
+
+
 class TestUSP(unittest.TestCase):
 
     def setUp(self):
@@ -291,6 +310,7 @@ class TestUSPCombinedQKV(unittest.TestCase):
         q = torch.randn(b, h, s, d)
         k = torch.randn(b, h, s, d)
         v = torch.randn(b, h, s, d)
+        extra = torch.randn(b, h, s, d)
 
         # 4. Run separate calls (Baseline)
         q_out_sep = usp._ft_c_input_all_to_all(q)
@@ -299,9 +319,81 @@ class TestUSPCombinedQKV(unittest.TestCase):
 
         # 5. Run combined call (Target)
         q_out_comb, k_out_comb, v_out_comb = usp._combined_qkv_all_to_all(q, k, v)
-
-        # 6. Assertions
-        # We use assert_close to handle floating point nuances
         torch.testing.assert_close(q_out_sep, q_out_comb, msg="Q tensors mismatch")
         torch.testing.assert_close(k_out_sep, k_out_comb, msg="K tensors mismatch")
         torch.testing.assert_close(v_out_sep, v_out_comb, msg="V tensors mismatch")
+
+        q_out_comb, k_out_comb, v_out_comb, extra_out = usp._combined_qkv_all_to_all(
+            q, k, v, extra
+        )
+        torch.testing.assert_close(q_out_sep, q_out_comb, msg="Q tensors mismatch with extra")
+        torch.testing.assert_close(k_out_sep, k_out_comb, msg="K tensors mismatch with extra")
+        torch.testing.assert_close(v_out_sep, v_out_comb, msg="V tensors mismatch with extra")
+        torch.testing.assert_close(
+            extra_out, usp._ft_c_input_all_to_all(extra), msg="extra tensor mismatch"
+        )
+
+    @unittest.mock.patch('xfuser.model_executor.layers.usp.get_ulysses_parallel_world_size')
+    @unittest.mock.patch('xfuser.model_executor.layers.usp._sdpa_all_to_all_single')
+    def test_combined_gqa_qkv_all_to_all(self, mock_all_to_all, mock_world_size):
+        """Compact GQA exchange matches separate Q/K/V all-to-all calls."""
+        world_size = 2
+        mock_world_size.return_value = world_size
+        mock_all_to_all.side_effect = lambda x: x
+
+        batch, query_heads, kv_heads, sequence, head_dim = 2, 6, 2, 8, 4
+        query = torch.randn(batch, query_heads, sequence, head_dim)
+        key = torch.randn(batch, kv_heads, sequence, head_dim)
+        value = torch.randn(batch, kv_heads, sequence, head_dim)
+        extra = torch.randn_like(query)
+
+        expected = (
+            usp._ft_c_input_all_to_all(query),
+            usp._ft_c_input_all_to_all(key),
+            usp._ft_c_input_all_to_all(value),
+            usp._ft_c_input_all_to_all(extra),
+        )
+        actual = usp._combined_gqa_qkv_all_to_all(query, key, value, extra)
+
+        self.assertEqual(mock_all_to_all.call_count, 5)
+        for expected_tensor, actual_tensor in zip(expected, actual):
+            torch.testing.assert_close(actual_tensor, expected_tensor)
+
+    def test_repeat_kv_heads_preserves_gqa_order(self):
+        key = torch.tensor([[[[0.0]], [[1.0]]]])
+        value = key + 10
+
+        repeated_key, repeated_value = usp._repeat_kv_heads(key, value, repeats=3)
+
+        torch.testing.assert_close(
+            repeated_key.flatten(), torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+        )
+        torch.testing.assert_close(
+            repeated_value.flatten(),
+            torch.tensor([10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
+        )
+
+    def test_ulysses_extra_inputs_are_named_by_the_caller(self):
+        """USP exchanges whatever keys a backend lists, without knowing their meaning."""
+        query = torch.randn(1, 2, 8, 4)
+        gate = torch.randn_like(query)
+        attention_kwargs = {
+            usp.ULYSSES_EXTRA_INPUTS_KEY: ("some_backend_tensor",),
+            "some_backend_tensor": gate,
+        }
+
+        self.assertEqual(
+            usp._ulysses_extra_inputs(attention_kwargs, query),
+            [("some_backend_tensor", gate)],
+        )
+        self.assertEqual(usp._ulysses_extra_inputs({}, query), [])
+        self.assertEqual(
+            usp._ulysses_extra_inputs(
+                {usp.ULYSSES_EXTRA_INPUTS_KEY: ("missing",)}, query
+            ),
+            [],
+        )
+
+        attention_kwargs["some_backend_tensor"] = torch.randn(1, 2, 8, 5)
+        with self.assertRaisesRegex(ValueError, "some_backend_tensor"):
+            usp._ulysses_extra_inputs(attention_kwargs, query)

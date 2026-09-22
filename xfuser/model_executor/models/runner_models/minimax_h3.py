@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 from types import MethodType, SimpleNamespace
 
 import numpy as np
@@ -42,8 +43,21 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
     # The packed sequence is a single batch row, so MHA v4 can serve its key padding densely.
     *AITER_MHA_V4_ONLY_BACKENDS,
 })
+_FASTH3_ATTN_BACKENDS = frozenset({AttentionBackendType.FLEX_VSA_H3})
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
+FASTH3_V1_DATAFREE_MODEL_ID = (
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
+)
+FASTH3_V2_MODEL_ID = "FastVideo/FastVideo-FastH3-8-Step-V2"
+FASTH3_MODEL_IDS = (FASTH3_V1_DATAFREE_MODEL_ID, FASTH3_V2_MODEL_ID)
+# Full set of FastH3 V1-VSA IDs. Used in _customize_settings to route the
+# correct checkpoint into from_pretrained when a weight variant is requested.
+FASTH3_V1_MODEL_IDS = frozenset({
+    FASTH3_V1_DATAFREE_MODEL_ID,
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300",
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900",
+})
 
 
 def _minimax_h3_parallel_decode_clip(self, z: torch.Tensor) -> torch.Tensor:
@@ -284,6 +298,9 @@ class xFuserMiniMaxH3Model(xFuserModel):
         enable_tiling=False,
     )
     _transformer_component_name = "transformer"
+    _warmup_num_inference_steps = 3
+    _enable_fasth3_vsa = False
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
@@ -329,13 +346,13 @@ class xFuserMiniMaxH3Model(xFuserModel):
             if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
-            if backend not in _SUPPORTED_ATTN_BACKENDS:
+            if backend not in self._supported_attn_backends:
                 supported = ", ".join(
-                    sorted(item.name for item in _SUPPORTED_ATTN_BACKENDS)
+                    sorted(item.name for item in self._supported_attn_backends)
                 )
                 raise ValueError(
-                    f"MiniMax-H3 does not support attention backend {backend.name}. "
-                    f"Supported backends: {supported}."
+                    f"{self.settings.output_name} does not support attention "
+                    f"backend {backend.name}. Supported backends: {supported}."
                 )
             if backend == AttentionBackendType.AITER_FP8:
                 try:
@@ -401,6 +418,11 @@ class xFuserMiniMaxH3Model(xFuserModel):
             self.settings.model_name,
             subfolder="transformer",
             dtype=torch.bfloat16,
+            enable_fasth3_vsa=self._enable_fasth3_vsa,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer=transformer)
         pipe.load_components(dtype=torch.bfloat16)
@@ -478,7 +500,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
             "generator": torch.Generator(device="cuda").manual_seed(
                 input_args["seed"]
             ),
-            "output_type": "np",
+            "output_type": "pt",
         }
         images = input_args.get("input_images") or []
         task = input_args.get("task")
@@ -506,7 +528,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
         state = self.pipe(
             **pipe_args,
         )
-        videos = state.get("videos")
+        videos = self._decoded_videos_to_frames(state.get("videos"))
         audio = state.get("audio")
         sampling_rate = int(state.get("sampling_rate"))
         return MiniMaxH3DiffusionOutput(
@@ -542,14 +564,47 @@ class xFuserMiniMaxH3Model(xFuserModel):
         self._enable_compute_comm_overlap()
         transformer = getattr(self.pipe, self._transformer_component_name)
         use_hybrid = get_runtime_state().has_attention_schedule()
-        transformer.forward = torch.compile(
-            transformer.forward,
+        original_forward = transformer.forward
+        compiled_forward = torch.compile(
+            original_forward,
             mode=mode,
             fullgraph=not use_hybrid,
         )
+
+        # The below fixes a recompile: avoids more than one graph realizing
+        # after compile-warmup.
+
+        # mark_unbacked is only exposed on torch._dynamo.decorators, not on
+        # torch._dynamo itself. mark_dynamic is the weaker fallback: it avoids
+        # specializing on the exact size but still splits 1 from >1.
+        from torch._dynamo import decorators as dynamo_decorators
+
+        mark_timestep = getattr(
+            dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
+        )
+
+        def forward_with_dynamic_timestep(*args, **kwargs):
+            # Marking must happen outside the compiled region. Without it dynamo
+            # specializes on timestep shape 1 vs >1 and recompiles when it changes.
+            # Remember that the timestep is a 1D tensor of variable length along
+            # the denoising steps.
+            timestep = kwargs.get("timestep")
+            if timestep is None and len(args) > 3:
+                timestep = args[3]
+            if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
+                mark_timestep(timestep, 0)
+            return compiled_forward(*args, **kwargs)
+
+        # The denoise block selects which layout fields to pass by inspecting
+        # signature(transformer.forward), so the wrapper must expose the real
+        # parameter list rather than (*args, **kwargs).
+        functools.update_wrapper(forward_with_dynamic_timestep, original_forward)
+        transformer.forward = forward_with_dynamic_timestep
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
-            compile_args["num_inference_steps"] = 3
+            compile_args["num_inference_steps"] = (
+                self._warmup_num_inference_steps
+            )
         self._run_timed_pipe(compile_args)
 
     def _run_warmup_calls(self, input_args: dict) -> None:
@@ -557,14 +612,29 @@ class xFuserMiniMaxH3Model(xFuserModel):
             return
         log(
             f"Warming up MiniMax-H3 with {self.config.warmup_calls} "
-            "three-point calls..."
+            f"{self._warmup_num_inference_steps}-point calls..."
         )
         warmup_args = copy.deepcopy(input_args)
-        warmup_args["num_inference_steps"] = 3
+        warmup_args["num_inference_steps"] = self._warmup_num_inference_steps
         for iteration in range(self.config.warmup_calls):
             log(f"Warmup iteration {iteration + 1}/{self.config.warmup_calls}")
             self._run_timed_pipe(warmup_args)
         log("Warmup complete.")
+
+    @staticmethod
+    def _decoded_videos_to_frames(videos) -> list[torch.Tensor]:
+        # postprocess_video(output_type="np") copies the float video to the host
+        # and transposes it there. At 768x1344x124 that is a 1.43 GiB transfer
+        # plus a single-threaded 1.43 GiB NumPy transpose with the GPU idle.
+        # Quantizing and transposing on the device makes it a 366 MiB transfer
+        # already in the [F, H, W, C] layout encode_video_with_audio wants.
+        frames = []
+        for video in videos:
+            if video.dtype != torch.uint8:
+                video = video.float().mul(255).round_().clamp_(0, 255)
+                video = video.to(torch.uint8)
+            frames.append(video.permute(0, 2, 3, 1).contiguous().cpu())
+        return frames
 
     @staticmethod
     def _video_to_uint8(video) -> torch.Tensor:
@@ -602,6 +672,101 @@ class xFuserMiniMaxH3Model(xFuserModel):
                 output_path=output_path,
             )
             log(f"Output video with audio saved to {output_path}")
+
+
+@register_model(FASTH3_V1_DATAFREE_MODEL_ID)
+@register_model("FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1300")
+@register_model("FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-Synthetic-Step1900")
+@register_model("FastH3")
+class xFuserFastH3Model(xFuserMiniMaxH3Model):
+    """FastH3 Preview v1 runner.
+
+    Transformer attention goes through USP's backend selector. ``FLEX_VSA_H3``
+    is the default and runs the sparse-distilled VSA-H3 kernel; other
+    MiniMax-H3 backends stay dense when selected explicitly.
+    """
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # MiniMaxH3Scheduler includes the terminal zero sigma, so five points
+        # produce the four transformer forwards used to train FastH3.
+        num_inference_steps=5,
+    )
+
+    settings = copy.deepcopy(xFuserMiniMaxH3Model.settings)
+    settings.model_name = FASTH3_V1_DATAFREE_MODEL_ID
+    settings.output_name = "fasth3"
+    settings.valid_tasks = ["t2va"]
+    settings.default_attention_backend = AttentionBackendType.FLEX_VSA_H3.name
+
+    _warmup_num_inference_steps = 5
+    _enable_fasth3_vsa = True
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+
+    def _customize_settings(self, config) -> None:
+        super()._customize_settings(config)
+        # Use the caller-supplied HF ID so variant weights load correctly.
+        # Fall back to the primary DataFree checkpoint for short aliases ("FastH3").
+        if config.model in FASTH3_V1_MODEL_IDS:
+            self.settings.model_name = config.model
+
+    def _validate_config(self, config) -> None:
+        backend = _parse_attention_backend(
+            config.attention_backend, "attention backend"
+        )
+        if backend == AttentionBackendType.FLEX_VSA_H3:
+            if config.use_hybrid_attn_schedule:
+                raise ValueError(
+                    "FLEX_VSA_H3 uses VSA-H3 for every transformer step and "
+                    "does not support xDiT's hybrid attention schedule."
+                )
+            if config.use_torch_compile:
+                raise ValueError(
+                    "FLEX_VSA_H3 does not support wrapping the full transformer "
+                    "with --use_torch_compile yet. Its FlexAttention kernel is "
+                    "compiled independently."
+                )
+        super()._validate_config(config)
+
+    def _validate_args(self, input_args: dict) -> None:
+        super()._validate_args(input_args)
+        if input_args["num_inference_steps"] != 5:
+            raise ValueError(
+                "FastH3 Preview v1 requires 5 scheduler points, which produce "
+                "the checkpoint's trained 4 transformer forwards."
+            )
+
+
+@register_model(FASTH3_V2_MODEL_ID)
+class xFuserFastH3V2Model(xFuserFastH3Model):
+    """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 9
+    scheduler points (8 transformer forwards)."""
+
+    default_input_values = DefaultInputValues(
+        height=768,
+        width=1344,
+        num_frames=124,
+        # MiniMaxH3Scheduler includes the terminal zero sigma, so nine points
+        # produce the eight transformer forwards used to train FastH3 V2.
+        num_inference_steps=9,
+    )
+
+    settings = copy.deepcopy(xFuserFastH3Model.settings)
+    settings.model_name = FASTH3_V2_MODEL_ID
+    settings.output_name = "fasth3_v2"
+
+    _warmup_num_inference_steps = 9
+
+    def _validate_args(self, input_args: dict) -> None:
+        # Skip the V1 step-count check; delegate to xFuserMiniMaxH3Model.
+        xFuserMiniMaxH3Model._validate_args(self, input_args)
+        if input_args["num_inference_steps"] != 9:
+            raise ValueError(
+                "FastH3 V2 requires 9 scheduler points, which produce "
+                "the checkpoint's trained 8 transformer forwards."
+            )
 
 
 @register_model("MiniMax-H3-Ref2VA")
@@ -655,6 +820,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             self.settings.model_name,
             subfolder="transformer_ref",
             dtype=torch.bfloat16,
+            attention_backend=_parse_attention_backend(
+                getattr(self.config, "attention_backend", None),
+                "attention backend",
+            ),
         )
         pipe.update_components(transformer_ref=transformer)
         pipe.load_components(dtype=torch.bfloat16)
@@ -688,10 +857,10 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
             generator=torch.Generator(device="cuda").manual_seed(
                 input_args["seed"]
             ),
-            output_type="np",
+            output_type="pt",
         )
         return MiniMaxH3DiffusionOutput(
-            videos=state.get("videos"),
+            videos=self._decoded_videos_to_frames(state.get("videos")),
             audio=state.get("audio"),
             audio_sample_rate=int(state.get("sampling_rate")),
             pipe_args=input_args,

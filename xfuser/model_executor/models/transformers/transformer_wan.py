@@ -11,6 +11,7 @@ from xfuser.model_executor.layers.usp import (
     USP,
     attention,
 )
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_sequence_parallel_rank,
@@ -92,13 +93,14 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             # as some backends may have too much overhead for cross-attention.
             backend = get_runtime_state().get_cross_attention_backend()
 
+        activation_dtype = hidden_states.dtype
+
         encoder_hidden_states_img = None
         if attn.add_k_proj is not None:
             # 512 is the context length of the text encoder, hardcoded for now
             image_context_length = encoder_hidden_states.shape[1] - 512
             encoder_hidden_states_img = encoder_hidden_states[:, :image_context_length]
             encoder_hidden_states = encoder_hidden_states[:, image_context_length:]
-
         query, key, value = self._get_qkv_projections(attn, hidden_states, encoder_hidden_states)
 
         # Collapse norm_q -> norm_k -> apply_rotary_emb(q) -> apply_rotary_emb(k)
@@ -126,15 +128,15 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             key_img = key_img.unflatten(2, (attn.heads, -1))
             value_img = value_img.unflatten(2, (attn.heads, -1))
 
-            hidden_states_img = self.attention_function(query.transpose(1, 2),
-                                                        key_img.transpose(1, 2),
-                                                        value_img.transpose(1, 2),
-                                                        backend=backend,
-                                                        attention_kwargs=self.attention_kwargs,
-                                                        ).transpose(1, 2)
+            hidden_states_img = self.attention_function(
+                query.transpose(1, 2),
+                key_img.transpose(1, 2),
+                value_img.transpose(1, 2),
+                backend=backend,
+                attention_kwargs=self.attention_kwargs,
+            ).transpose(1, 2)
             hidden_states_img = hidden_states_img.flatten(2, 3)
-            hidden_states_img = hidden_states_img.type_as(query)
-
+            hidden_states_img = hidden_states_img.to(activation_dtype)
 
         hidden_states = self.attention_function(
             query.transpose(1, 2),
@@ -143,10 +145,11 @@ class xFuserWanAttnProcessor(WanAttnProcessor):
             backend=backend,
             attention_kwargs=self.attention_kwargs,
             head_balance_layer=attn,
+            attn_layer=None if self.is_cross_attention else attn,
         ).transpose(1, 2)
 
         hidden_states = hidden_states.flatten(2, 3)
-        hidden_states = hidden_states.type_as(query)
+        hidden_states = hidden_states.to(activation_dtype)
 
         if hidden_states_img is not None:
             hidden_states = hidden_states + hidden_states_img
@@ -245,6 +248,10 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
                 torch.arange(num_attention_heads, dtype=torch.long),
                 persistent=False,
             )
+        # attn2 is cross-attention over the text encoder: no Ulysses collective.
+        register_fp8_comms_eligible_modules(
+            self, [block.attn1 for block in self.blocks]
+        )
 
 
     def _update_vsa_attention_kwargs(
@@ -270,7 +277,6 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
         )
         self.attention_kwargs["vsa_effective_drop_rate"] = effective_drop_rate
         self.attention_kwargs["vsa_use_dense"] = effective_drop_rate <= 0.25
-
 
     def _chunk_and_pad_sequence(self, x: torch.Tensor, sp_world_rank: int, sp_world_size: int, pad_amount: int, dim: int) -> torch.Tensor:
         if pad_amount > 0:

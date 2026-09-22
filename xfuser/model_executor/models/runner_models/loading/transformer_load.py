@@ -107,7 +107,7 @@ def _prepare_native_load(
         )
     from .format_backends import prepare_native_transformer_format_load
 
-    is_fp4 = adapter.format.value in {"fp4", "fp8_fp4"}
+    is_fp4 = adapter.format.value in {"fp4", "fp8_fp4", "fp4_fp6"}
     return prepare_native_transformer_format_load(
         adapter,
         component_name=component_name,
@@ -127,15 +127,18 @@ def _prepare_native_load(
 
 
 def _fp4_remainder(loader, component_name):
-    """An FP4 blockwise fill also owns the FP8 remainder, whose targets it must be told."""
+    """Tell an FP4 block fill which higher-precision remainder it also owns."""
 
     if not loader.model.config.use_fp4_gemms:
         return {}
+    remainder_key = (
+        "mxfp6_targets"
+        if getattr(loader.model.config, "use_fp6_gemms", False)
+        else "fp8_targets"
+    )
     return {
         "fp4_gemms": True,
-        "fp8_targets": tuple(
-            loader.quantization_plan.targets_for(component_name)
-        ),
+        remainder_key: tuple(loader.quantization_plan.targets_for(component_name)),
     }
 
 

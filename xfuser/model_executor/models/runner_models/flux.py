@@ -48,6 +48,7 @@ class xFuserFluxModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
         fully_shard_degree=True,
+        use_fp8_comms=True,
         supports_step_caching=True,
         profile_capture_phase=True,
     )
@@ -160,6 +161,7 @@ class xFuserFluxKontextModel(xFuserModel):
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
         fully_shard_degree=True,
+        use_fp8_comms=True,
         supports_step_caching=True,
     )
     default_input_values = DefaultInputValues(
@@ -284,6 +286,7 @@ class xFuserFlux2Model(xFuserModel):
         use_fp8_text_encoder=True,
         use_fp4_gemms=True,
         fully_shard_degree=True,
+        use_fp8_comms=True,
         enable_tiling=True,
         enable_slicing=True,
         use_parallel_vae=True,
@@ -432,6 +435,7 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         use_parallel_vae=True,
         use_parallel_vae_encoder=True,
         fully_shard_degree=True,
+        use_fp8_comms=True,
         pipefusion_parallel_degree=True,
         supports_step_caching=True,
         profile_capture_phase=True,

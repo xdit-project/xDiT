@@ -87,6 +87,26 @@ class GemmPrecisionSchedule:
         if not use_high_precision_schedule:
             raise ValueError("GemmPrecisionSchedule requires at least one step.")
         self.use_high_precision_schedule = list(use_high_precision_schedule)
+        self.total_steps = len(self.use_high_precision_schedule)
+
+    @classmethod
+    def from_comma_delimited_string(
+        cls,
+        value: str,
+        *,
+        low_format: str = "fp4",
+        high_format: str = "fp8",
+    ) -> "GemmPrecisionSchedule":
+        schedule = []
+        for token in value.split(","):
+            name = token.strip().lower()
+            if name not in {low_format, high_format}:
+                raise ValueError(
+                    f"Unknown GEMM schedule format {name!r}; expected "
+                    f"{high_format} or {low_format}."
+                )
+            schedule.append(name == high_format)
+        return cls(schedule)
 
     def is_high_precision(self, step: int) -> bool:
         if step < 0 or step >= len(self.use_high_precision_schedule):

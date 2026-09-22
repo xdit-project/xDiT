@@ -334,6 +334,21 @@ def torchao_float8_fsdp2_patches_available() -> tuple[bool, str | None]:
         )
     return True, None
 
+def _weight_is_torchao_quantized(module) -> bool:
+    """Whether ``module.weight`` is one of torchao's quantized tensor subclasses.
+
+    torchao installs those through ``nn.Parameter``, which returns a tensor subclass as itself
+    rather than wrapping it, so the weight is the quantized tensor and a plain isinstance answers.
+    False when torchao is absent, since nothing can then be holding one of its tensors.
+    """
+    try:
+        # torchao is an optional extra
+        from torchao.utils import TorchAOBaseTensor
+    except ImportError:
+        return False
+
+    return isinstance(getattr(module, "weight", None), TorchAOBaseTensor)
+
 
 def quantize_linear_layers_to_int8(
     module_or_module_list: torch.nn.Module | torch.nn.ModuleList,
@@ -352,7 +367,7 @@ def quantize_linear_layers_to_int8(
     requested_filter = filter_fn
 
     def filter_fn(mod, fqn):
-        if not _is_linear(mod, fqn):
+        if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
             return False
         if requested_filter is not None and not requested_filter(mod, fqn):
             return False
@@ -389,7 +404,7 @@ def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Mo
     requested_filter = filter_fn
 
     def filter_fn(mod, fqn):
-        if not _is_linear(mod, fqn):
+        if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
             return False
         if requested_filter is not None:
             return requested_filter(mod, fqn)
@@ -502,6 +517,56 @@ def _layer_uses_fp8_override(
     return False
 
 
+def quantize_linear_layers_to_fp6(
+    model: torch.nn.Module,
+    parent_name: str = "",
+    filter_fn: Callable[[torch.nn.Module, str], bool] | None = None,
+    device: torch.device | None = None,
+    offload_to_cpu: bool = False,
+) -> int:
+    """Replace selected ``nn.Linear`` leaves with AITER MXFP6 linears.
+
+    The source module remains fully intact until the packed replacement is
+    installed. ``device`` is the transient packing/final device;
+    ``offload_to_cpu`` evicts each converted leaf immediately after packing.
+    Returns the number of leaves replaced.
+    """
+
+    from xfuser.model_executor.layers.mxfp6_linear import xFuserMXFP6Linear
+
+    replaced = 0
+    for name, module in list(model.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+        if isinstance(module, torch.nn.Linear):
+            if filter_fn is not None and not filter_fn(module, full_name):
+                continue
+
+            weight = module.weight.detach()
+            bias = module.bias.detach() if module.bias is not None else None
+            fp6_layer = xFuserMXFP6Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+                device="meta",
+                dtype=weight.dtype,
+            )
+            fp6_layer.train(module.training)
+            fp6_layer.load_and_quantize_weights(weight, bias, device=device)
+            if offload_to_cpu:
+                fp6_layer.to("cpu")
+            setattr(model, name, fp6_layer)
+            replaced += 1
+        elif next(module.children(), None) is not None:
+            replaced += quantize_linear_layers_to_fp6(
+                module,
+                parent_name=full_name,
+                filter_fn=filter_fn,
+                device=device,
+                offload_to_cpu=offload_to_cpu,
+            )
+    return replaced
+
+
 def quantize_linear_layers_to_fp4(
     model,
     parent_name='',
@@ -510,28 +575,56 @@ def quantize_linear_layers_to_fp4(
     use_hybrid_schedule: bool = False,
     device: Optional[torch.device] = None,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    use_fp6_for_overrides: bool = False,
 ):
-    from torchao.quantization.granularity import PerTensor
-    from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
     from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
+
+    if not use_fp6_for_overrides:
+        from torchao.quantization.granularity import PerTensor
+        from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
+
+    fp6_linear_cls = None
+    if use_fp6_for_overrides:
+        from xfuser.model_executor.layers.mxfp6_linear import xFuserMXFP6Linear
+
+        fp6_linear_cls = xFuserMXFP6Linear
+
+    def make_fp6_layer(module):
+        weight = module.weight.detach()
+        bias = module.bias.detach() if module.bias is not None else None
+        layer = fp6_linear_cls(
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            device="meta",
+            dtype=weight.dtype,
+        )
+        layer.train(module.training)
+        layer.load_and_quantize_weights(weight, bias, device=device)
+        return layer
 
     for name, module in list(model.named_children()):
         full_name = f"{parent_name}.{name}" if parent_name else name
 
         if isinstance(module, torch.nn.Linear):
+            if _weight_is_torchao_quantized(module):
+                continue
             if filter_fn is not None and not filter_fn(module, full_name):
                 continue
             if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
-                quantize_(
-                      module,
-                      config=Float8DynamicActivationFloat8WeightConfig(
-                          granularity=PerTensor(),
-                          set_inductor_config=False,
-                          kernel_preference=_get_fp8_kernel_preference(),
-                          activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
-                    ),
-                    device=device,
-                )
+                if fp6_linear_cls is not None:
+                    setattr(model, name, make_fp6_layer(module))
+                else:
+                    quantize_(
+                          module,
+                          config=Float8DynamicActivationFloat8WeightConfig(
+                              granularity=PerTensor(),
+                              set_inductor_config=False,
+                              kernel_preference=_get_fp8_kernel_preference(),
+                              activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
+                        ),
+                        device=device,
+                    )
             else:
                 low_precision_layer = xFuserMXFP4Linear(
                     module.in_features,
@@ -545,27 +638,30 @@ def quantize_linear_layers_to_fp4(
                     low_precision_layer.load_and_quantize_weights(module.weight, module.bias)
 
                 if use_hybrid_schedule:
-                    high_precision_layer = torch.nn.Linear(
-                        module.in_features,
-                        module.out_features,
-                        bias=(module.bias is not None),
-                        device=module.weight.device,
-                        dtype=module.weight.dtype,
-                    )
-                    with torch.no_grad():
-                        high_precision_layer.weight.copy_(module.weight)
-                        if module.bias is not None:
-                            high_precision_layer.bias.copy_(module.bias)
-                    quantize_(
-                        high_precision_layer,
-                        config=Float8DynamicActivationFloat8WeightConfig(
-                            granularity=PerTensor(),
-                            set_inductor_config=False,
-                            kernel_preference=_get_fp8_kernel_preference(),
-                            activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
-                        ),
-                        device=device,
-                    )
+                    if fp6_linear_cls is not None:
+                        high_precision_layer = make_fp6_layer(module)
+                    else:
+                        high_precision_layer = torch.nn.Linear(
+                            module.in_features,
+                            module.out_features,
+                            bias=(module.bias is not None),
+                            device=module.weight.device,
+                            dtype=module.weight.dtype,
+                        )
+                        with torch.no_grad():
+                            high_precision_layer.weight.copy_(module.weight)
+                            if module.bias is not None:
+                                high_precision_layer.bias.copy_(module.bias)
+                        quantize_(
+                            high_precision_layer,
+                            config=Float8DynamicActivationFloat8WeightConfig(
+                                granularity=PerTensor(),
+                                set_inductor_config=False,
+                                kernel_preference=_get_fp8_kernel_preference(),
+                                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
+                            ),
+                            device=device,
+                        )
                     new_layer = xFuserHybridMXFP4Linear(
                         high_precision_linear=high_precision_layer,
                         low_precision_linear=low_precision_layer,
@@ -584,6 +680,7 @@ def quantize_linear_layers_to_fp4(
                 use_hybrid_schedule=use_hybrid_schedule,
                 device=device,
                 filter_fn=filter_fn,
+                use_fp6_for_overrides=use_fp6_for_overrides,
             )
 
 
@@ -628,6 +725,8 @@ def quantize_linear_layers_to_nvfp4(
         for fqn, submodule in module.named_modules():
             if not isinstance(submodule, torch.nn.Linear):
                 continue
+            if _weight_is_torchao_quantized(submodule):
+                continue
             if filter_fn is not None and not filter_fn(submodule, fqn):
                 continue
 
@@ -643,7 +742,7 @@ def quantize_linear_layers_to_nvfp4(
             quantized_count += 1
 
         def nvfp4_filter_fn(mod, fqn):
-            if not _is_linear(mod, fqn):
+            if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
                 return False
             if filter_fn is not None and not filter_fn(mod, fqn):
                 return False
@@ -669,7 +768,7 @@ def quantize_linear_layers_to_nvfp4(
             )
 
             def fp8_filter_fn(mod, fqn):
-                if not _is_linear(mod, fqn):
+                if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
                     return False
                 if filter_fn is not None and not filter_fn(mod, fqn):
                     return False

@@ -54,11 +54,13 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     block_mask = parameters.get("block_mask") is not None
     scale_modes = parameters.get("q_scale_mode") is not None
     seqlens_k = parameters.get("seqlens_k") is not None
-    try:
-        from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
-        kv_tile = int(_aiter_mha_v4_kv_tile())
-    except ImportError:
-        kv_tile = 64 if is_gfx942 else 128
+    kv_tile = 64 if is_gfx942 else 128
+    if enabled:
+        try:
+            from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
+            kv_tile = int(_aiter_mha_v4_kv_tile())
+        except ImportError:
+            pass
     return _AiterMhaV4Capabilities(
         enabled=enabled,
         is_gfx942=is_gfx942,
@@ -152,13 +154,11 @@ def _build_hadamard_matrix(block_r, dtype=torch.bfloat16, allow_sylvester_fallba
 
 
 def _replicate_hadamard_per_device(hadamard):
-    """Replicate a single Hadamard matrix on each available device, keyed by
-    torch.device (all GPUs if CUDA is available, else CPU). A None matrix maps
-    to None on every device."""
+    """Replicate a single Hadamard matrix on each visible GPU, keyed by
+    torch.device. A None matrix maps to None on every device."""
+    devices = []
     if torch.cuda.is_available():
-        devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
-    else:
-        devices = [torch.device("cpu")]
+        devices += [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
     return {
         device: (hadamard.to(device) if hadamard is not None else None)
         for device in devices
@@ -398,8 +398,11 @@ def _build_aiter_mla_metadata(batch_size, q_seq_len, kv_seq_len, num_heads, num_
 
 aten = torch.ops.aten
 env_info = PACKAGES_CHECKER.get_packages_info()
+AITER_FP8_DTYPE = torch.float8_e4m3fn  # fallback; fp8 comms requires aiter
+FP8_HADAMARD_MATRIX = {}
 if env_info["has_aiter"]:
     import aiter
+    AITER_FP8_DTYPE = aiter.dtypes.fp8
     from aiter import flash_attn_func as flash_attn_func_aiter
     from aiter import flash_attn_varlen_func as flash_attn_varlen_func_aiter
     try:
@@ -589,6 +592,40 @@ if env_info["has_aiter"]:
         ) -> torch.Tensor:
             return torch.empty_like(query)
 
+        @custom_op("xfuser::flydsl_attn_fp8_prequant", mutates_args=())
+        def _flydsl_attn_fp8_prequant_kernel(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            q_descale: torch.Tensor,
+            k_descale: torch.Tensor,
+            v_descale: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return flydsl_flash_attn_func_aiter(
+                query,
+                key,
+                value,
+                causal=is_causal,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                waves_per_eu=2,
+                daz=True,
+            )
+
+        @register_fake("xfuser::flydsl_attn_fp8_prequant")
+        def _flydsl_attn_fp8_prequant_fake(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            q_descale: torch.Tensor,
+            k_descale: torch.Tensor,
+            v_descale: torch.Tensor,
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return torch.empty_like(query, dtype=torch.bfloat16)
+
     except ImportError:
         pass
 if env_info["has_flash_attn"]:
@@ -658,6 +695,7 @@ class AttentionBackendType(Enum):
     AITER_SPARGE = "AITER Sparge"
     AITER_SPARGE_V2 = "AITER Sparge V2"
     AITER_VSA = "AITER VSA CK"
+    FLEX_VSA_H3 = "Flex VSA-H3"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
@@ -707,6 +745,12 @@ AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_GFX942_SPARGE_BA
 def _mha_v4_sparge_tile():
     """Return Sparge tile sizes matching the active MHA v4 sparse KV geometry."""
     return {"BLOCK_M": 256, "BLOCK_N": _AITER_MHA_V4.kv_tile}
+
+
+SUPPORTS_PRE_QUANTIZATION_BACKENDS = {
+    AttentionBackendType.AITER_FP8,
+    AttentionBackendType.AITER_FLYDSL_FP8,
+}
 
 
 def register_attention_function(backend_type):
@@ -971,6 +1015,27 @@ def _fp8_hadamard_rotate(x: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
     return torch.matmul(x.unflatten(-1, (d // block_r, block_r)), R).flatten(-2)
 
 
+def rotate_qk_for_fp8_comms(query, key, backend):
+    """Rotate Q,K exactly as the fp8-comms path does before quantizing them.
+
+    Returns the inputs untouched for backends whose fp8-comms path does not rotate,
+    so callers can apply this unconditionally. Single definition shared by the
+    quantization site in USP and the calibration site in the attention processor:
+    both must measure and quantize the same distribution, otherwise the frozen
+    per-layer scale describes a tensor that is never quantized.
+    """
+    if backend not in (
+        AttentionBackendType.AITER_FP8,
+        AttentionBackendType.AITER_FLYDSL_FP8,
+    ):
+        return query, key
+    R = _get_fp8_hadamard_matrix(query.shape[-1], query.device)
+    return (
+        _fp8_hadamard_rotate(query, R).contiguous(),
+        _fp8_hadamard_rotate(key, R).contiguous(),
+    )
+
+
 def _quantize_aiter_fp8_inputs(query, key, value):
     quant_dtype = aiter.dtypes.fp8
     dtype_max = torch.finfo(quant_dtype).max
@@ -1181,9 +1246,54 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
     then calls attention through AITER
     """
     _validate_aiter_low_precision_dropout(dropout_p)
+    attention_kwargs = attention_kwargs or {}
+    pre_quantized = attention_kwargs.get("pre_quantized", False)
+
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+
+    if pre_quantized:
+        # Q/K/V arrive already FP8 from fp8 comms (quantized before the Ulysses
+        # all-to-all).
+        if (attention_kwargs or {}).get("indices_k") is not None:
+            raise NotImplementedError(
+                "fp8 comms pre-quantized attention does not support varlen packing; "
+                "the indices_k mask would be silently dropped and dense attention would "
+                "run over padded keys."
+            )
+        softmax_scale = query.shape[-1] ** -0.5
+        if _use_aiter_mha_v4_fp8(query, is_causal):
+            fp8_format = _aiter_native_fp8_format()
+            per_tensor = _AiterAttentionScaleMode.F32_PER_TENSOR
+            output = _aiter_mha_v4_packed(
+                query,
+                key,
+                value,
+                attention_kwargs["q_descale"],
+                attention_kwargs["k_descale"],
+                attention_kwargs["v_descale"],
+                fp8_format,
+                fp8_format,
+                fp8_format,
+                per_tensor,
+                per_tensor,
+                per_tensor,
+                softmax_scale=softmax_scale,
+            )
+        else:
+            output = aiter.flash_attn_fp8_pertensor_func(
+                query,
+                key,
+                value,
+                causal=is_causal,
+                softmax_scale=softmax_scale,
+                q_descale=attention_kwargs["q_descale"],
+                k_descale=attention_kwargs["k_descale"],
+                v_descale=attention_kwargs["v_descale"],
+            )
+        output = torch.permute(output, [0, 2, 1, 3])
+        return output, None
 
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     use_mha_v4 = packed is None and _use_aiter_mha_v4_fp8(query, is_causal)
@@ -1826,6 +1936,96 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
     return output, softmax_lse
 
 
+def _dense_h3_fallback_attn_call(
+    query, key, value, dropout_p, is_causal, attention_kwargs=None
+):
+    """Dense kernel used by FastH3's token refiner (no VSA-H3 metadata)."""
+    if env_info["has_aiter"]:
+        return _aiter_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
+    return _sdpa_attn_call(
+        query, key, value, dropout_p, is_causal, attention_kwargs
+    )
+
+
+@register_attention_function(AttentionBackendType.FLEX_VSA_H3)
+def _flex_vsa_h3_attn_call(
+    query,
+    key,
+    value,
+    dropout_p,
+    is_causal,
+    attention_kwargs=None,
+):
+    """FastH3 64-token VSA-H3 through FlexAttention.
+
+    USP gathers sequence before this runs. The compression gate rides the
+    same Ulysses exchange in ``attention_kwargs['vsa_h3_gate']``. Calls
+    without that metadata, including the MiniMax-H3 token refiner, fall
+    back to dense attention the same way AITER_VSA falls back without
+    Wan ``thw``.
+    """
+    attention_kwargs = attention_kwargs or {}
+    metadata = attention_kwargs.get("vsa_h3_metadata")
+    gate = attention_kwargs.get("vsa_h3_gate")
+    if metadata is None or gate is None:
+        return _dense_h3_fallback_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
+    if is_causal:
+        raise ValueError("FLEX_VSA_H3 does not support causal attention")
+    if dropout_p not in (None, 0.0):
+        raise ValueError("FLEX_VSA_H3 does not support attention dropout")
+
+    from xfuser.core.vsa_h3_attention import (
+        flex_h3_vsa_attention,
+        tile_h3_vsa_tensor,
+        untile_h3_vsa_tensor,
+    )
+
+    sequence_length = metadata.total_seq_length
+    gathered_length = query.shape[2]
+    query = query[:, :, :sequence_length]
+    key = key[:, :, :sequence_length]
+    value = value[:, :, :sequence_length]
+    gate = gate[:, :, :sequence_length]
+
+    def tile_bhsd(tensor):
+        return tile_h3_vsa_tensor(
+            tensor.transpose(1, 2),
+            metadata,
+        ).transpose(1, 2).contiguous()
+
+    tiled_query = tile_bhsd(query)
+    tiled_key = tile_bhsd(key)
+    tiled_value = tile_bhsd(value)
+    tiled_gate = tile_bhsd(gate)
+    sparse_output, compressed_output = flex_h3_vsa_attention(
+        tiled_query,
+        tiled_key,
+        tiled_value,
+        metadata,
+    )
+    tiled_output = sparse_output + (
+        compressed_output.to(sparse_output.dtype) * tiled_gate
+    )
+    packed_output = untile_h3_vsa_tensor(
+        tiled_output.transpose(1, 2),
+        metadata,
+    ).transpose(1, 2)
+    if gathered_length > sequence_length:
+        padded_output = packed_output.new_zeros(
+            packed_output.shape[0],
+            packed_output.shape[1],
+            gathered_length,
+            packed_output.shape[3],
+        )
+        padded_output[:, :, :sequence_length] = packed_output
+        packed_output = padded_output
+    return packed_output, None
+
+
 @register_attention_function(AttentionBackendType.AITER_VSA)
 @torch.compiler.disable
 def _aiter_vsa_attn_call(
@@ -2295,8 +2495,38 @@ def _aiter_flydsl_attn_call(query, key, value, dropout_p, is_causal, attention_k
     )
 
 
+def _aiter_flydsl_fp8_prequant_call(query, key, value, dropout_p, is_causal, attention_kwargs):
+    """FlyDSL fp8 attention on Q/K/V that fp8 comms already quantized (and rotated)."""
+    _validate_aiter_low_precision_dropout(dropout_p)
+    if attention_kwargs.get("indices_k") is not None:
+        raise NotImplementedError(
+            "fp8 comms pre-quantized attention does not support varlen packing; "
+            "the indices_k mask would be silently dropped and dense attention would "
+            "run over padded keys."
+        )
+    query = torch.permute(query, [0, 2, 1, 3]).contiguous()
+    key = torch.permute(key, [0, 2, 1, 3]).contiguous()
+    value = torch.permute(value, [0, 2, 1, 3]).contiguous()
+    output = torch.ops.xfuser.flydsl_attn_fp8_prequant(
+        query,
+        key,
+        value,
+        attention_kwargs["q_descale"],
+        attention_kwargs["k_descale"],
+        attention_kwargs["v_descale"],
+        is_causal,
+    )
+    output = torch.permute(output, [0, 2, 1, 3])
+    return output, None
+
+
 @register_attention_function(AttentionBackendType.AITER_FLYDSL_FP8)
 def _aiter_flydsl_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    attention_kwargs = attention_kwargs or {}
+    if attention_kwargs.get("pre_quantized", False):
+        return _aiter_flydsl_fp8_prequant_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
     return _aiter_flydsl_dispatch(
         query, key, value, dropout_p, is_causal, attention_kwargs, torch.ops.xfuser.flydsl_attn_fp8
     )

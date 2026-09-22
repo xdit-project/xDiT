@@ -153,7 +153,10 @@ def test_model_loader_materialization_uses_current_shard_degree(monkeypatch):
     model = SimpleNamespace(
         config=SimpleNamespace(use_fp4_gemms=False, fully_shard_degree=2)
     )
-    loader = SimpleNamespace(model=model)
+    loader = SimpleNamespace(
+        model=model,
+        quantization_plan=SimpleNamespace(log_gemm_plan=lambda: None),
+    )
     monkeypatch.setattr(
         shard, "shard_pipeline_components", lambda value: calls.append(("shard", value))
     )

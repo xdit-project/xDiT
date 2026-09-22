@@ -13,6 +13,7 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 
+from xfuser.core.distributed.fp8_comms import register_fp8_comms_eligible_modules
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.logger import init_logger
 from xfuser.model_executor.base_wrapper import xFuserBaseWrapper
@@ -21,6 +22,17 @@ from .register import xFuserTransformerWrappersRegister
 from .base_transformer import xFuserTransformerBaseWrapper
 
 logger = init_logger(__name__)
+
+
+def sd3_attn_modules(transformer) -> list[nn.Module]:
+    """Return every SD3 self-attention module that executes USP."""
+    modules = []
+    for block in transformer.transformer_blocks:
+        modules.append(block.attn)
+        attn2 = getattr(block, "attn2", None)
+        if attn2 is not None:
+            modules.append(attn2)
+    return modules
 
 
 @xFuserTransformerWrappersRegister.register(SD3Transformer2DModel)
@@ -37,6 +49,7 @@ class xFuserSD3Transformer2DWrapper(xFuserTransformerBaseWrapper):
         self.encoder_hidden_states_cache = [
             None for _ in range(len(self.transformer_blocks))
         ]
+        register_fp8_comms_eligible_modules(self, sd3_attn_modules(self))
 
     def forward(
         self,

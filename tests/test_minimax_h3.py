@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import inspect
-import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -100,15 +99,22 @@ def _tiny_inputs(device):
     }
 
 
-def _patch_minimax_runtime_state(monkeypatch, *, track_steps=False):
+def _patch_minimax_runtime_state(
+    monkeypatch, *, track_steps=False, attention_backend=None
+):
     from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
 
     calls = []
+    selected_backend = (
+        AttentionBackendType.SDPA
+        if attention_backend is None
+        else attention_backend
+    )
 
     class _RuntimeState:
-        attention_backend = AttentionBackendType.SDPA
+        attention_backend = selected_backend
 
         def has_attention_schedule(self):
             return False
@@ -193,6 +199,20 @@ def test_minimax_h3_padding_alignment():
     assert torch.all(padded[2][65:] == -1)
 
 
+def test_minimax_h3_wrapper_exposes_diffusers_config_signature():
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    init_keys = xFuserMiniMaxH3Transformer3DWrapper._get_init_keys(
+        xFuserMiniMaxH3Transformer3DWrapper
+    )
+
+    assert "hidden_size" in init_keys
+    assert "num_layers" in init_keys
+    assert "enable_fasth3_vsa" in init_keys
+
+
 def test_minimax_h3_runner_registration():
     import xfuser.model_executor.models.runner_models
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
@@ -200,6 +220,197 @@ def test_minimax_h3_runner_registration():
     assert "MiniMaxAI/MiniMax-H3" in MODEL_REGISTRY
     assert "MiniMax-H3" in MODEL_REGISTRY
     assert "MiniMax-H3-Ref2VA" in MODEL_REGISTRY
+    assert "FastH3" in MODEL_REGISTRY
+    assert (
+        "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
+        in MODEL_REGISTRY
+    )
+
+
+def test_fasth3_defaults_match_inference_contract():
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        FASTH3_V1_DATAFREE_MODEL_ID,
+        xFuserFastH3Model,
+        xFuserMiniMaxH3Model,
+    )
+
+    assert xFuserFastH3Model.settings.model_name == FASTH3_V1_DATAFREE_MODEL_ID
+    assert xFuserFastH3Model.settings.valid_tasks == ["t2va"]
+    assert (
+        xFuserFastH3Model.settings.default_attention_backend
+        == AttentionBackendType.FLEX_VSA_H3.name
+    )
+    assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
+    assert xFuserFastH3Model._warmup_num_inference_steps == 5
+    assert xFuserFastH3Model._enable_fasth3_vsa
+    assert xFuserFastH3Model._supported_attn_backends == (
+        xFuserMiniMaxH3Model._supported_attn_backends
+        | {AttentionBackendType.FLEX_VSA_H3}
+    )
+
+
+def test_fasth3_wrapper_defines_checkpoint_compression_gates(monkeypatch):
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    _patch_minimax_runtime_state(monkeypatch)
+    model = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        enable_fasth3_vsa=True,
+    )
+
+    for block in model.transformer_blocks:
+        gate = block.attn.to_gate_compress
+        assert gate.in_features == block.attn.to_q.in_features
+        assert gate.out_features == block.attn.to_q.out_features
+        assert gate.bias is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/HIP")
+def test_fasth3_wrapper_runs_vsa_attention(monkeypatch):
+    from xfuser.model_executor.layers import usp
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(
+        transformer_minimax_h3,
+        "get_ulysses_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        transformer_minimax_h3,
+        "get_ulysses_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(usp, "get_ulysses_parallel_world_size", lambda: 1)
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    _patch_minimax_runtime_state(
+        monkeypatch,
+        attention_backend=AttentionBackendType.FLEX_VSA_H3,
+    )
+    model = (
+        xFuserMiniMaxH3Transformer3DWrapper(
+            **_tiny_config(),
+            enable_fasth3_vsa=True,
+        )
+        .to(device="cuda", dtype=torch.bfloat16)
+        .eval()
+    )
+
+    inputs = {
+        name: value.to("cuda") if isinstance(value, torch.Tensor) else value
+        for name, value in _tiny_inputs("cpu").items()
+    }
+    with torch.no_grad():
+        output = model(**inputs)
+
+    assert output.sample.shape == (1, 48, 16)
+    assert output.audio_sample.shape == (1, 12, 6)
+    assert torch.isfinite(output.sample).all()
+    assert torch.isfinite(output.audio_sample).all()
+
+
+def test_fasth3_accepts_vsa_and_dense_attention_backends(monkeypatch):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3Model,
+    )
+
+    # Announcing the default backend goes through runner_utils.log, which reads
+    # RANK/WORLD_SIZE straight from the env.
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    for backend in ("AITER", "FLEX_VSA_H3"):
+        config = xFuserArgs(
+            model="FastH3",
+            task="t2va",
+            attention_backend=backend,
+        )
+        xFuserFastH3Model(config)
+        assert config.attention_backend == backend
+
+    defaulted = xFuserArgs(model="FastH3", task="t2va")
+    xFuserFastH3Model(defaulted)
+    assert defaulted.attention_backend == "FLEX_VSA_H3"
+
+
+def test_default_attention_backend_is_reusable_by_any_model(monkeypatch):
+    """The default backend lives in ModelSettings, so it is not a FastH3-only feature."""
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    model = xFuserMiniMaxH3Model(
+        xFuserArgs(model="MiniMax-H3", task="t2va", attention_backend="AITER")
+    )
+    model.settings.default_attention_backend = "AITER_FP8"
+
+    explicit = xFuserArgs(model="MiniMax-H3", task="t2va", attention_backend="AITER")
+    model._apply_default_attention_backend(explicit)
+    assert explicit.attention_backend == "AITER"
+
+    defaulted = xFuserArgs(model="MiniMax-H3", task="t2va")
+    model._apply_default_attention_backend(defaulted)
+    assert defaulted.attention_backend == "AITER_FP8"
+
+    model.settings.default_attention_backend = "NOT_A_BACKEND"
+    with pytest.raises(ValueError, match="default attention backend"):
+        model._apply_default_attention_backend(
+            xFuserArgs(model="MiniMax-H3", task="t2va")
+        )
+
+
+def test_fasth3_rejects_unsupported_attention_backend():
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3Model,
+    )
+
+    config = xFuserArgs(
+        model="FastH3",
+        task="t2va",
+        attention_backend="FLASH_3",
+    )
+
+    with pytest.raises(ValueError, match="does not support attention backend"):
+        xFuserFastH3Model(config)
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {"use_torch_compile": True},
+        {
+            "use_hybrid_attn_schedule": True,
+            "hybrid_attn_high_precision_backend": "AITER",
+            "hybrid_attn_low_precision_backend": "AITER_FP8",
+        },
+    ],
+)
+def test_fasth3_rejects_unsupported_compile_modes(unsupported):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3Model,
+    )
+
+    config = xFuserArgs(
+        model="FastH3",
+        task="t2va",
+        attention_backend="FLEX_VSA_H3",
+        **unsupported,
+    )
+
+    with pytest.raises(ValueError, match="FLEX_VSA_H3"):
+        xFuserFastH3Model(config)
 
 
 def test_minimax_h3_fp8_quantization_policy():
@@ -646,6 +857,70 @@ def test_minimax_h3_loads_task_workflow(
     assert pipe.text_encoder.lm_head is None
 
 
+def test_fasth3_loads_published_checkpoint(monkeypatch):
+    from diffusers import ModularPipeline
+
+    from xfuser.model_executor.models.runner_models import minimax_h3
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        FASTH3_V1_DATAFREE_MODEL_ID,
+        xFuserFastH3Model,
+    )
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    pipe = _FakeMiniMaxPipe()
+    transformer = _FakeTransformer()
+    pipeline_loads = []
+    transformer_loads = []
+
+    def fake_pipeline_from_pretrained(model_name, workflow):
+        pipeline_loads.append((model_name, workflow))
+        return pipe
+
+    def fake_transformer_from_pretrained(model_name, **kwargs):
+        transformer_loads.append((model_name, kwargs))
+        return transformer
+
+    monkeypatch.setattr(
+        ModularPipeline,
+        "from_pretrained",
+        fake_pipeline_from_pretrained,
+    )
+    monkeypatch.setattr(
+        xFuserMiniMaxH3Transformer3DWrapper,
+        "from_pretrained",
+        fake_transformer_from_pretrained,
+    )
+    monkeypatch.setattr(
+        minimax_h3,
+        "_patch_minimax_h3_text_encoder_broadcast",
+        lambda: None,
+    )
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+
+    model = object.__new__(xFuserFastH3Model)
+    model.config = SimpleNamespace(task="t2va", text_encoder_tp_degree=1)
+    model._parallelize_text_encoder = lambda text_encoder: None
+
+    actual = model._load_model()
+
+    assert actual is pipe
+    assert pipeline_loads == [(FASTH3_V1_DATAFREE_MODEL_ID, "t2va")]
+    assert transformer_loads == [
+        (
+            FASTH3_V1_DATAFREE_MODEL_ID,
+            {
+                "subfolder": "transformer",
+                "dtype": torch.bfloat16,
+                "enable_fasth3_vsa": True,
+                "attention_backend": None,
+            },
+        )
+    ]
+    assert pipe.transformer is transformer
+
+
 def test_minimax_h3_ref2va_loads_workflow(monkeypatch):
     from diffusers import ModularPipeline
 
@@ -739,6 +1014,27 @@ def test_minimax_h3_compile_preserves_forward_signature(monkeypatch):
     assert compile_calls == [{"mode": "default", "fullgraph": False}]
 
 
+def test_fasth3_warmup_uses_four_forward_schedule(monkeypatch):
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3Model,
+    )
+
+    model = object.__new__(xFuserFastH3Model)
+    model.config = SimpleNamespace(warmup_calls=2)
+    calls = []
+    model._run_timed_pipe = lambda input_args: calls.append(input_args)
+    monkeypatch.setattr(
+        "xfuser.model_executor.models.runner_models.minimax_h3.log",
+        lambda message: None,
+    )
+    input_args = {"num_inference_steps": 50, "prompt": "test"}
+
+    model._run_warmup_calls(input_args)
+
+    assert input_args["num_inference_steps"] == 50
+    assert [call["num_inference_steps"] for call in calls] == [5, 5]
+
+
 def test_minimax_h3_ref2va_uses_typed_image_references():
     from diffusers.modular_pipelines.minimax_h3 import MiniMaxH3ImageReference
 
@@ -751,7 +1047,7 @@ def test_minimax_h3_ref2va_uses_typed_image_references():
     def fake_pipe(**kwargs):
         captured.update(kwargs)
         return {
-            "videos": np.zeros((1, 1, 1, 1, 3), dtype=np.float32),
+            "videos": torch.zeros((1, 1, 3, 1, 1), dtype=torch.float32),
             "audio": torch.zeros(1, 2, 1),
             "sampling_rate": 24_000,
         }
@@ -775,6 +1071,40 @@ def test_minimax_h3_ref2va_uses_typed_image_references():
     assert len(captured["references"]) == 1
     assert isinstance(captured["references"][0], MiniMaxH3ImageReference)
     assert captured["references"][0].image is image
+    assert captured["output_type"] == "pt"
+
+
+def test_minimax_h3_decoded_videos_convert_to_uint8_frames_on_device():
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    # [B, F, C, H, W] denormalized to [0, 1], as postprocess_video leaves it.
+    videos = torch.tensor([0.0, 0.5, 1.0]).view(1, 1, 3, 1, 1).expand(1, 2, 3, 4, 5)
+
+    frames = xFuserMiniMaxH3Model._decoded_videos_to_frames(videos)
+
+    assert isinstance(frames, list) and len(frames) == 1
+    frame = frames[0]
+    assert frame.shape == (2, 4, 5, 3)
+    assert frame.dtype == torch.uint8
+    assert frame.is_contiguous()
+    assert frame[..., 0].unique().tolist() == [0]
+    assert frame[..., 1].unique().tolist() == [128]
+    assert frame[..., 2].unique().tolist() == [255]
+
+
+def test_minimax_h3_decoded_videos_do_not_rescale_uint8():
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserMiniMaxH3Model,
+    )
+
+    videos = torch.full((1, 2, 3, 4, 5), 7, dtype=torch.uint8)
+
+    frames = xFuserMiniMaxH3Model._decoded_videos_to_frames(videos)
+
+    assert frames[0].shape == (2, 4, 5, 3)
+    assert frames[0].unique().tolist() == [7]
 
 
 def test_minimax_h3_supports_hybrid_attention_capability():

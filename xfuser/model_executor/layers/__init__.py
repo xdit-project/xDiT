@@ -6,6 +6,7 @@ from .conv import xFuserConv2dWrapper
 from .embeddings import xFuserPatchEmbedWrapper
 from .feedforward import xFuserFeedForwardWrapper
 from .mxfp4_linear import xFuserMXFP4Linear
+from .mxfp6_linear import xFuserMXFP6Linear
 from .fp8_linear import xFuserFP8BlockScaleLinear
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "xFuserPatchEmbedWrapper",
     "xFuserFeedForwardWrapper",
     "xFuserMXFP4Linear",
+    "xFuserMXFP6Linear",
     "xFuserFP8BlockScaleLinear",
 ]

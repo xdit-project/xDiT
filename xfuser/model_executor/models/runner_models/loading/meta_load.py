@@ -588,8 +588,7 @@ class ModelLoader:
 
     def materialize_pipeline(self) -> None:
         """Place or shard the loaded pipeline according to the current run config."""
-        if self.model.config.use_fp4_gemms:
-            self.quantization_plan.log_fp8_overrides()
+        self.quantization_plan.log_gemm_plan()
         if self.model.config.fully_shard_degree > 1:
             from .shard import shard_pipeline_components
 

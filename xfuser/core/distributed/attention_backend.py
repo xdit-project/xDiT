@@ -680,6 +680,8 @@ class AttentionBackendType(Enum):
     AITER_F6F4 = "AITER F6F4"
     AITER_MXFP4 = "AITER MXFP4"
     AITER_F4F4 = "AITER F4F4"
+    AITER_BF16_SPARGE = "AITER BF16 Sparge"
+    AITER_BF16FP8_SPARGE = "AITER BF16/FP8 Sparge"
     AITER_I8FP8_SPARGE = "AITER I8FP8 Sparge"
     AITER_FP8_SPARGE = "AITER FP8 Sparge"
     AITER_MXFP8_SPARGE = "AITER MXFP8 Sparge"
@@ -713,6 +715,8 @@ AITER_LOW_PRECISION_BACKENDS = (
     AttentionBackendType.AITER_F4F4,
 )
 AITER_MHA_V4_SPARGE_BACKENDS = (
+    AttentionBackendType.AITER_BF16_SPARGE,
+    AttentionBackendType.AITER_BF16FP8_SPARGE,
     AttentionBackendType.AITER_I8FP8_SPARGE,
     AttentionBackendType.AITER_FP8_SPARGE,
     AttentionBackendType.AITER_MXFP8_SPARGE,
@@ -1679,6 +1683,36 @@ def _aiter_mha_v4_sparge_call(
         )
     output = torch.permute(output, [0, 2, 1, 3])
     return restore_sparge_output(output, state), None
+
+
+@register_attention_function(AttentionBackendType.AITER_BF16_SPARGE)
+def _aiter_bf16_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run Sparge + the AITER BF16 Q/K/V MHA v4 row."""
+    return _aiter_mha_v4_sparge_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.BF16,
+        _AiterAttentionFormat.BF16,
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_BF16FP8_SPARGE)
+def _aiter_bf16fp8_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run Sparge + the AITER BF16 Q/K and per-tensor FP8 V MHA v4 row."""
+    return _aiter_mha_v4_sparge_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.BF16,
+        _aiter_native_fp8_format(),
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+    )
 
 
 @register_attention_function(AttentionBackendType.AITER_I8FP8_SPARGE)

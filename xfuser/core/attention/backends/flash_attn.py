@@ -10,6 +10,7 @@ import torch
 
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
 from xfuser.core.attention.requirements import CUDA_CAPABILITY, PLATFORM, SYMBOL
+from xfuser.core.attention.constraints import NO_VARLEN
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 
 _FA2 = "flash_attn:flash_attn_func"
@@ -146,7 +147,7 @@ SPECS = [
                 & SYMBOL("flash_attn_interface:flash_attn_varlen_func")),
 
     Spec(AttentionBackendType.FLASH_3_FP8, impl=flash_3_fp8, returns_lse=True,
-         low_precision=True, requires=PLATFORM("cuda") & SYMBOL(_FA3)),
+         low_precision=True, accepts=NO_VARLEN, requires=PLATFORM("cuda") & SYMBOL(_FA3)),
 
     # FAv4 produces an LSE but the legacy ring blocklist excludes it, so it
     # does not participate in ring attention.
@@ -154,7 +155,7 @@ SPECS = [
          requires=PLATFORM("cuda") & SYMBOL(_FA4)
                 & SYMBOL("flash_attn.cute.interface:flash_attn_varlen_func")),
 
-    Spec(AttentionBackendType.FLASH_4_FP4, impl=flash_4_fp4, low_precision=True,
+    Spec(AttentionBackendType.FLASH_4_FP4, impl=flash_4_fp4, low_precision=True, accepts=NO_VARLEN,
          requires=PLATFORM("cuda") & CUDA_CAPABILITY((10, 0)) & SYMBOL(_FA4)
                 & SYMBOL("xfuser.core.distributed.fp4_quantize:quantize_qk_to_fp4")),
 ]

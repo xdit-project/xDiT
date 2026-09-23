@@ -514,3 +514,42 @@ def test_every_live_shim_carries_a_date():
         "live aiter-shim markers without 'added YYYY-MM-DD':\n  "
         + "\n  ".join(undated)
     )
+
+
+# --------------------------------------------------------------------------
+# varlen packing
+# --------------------------------------------------------------------------
+
+# Backends whose kernel branches on call.varlen and calls a varlen entry point.
+# Everything else must declare NO_VARLEN: accepting a packed call without
+# honouring it runs dense attention over padded keys and returns wrong numbers
+# rather than failing.
+VARLEN_CAPABLE = {
+    "AITER", "AITER_FP8", "FLASH", "FLASH_3", "FLASH_4",
+}
+
+
+def test_only_varlen_capable_backends_accept_packed_keys():
+    import torch
+
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.spec import VarlenPacking
+
+    q = torch.zeros(1, 4, 8, 128)
+    packed = AttnCall(
+        varlen=VarlenPacking(
+            indices_k=torch.tensor([0]),
+            cu_seqlens_k=torch.tensor([0, 1]),
+            max_seqlen_k=1,
+        )
+    )
+    accepting = {
+        backend.name
+        for backend, spec in registry.REGISTRY.items()
+        if spec.rejects(q, q, q, packed) is None
+    }
+    assert accepting == VARLEN_CAPABLE, (
+        "varlen support disagrees with what the kernels implement; "
+        f"unexpected: {sorted(accepting - VARLEN_CAPABLE)}, "
+        f"missing: {sorted(VARLEN_CAPABLE - accepting)}"
+    )

@@ -6,6 +6,7 @@ import torch
 
 from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
 from xfuser.core.attention.requirements import PLATFORM, SYMBOL
+from xfuser.core.attention.constraints import NO_VARLEN
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 
 
@@ -51,6 +52,7 @@ def nvte_fp8(query, key, value, call: AttnCall):
 
 SPECS = [
     Spec(AttentionBackendType.NVTE_FP8, impl=nvte_fp8, low_precision=True,
+         accepts=NO_VARLEN,
          # Platform first: All reports the first failure, and "requires cuda,
          # found rocm" is more use to an AMD user than "not importable".
          requires=PLATFORM("cuda")

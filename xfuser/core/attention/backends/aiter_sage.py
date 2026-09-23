@@ -20,6 +20,7 @@ from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import (
     ANY_CALL,
     HEAD_DIM,
+    NO_VARLEN,
     SELF_ATTENTION,
     CallConstraint,
 )
@@ -222,14 +223,14 @@ for _kernel in (V1, V2):
         impl=functools.partial(dense, kernel=_kernel),
         returns_lse=True,
         low_precision=True,
-        accepts=_kernel.accepts,
+        accepts=_kernel.accepts & NO_VARLEN,
         requires=_kernel.requires,
     ))
     SPECS.append(Spec(
         AttentionBackendType[f"AITER_SPARSE_SAGE{_kernel.name}"],
         impl=functools.partial(ssta, kernel=_kernel),
         sparsity="ssta",
-        accepts=SELF_ATTENTION,
+        accepts=_kernel.accepts & SELF_ATTENTION & NO_VARLEN,
         low_precision=True,
         requires=_kernel.requires & SYMBOL(_RAGGED_LUT),
     ))
@@ -241,7 +242,7 @@ for _kernel in (V1, V2):
         # Both mask sources reorder Q and K/V against one spatial layout, so a
         # cross-attention call indexes K/V out of bounds. The legacy path has
         # no such guard and cores the process rather than raising.
-        accepts=_kernel.accepts & SELF_ATTENTION,
+        accepts=_kernel.accepts & SELF_ATTENTION & NO_VARLEN,
         low_precision=True,
         requires=(
             _kernel.requires

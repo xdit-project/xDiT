@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from xfuser.core.attention.requirements import PLATFORM
+from xfuser.core.attention.constraints import NO_VARLEN
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 
 aten = torch.ops.aten
@@ -67,15 +68,15 @@ def cudnn(query, key, value, call: AttnCall):
 
 
 SPECS = [
-    Spec(AttentionBackendType.SDPA, impl=sdpa),
+    Spec(AttentionBackendType.SDPA, impl=sdpa, accepts=NO_VARLEN),
 
-    Spec(AttentionBackendType.SDPA_FLASH, impl=sdpa_flash, returns_lse=True),
+    Spec(AttentionBackendType.SDPA_FLASH, impl=sdpa_flash, returns_lse=True, accepts=NO_VARLEN),
 
     # Explicit despite matching the default: this one returns a non-None second
     # value that is *not* an LSE, so the False is a claim, not an omission.
-    Spec(AttentionBackendType.SDPA_MATH, impl=sdpa_math, returns_lse=False),
+    Spec(AttentionBackendType.SDPA_MATH, impl=sdpa_math, returns_lse=False, accepts=NO_VARLEN),
 
-    Spec(AttentionBackendType.SDPA_EFFICIENT, impl=sdpa_efficient, returns_lse=True),
+    Spec(AttentionBackendType.SDPA_EFFICIENT, impl=sdpa_efficient, returns_lse=True, accepts=NO_VARLEN),
 
     # The legacy module has no availability check for CUDNN at all, so it is
     # selectable on a ROCm build and fails at the first attention call. The
@@ -83,5 +84,6 @@ SPECS = [
     # Attention would still fail late, with torch's own clear message; not
     # worth running a trial kernel during config validation to catch.
     Spec(AttentionBackendType.CUDNN,
-         impl=cudnn, returns_lse=True, requires=PLATFORM("cuda")),
+         impl=cudnn, returns_lse=True, accepts=NO_VARLEN,
+         requires=PLATFORM("cuda")),
 ]

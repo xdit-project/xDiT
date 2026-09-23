@@ -20,6 +20,7 @@ from xfuser.core.sparge_attention.sparge import (
     mask_padded_kv_blocks,
 )
 from xfuser.core.sparge_attention.head_balance import COST_SINK_KEY
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
@@ -650,52 +651,8 @@ if env_info["has_flex_block_attn"]:
 if env_info["has_npu_flash_attn"]:
     import torch_npu
 
-class AttentionBackendType(Enum):
-    SDPA = "SDPA"
-    SDPA_MATH = "SDPA with Math backend"
-    SDPA_EFFICIENT = "SDPA with memory-efficient backend"
-    SDPA_FLASH = "SDPA with FLASH backend"
-    FLASH = "Flash Attention V2"
-    CUDNN =  "cuDNN"
-    FLASH_3 = "Flash Attention V3"
-    FLASH_3_FP8 = "Flash Attention v3 FP8"
-    NVTE_FP8 = "NVTE FP8"
-    FLASH_4 = "Flash Attention V4"
-    FLASH_4_FP4 = "Flash Attention V4 FP4"
-    SAGE = "Sage Attention"
-    FLEX_BLOCK_ATTN = "Flex Block Attention"
-    AITER = "AITER"
-    AITER_BF16 = "AITER BF16 MHA v4"
-    AITER_BF16FP8 = "AITER BF16/FP8 MHA v4"
-    AITER_MLA = "AITER MLA" # deprecated, use AITER_FP8
-    AITER_I8FP8 = "AITER I8FP8"
-    AITER_FP8 = "AITER FP8"
-    AITER_MXFP8 = "AITER MXFP8"
-    AITER_F8F6 = "AITER F8F6"
-    AITER_MXFP6 = "AITER MXFP6"
-    AITER_F6F4 = "AITER F6F4"
-    AITER_MXFP4 = "AITER MXFP4"
-    AITER_F4F4 = "AITER F4F4"
-    AITER_I8FP8_SPARGE = "AITER I8FP8 Sparge"
-    AITER_FP8_SPARGE = "AITER FP8 Sparge"
-    AITER_MXFP8_SPARGE = "AITER MXFP8 Sparge"
-    AITER_F8F6_SPARGE = "AITER F8F6 Sparge"
-    AITER_MXFP6_SPARGE = "AITER MXFP6 Sparge"
-    AITER_F6F4_SPARGE = "AITER F6F4 Sparge"
-    AITER_MXFP4_SPARGE = "AITER MXFP4 Sparge"
-    AITER_F4F4_SPARGE = "AITER F4F4 Sparge"
-    AITER_SAGE = "AITER Sage"
-    AITER_SPARSE_SAGE = "AITER Sparse Sage"
-    AITER_SAGE_V2 = "AITER Sage V2"
-    AITER_SPARSE_SAGE_V2 = "AITER Sparse Sage V2"
-    AITER_SPARGE = "AITER Sparge"
-    AITER_SPARGE_V2 = "AITER Sparge V2"
-    AITER_VSA = "AITER VSA CK"
-    FLEX_VSA_H3 = "Flex VSA-H3"
-    FLEX_BLOCK_SPARGE = "Flex Block Sparge"
-    AITER_FLYDSL = "AITER FlyDSL"
-    AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
-    NPU = "NPU"
+# AttentionBackendType now lives in xfuser/core/attention/spec.py and is
+# re-exported here so existing importers keep working unchanged.
 
 
 AITER_LOW_PRECISION_BACKENDS = (

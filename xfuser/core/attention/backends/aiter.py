@@ -1,0 +1,56 @@
+"""
+AITER's flash attention: the dense bf16 backend.
+"""
+
+from xfuser.core.attention.layout import from_bshd, pack_kv, to_bshd
+from xfuser.core.attention.requirements import ARCH, SYMBOL
+from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+
+
+AITER_ARCH = ARCH("gfx942", "gfx950", "gfx1200", "gfx1201")
+
+# AITER FAv3 on gfx942 supports three different rounding modes:
+#   0 = RTNE (round to nearest even)
+#   1 = RTNA (round to nearest away)
+#   2 = RTZ  (round to zero)
+_BF16_ROUNDING_MODE = 2
+
+
+def aiter_attention(query, key, value, call: AttnCall):
+    """BSHD kernel; packs K/V when the model supplies varlen indices."""
+    from aiter import flash_attn_func, flash_attn_varlen_func
+
+    q, k, v = to_bshd(query, key, value, contiguous=True)
+
+    if call.varlen is None:
+        out, lse = flash_attn_func(
+            q, k, v,
+            dropout_p=call.dropout_p, causal=call.is_causal,
+            return_lse=True, return_attn_probs=False,
+            how_v3_bf16_cvt=_BF16_ROUNDING_MODE,
+        )
+    else:
+        p = pack_kv(q, k, v, call.varlen)
+        out, lse = flash_attn_varlen_func(
+            p.q, p.k, p.v, p.cu_seqlens_q, p.cu_seqlens_k,
+            max_seqlen_q=p.max_seqlen_q, max_seqlen_k=p.max_seqlen_k,
+            softmax_scale=p.head_dim ** -0.5,
+            dropout_p=call.dropout_p, causal=call.is_causal,
+            return_lse=True, return_attn_probs=False,
+            how_v3_bf16_cvt=_BF16_ROUNDING_MODE,
+        )
+        out = p.unflatten(out)
+
+    return from_bshd(out), lse
+
+
+SPECS = [
+    Spec(
+        AttentionBackendType.AITER,
+        impl=aiter_attention,
+        returns_lse=True,
+        requires=SYMBOL("aiter:flash_attn_func")
+               & SYMBOL("aiter:flash_attn_varlen_func")
+               & AITER_ARCH,
+    ),
+]

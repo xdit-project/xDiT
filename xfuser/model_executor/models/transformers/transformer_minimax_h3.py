@@ -318,7 +318,7 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 raise RuntimeError(
                     "VSA-H3 tile geometry was not primed for the sequence being "
                     "traced. Compiling MiniMax-H3's forward requires the "
-                    "runner's _wrap_compiled_forward_for_vsa_h3 wrapper, which "
+                    "runner's _wrap_compiled_forward wrapper, which "
                     "recovers the geometry outside the compiled region."
                 )
             return

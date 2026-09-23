@@ -225,39 +225,63 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
     encoders._xfuser_broadcast_patched = True
 
 
-def _wrap_compiled_forward_for_vsa_h3(
-    transformer, original_forward, compiled_forward
-):
-    """Prime VSA-H3's tile geometry outside the compiled region.
+def _mark_dynamic_timestep(timestep):
+    """Keep the timestep's length out of dynamo's guards.
 
-    The geometry is recovered from ``position_ids`` *values*, which forces
-    device syncs and cannot be traced, so ``fullgraph=True`` would reject it.
-    It is constant for a run, so priming the cache here leaves the lookup
-    inside ``forward`` as a branch that folds against the shape guards.
-
-    Returns ``compiled_forward`` unchanged for every non-VSA-H3 backend.
+    Without this dynamo specializes on timestep shape 1 vs >1 and recompiles
+    when it changes; the timestep is a 1-D tensor whose length varies along the
+    denoising steps. ``mark_unbacked`` is only exposed on
+    ``torch._dynamo.decorators``, not on ``torch._dynamo`` itself, and
+    ``mark_dynamic`` is the weaker fallback: it avoids specializing on the exact
+    size but still splits 1 from >1.
     """
-    if not getattr(transformer, "use_vsa_h3", False):
-        return compiled_forward
+    from torch._dynamo import decorators as dynamo_decorators
 
+    mark = getattr(
+        dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
+    )
+    mark(timestep, 0)
+
+
+def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
+    """Do everything that has to happen outside the compiled region.
+
+    Two jobs, both of which would otherwise force a recompile or a graph break:
+
+    * mark the timestep's length dynamic, since marking must happen outside the
+      compiled region to take effect;
+    * prime VSA-H3's tile geometry, which is recovered from ``position_ids``
+      *values*. That forces device syncs and cannot be traced, so
+      ``fullgraph=True`` would reject it. It is constant for a run, so priming
+      the cache here leaves the lookup inside ``forward`` as a branch that folds
+      against the shape guards. Skipped for non-VSA-H3 backends.
+
+    One ``signature.bind`` serves both, which is also what lets the timestep be
+    found by name whether it arrived positionally or not.
+    """
     signature = inspect.signature(original_forward)
+    prime_vsa_h3 = getattr(transformer, "use_vsa_h3", False)
 
-    def forward_with_vsa_h3_metadata(*args, **kwargs):
+    def forward_outside_the_graph(*args, **kwargs):
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        transformer.prepare_vsa_h3_metadata(
-            bound.arguments["position_ids"],
-            bound.arguments["video_indices"],
-            bound.arguments["audio_indices"],
-            bound.arguments["text_indices"],
-        )
+        timestep = bound.arguments.get("timestep")
+        if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
+            _mark_dynamic_timestep(timestep)
+        if prime_vsa_h3:
+            transformer.prepare_vsa_h3_metadata(
+                bound.arguments["position_ids"],
+                bound.arguments["video_indices"],
+                bound.arguments["audio_indices"],
+                bound.arguments["text_indices"],
+            )
         return compiled_forward(*args, **kwargs)
 
     # The denoise block picks which layout fields to pass by inspecting
     # signature(transformer.forward), so the wrapper has to expose the real
     # parameter list rather than (*args, **kwargs).
-    functools.update_wrapper(forward_with_vsa_h3_metadata, original_forward)
-    return forward_with_vsa_h3_metadata
+    functools.update_wrapper(forward_outside_the_graph, original_forward)
+    return forward_outside_the_graph
 
 
 class MiniMaxH3DiffusionOutput(DiffusionOutput):
@@ -605,36 +629,10 @@ class xFuserMiniMaxH3Model(xFuserModel):
             fullgraph=not use_hybrid,
         )
 
-        # The below fixes a recompile: avoids more than one graph realizing
-        # after compile-warmup.
-
-        # mark_unbacked is only exposed on torch._dynamo.decorators, not on
-        # torch._dynamo itself. mark_dynamic is the weaker fallback: it avoids
-        # specializing on the exact size but still splits 1 from >1.
-        from torch._dynamo import decorators as dynamo_decorators
-
-        mark_timestep = getattr(
-            dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
-        )
-
-        def forward_with_dynamic_timestep(*args, **kwargs):
-            # Marking must happen outside the compiled region. Without it dynamo
-            # specializes on timestep shape 1 vs >1 and recompiles when it changes.
-            # Remember that the timestep is a 1D tensor of variable length along
-            # the denoising steps.
-            timestep = kwargs.get("timestep")
-            if timestep is None and len(args) > 3:
-                timestep = args[3]
-            if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
-                mark_timestep(timestep, 0)
-            return compiled_forward(*args, **kwargs)
-
-        # The denoise block selects which layout fields to pass by inspecting
-        # signature(transformer.forward), so the wrapper must expose the real
-        # parameter list rather than (*args, **kwargs).
-        functools.update_wrapper(forward_with_dynamic_timestep, original_forward)
-        transformer.forward = _wrap_compiled_forward_for_vsa_h3(
-            transformer, original_forward, forward_with_dynamic_timestep
+        # Marking the timestep dynamic fixes a recompile: it avoids more than
+        # one graph realizing after compile-warmup.
+        transformer.forward = _wrap_compiled_forward(
+            transformer, original_forward, compiled_forward
         )
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():

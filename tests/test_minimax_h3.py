@@ -1369,61 +1369,99 @@ def test_fasth3_vsa_tracing_rejects_a_stale_geometry(monkeypatch):
         wrapper.prepare_vsa_h3_metadata(**longer)
 
 
-def test_fasth3_vsa_compile_wrapper_primes_geometry():
-    """The runner's compile wrapper must prime the geometry before tracing."""
-    from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        _wrap_compiled_forward_for_vsa_h3,
-    )
+class _WrapperTransformer:
+    """Stand-in with the real forward's parameter names and order."""
 
-    primed = []
+    def __init__(self, use_vsa_h3):
+        self.use_vsa_h3 = use_vsa_h3
+        self.primed = []
 
-    class _Transformer:
-        use_vsa_h3 = True
+    def prepare_vsa_h3_metadata(self, position_ids, video, audio, text):
+        self.primed.append(position_ids)
 
-        def prepare_vsa_h3_metadata(self, position_ids, video, audio, text):
-            primed.append(position_ids)
+    def forward(
+        self,
+        hidden_states,
+        timestep,
+        position_ids,
+        video_indices,
+        audio_indices,
+        text_indices,
+    ):
+        return hidden_states
 
-        def forward(
-            self,
-            hidden_states,
-            position_ids,
-            video_indices,
-            audio_indices,
-            text_indices,
-        ):
-            return hidden_states
 
-    transformer = _Transformer()
+def test_fasth3_compile_wrapper_primes_geometry_and_marks_the_timestep(
+    monkeypatch,
+):
+    """Both jobs the compiled region cannot do itself, in one wrapper."""
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    marked = []
+    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+
+    transformer = _WrapperTransformer(use_vsa_h3=True)
     compiled_calls = []
-    forward = _wrap_compiled_forward_for_vsa_h3(
+    forward = minimax_h3._wrap_compiled_forward(
         transformer,
         transformer.forward,
         lambda *args, **kwargs: compiled_calls.append((args, kwargs)),
     )
 
-    forward(1, 2, video_indices=3, audio_indices=4, text_indices=5)
+    # Timestep positionally, the rest by keyword: the wrapper binds the
+    # signature, so where an argument came from does not matter.
+    timestep = torch.tensor([0.7, 0.3])
+    forward(
+        1,
+        timestep,
+        position_ids=2,
+        video_indices=3,
+        audio_indices=4,
+        text_indices=5,
+    )
 
-    assert primed == [2]
+    assert transformer.primed == [2]
+    assert marked == [timestep]
     assert len(compiled_calls) == 1
     assert inspect.signature(forward) == inspect.signature(transformer.forward)
 
 
-def test_fasth3_vsa_compile_wrapper_passes_other_backends_through():
-    from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        _wrap_compiled_forward_for_vsa_h3,
+def test_fasth3_compile_wrapper_marks_the_timestep_for_other_backends(
+    monkeypatch,
+):
+    """Non-VSA-H3 backends skip the priming but keep the timestep marking."""
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    marked = []
+    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+
+    transformer = _WrapperTransformer(use_vsa_h3=False)
+    forward = minimax_h3._wrap_compiled_forward(
+        transformer, transformer.forward, lambda *args, **kwargs: None
     )
 
-    transformer = SimpleNamespace(use_vsa_h3=False)
+    timestep = torch.tensor([0.7])
+    forward(1, timestep, 2, 3, 4, 5)
 
-    def compiled_forward():
-        return None
+    assert transformer.primed == []
+    assert marked == [timestep]
 
-    assert (
-        _wrap_compiled_forward_for_vsa_h3(
-            transformer, compiled_forward, compiled_forward
-        )
-        is compiled_forward
+
+def test_fasth3_compile_wrapper_ignores_a_scalar_timestep(monkeypatch):
+    """Nothing to mark when the timestep has no length to vary."""
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    marked = []
+    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+
+    transformer = _WrapperTransformer(use_vsa_h3=False)
+    forward = minimax_h3._wrap_compiled_forward(
+        transformer, transformer.forward, lambda *args, **kwargs: None
     )
+
+    forward(1, torch.tensor(0.7), 2, 3, 4, 5)
+
+    assert marked == []
 
 
 def test_fasth3_accepts_torch_compile(monkeypatch):

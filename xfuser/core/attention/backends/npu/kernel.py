@@ -1,8 +1,6 @@
 """Ascend NPU fused attention."""
 
-from xfuser.core.attention.requirements import PLATFORM, SYMBOL
-from xfuser.core.attention.constraints import NO_VARLEN
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import AttnCall
 
 
 def npu_attention(query, key, value, call: AttnCall):
@@ -21,8 +19,3 @@ def npu_attention(query, key, value, call: AttnCall):
     return out.transpose(1, 2), lse.squeeze(-1)
 
 
-SPECS = [
-    Spec(AttentionBackendType.NPU, impl=npu_attention, returns_lse=True, accepts=NO_VARLEN,
-         requires=PLATFORM("npu")
-              & SYMBOL("torch_npu:npu_fused_infer_attention_score")),
-]

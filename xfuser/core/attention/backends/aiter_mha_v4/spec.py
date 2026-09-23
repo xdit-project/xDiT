@@ -14,9 +14,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Tuple
 
-import torch
-
-from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
 from xfuser.core.attention.requirements import ARCH, PARAM, SYMBOL, Requirement
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
@@ -26,13 +23,7 @@ from xfuser.core.attention.constraints import (
     NO_VARLEN,
     SELF_ATTENTION,
 )
-from xfuser.core.attention.sparsity.sparge import (
-    SpargeConfig,
-    build_block_mask,
-    cost_sink_from,
-    restore_sparge_output,
-)
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
 _MHA_V4 = "aiter.ops.mha_v4:mha_v4"
 
@@ -71,45 +62,6 @@ class Scale(Enum):
 
     E8M0_PER_1X32 = auto()
     F32_PER_TENSOR = auto()
-
-
-@functools.lru_cache(maxsize=None)
-def _aiter_format(fmt: Fmt):
-    from aiter.ops.mha_v4 import AttentionFormat, native_fp8_format
-
-    if fmt is Fmt.NATIVE_FP8:
-        return native_fp8_format()
-    return getattr(AttentionFormat, fmt.name)
-
-
-@functools.lru_cache(maxsize=None)
-def _aiter_scale(scale: Scale):
-    from aiter.ops.mha_v4 import AttentionScaleMode
-
-    return getattr(AttentionScaleMode, scale.name)
-
-
-@functools.lru_cache(maxsize=1)
-def _kv_tile() -> int:
-    """Sparge's KV tile must match the kernel's sparse geometry."""
-    from aiter.ops.mha_v4 import mha_v4
-
-    try:
-        from aiter.ops.mha_v4 import mha_v4_kv_tile
-
-        return int(mha_v4_kv_tile())
-    except ImportError:
-        arch = torch.cuda.get_device_properties(0).gcnArchName
-        return 64 if "gfx942" in arch else 128
-
-
-@functools.lru_cache(maxsize=1)
-def _has_scale_modes() -> bool:
-    import inspect
-
-    from aiter.ops.mha_v4 import mha_v4
-
-    return "q_scale_mode" in inspect.signature(mha_v4).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +104,6 @@ FORMATS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# kernels
-# ---------------------------------------------------------------------------
-
 DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128)
 
 # SELF_ATTENTION is stricter than the legacy validator, which checks head
@@ -166,99 +114,6 @@ DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128)
 SPARGE_CALLS = DENSE_CALLS & MHA_ONLY & SELF_ATTENTION
 
 
-def _launch(q, k, v, fmt: MhaV4Format, block_mask=None):
-    """One MHA v4 launch. Tensors are BSHD."""
-    from aiter.ops.mha_v4 import mha_v4
-
-    if fmt.is_mxfp8 and not _has_scale_modes():
-        return _launch_mxfp8_legacy(q, k, v, block_mask)
-
-    kwargs = {}
-    if fmt.qk_scale is not None:
-        kwargs = {
-            "q_scale_mode": _aiter_scale(fmt.qk_scale),
-            "k_scale_mode": _aiter_scale(fmt.qk_scale),
-            "v_scale_mode": _aiter_scale(fmt.v_scale),
-        }
-    qk = _aiter_format(fmt.qk)
-    return mha_v4(q, k, v, qk, qk, _aiter_format(fmt.v),
-                  block_mask=block_mask, **kwargs)
-
-
-def _launch_mxfp8_legacy(q, k, v, block_mask):
-    # aiter-shim: added 2026-08-24, drop once the floor passes the build that
-    # gained scale modes. AITER deprecated mha_v4_mxfp8, and its
-    # DeprecationWarning is untraceable by Dynamo, which breaks fullgraph=True.
-    from aiter.ops.mha_v4 import mha_v4_mxfp8
-
-    if block_mask is None:
-        return mha_v4_mxfp8(q, k, v)
-    return mha_v4_mxfp8(q, k, v, block_mask=block_mask)
-
-
-def _launch_mxfp8_packed(q, k, v, block_mask):
-    """Hand-packed MXFP8 sparse path, used when mha_v4 takes no block_mask for
-    the deprecated MXFP8 entry point."""
-    from aiter.ops.mha_v4 import (
-        mha_v4_packed,
-        mha_v4_q_multiplier,
-        native_fp8_format,
-        quantize_fp8,
-        quantize_mxfp8_k,
-        quantize_mxfp8_q,
-    )
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-
-    lut = block_attn_mask_to_ragged_lut(block_mask, return_none_if_dense=False)
-    if lut is None:
-        raise RuntimeError("block_attn_mask_to_ragged_lut returned None")
-    kv_block_indices, lut_start, lut_count = lut
-
-    softmax_scale = q.shape[-1] ** -0.5
-    q_q, q_scale = quantize_mxfp8_q(q, mha_v4_q_multiplier(softmax_scale))
-    k_q, k_scale = quantize_mxfp8_k(k)
-    v_q, v_scale = quantize_fp8(v)
-    fp8 = native_fp8_format()
-    return mha_v4_packed(
-        q_q, k_q, v_q, q_scale, k_scale, v_scale,
-        fp8, fp8, fp8,
-        _aiter_scale(Scale.E8M0_PER_1X32),
-        _aiter_scale(Scale.E8M0_PER_1X32),
-        _aiter_scale(Scale.F32_PER_TENSOR),
-        softmax_scale=softmax_scale,
-        kv_block_indices=kv_block_indices,
-        lut_start=lut_start,
-        lut_count=lut_count,
-    )
-
-
-def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
-    q, k, v = to_bshd(query, key, value, contiguous=True)
-    return from_bshd(_launch(q, k, v, fmt)), None
-
-
-def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
-    q, k, v, state, block_mask = build_block_mask(
-        query, key, value,
-        is_causal=call.is_causal,
-        config=SpargeConfig.from_kwargs(call.attention_kwargs),
-        block_m=256, block_n=_kv_tile(),
-        ulysses_world_size=call.ctx.ulysses_world_size,
-        cost_sink=cost_sink_from(call.attention_kwargs),
-        pad_block_divisible=True,
-    )
-    q, k, v = to_bshd(q, k, v, contiguous=True)
-
-    if fmt.is_mxfp8 and _has_scale_modes():
-        # The deprecated MXFP8 entry point is the one that takes a block_mask;
-        # with scale modes present we pack the sparse call by hand instead.
-        output = _launch_mxfp8_packed(q, k, v, block_mask)
-    else:
-        output = _launch(q, k, v, fmt, block_mask=block_mask)
-
-    return restore_sparge_output(from_bshd(output), state), None
-
-
 # ---------------------------------------------------------------------------
 # specs
 # ---------------------------------------------------------------------------
@@ -266,7 +121,7 @@ def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
 def _dense_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}"],
-        impl=functools.partial(mha_v4_dense, fmt=fmt),
+        impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=DENSE_CALLS,
         requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942,
@@ -276,7 +131,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
 def _sparge_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}_SPARGE"],
-        impl=functools.partial(mha_v4_sparge, fmt=fmt),
+        impl=Impl("kernel:mha_v4_sparge", {"fmt": fmt}),
         sparsity="sparge",
         head_balanced=True,
         low_precision=True,

@@ -4,27 +4,19 @@ import math
 
 import torch
 
-from xfuser.core.attention.constraints import (
-    NO_DROPOUT,
-    NO_VARLEN,
-    NON_CAUSAL,
-    SELF_ATTENTION,
-)
-from xfuser.core.attention.requirements import SYMBOL
 from xfuser.core.attention.sparsity.sparge import (
     SpargeConfig,
     build_block_mask,
     cost_sink_from,
     restore_sparge_output,
 )
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import AttentionBackendType, AttnCall
 from xfuser.core.distributed.ssta import (
     get_sparse_mask,
     setup_ssta,
     untile_ssta_output,
 )
 
-_FLEX = "flex_block_attn:flex_block_attn_func"
 
 
 def _flex_op():
@@ -117,24 +109,10 @@ def _dense_fallback(query, key, value, call: AttnCall):
 
     aiter = registry.REGISTRY.get(AttentionBackendType.AITER)
     if aiter is not None and aiter.unavailable() is None:
-        return aiter.impl(query, key, value, call)
+        return aiter.resolved()(query, key, value, call)
 
-    from xfuser.core.attention.backends.sdpa import sdpa
+    from xfuser.core.attention.backends.sdpa.kernel import sdpa
 
     return sdpa(query, key, value, call)
 
 
-SPECS = [
-    Spec(AttentionBackendType.FLEX_BLOCK_ATTN, impl=flex_block,
-         sparsity="ssta", accepts=SELF_ATTENTION & NO_VARLEN, requires=SYMBOL(_FLEX)),
-
-    Spec(AttentionBackendType.FLEX_BLOCK_SPARGE, impl=flex_sparge,
-         sparsity="sparge", head_balanced=True, accepts=SELF_ATTENTION & NO_VARLEN,
-         requires=SYMBOL(_FLEX)),
-
-    # Flex-attention based but not flex_block_attn: this one goes through
-    # torch's own FlexAttention, so it has no third-party requirement.
-    Spec(AttentionBackendType.FLEX_VSA_H3, impl=flex_vsa_h3, sparsity="h3",
-         accepts=NON_CAUSAL & NO_DROPOUT & NO_VARLEN,
-         requires=SYMBOL("xfuser.core.vsa_h3_attention:flex_h3_vsa_attention")),
-]

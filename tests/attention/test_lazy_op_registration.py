@@ -190,7 +190,10 @@ def test_deep_constraint_chain_traces_clean_when_satisfied():
     """The MHA v4 chain is the deepest in the package -- four constraints
     including a tuple-membership test on head_dim. Standard usage walks it on
     every call, so it must fold away rather than break the graph."""
-    from xfuser.core.attention.backends.aiter_mha_v4 import DENSE_CALLS, SPARGE_CALLS
+    from xfuser.core.attention.backends.aiter_mha_v4.spec import (
+        DENSE_CALLS,
+        SPARGE_CALLS,
+    )
     from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 
     def impl(q, k, v, call):

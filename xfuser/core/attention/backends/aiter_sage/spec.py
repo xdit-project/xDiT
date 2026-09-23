@@ -14,8 +14,6 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-import torch
-
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import (
     ANY_CALL,
@@ -31,7 +29,7 @@ from xfuser.core.attention.sparsity.sparge import (
     cost_sink_from,
     restore_sparge_output,
 )
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 from xfuser.core.distributed.ssta import (
     expand_block_mask,
     get_sparse_mask,
@@ -80,19 +78,6 @@ class SageKernel:
     requires: Requirement
     accepts: CallConstraint = ANY_CALL
 
-    def resolve(self):
-        module, _, symbol = self.wrapper.partition(":")
-        return getattr(__import__(module, fromlist=[symbol]), symbol)
-
-    def config(self) -> dict:
-        module, _, symbol = self.configs.partition(":")
-        return getattr(__import__(module, fromlist=[symbol]), symbol)()
-
-    def extra(self, query) -> dict:
-        if not self.rotates:
-            return {}
-        return {"hadamard_rotation": True, "R": hadamard.matrix(_block_r(), str(query.device))}
-
     def prepare(self, *tensors):
         # aiter-shim: added 2026-03-12. Sage v2 needed contiguous inputs in
         # older builds. Pre-floor, so it is a removal candidate -- but unlike
@@ -131,96 +116,11 @@ V2 = SageKernel(
 )
 
 
-def _causal(kernel: SageKernel, call: AttnCall) -> dict:
-    return {"causal": call.is_causal} if kernel.passes_causal else {}
-
-
-# ---------------------------------------------------------------------------
-# the three mask sources
-# ---------------------------------------------------------------------------
-
-def dense(query, key, value, call: AttnCall, *, kernel: SageKernel):
-    """No mask. The only cell that can participate in ring attention, and only
-    then does the wrapper produce an LSE."""
-    q, k, v = kernel.prepare(query, key, value)
-    attn = kernel.resolve()
-    extra = kernel.extra(q)
-
-    if call.ctx.ring_world_size > 1:
-        # aiter-shim cut 2026-09: AITER_SAGE_SUPPORTS_RING /
-        # AITER_SAGE_V2_SUPPORTS_RING (both added 2026-06-17) probed for these
-        # parameters. Every build at or after the July floor has them.
-        lse_args = {"return_lse": True}
-        if not kernel.rotates:
-            lse_args["smooth_k"] = True
-        return attn(q, k, v, layout="bhsd", **extra, **lse_args, **_causal(kernel, call))
-
-    return attn(q, k, v, layout="bhsd", **extra, **_causal(kernel, call)), None
-
-
-def ssta(query, key, value, call: AttnCall, *, kernel: SageKernel):
-    """Tile-based static mask, supplied by the model's sparse config."""
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-
-    kwargs = call.attention_kwargs
-    kwargs["sp_size"] = call.ctx.ulysses_world_size
-    block_size = math.prod(kwargs["tile_size"])
-
-    config = kernel.config()
-    config["BLOCK_M"] = _TRITON_SSTA_BLOCK
-    config["BLOCK_N"] = _TRITON_SSTA_BLOCK
-
-    q, k, v, mask_config, state = setup_ssta(query, key, value, kwargs)
-    block_mask = get_sparse_mask(mask_config, sparse_type=kwargs["attn_sparse_type"])
-    if block_size != _TRITON_SSTA_BLOCK:
-        block_mask = expand_block_mask(block_mask, factor=block_size // _TRITON_SSTA_BLOCK)
-
-    output = kernel.resolve()(
-        q, k, v,
-        layout="bhsd", config=config, **kernel.extra(q),
-        block_lut=block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1]),
-        **_causal(kernel, call),
-    )
-    output = untile_ssta_output(
-        output, state, kwargs["encoder_sequence_length"], kwargs["sp_size"]
-    )
-    return output, None
-
-
-def sparge(query, key, value, call: AttnCall, *, kernel: SageKernel):
-    """Data-dependent mask computed from Q/K."""
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-
-    query, key, value = kernel.prepare(query, key, value)
-    config = kernel.config()
-
-    q, k, v, state, block_mask = build_block_mask(
-        query, key, value,
-        is_causal=call.is_causal,
-        config=SpargeConfig.from_kwargs(call.attention_kwargs),
-        block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
-        ulysses_world_size=call.ctx.ulysses_world_size,
-        cost_sink=cost_sink_from(call.attention_kwargs),
-    )
-
-    output = kernel.resolve()(
-        q, k, v,
-        layout="bhsd", config=config, **kernel.extra(q),
-        block_lut=block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1]),
-        **_causal(kernel, call),
-    )
-    return restore_sparge_output(output, state), None
-
-
-# ---------------------------------------------------------------------------
-# specs
-# ---------------------------------------------------------------------------
-
 SPECS = []
 for _kernel in (V1, V2):
     SPECS.append(Spec(
         AttentionBackendType[f"AITER_SAGE{_kernel.name}"],
-        impl=functools.partial(dense, kernel=_kernel),
+        impl=Impl("kernel:dense", {"kernel": _kernel}),
         returns_lse=True,
         low_precision=True,
         accepts=_kernel.accepts & NO_VARLEN,
@@ -228,7 +128,7 @@ for _kernel in (V1, V2):
     ))
     SPECS.append(Spec(
         AttentionBackendType[f"AITER_SPARSE_SAGE{_kernel.name}"],
-        impl=functools.partial(ssta, kernel=_kernel),
+        impl=Impl("kernel:ssta", {"kernel": _kernel}),
         sparsity="ssta",
         accepts=_kernel.accepts & SELF_ATTENTION & NO_VARLEN,
         low_precision=True,
@@ -236,7 +136,7 @@ for _kernel in (V1, V2):
     ))
     SPECS.append(Spec(
         AttentionBackendType[f"AITER_SPARGE{_kernel.name}"],
-        impl=functools.partial(sparge, kernel=_kernel),
+        impl=Impl("kernel:sparge", {"kernel": _kernel}),
         sparsity="sparge",
         head_balanced=True,
         # Both mask sources reorder Q and K/V against one spatial layout, so a

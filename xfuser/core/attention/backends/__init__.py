@@ -1,12 +1,20 @@
-"""Backend modules: one per family, kernel code and specs together.
+"""Backend packages: one per family, each split in two.
 
-Each module exposes a module-level SPECS list. They are imported explicitly
-below rather than auto-discovered, so grep finds every backend and a forgotten
-import is a loud failure rather than a silently absent backend.
+    <family>/spec.py     declaration -- imports no vendor library, so the
+                         registry loads on any machine
+    <family>/kernel.py   implementation -- imports its vendor library at module
+                         level, and is imported only when the backend is
+                         selected
 
-Migration status: modules listed here are served by the new registry; the rest
-are still served by xfuser/core/distributed/attention_backend.py. The count is
-visible via registry.missing_specs().
+Splitting them is what lets kernel modules use ordinary top-of-file imports:
+Dynamo refuses to trace importlib, so resolving an implementation inside a
+compiled region is a hard failure under fullgraph=True. Resolution happens in
+runtime_state's compatibility check instead, which runs for the attention
+backend, the cross-attention backend, and every backend in a hybrid schedule.
+
+Packages are listed explicitly rather than auto-discovered, so grep finds every
+backend and a forgotten entry is a loud failure rather than a silently absent
+one.
 """
 
 from xfuser.core.attention.backends import (

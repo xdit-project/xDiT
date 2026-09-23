@@ -5,9 +5,7 @@ import functools
 import torch
 
 from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
-from xfuser.core.attention.requirements import PLATFORM, SYMBOL
-from xfuser.core.attention.constraints import NO_VARLEN
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import AttnCall
 
 
 @functools.lru_cache(maxsize=32)
@@ -50,12 +48,3 @@ def nvte_fp8(query, key, value, call: AttnCall):
     return from_bshd(out.view(batch, seq_len, num_heads, head_dim)), None
 
 
-SPECS = [
-    Spec(AttentionBackendType.NVTE_FP8, impl=nvte_fp8, low_precision=True,
-         accepts=NO_VARLEN,
-         # Platform first: All reports the first failure, and "requires cuda,
-         # found rocm" is more use to an AMD user than "not importable".
-         requires=PLATFORM("cuda")
-                & SYMBOL("transformer_engine.pytorch:DotProductAttention")
-                & SYMBOL("transformer_engine.common:recipe")),
-]

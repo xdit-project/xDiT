@@ -9,9 +9,7 @@ import functools
 import torch
 
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
-from xfuser.core.attention.requirements import CUDA_CAPABILITY, PLATFORM, SYMBOL
-from xfuser.core.attention.constraints import NO_VARLEN
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import AttnCall
 
 _FA2 = "flash_attn:flash_attn_func"
 _FA3 = "flash_attn_interface:flash_attn_func"
@@ -133,29 +131,3 @@ def flash_4_fp4(query, key, value, call: AttnCall):
     return from_bshd(out), softmax_lse
 
 
-# FAv2 is NOT CUDA-only: envs.check_flash_attn admits ROCm, and
-# _select_attention_backend picks FLASH on HIP when aiter is absent. Gating it
-# on cuda would take that path away from AMD users, so it stays symbol-gated.
-# FAv3 (Hopper), FAv4 (CUTE DSL) and SageAttention have no ROCm build; the
-# platform check turns "not importable" into a message that says why.
-SPECS = [
-    Spec(AttentionBackendType.FLASH, impl=flash_2, returns_lse=True,
-         requires=SYMBOL(_FA2) & SYMBOL("flash_attn:flash_attn_varlen_func")),
-
-    Spec(AttentionBackendType.FLASH_3, impl=flash_3, returns_lse=True,
-         requires=PLATFORM("cuda") & SYMBOL(_FA3)
-                & SYMBOL("flash_attn_interface:flash_attn_varlen_func")),
-
-    Spec(AttentionBackendType.FLASH_3_FP8, impl=flash_3_fp8, returns_lse=True,
-         low_precision=True, accepts=NO_VARLEN, requires=PLATFORM("cuda") & SYMBOL(_FA3)),
-
-    # FAv4 produces an LSE but the legacy ring blocklist excludes it, so it
-    # does not participate in ring attention.
-    Spec(AttentionBackendType.FLASH_4, impl=flash_4,
-         requires=PLATFORM("cuda") & SYMBOL(_FA4)
-                & SYMBOL("flash_attn.cute.interface:flash_attn_varlen_func")),
-
-    Spec(AttentionBackendType.FLASH_4_FP4, impl=flash_4_fp4, low_precision=True, accepts=NO_VARLEN,
-         requires=PLATFORM("cuda") & CUDA_CAPABILITY((10, 0)) & SYMBOL(_FA4)
-                & SYMBOL("xfuser.core.distributed.fp4_quantize:quantize_qk_to_fp4")),
-]

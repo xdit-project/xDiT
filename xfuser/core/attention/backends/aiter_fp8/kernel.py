@@ -16,10 +16,9 @@ from typing import Optional
 import torch
 
 from xfuser.core.attention.numerics import hadamard
-from xfuser.core.attention.constraints import NO_DROPOUT
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
-from xfuser.core.attention.requirements import ARCH, SYMBOL
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.requirements import ARCH
+from xfuser.core.attention.spec import AttnCall
 from xfuser.envs import environment_variables
 
 
@@ -151,20 +150,3 @@ def aiter_fp8(query, key, value, call: AttnCall):
     return _legacy(query, key, value, call)
 
 
-SPECS = [
-    Spec(
-        AttentionBackendType.AITER_FP8,
-        impl=aiter_fp8,
-        low_precision=True,
-        accepts=NO_DROPOUT,
-        accepts_prequantized=True,
-        prequant_rotate=hadamard.rotate_qk,
-        # The Hadamard symbol is needed by the legacy path, via _rotation.
-        # That path is always reachable -- varlen packing and head dims other
-        # than 128 never take MHA v4 -- so it gates the whole backend rather
-        # than being checked when that branch is taken.
-        requires=SYMBOL("aiter:flash_attn_fp8_pertensor_func")
-               & SYMBOL("aiter:per_tensor_quant")
-               & hadamard.CREATE_HADAMARD,
-    ),
-]

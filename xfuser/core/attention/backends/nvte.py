@@ -4,7 +4,7 @@ import functools
 
 import torch
 
-from xfuser.core.attention.layout import from_bshd, to_bshd
+from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
 from xfuser.core.attention.requirements import PLATFORM, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 

@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 
 import torch
 
-from xfuser.core.attention.layout import from_bshd, to_bshd
+from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
 from xfuser.core.attention.requirements import ARCH, PARAM, SYMBOL, Requirement
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
@@ -277,7 +277,7 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}_SPARGE"],
         impl=functools.partial(mha_v4_sparge, fmt=fmt),
-        is_sparse=True,
+        sparsity="sparge",
         head_balanced=True,
         low_precision=True,
         accepts=SPARGE_CALLS,

@@ -121,15 +121,15 @@ def _dense_fallback(query, key, value, call: AttnCall):
 
 SPECS = [
     Spec(AttentionBackendType.FLEX_BLOCK_ATTN, impl=flex_block,
-         is_sparse=True, accepts=SELF_ATTENTION, requires=SYMBOL(_FLEX)),
+         sparsity="ssta", accepts=SELF_ATTENTION, requires=SYMBOL(_FLEX)),
 
     Spec(AttentionBackendType.FLEX_BLOCK_SPARGE, impl=flex_sparge,
-         is_sparse=True, head_balanced=True, accepts=SELF_ATTENTION,
+         sparsity="sparge", head_balanced=True, accepts=SELF_ATTENTION,
          requires=SYMBOL(_FLEX)),
 
     # Flex-attention based but not flex_block_attn: this one goes through
     # torch's own FlexAttention, so it has no third-party requirement.
-    Spec(AttentionBackendType.FLEX_VSA_H3, impl=flex_vsa_h3, is_sparse=True,
+    Spec(AttentionBackendType.FLEX_VSA_H3, impl=flex_vsa_h3, sparsity="h3",
          accepts=NON_CAUSAL & NO_DROPOUT,
          requires=SYMBOL("xfuser.core.vsa_h3_attention:flex_h3_vsa_attention")),
 ]

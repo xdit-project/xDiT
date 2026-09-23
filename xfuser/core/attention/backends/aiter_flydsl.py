@@ -4,9 +4,10 @@ AITER FlyDSL: a gfx1201 MHA kernel
 
 import torch
 
+from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.backends.sdpa import sdpa_flash
 from xfuser.core.attention.constraints import NO_DROPOUT
-from xfuser.core.attention.layout import from_bshd, to_bshd
+from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
 from xfuser.core.attention.requirements import ARCH, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 
@@ -76,6 +77,8 @@ SPECS = [
 
     Spec(AttentionBackendType.AITER_FLYDSL_FP8, impl=flydsl_fp8, low_precision=True,
          accepts=NO_DROPOUT,
+         accepts_prequantized=True,
+         prequant_rotate=hadamard.rotate_qk,
          requires=SYMBOL(_FLYDSL) & SYMBOL("aiter.ops.flydsl:flydsl_fp8_quant")
                 & ARCH("gfx1201")),
 ]

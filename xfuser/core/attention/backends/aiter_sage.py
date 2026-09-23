@@ -16,6 +16,7 @@ from typing import Optional
 
 import torch
 
+from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import (
     ANY_CALL,
     HEAD_DIM,
@@ -51,7 +52,8 @@ _TRITON_SSTA_BLOCK = 128
 
 
 # ---------------------------------------------------------------------------
-# hadamard (sage v2 only)
+# rotation block size (sage v2 only; the matrix itself is shared, see
+# xfuser/core/attention/numerics/hadamard.py)
 # ---------------------------------------------------------------------------
 
 def _block_r() -> int:
@@ -60,37 +62,6 @@ def _block_r() -> int:
     except (TypeError, ValueError):
         return 128
     return value if value in (16, 32, 64, 128) else 128
-
-
-@functools.lru_cache(maxsize=None)
-def _hadamard(device_key) -> torch.Tensor:
-    """AITER's own matrix. Unlike the fp8 one there is no local fallback: sage
-    v2's rotation must match what the kernel expects."""
-    try:
-        from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4 import (
-            create_hadamard_matrix,
-        )
-    except ImportError:
-        # The symbol moved modules; both spellings are alive in the wild, which
-        # is what SYMBOL(a) | SYMBOL(b) declares below.
-        from aiter.ops.triton.quant.sage_attention_quant_wrappers import (
-            create_hadamard_matrix,
-        )
-
-    block_r = _block_r()
-    matrix = create_hadamard_matrix(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
-    return matrix.to(torch.device(device_key))
-
-
-_HADAMARD_SYMBOL = (
-    SYMBOL(
-        "aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4"
-        ":create_hadamard_matrix"
-    )
-    | SYMBOL(
-        "aiter.ops.triton.quant.sage_attention_quant_wrappers:create_hadamard_matrix"
-    )
-)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +73,7 @@ class SageKernel:
     name: str
     wrapper: str            # "module:function"
     configs: str            # "module:function"
-    hadamard: bool
+    rotates: bool          # Hadamard-rotate Q/K (sage v2 only)
     force_contiguous: bool
     passes_causal: bool
     requires: Requirement
@@ -117,14 +88,16 @@ class SageKernel:
         return getattr(__import__(module, fromlist=[symbol]), symbol)()
 
     def extra(self, query) -> dict:
-        if not self.hadamard:
+        if not self.rotates:
             return {}
-        return {"hadamard_rotation": True, "R": _hadamard(str(query.device))}
+        return {"hadamard_rotation": True, "R": hadamard.matrix(_block_r(), str(query.device))}
 
     def prepare(self, *tensors):
-        # aiter-shim: sage v2 needed contiguous inputs in older builds. Kept
-        # because no version is recorded for the fix and dropping it silently
-        # changes numerics rather than raising.
+        # aiter-shim: added 2026-03-12. Sage v2 needed contiguous inputs in
+        # older builds. Pre-floor, so it is a removal candidate -- but unlike
+        # the probe-guarded shims this is an unconditional copy, and "AITER no
+        # longer needs it" cannot be established by introspection, only by a
+        # bitwise run with and without. Kept until that is measured.
         if not self.force_contiguous:
             return tensors
         return tuple(t.contiguous() for t in tensors)
@@ -133,7 +106,7 @@ class SageKernel:
 V1 = SageKernel(
     name="", wrapper=_SAGE_V1,
     configs="aiter.ops.triton.attention.fav3_sage:get_sage_fwd_configs",
-    hadamard=False, force_contiguous=False,
+    rotates=False, force_contiguous=False,
     # NOTE: the wrapper accepts `causal`, but the legacy backend never passed
     # it -- a causal request silently returns non-causal output. Ported
     # unchanged. Declaring NON_CAUSAL in `accepts` below is the one-line fix.
@@ -147,8 +120,8 @@ V2 = SageKernel(
         "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper"
         ":get_sage_fwd_configs_mxfp4"
     ),
-    hadamard=True, force_contiguous=True, passes_causal=True,
-    requires=SYMBOL(_SAGE_V2) & _HADAMARD_SYMBOL,
+    rotates=True, force_contiguous=True, passes_causal=True,
+    requires=SYMBOL(_SAGE_V2) & hadamard.CREATE_HADAMARD,
     # The rotation matrix is block_r wide and the kernel reads a full block per
     # head, so a smaller head dimension reads past its end: two allocations of
     # the same matrix give different results. The legacy path has no guard and
@@ -177,7 +150,7 @@ def dense(query, key, value, call: AttnCall, *, kernel: SageKernel):
         # AITER_SAGE_V2_SUPPORTS_RING (both added 2026-06-17) probed for these
         # parameters. Every build at or after the July floor has them.
         lse_args = {"return_lse": True}
-        if not kernel.hadamard:
+        if not kernel.rotates:
             lse_args["smooth_k"] = True
         return attn(q, k, v, layout="bhsd", **extra, **lse_args, **_causal(kernel, call))
 
@@ -255,7 +228,7 @@ for _kernel in (V1, V2):
     SPECS.append(Spec(
         AttentionBackendType[f"AITER_SPARSE_SAGE{_kernel.name}"],
         impl=functools.partial(ssta, kernel=_kernel),
-        is_sparse=True,
+        sparsity="ssta",
         accepts=SELF_ATTENTION,
         low_precision=True,
         requires=_kernel.requires & SYMBOL(_RAGGED_LUT),
@@ -263,7 +236,7 @@ for _kernel in (V1, V2):
     SPECS.append(Spec(
         AttentionBackendType[f"AITER_SPARGE{_kernel.name}"],
         impl=functools.partial(sparge, kernel=_kernel),
-        is_sparse=True,
+        sparsity="sparge",
         head_balanced=True,
         # Both mask sources reorder Q and K/V against one spatial layout, so a
         # cross-attention call indexes K/V out of bounds. The legacy path has

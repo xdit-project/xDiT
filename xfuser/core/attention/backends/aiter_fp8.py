@@ -15,10 +15,10 @@ from typing import Optional
 
 import torch
 
-from xfuser.core.attention import hadamard
+from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import NO_DROPOUT
-from xfuser.core.attention.layout import from_bshd, pack_kv, to_bshd
-from xfuser.core.attention.requirements import SYMBOL
+from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
+from xfuser.core.attention.requirements import ARCH, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 from xfuser.envs import environment_variables
 
@@ -30,14 +30,6 @@ def _static_scale() -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return value if value > 1 else None
-
-
-def _rotation(query) -> torch.Tensor:
-    """128-blocked for head_dim that is a multiple of 128 (every current
-    model); full-head for smaller power-of-two dims such as LTX-2.5 audio."""
-    head_dim = query.shape[-1]
-    block_r = 128 if head_dim % 128 == 0 else head_dim
-    return hadamard.matrix(block_r, str(query.device))
 
 
 def _quantize(query, key, value):
@@ -84,14 +76,17 @@ def _pre_quantized(query, key, value, call: AttnCall):
     return from_bshd(out), None
 
 
-def _mha_v4_eligible(query, call: AttnCall) -> bool:
-    try:
-        from aiter.ops.mha_v4 import mha_v4  # noqa: F401  - presence is the test
-    except ImportError:
-        return False
+# Legacy gates this on architecture (_AITER_MHA_V4.enabled is
+# "gfx942" or "gfx950" in the arch name), not on whether mha_v4 imports. The
+# symbol is arch-independent, so an import test would take the MHA v4 path on
+# RDNA4, where legacy takes the legacy path.
+_MHA_V4_ARCH = ARCH("gfx950", "gfx942")
 
+
+def _mha_v4_eligible(query, call: AttnCall) -> bool:
     return (
-        call.varlen is None
+        _MHA_V4_ARCH.satisfied()
+        and call.varlen is None
         and query.is_cuda
         and query.shape[-1] == 128
         and not call.is_causal
@@ -142,9 +137,7 @@ def _legacy(query, key, value, call: AttnCall):
     """Rotate Q/K here, quantise, then dense or varlen. Both kernels expect
     pre-rotated Q/K, unlike MHA v4 which does its own."""
     q, k, v = to_bshd(query, key, value, contiguous=True)
-    r = _rotation(q)
-    q = hadamard.rotate(q, r).contiguous()
-    k = hadamard.rotate(k, r).contiguous()
+    q, k = hadamard.rotate_qk(q, k)
 
     launch = _legacy_dense if call.varlen is None else _legacy_varlen
     return from_bshd(launch(q, k, v, call)), None
@@ -164,7 +157,14 @@ SPECS = [
         impl=aiter_fp8,
         low_precision=True,
         accepts=NO_DROPOUT,
+        accepts_prequantized=True,
+        prequant_rotate=hadamard.rotate_qk,
+        # The Hadamard symbol is needed by the legacy path, via _rotation.
+        # That path is always reachable -- varlen packing and head dims other
+        # than 128 never take MHA v4 -- so it gates the whole backend rather
+        # than being checked when that branch is taken.
         requires=SYMBOL("aiter:flash_attn_fp8_pertensor_func")
-               & SYMBOL("aiter:per_tensor_quant"),
+               & SYMBOL("aiter:per_tensor_quant")
+               & hadamard.CREATE_HADAMARD,
     ),
 ]

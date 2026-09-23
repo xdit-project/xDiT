@@ -8,7 +8,7 @@ import functools
 
 import torch
 
-from xfuser.core.attention.layout import from_bshd, pack_kv, to_bshd
+from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
 from xfuser.core.attention.requirements import CUDA_CAPABILITY, PLATFORM, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 

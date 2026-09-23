@@ -63,7 +63,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_VSA,
         impl=vsa_attention,
-        is_sparse=True,
+        sparsity="vsa",
         low_precision=True,
         # Causal and dropout are refused outright; the dense-routing cases are
         # handled inside the kernel because they depend on the metadata, not

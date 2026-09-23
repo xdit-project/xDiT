@@ -2,7 +2,7 @@
 AITER's flash attention: the dense bf16 backend.
 """
 
-from xfuser.core.attention.layout import from_bshd, pack_kv, to_bshd
+from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
 from xfuser.core.attention.requirements import ARCH, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
 

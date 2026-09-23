@@ -13,7 +13,7 @@ from xfuser.core.distributed.ssta import (
     untile_ssta_output,
     expand_block_mask,
 )
-from xfuser.core.distributed import get_ulysses_parallel_world_size, get_ring_parallel_world_size
+from xfuser.core.distributed import get_ulysses_parallel_world_size, get_ring_parallel_world_size, model_parallel_is_initialized
 from xfuser.core.sparge_attention.sparge import (
     setup_sparge,
     compute_sparge_block_mask,
@@ -36,6 +36,7 @@ class _AiterMhaV4Capabilities:
     mxfp8_block_mask: bool = False
     scale_modes: bool = False
     seqlens_k: bool = False
+    lse: bool = False
     kv_tile: int = 128
 
 
@@ -55,10 +56,21 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     scale_modes = parameters.get("q_scale_mode") is not None
     seqlens_k = parameters.get("seqlens_k") is not None
     kv_tile = 64 if is_gfx942 else 128
+    lse = False
     if enabled:
         try:
             from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
             kv_tile = int(_aiter_mha_v4_kv_tile())
+        except ImportError:
+            pass
+        try:
+            from aiter.ops.mha_v4 import mha_v4_packed as _aiter_mha_v4_packed_probe
+            # return_lse has always been accepted and always raised; the lse output buffer only
+            # exists once the kernels actually write one, so probe for that instead.
+            lse = (
+                "lse"
+                in inspect.signature(_aiter_mha_v4_packed_probe).parameters
+            )
         except ImportError:
             pass
     return _AiterMhaV4Capabilities(
@@ -67,6 +79,7 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
         block_mask=block_mask,
         scale_modes=scale_modes,
         seqlens_k=seqlens_k,
+        lse=lse,
         mxfp8_block_mask=scale_modes and block_mask,
         kv_tile=kv_tile,
     )
@@ -1270,7 +1283,8 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
         if _use_aiter_mha_v4_fp8(query, is_causal):
             fp8_format = _aiter_native_fp8_format()
             per_tensor = _AiterAttentionScaleMode.F32_PER_TENSOR
-            output = _aiter_mha_v4_packed(
+            want_lse = _aiter_mha_v4_wants_lse()
+            result = _aiter_mha_v4_packed(
                 query,
                 key,
                 value,
@@ -1284,7 +1298,9 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
                 per_tensor,
                 per_tensor,
                 softmax_scale=softmax_scale,
+                **({"return_lse": True} if want_lse else {}),
             )
+            output, softmax_lse = result if want_lse else (result, None)
         else:
             output = aiter.flash_attn_fp8_pertensor_func(
                 query,
@@ -1296,22 +1312,27 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
                 k_descale=attention_kwargs["k_descale"],
                 v_descale=attention_kwargs["v_descale"],
             )
+            softmax_lse = None
         output = torch.permute(output, [0, 2, 1, 3])
-        return output, None
+        return output, softmax_lse
 
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     use_mha_v4 = packed is None and _use_aiter_mha_v4_fp8(query, is_causal)
+    softmax_lse = None
     if use_mha_v4:
         # The raw MHA v4 API owns canonical Q/K rotation and FP8 quantization.
         fp8_format = _aiter_native_fp8_format()
-        output = _aiter_mha_v4(
+        want_lse = _aiter_mha_v4_wants_lse()
+        result = _aiter_mha_v4(
             query,
             key,
             value,
             fp8_format,
             fp8_format,
             fp8_format,
+            **({"return_lse": True} if want_lse else {}),
         )
+        output, softmax_lse = result if want_lse else (result, None)
     else:
         if packed is not None:
             (
@@ -1354,7 +1375,18 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
             )
 
     output = torch.permute(output, [0, 2, 1, 3])
-    return output, None
+    return output, softmax_lse
+
+
+def _aiter_mha_v4_wants_lse():
+    """Ring attention merges per-rank partials, so it needs each rank's LSE; nothing else does."""
+    # get_ring_parallel_world_size() asserts when there is no SP group, and Dynamo cannot trace
+    # through that assert, so gate on the assert-free check first.
+    return (
+        _AITER_MHA_V4.lse
+        and model_parallel_is_initialized()
+        and get_ring_parallel_world_size() > 1
+    )
 
 
 def _aiter_mixed_attn_call(
@@ -1374,14 +1406,18 @@ def _aiter_mixed_attn_call(
         query, key, value, attention_kwargs
     )
 
-    if seqlens_k is None:
-        output = _aiter_mha_v4(query, key, value, qk_format, qk_format, v_format)
-    else:
-        output = _aiter_mha_v4(
-            query, key, value, qk_format, qk_format, v_format, seqlens_k=seqlens_k
-        )
+    want_lse = _aiter_mha_v4_wants_lse()
+    extra = {} if seqlens_k is None else {"seqlens_k": seqlens_k}
+    if want_lse:
+        extra["return_lse"] = True
+    result = _aiter_mha_v4(
+        query, key, value, qk_format, qk_format, v_format, **extra
+    )
+    # The kernel writes LSE as [batch, heads, Sq], which is already the layout the ring merge
+    # expects, so only O needs permuting back to BHSD.
+    output, softmax_lse = result if want_lse else (result, None)
     output = torch.permute(output, [0, 2, 1, 3])
-    return output, None
+    return output, softmax_lse
 
 
 @register_attention_function(AttentionBackendType.AITER_BF16)
@@ -1443,16 +1479,24 @@ def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
     query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
         query, key, value, attention_kwargs
     )
-    output = _aiter_launch_mxfp8(query, key, value, seqlens_k=seqlens_k)
-    return torch.permute(output, [0, 2, 1, 3]), None
+    output, softmax_lse = _aiter_launch_mxfp8(
+        query,
+        key,
+        value,
+        seqlens_k=seqlens_k,
+        return_lse=_aiter_mha_v4_wants_lse(),
+    )
+    return torch.permute(output, [0, 2, 1, 3]), softmax_lse
 
 
-def _aiter_launch_mxfp8(query, key, value, block_mask=None, seqlens_k=None):
+def _aiter_launch_mxfp8(
+    query, key, value, block_mask=None, seqlens_k=None, return_lse=False
+):
     # Prefer the generic API: AITER deprecated mha_v4_mxfp8, and its DeprecationWarning is
     # untraceable by Dynamo, which breaks torch.compile(fullgraph=True).
     if _AITER_MHA_V4.scale_modes:
         fp8_format = _aiter_native_fp8_format()
-        return _aiter_mha_v4(
+        result = _aiter_mha_v4(
             query,
             key,
             value,
@@ -1464,6 +1508,13 @@ def _aiter_launch_mxfp8(query, key, value, block_mask=None, seqlens_k=None):
             k_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
             v_scale_mode=_AiterAttentionScaleMode.F32_PER_TENSOR,
             **({} if seqlens_k is None else {"seqlens_k": seqlens_k}),
+            **({"return_lse": True} if return_lse else {}),
+        )
+        return result if return_lse else (result, None)
+    if return_lse:
+        raise NotImplementedError(
+            "ring attention needs the LSE, which the deprecated AITER mha_v4_mxfp8 entry point "
+            "cannot return; please update AITER"
         )
     if _aiter_mha_v4_mxfp8 is None:
         raise RuntimeError(
@@ -1474,8 +1525,8 @@ def _aiter_launch_mxfp8(query, key, value, block_mask=None, seqlens_k=None):
             "the deprecated AITER mha_v4_mxfp8 entry point cannot carry per-batch key lengths"
         )
     if block_mask is None:
-        return _aiter_mha_v4_mxfp8(query, key, value)
-    return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask)
+        return _aiter_mha_v4_mxfp8(query, key, value), None
+    return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask), None
 
 
 @register_attention_function(AttentionBackendType.AITER_F8F6)
@@ -1496,13 +1547,13 @@ def _aiter_f8f6_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
 
 @register_attention_function(AttentionBackendType.AITER_MXFP4)
 def _aiter_mxfp4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    """Run the AITER MXFP4 Q/K and FP8 V recipe."""
+    """Run the AITER MXFP4 Q/K/V recipe."""
     return _aiter_mixed_attn_call(
         query,
         key,
         value,
         _AiterAttentionFormat.MXFP4,
-        _aiter_native_fp8_format(),
+        _AiterAttentionFormat.MXFP4,
         dropout_p,
         is_causal,
         attention_kwargs,
@@ -1511,7 +1562,11 @@ def _aiter_mxfp4_attn_call(query, key, value, dropout_p, is_causal, attention_kw
 
 @register_attention_function(AttentionBackendType.AITER_F4F4)
 def _aiter_f4f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    """Run the AITER MXFP4 Q/K/V recipe."""
+    """Run the AITER MXFP4 Q/K/V recipe.
+
+    NOTE! AITER temporarily retired its separate f4f4 row, so this now resolves to the
+    same kernel as AITER_MXFP4 until that row is reinstated.
+    """
     return _aiter_mixed_attn_call(
         query,
         key,
@@ -1668,7 +1723,7 @@ def _aiter_mha_v4_sparge_call(
     v = torch.permute(v, [0, 2, 1, 3]).contiguous()
     if mxfp8:
         if _AITER_MHA_V4.mxfp8_block_mask:
-            output = _aiter_launch_mxfp8(q, k, v, block_mask=block_mask)
+            output, _ = _aiter_launch_mxfp8(q, k, v, block_mask=block_mask)
         else:
             output = _aiter_launch_mxfp8_sparse(q, k, v, block_mask)
     else:
@@ -1779,13 +1834,13 @@ def _aiter_f8f6_sparge_attn_call(query, key, value, dropout_p, is_causal, attent
 
 @register_attention_function(AttentionBackendType.AITER_MXFP4_SPARGE)
 def _aiter_mxfp4_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    """Run Sparge + the AITER MXFP4 Q/K and FP8 V MHA v4 row."""
+    """Run Sparge + the AITER MXFP4 Q/K/V MHA v4 row."""
     return _aiter_mha_v4_sparge_call(
         query,
         key,
         value,
         _AiterAttentionFormat.MXFP4,
-        _aiter_native_fp8_format(),
+        _AiterAttentionFormat.MXFP4,
         dropout_p,
         is_causal,
         attention_kwargs,

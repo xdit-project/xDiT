@@ -259,7 +259,15 @@ class RuntimeState(metaclass=ABCMeta):
                 # smooth_k, shipped with the LSE-correction fix needed for
                 # correct merging). Pick (module, symbol, required params)
                 # for the selected backend and validate the wrapper's signature.
-                if attention_backend == AttentionBackendType.AITER_SAGE:
+                if attention_backend in AITER_MHA_V4_ONLY_BACKEND_SET:
+                    # The dense MHA v4 kernels export LSE; mha_v4_packed grew the lse output
+                    # buffer in the same change, whereas return_lse has always been accepted
+                    # and always raised. AITER_FP8 is excluded on purpose: it only reaches
+                    # MHA v4 for some shapes and would silently yield no LSE for the rest.
+                    module_path = "aiter.ops.mha_v4"
+                    symbol = "mha_v4_packed"
+                    required = ("lse",)
+                elif attention_backend == AttentionBackendType.AITER_SAGE:
                     module_path = "aiter.ops.triton.attention.fav3_sage"
                     symbol = "fav3_sage_wrapper_func"
                     required = ("return_lse", "smooth_k")

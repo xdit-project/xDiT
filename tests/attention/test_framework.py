@@ -9,12 +9,7 @@ import pytest
 import torch
 
 from xfuser.core.attention import registry
-from xfuser.core.attention.layout import (
-    VarlenPacking,
-    from_bshd,
-    pack_kv,
-    to_bshd,
-)
+from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
 from xfuser.core.attention.requirements import (
     ALWAYS,
     ARCH,
@@ -30,7 +25,12 @@ from xfuser.core.attention.constraints import (
     NON_CAUSAL,
     NO_VARLEN,
 )
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Spec
+from xfuser.core.attention.spec import (
+    AttentionBackendType,
+    AttnCall,
+    Spec,
+    VarlenPacking,
+)
 
 
 # --------------------------------------------------------------------------
@@ -193,7 +193,7 @@ def test_get_unregistered_names_the_backend(clean_registry):
 
 def test_queries_replace_the_group_tuples(clean_registry):
     clean_registry.register([
-        _spec(AttentionBackendType.AITER_MXFP4_SPARGE, is_sparse=True,
+        _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity="sparge",
               head_balanced=True, low_precision=True, returns_lse=False),
         _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, returns_lse=False),
         _spec(AttentionBackendType.SDPA),
@@ -322,7 +322,8 @@ VENDOR_MODULES = {
     "transformer_engine", "torch_npu", "flex_block_attn", "yunchang", "distvae",
 }
 
-FRAMEWORK_MODULES = ["spec", "requirements", "constraints", "registry", "layout"]
+FRAMEWORK_MODULES = ["spec", "requirements", "constraints", "registry",
+                     "numerics/layout", "numerics/hadamard"]
 
 
 def _imported_top_level_modules(path):
@@ -435,3 +436,81 @@ def test_backends_without_an_lse_cannot_join_ring():
     # Every registered spec answers the question at all, which the blocklist
     # could not guarantee -- a backend absent from it was assumed ring-capable.
     assert all(isinstance(s.returns_lse, bool) for s in registry.REGISTRY.values())
+
+
+# --------------------------------------------------------------------------
+# satisfied() and FIRST_OF
+# --------------------------------------------------------------------------
+
+def test_satisfied_is_the_boolean_view_of_unmet():
+    """unmet() carries the reason, which gating and messages need; satisfied()
+    is for branching on a capability without a double negative."""
+    assert SYMBOL("math:sqrt").satisfied() is True
+    assert SYMBOL("math:nope").satisfied() is False
+    assert ALWAYS.satisfied() is True
+    assert (SYMBOL("math:sqrt") & SYMBOL("math:nope")).satisfied() is False
+
+
+def test_first_of_gates_on_any_path():
+    from xfuser.core.attention.requirements import FIRST_OF
+
+    assert FIRST_OF("math:nope", "math:sqrt").unmet() is None
+    assert FIRST_OF("math:sqrt", "math:nope").unmet() is None
+    reason = FIRST_OF("math:nope_a", "math:nope_b").unmet()
+    assert "math.nope_a" in reason and "math.nope_b" in reason
+
+
+def test_first_of_resolves_to_the_first_path_that_works():
+    """The point of the type: the gate and the import are one declaration, so
+    adding a path cannot update one and miss the other."""
+    import math
+
+    from xfuser.core.attention.requirements import FIRST_OF
+
+    assert FIRST_OF("math:nope", "math:sqrt").resolve() is math.sqrt
+    assert FIRST_OF("math:sqrt", "math:pow").resolve() is math.sqrt
+
+    with pytest.raises(ImportError, match="none of these"):
+        FIRST_OF("math:nope_a", "math:nope_b").resolve()
+
+
+def test_first_of_composes_with_and():
+    from xfuser.core.attention.requirements import FIRST_OF
+
+    combined = SYMBOL("math:pi") & FIRST_OF("math:nope", "math:sqrt")
+    assert combined.satisfied()
+
+
+def test_hadamard_declares_its_symbol_once():
+    """hadamard.matrix() resolves through the same object backends gate on."""
+    from xfuser.core.attention.numerics import hadamard
+    from xfuser.core.attention.requirements import FIRST_OF
+
+    assert isinstance(hadamard.CREATE_HADAMARD, FIRST_OF)
+    assert len(hadamard.CREATE_HADAMARD.targets) == 2
+
+
+# --------------------------------------------------------------------------
+# shim hygiene
+# --------------------------------------------------------------------------
+
+def test_every_live_shim_carries_a_date():
+    """Shims accumulated in the legacy module because nobody could tell when
+    one became safe to delete. A live marker must say when it was introduced,
+    so shim_report.py can age it; historical "aiter-shim cut" notes are not
+    subject to this."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from shim_report import find_live
+
+    undated = [
+        f"{path}:{number}  {text}"
+        for path, number, date, text in find_live()
+        if date is None
+    ]
+    assert not undated, (
+        "live aiter-shim markers without 'added YYYY-MM-DD':\n  "
+        + "\n  ".join(undated)
+    )

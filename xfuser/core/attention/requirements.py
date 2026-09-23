@@ -83,6 +83,11 @@ class Requirement:
     def __or__(self, other: "Requirement") -> "Requirement":
         return Any((self, other))
 
+    def satisfied(self) -> bool:
+        """Yes/no, for branching on a capability. Use unmet() when you want
+        the reason -- that is what gating and error messages need."""
+        return self.unmet() is None
+
     def __bool__(self):
         raise TypeError("Requirement is not a bool; call unmet()")
 
@@ -172,6 +177,36 @@ class PARAM(Requirement):
         if self.parameter not in params:
             return f"{name} has no parameter {self.parameter!r}"
         return None
+
+
+@dataclass(frozen=True)
+class FIRST_OF(Requirement):
+    """A symbol that lives at more than one path depending on the version.
+
+    Gates on at least one path resolving, and ``resolve()`` returns the first
+    that does. One declaration serves both, so the requirement and the import
+    cannot drift -- adding a path is a single line.
+    """
+
+    targets: Tuple[str, ...]
+
+    def __init__(self, *targets: str):
+        object.__setattr__(self, "targets", tuple(targets))
+
+    def _names(self) -> str:
+        return ", ".join(t.replace(":", ".") for t in self.targets)
+
+    def unmet(self) -> Optional[str]:
+        if any(_resolve(t) is not None for t in self.targets):
+            return None
+        return f"none of these is importable: {self._names()}"
+
+    def resolve(self):
+        for target in self.targets:
+            obj = _resolve(target)
+            if obj is not None:
+                return obj
+        raise ImportError(self.unmet())
 
 
 @dataclass(frozen=True)

@@ -7,9 +7,10 @@ shape just writes what it needs.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
+
+from xfuser.core.attention.spec import VarlenPacking
 
 _BHSD_TO_BSHD = [0, 2, 1, 3]
 
@@ -26,31 +27,6 @@ def to_bshd(*tensors: torch.Tensor, contiguous: bool = False):
 def from_bshd(tensor: torch.Tensor) -> torch.Tensor:
     """BSHD -> BHSD."""
     return torch.permute(tensor, _BHSD_TO_BSHD)
-
-
-@dataclass(frozen=True)
-class VarlenPacking:
-    """Per-call key packing supplied by the model.
-
-    ``indices_k`` selects the surviving K/V rows out of a flattened B*S; the
-    cumulative lengths and maximum describe the packed result.
-    """
-
-    indices_k: torch.Tensor
-    cu_seqlens_k: torch.Tensor
-    max_seqlen_k: int
-
-    @classmethod
-    def from_kwargs(cls, attention_kwargs: Optional[dict]) -> Optional["VarlenPacking"]:
-        kwargs = attention_kwargs or {}
-        indices_k = kwargs.get("indices_k")
-        if indices_k is None:
-            return None
-        return cls(
-            indices_k=indices_k,
-            cu_seqlens_k=kwargs["cu_seqlens_k"],
-            max_seqlen_k=kwargs["max_seqlen_k"],
-        )
 
 
 @dataclass(frozen=True)

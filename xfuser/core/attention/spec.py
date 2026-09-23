@@ -6,10 +6,13 @@ closed: a field belongs here only if something else in xDiT consumes it.
 
     returns_lse    ring attention merges per-rank outputs via the LSE
     requires       availability gating, and skip decisions in the test suite
-    is_sparse      model capability checks in base_model
+    sparsity       which strategy, if any; model capability checks read it
     head_balanced  the Ulysses head balancer in usp
     low_precision  the quality warning in runtime_state
     accepts        pre-call validation, and shape selection in the test suite
+    accepts_prequantized / prequant_rotate
+                   fp8 comms: whether Q/K/V may arrive already quantised, and
+                   how to rotate Q/K before quantising them
 
 Everything else -- quantisation formats, tile sizes, drop rates, routing
 conditions -- is private to the backend module that implements it.
@@ -21,7 +24,6 @@ from typing import Any, Callable, Optional
 
 import torch
 
-from xfuser.core.attention.layout import VarlenPacking
 from xfuser.core.attention.requirements import ALWAYS, Requirement
 from xfuser.core.attention.constraints import ANY_CALL, CallConstraint
 
@@ -75,6 +77,31 @@ class AttentionBackendType(Enum):
 
 
 @dataclass(frozen=True)
+class VarlenPacking:
+    """Per-call key packing supplied by the model.
+
+    ``indices_k`` selects the surviving K/V rows out of a flattened B*S; the
+    cumulative lengths and maximum describe the packed result.
+    """
+
+    indices_k: torch.Tensor
+    cu_seqlens_k: torch.Tensor
+    max_seqlen_k: int
+
+    @classmethod
+    def from_kwargs(cls, attention_kwargs: Optional[dict]) -> Optional["VarlenPacking"]:
+        kwargs = attention_kwargs or {}
+        indices_k = kwargs.get("indices_k")
+        if indices_k is None:
+            return None
+        return cls(
+            indices_k=indices_k,
+            cu_seqlens_k=kwargs["cu_seqlens_k"],
+            max_seqlen_k=kwargs["max_seqlen_k"],
+        )
+
+
+@dataclass(frozen=True)
 class ParallelContext:
     """Sequence-parallel degrees, passed in rather than read from globals.
 
@@ -123,10 +150,25 @@ class Spec:
     returns_lse: bool = False
     requires: Requirement = ALWAYS
 
-    is_sparse: bool = False
+    # Which sparsity strategy, if any: "ssta", "sparge", "vsa", "h3".
+    # A kind rather than a flag because the consumers distinguish them --
+    # base_model gates SSTA and sparge separately, and they are not
+    # interchangeable for a given model.
+    sparsity: Optional[str] = None
     head_balanced: bool = False
     low_precision: bool = False
+
+    # fp8 comms quantises Q/K/V before the Ulysses all-to-all and hands the
+    # kernel fp8 plus descales. Both facts belong to the backend: whether it
+    # can consume that, and what rotation the comms layer must apply first so
+    # calibration measures the distribution that is actually quantised.
+    accepts_prequantized: bool = False
+    prequant_rotate: Optional[Callable] = None
     accepts: CallConstraint = ANY_CALL
+
+    @property
+    def is_sparse(self) -> bool:
+        return self.sparsity is not None
 
     def unavailable(self) -> Optional[str]:
         """Why this backend cannot run here, or None. Never says 'update X':

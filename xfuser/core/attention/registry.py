@@ -39,7 +39,8 @@ def get(backend: AttentionBackendType) -> Spec:
 
 
 def where(**flags) -> List[Spec]:
-    """Specs whose fields all match, e.g. where(is_sparse=True)."""
+    """Specs whose fields all match, e.g. where(sparsity="sparge").
+    Derived properties work too, so where(is_sparse=True) is valid."""
     return [
         spec
         for spec in REGISTRY.values()

@@ -692,6 +692,7 @@ class AttentionBackendType(Enum):
     AITER_SPARGE_V2 = "AITER Sparge V2"
     AITER_VSA = "AITER VSA CK"
     FLEX_VSA_H3 = "Flex VSA-H3"
+    TRITON_VSA_H3 = "Triton VSA-H3"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"
@@ -708,6 +709,12 @@ AITER_LOW_PRECISION_BACKENDS = (
     AttentionBackendType.AITER_MXFP4,
     AttentionBackendType.AITER_F4F4,
 )
+# Both run FastH3's VSA-H3 selection and differ only in the kernel that
+# consumes it, so anything keyed on "is this VSA-H3?" takes the pair.
+VSA_H3_BACKENDS = frozenset({
+    AttentionBackendType.FLEX_VSA_H3,
+    AttentionBackendType.TRITON_VSA_H3,
+})
 AITER_MHA_V4_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_I8FP8_SPARGE,
     AttentionBackendType.AITER_FP8_SPARGE,
@@ -1787,22 +1794,40 @@ def _dense_h3_fallback_attn_call(
     )
 
 
-@register_attention_function(AttentionBackendType.FLEX_VSA_H3)
-def _flex_vsa_h3_attn_call(
+_warned_vsa_h3_triton_missing = False
+
+
+def _warn_vsa_h3_triton_missing(device):
+    global _warned_vsa_h3_triton_missing
+    if _warned_vsa_h3_triton_missing:
+        return
+    _warned_vsa_h3_triton_missing = True
+    logger.warning(
+        "TRITON_VSA_H3 cannot run its kernel on %s, falling back to the "
+        "FlexAttention path. Select FLEX_VSA_H3 to ask for it directly.",
+        device,
+    )
+
+
+def _vsa_h3_attn_call(
     query,
     key,
     value,
     dropout_p,
     is_causal,
-    attention_kwargs=None,
+    attention_kwargs,
+    use_triton,
 ):
-    """FastH3 64-token VSA-H3 through FlexAttention.
+    """FastH3 64-token VSA-H3, on either kernel.
 
     USP gathers sequence before this runs. The compression gate rides the
     same Ulysses exchange in ``attention_kwargs['vsa_h3_gate']``. Calls
     without that metadata, including the MiniMax-H3 token refiner, fall
     back to dense attention the same way AITER_VSA falls back without
     Wan ``thw``.
+
+    Both kernels select the same key tiles and differ only in how they read
+    them, so everything around the call is shared.
     """
     attention_kwargs = attention_kwargs or {}
     metadata = attention_kwargs.get("vsa_h3_metadata")
@@ -1812,11 +1837,18 @@ def _flex_vsa_h3_attn_call(
             query, key, value, dropout_p, is_causal, attention_kwargs
         )
     if is_causal:
-        raise ValueError("FLEX_VSA_H3 does not support causal attention")
+        raise ValueError("VSA-H3 does not support causal attention")
     if dropout_p not in (None, 0.0):
-        raise ValueError("FLEX_VSA_H3 does not support attention dropout")
+        raise ValueError("VSA-H3 does not support attention dropout")
 
-    from xfuser.core.vsa_h3_attention import h3_vsa_attention
+    from xfuser.core.vsa_h3_attention import (
+        h3_vsa_attention,
+        h3_vsa_triton_is_usable,
+    )
+
+    if use_triton and not h3_vsa_triton_is_usable(query.device):
+        _warn_vsa_h3_triton_missing(query.device)
+        use_triton = False
 
     sequence_length = metadata.total_seq_length
     gathered_length = query.shape[2]
@@ -1828,7 +1860,9 @@ def _flex_vsa_h3_attn_call(
     # Nothing is permuted here. The padded tile buffers the FlexAttention
     # kernel needs are built inside h3_vsa_attention, which keeps the gate and
     # the compression branch out of tile order entirely.
-    packed_output = h3_vsa_attention(query, key, value, gate, metadata)
+    packed_output = h3_vsa_attention(
+        query, key, value, gate, metadata, use_triton=use_triton
+    )
     if gathered_length > sequence_length:
         padded_output = packed_output.new_zeros(
             packed_output.shape[0],
@@ -1839,6 +1873,48 @@ def _flex_vsa_h3_attn_call(
         padded_output[:, :, :sequence_length] = packed_output
         packed_output = padded_output
     return packed_output, None
+
+
+@register_attention_function(AttentionBackendType.FLEX_VSA_H3)
+def _flex_vsa_h3_attn_call(
+    query,
+    key,
+    value,
+    dropout_p,
+    is_causal,
+    attention_kwargs=None,
+):
+    """VSA-H3 through FlexAttention: portable, and the selection reference."""
+    return _vsa_h3_attn_call(
+        query,
+        key,
+        value,
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+        use_triton=False,
+    )
+
+
+@register_attention_function(AttentionBackendType.TRITON_VSA_H3)
+def _triton_vsa_h3_attn_call(
+    query,
+    key,
+    value,
+    dropout_p,
+    is_causal,
+    attention_kwargs=None,
+):
+    """VSA-H3 through the hand-written kernel, Flex where it cannot run."""
+    return _vsa_h3_attn_call(
+        query,
+        key,
+        value,
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+        use_triton=True,
+    )
 
 
 @register_attention_function(AttentionBackendType.AITER_VSA)

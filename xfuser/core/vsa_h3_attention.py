@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import functools
 import math
-import os
 from dataclasses import dataclass
 
 import torch
@@ -822,29 +821,13 @@ def flex_h3_vsa_attention(
     return sparse_output, compressed
 
 
-def _use_triton_kernel(device: torch.device) -> bool:
-    """Whether to run the hand-written kernel instead of FlexAttention."""
-    choice = os.environ.get("XFUSER_VSA_H3_BACKEND", "auto").lower()
-    if choice == "flex":
-        return False
+def h3_vsa_triton_is_usable(device: torch.device) -> bool:
+    """Whether the hand-written kernel can run on ``device``."""
     from xfuser.core import vsa_h3_triton
 
     # The kernel is launched on the tensors' own device, so a CPU tensor cannot
     # use it however Triton is built.
-    on_gpu = device.type == "cuda"
-    if choice == "triton":
-        if not (on_gpu and vsa_h3_triton.is_available()):
-            raise RuntimeError(
-                "XFUSER_VSA_H3_BACKEND=triton but Triton is unavailable for "
-                f"device {device}."
-            )
-        return True
-    if choice != "auto":
-        raise ValueError(
-            "XFUSER_VSA_H3_BACKEND must be one of auto, triton, flex; got "
-            f"{choice!r}."
-        )
-    return on_gpu and vsa_h3_triton.is_available()
+    return device.type == "cuda" and vsa_h3_triton.is_available()
 
 
 def h3_vsa_attention(
@@ -854,19 +837,24 @@ def h3_vsa_attention(
     gate: torch.Tensor,
     metadata: MiniMaxH3VSAMetadata,
     sparsity: float = FASTH3_VSA_SPARSITY,
+    *,
+    use_triton: bool,
 ) -> torch.Tensor:
     """VSA-H3 attention, gate applied, everything in packed row order.
 
     ``query``/``key``/``value``, ``gate`` and the result are all packed
     ``[B, H, S, D]``.
 
-    Prefers the hand-written Triton kernel, which reads packed rows through the
-    tile map and folds the compression branch and the gate into its epilogue,
-    so tile order is never materialised. FlexAttention needs the padded tile
-    buffers, so the fallback builds them; both select the same key tiles. Set
-    ``XFUSER_VSA_H3_BACKEND=flex`` to force the fallback.
+    The Triton kernel reads packed rows through the tile map and folds the
+    compression branch and the gate into its epilogue, so tile order is never
+    materialised. FlexAttention needs the padded tile buffers, so that path
+    builds them. Both select the same key tiles.
+
+    ``use_triton`` has no default: the attention backend the caller selected is
+    what decides, and callers that check ``h3_vsa_triton_is_usable`` first are
+    the ones that may fall back.
     """
-    if _use_triton_kernel(query.device):
+    if use_triton:
         from xfuser.core.vsa_h3_triton import (
             triton_h3_vsa_attention,
             triton_pool_h3_vsa_tiles,

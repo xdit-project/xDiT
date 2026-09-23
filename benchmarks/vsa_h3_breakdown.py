@@ -89,7 +89,9 @@ def main():
     print(f"  {'stage sum':<18} {total:8.3f} ms")
 
     whole = _time(
-        lambda: vsa.h3_vsa_attention(query, key, value, gate, metadata),
+        lambda: vsa.h3_vsa_attention(
+            query, key, value, gate, metadata, use_triton=True
+        ),
         args.iters,
     )
     print(f"  {'end to end':<18} {whole:8.3f} ms")

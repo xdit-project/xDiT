@@ -3,7 +3,7 @@
     python benchmarks/vsa_h3_microbench.py
 
 The defaults are the geometry a FastH3 768x1344x124 run with Ulysses degree 8
-reaches, i.e. 7 heads per rank. Set XFUSER_VSA_H3_BACKEND=flex to measure the
+reaches, i.e. 7 heads per rank. Pass --kernel flex to measure the
 FlexAttention path instead of the Triton kernel.
 """
 
@@ -44,6 +44,9 @@ def main():
     parser.add_argument("--video", type=int, nargs=3, default=(37, 24, 42))
     parser.add_argument("--prefix", type=int, nargs=2, default=(11, 414))
     parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument(
+        "--kernel", choices=("triton", "flex"), default="triton"
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda")
@@ -78,8 +81,12 @@ def main():
         aiter_ms = None
         print(f"dense AITER FA    unavailable ({error})")
 
+    use_triton = args.kernel == "triton"
+
     def sparse_call():
-        return vsa.h3_vsa_attention(query, key, value, gate, metadata)
+        return vsa.h3_vsa_attention(
+            query, key, value, gate, metadata, use_triton=use_triton
+        )
 
     sparse_ms = _time(sparse_call, args.iters)
     torch.cuda.reset_peak_memory_stats()

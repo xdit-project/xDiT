@@ -228,7 +228,10 @@ def test_minimax_h3_runner_registration():
 
 
 def test_fasth3_defaults_match_inference_contract():
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.distributed.attention_backend import (
+        AttentionBackendType,
+        VSA_H3_BACKENDS,
+    )
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
@@ -239,14 +242,13 @@ def test_fasth3_defaults_match_inference_contract():
     assert xFuserFastH3Model.settings.valid_tasks == ["t2va"]
     assert (
         xFuserFastH3Model.settings.default_attention_backend
-        == AttentionBackendType.FLEX_VSA_H3.name
+        == AttentionBackendType.TRITON_VSA_H3.name
     )
     assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
     assert xFuserFastH3Model._warmup_num_inference_steps == 5
     assert xFuserFastH3Model._enable_fasth3_vsa
     assert xFuserFastH3Model._supported_attn_backends == (
-        xFuserMiniMaxH3Model._supported_attn_backends
-        | {AttentionBackendType.FLEX_VSA_H3}
+        xFuserMiniMaxH3Model._supported_attn_backends | VSA_H3_BACKENDS
     )
 
 
@@ -325,7 +327,7 @@ def test_fasth3_accepts_vsa_and_dense_attention_backends(monkeypatch):
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
 
-    for backend in ("AITER", "FLEX_VSA_H3"):
+    for backend in ("AITER", "FLEX_VSA_H3", "TRITON_VSA_H3"):
         config = xFuserArgs(
             model="FastH3",
             task="t2va",
@@ -336,7 +338,7 @@ def test_fasth3_accepts_vsa_and_dense_attention_backends(monkeypatch):
 
     defaulted = xFuserArgs(model="FastH3", task="t2va")
     xFuserFastH3Model(defaulted)
-    assert defaulted.attention_backend == "FLEX_VSA_H3"
+    assert defaulted.attention_backend == "TRITON_VSA_H3"
 
 
 def test_default_attention_backend_is_reusable_by_any_model(monkeypatch):
@@ -395,7 +397,8 @@ def test_fasth3_rejects_unsupported_attention_backend():
         },
     ],
 )
-def test_fasth3_rejects_unsupported_compile_modes(unsupported):
+@pytest.mark.parametrize("backend", ["FLEX_VSA_H3", "TRITON_VSA_H3"])
+def test_fasth3_rejects_unsupported_compile_modes(unsupported, backend):
     from xfuser import xFuserArgs
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3Model,
@@ -404,11 +407,11 @@ def test_fasth3_rejects_unsupported_compile_modes(unsupported):
     config = xFuserArgs(
         model="FastH3",
         task="t2va",
-        attention_backend="FLEX_VSA_H3",
+        attention_backend=backend,
         **unsupported,
     )
 
-    with pytest.raises(ValueError, match="FLEX_VSA_H3"):
+    with pytest.raises(ValueError, match="VSA-H3"):
         xFuserFastH3Model(config)
 
 
@@ -1185,16 +1188,15 @@ def test_minimax_h3_forward_increments_hybrid_step_counter(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="VSA-H3 needs a GPU")
-@pytest.mark.parametrize("vsa_backend", ["flex", "triton"])
+@pytest.mark.parametrize("vsa_backend", ["FLEX_VSA_H3", "TRITON_VSA_H3"])
 def test_fasth3_vsa_transformer_compiles_fullgraph(monkeypatch, vsa_backend):
     """Both VSA-H3 kernels must trace without graph breaks under fullgraph."""
     import torch._dynamo
 
     from xfuser.core import vsa_h3_triton
 
-    if vsa_backend == "triton" and not vsa_h3_triton.is_available():
+    if vsa_backend == "TRITON_VSA_H3" and not vsa_h3_triton.is_available():
         pytest.skip("Triton is unavailable")
-    monkeypatch.setenv("XFUSER_VSA_H3_BACKEND", vsa_backend)
 
     from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
@@ -1223,7 +1225,7 @@ def test_fasth3_vsa_transformer_compiles_fullgraph(monkeypatch, vsa_backend):
     wrapper = (
         xFuserMiniMaxH3Transformer3DWrapper(
             **config,
-            attention_backend=AttentionBackendType.FLEX_VSA_H3,
+            attention_backend=AttentionBackendType[vsa_backend],
             enable_fasth3_vsa=True,
         )
         .eval()
@@ -1425,13 +1427,13 @@ def test_fasth3_vsa_compile_wrapper_passes_other_backends_through():
 
 
 def test_fasth3_accepts_torch_compile(monkeypatch):
-    """--use_torch_compile is no longer rejected for FLEX_VSA_H3."""
+    """--use_torch_compile is no longer rejected for the VSA-H3 backends."""
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3Model,
     )
 
     config = SimpleNamespace(
-        attention_backend="FLEX_VSA_H3",
+        attention_backend="TRITON_VSA_H3",
         use_hybrid_attn_schedule=False,
         use_torch_compile=True,
     )

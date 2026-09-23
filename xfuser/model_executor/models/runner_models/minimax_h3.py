@@ -8,7 +8,10 @@ from types import MethodType, SimpleNamespace
 import numpy as np
 import torch
 
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_backend import (
+    AttentionBackendType,
+    VSA_H3_BACKENDS,
+)
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,
@@ -39,7 +42,7 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
 })
-_FASTH3_ATTN_BACKENDS = frozenset({AttentionBackendType.FLEX_VSA_H3})
+_FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 FASTH3_V1_DATAFREE_MODEL_ID = (
@@ -714,9 +717,10 @@ class xFuserMiniMaxH3Model(xFuserModel):
 class xFuserFastH3Model(xFuserMiniMaxH3Model):
     """FastH3 Preview v1 runner.
 
-    Transformer attention goes through USP's backend selector. ``FLEX_VSA_H3``
-    is the default and runs the sparse-distilled VSA-H3 kernel; other
-    MiniMax-H3 backends stay dense when selected explicitly.
+    Transformer attention goes through USP's backend selector.
+    ``TRITON_VSA_H3`` is the default and runs the sparse-distilled VSA-H3
+    kernel; ``FLEX_VSA_H3`` runs the same selection through FlexAttention;
+    other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
     default_input_values = DefaultInputValues(
@@ -732,7 +736,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     settings.model_name = FASTH3_V1_DATAFREE_MODEL_ID
     settings.output_name = "fasth3"
     settings.valid_tasks = ["t2va"]
-    settings.default_attention_backend = AttentionBackendType.FLEX_VSA_H3.name
+    settings.default_attention_backend = AttentionBackendType.TRITON_VSA_H3.name
 
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
@@ -749,11 +753,11 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
         backend = _parse_attention_backend(
             config.attention_backend, "attention backend"
         )
-        if backend == AttentionBackendType.FLEX_VSA_H3:
+        if backend in VSA_H3_BACKENDS:
             if config.use_hybrid_attn_schedule:
                 raise ValueError(
-                    "FLEX_VSA_H3 uses VSA-H3 for every transformer step and "
-                    "does not support xDiT's hybrid attention schedule."
+                    "VSA-H3 runs on every transformer step and does not "
+                    "support xDiT's hybrid attention schedule."
                 )
         super()._validate_config(config)
 

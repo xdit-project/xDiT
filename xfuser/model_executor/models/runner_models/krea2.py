@@ -29,7 +29,7 @@ _QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
 # padding key positions.  SDPA_FLASH is excluded because
 # aten._scaled_dot_product_flash_attention has no mask parameter.
 # Quantised backends (FP8, SAGE, MLA, etc.) are excluded for the same reason.
-_KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
+KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
     {
         AttentionBackendType.AITER,
         AttentionBackendType.SDPA,
@@ -83,6 +83,10 @@ class _Krea2BaseModel(xFuserModel):
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
     )
+    supported_attn_backends = KREA2_SUPPORTED_ATTN_BACKENDS
+    unsupported_attn_backend_reason = (
+        "The attention mask requires a backend with varlen support."
+    )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=False,
@@ -97,29 +101,6 @@ class _Krea2BaseModel(xFuserModel):
         enable_tiling=True,
         enable_slicing=True,
     )
-
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        if config.use_hybrid_attn_schedule:
-            specs = [
-                (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
-                (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
-            ]
-        else:
-            specs = [(config.attention_backend, "attention backend")]
-
-        backends = [b for v, lbl in specs if (b := _parse_attention_backend(v, lbl)) is not None]
-
-        for backend in backends:
-            if backend not in _KREA2_SUPPORTED_ATTN_BACKENDS:
-                supported = ", ".join(
-                    sorted(b.name for b in _KREA2_SUPPORTED_ATTN_BACKENDS)
-                )
-                raise ValueError(
-                    f"Krea-2 does not support --attention_backend {backend.name}. "
-                    f"The attention mask requires a backend with varlen support. "
-                    f"Supported backends: {supported}"
-                )
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers.pipelines.krea2 import Krea2Pipeline

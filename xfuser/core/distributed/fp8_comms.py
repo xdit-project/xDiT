@@ -334,9 +334,7 @@ class Fp8CommsState:
             return False
         if model_state.synced:
             return True
-        from xfuser.core.distributed.attention_backend import rotate_qk_for_fp8_comms
-
-        calib_query, calib_key = rotate_qk_for_fp8_comms(query, key, backend)
+        calib_query, calib_key = _rotate_for_backend(query, key, backend)
         self.update_running_max(
             fp8_owner, attn.fp8_comms_layer_idx, calib_query, calib_key, value
         )
@@ -415,9 +413,7 @@ def fp8_attention_kwargs(fp8_comms, attn, query, key, value, is_cross_attention,
     """
     if is_cross_attention or fp8_comms is None:
         return {}
-    from xfuser.core.distributed.attention_backend import SUPPORTS_PRE_QUANTIZATION_BACKENDS
-
-    if backend not in SUPPORTS_PRE_QUANTIZATION_BACKENDS:
+    if not _accepts_prequantized(backend):
         return {}
     synced = fp8_comms.observe_qkv(attn, query, key, value, backend)
     if not synced:
@@ -439,6 +435,34 @@ def fp8_observe_output(fp8_comms, attn, out, is_cross_attention) -> None:
     fp8_comms.observe_output(attn, out)
 
 
+# ---- backend facts, read from the spec rather than a list here -------------
+
+
+def _spec(backend):
+    from xfuser.core.attention import registry
+
+    return registry.REGISTRY.get(backend)
+
+
+def _accepts_prequantized(backend) -> bool:
+    """Whether this backend can be handed fp8 Q/K/V plus descales."""
+    spec = _spec(backend)
+    return spec is not None and spec.accepts_prequantized
+
+
+def _rotate_for_backend(query, key, backend):
+    """Rotate Q/K the way this backend's fp8 path expects, or leave them.
+
+    Returns the inputs untouched for backends that do not rotate, so callers
+    apply it unconditionally. Declared on the spec, so a new fp8 backend that
+    rotates cannot be silently left out the way a hardcoded list allowed.
+    """
+    spec = _spec(backend)
+    if spec is None or spec.prequant_rotate is None:
+        return query, key
+    return spec.prequant_rotate(query, key)
+
+
 # ---- quantized all-to-all helpers (called from USP, thin) ------------------
 
 
@@ -456,10 +480,9 @@ def _per_tensor_quant(x: torch.Tensor, scale_t: torch.Tensor):
 def fp8_comms_input_all_to_all(query, key, value, q_scale, k_scale, v_scale, backend):
     """Rotate Q,K, quantize Q/K/V to FP8 using per-layer scales, and run interleaved
     input all-to-alls. Returns (query, key, value, attn_kwargs_update, qkv_amaxes)."""
-    from xfuser.core.distributed.attention_backend import rotate_qk_for_fp8_comms
     from xfuser.model_executor.layers.usp import _ft_c_input_all_to_all
 
-    query, key = rotate_qk_for_fp8_comms(query, key, backend)
+    query, key = _rotate_for_backend(query, key, backend)
     q_fp8, q_descale = _per_tensor_quant(query, q_scale)
     query = _ft_c_input_all_to_all(q_fp8)
     k_fp8, k_descale = _per_tensor_quant(key, k_scale)
@@ -531,10 +554,8 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
     if not config.use_fp8_comms:
         return
     from xfuser.core.distributed import attention_backend as ab
-    from xfuser.core.distributed.attention_backend import (
-        AttentionBackendType,
-        SUPPORTS_PRE_QUANTIZATION_BACKENDS,
-    )
+    from xfuser.core.attention import registry as attention_registry
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
     from xfuser.core.distributed.attention_schedule import AttentionSchedule
 
     def _parse(name, kind):
@@ -587,10 +608,11 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
                         "hybrid high-precision attention backend",
                     )
                 )
-    if not effective_backends & SUPPORTS_PRE_QUANTIZATION_BACKENDS:
+    supports_prequant = attention_registry.types_where(accepts_prequantized=True)
+    if not effective_backends & supports_prequant:
         raise ValueError(
             f"--use_fp8_comms requires an attention backend that supports pre-quantization "
-            f"({', '.join(b.name for b in SUPPORTS_PRE_QUANTIZATION_BACKENDS)}). "
+            f"({', '.join(sorted(b.name for b in supports_prequant))}). "
             f"Set --attention_backend, --hybrid_attn_schedule, or "
             f"--hybrid_attn_low_precision_backend / --hybrid_attn_high_precision_backend "
             f"so at least one scheduled backend supports pre-quantization."

@@ -295,7 +295,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
     _transformer_component_name = "transformer"
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
-    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
@@ -341,14 +341,6 @@ class xFuserMiniMaxH3Model(xFuserModel):
             if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
-            if backend not in self._supported_attn_backends:
-                supported = ", ".join(
-                    sorted(item.name for item in self._supported_attn_backends)
-                )
-                raise ValueError(
-                    f"{self.settings.output_name} does not support attention "
-                    f"backend {backend.name}. Supported backends: {supported}."
-                )
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
@@ -698,7 +690,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
-    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)

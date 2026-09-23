@@ -45,8 +45,8 @@ from xfuser.core.distributed import (
     runtime_state_is_initialized,
     init_distributed_environment,
 )
+from xfuser.core.attention import registry as attention_registry
 from xfuser.core.distributed.attention_backend import (
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
     AttentionBackendType,
 )
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
@@ -82,17 +82,18 @@ def register_model(name: str) -> Callable:
     return decorator
 
 
-_SPARSE_ATTENTION_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARSE_SAGE,
-    AttentionBackendType.AITER_SPARSE_SAGE_V2,
-    AttentionBackendType.FLEX_BLOCK_ATTN
-})
-_SPARGE_ATTENTION_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARGE,
-    AttentionBackendType.AITER_SPARGE_V2,
-    AttentionBackendType.AITER_VSA,
-    AttentionBackendType.FLEX_BLOCK_SPARGE,
-}) | AITER_MHA_V4_SPARGE_BACKEND_SET
+# Derived from the backend specs rather than listed here: each backend
+# declares its sparsity strategy, so adding one cannot miss these sets.
+# "sparge" and "vsa" are grouped because both need a separate, dense
+# cross-attention backend.
+def _backends_with_sparsity(*kinds: str) -> frozenset:
+    return frozenset().union(
+        *(attention_registry.types_where(sparsity=kind) for kind in kinds)
+    )
+
+
+_SPARSE_ATTENTION_BACKENDS = _backends_with_sparsity("ssta")
+_SPARGE_ATTENTION_BACKENDS = _backends_with_sparsity("sparge", "vsa")
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:
@@ -268,6 +269,15 @@ class xFuserModel(abc.ABC):
         replicated_meta=False,
         routes=LoadRoute.NONE,
     )
+    # Backends this model is known to produce correct output with. None means
+    # no numerical restriction. Distinct from ModelCapabilities, which is
+    # structural ("does this model supply what sparse backends need"): this is
+    # empirical, measured per model, and cannot be derived from a spec.
+    # Default-deny on purpose -- a backend nobody has run against this model
+    # should be refused, not assumed correct.
+    supported_attn_backends: Optional[frozenset] = None
+    unsupported_attn_backend_reason: str = ""
+
     capabilities: ModelCapabilities = ModelCapabilities()
     default_input_values: DefaultInputValues = DefaultInputValues()
     settings: ModelSettings = ModelSettings()
@@ -506,6 +516,49 @@ class xFuserModel(abc.ABC):
         config.attention_backend = default
         log(f"--attention_backend not set, using {self.settings.model_name} default: {default}")
 
+    def _validate_supported_attn_backends(self, config: xFuserArgs) -> None:
+        """Refuse backends this model is not known to be correct with.
+
+        Checks every backend the run could reach: the explicit one and, under a
+        hybrid schedule, each scheduled backend.
+        """
+        allowed = self.supported_attn_backends
+        if allowed is None:
+            return
+
+        if config.use_hybrid_attn_schedule and config.hybrid_attn_schedule:
+            candidates = list(
+                AttentionSchedule.from_comma_delimited_string(
+                    config.hybrid_attn_schedule
+                ).backends
+            )
+        else:
+            candidates = [
+                _parse_attention_backend(value, label)
+                for value, label in (
+                    (config.attention_backend, "attention backend"),
+                    (config.cross_attention_backend, "cross attention backend"),
+                    (config.hybrid_attn_low_precision_backend,
+                     "hybrid low-precision attention backend"),
+                    (config.hybrid_attn_high_precision_backend,
+                     "hybrid high-precision attention backend"),
+                )
+            ]
+
+        for backend in candidates:
+            if backend is None or backend in allowed:
+                continue
+            supported = ", ".join(sorted(b.name for b in allowed))
+            reason = (
+                f" {self.unsupported_attn_backend_reason}"
+                if self.unsupported_attn_backend_reason
+                else ""
+            )
+            raise ValueError(
+                f"{self.settings.model_name} does not support attention backend "
+                f"{backend.name}.{reason} Supported backends: {supported}."
+            )
+
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         config._validate_gemm_quantization_flags()
@@ -529,6 +582,8 @@ class xFuserModel(abc.ABC):
                     f"Model {self.settings.model_name} does not support --cache_method {config.cache_method}. "
                     f"Supported: {', '.join(supported_methods)}"
                 )
+
+        self._validate_supported_attn_backends(config)
 
         backend = _parse_attention_backend(config.attention_backend, "attention backend")
         supports_sparse = self.capabilities.supports_sparse_attention_backends

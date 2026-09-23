@@ -23,7 +23,7 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 # Only full-precision attention backends produce correct results on Cosmos3.
 # Quantized backends (FP8, MXFP4, MLA) cause >50% relative error per layer
 # due to extreme K/V dynamic range mismatch in the MoT attention.
-_COSMOS3_SUPPORTED_ATTN_BACKENDS = frozenset({
+COSMOS3_SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.AITER,
     AttentionBackendType.SDPA,
     AttentionBackendType.SDPA_MATH,
@@ -54,6 +54,11 @@ class xFuserCosmos3SuperModel(xFuserModel):
         meta_text_encoders=(),
         replicated_meta=True,
         routes=STANDARD_LOAD_ROUTES,
+    )
+    supported_attn_backends = COSMOS3_SUPPORTED_ATTN_BACKENDS
+    unsupported_attn_backend_reason = (
+        "Quantized attention backends produce >50% relative error on this model "
+        "due to extreme K/V dynamic range mismatch in the MoT attention."
     )
     capabilities = ModelCapabilities(
         ulysses_degree=True,
@@ -88,18 +93,6 @@ class xFuserCosmos3SuperModel(xFuserModel):
         ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )
-
-    def _validate_config(self, config) -> None:
-        super()._validate_config(config)
-        backend = _parse_attention_backend(config.attention_backend, "attention backend")
-        if backend is not None and backend not in _COSMOS3_SUPPORTED_ATTN_BACKENDS:
-            supported = ", ".join(sorted(b.name for b in _COSMOS3_SUPPORTED_ATTN_BACKENDS))
-            raise ValueError(
-                f"Cosmos3 does not support --attention_backend {backend.name}. "
-                f"Quantized attention backends produce >50% relative error on this "
-                f"model due to extreme K/V dynamic range mismatch in the MoT attention. "
-                f"Supported backends: {supported}"
-            )
 
     def _load_model(self) -> DiffusionPipeline:
         from xfuser.model_executor.models.transformers.transformer_cosmos3 import (

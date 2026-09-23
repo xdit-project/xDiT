@@ -24,8 +24,10 @@ from xfuser.core.distributed import (
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import VarlenPacking
+from xfuser.core.attention.spec import AttnCall, ParallelContext
 from xfuser.core.distributed.attention_backend import (
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
     ATTENTION_FUNCTION_REGISTRY,
     AttentionBackendType,
 )
@@ -44,11 +46,7 @@ from xfuser.core.sparge_attention.head_balance import (
 # These all build a block mask via _build_sparge_block_mask and write the
 # per-head cost into the head-balance "cost sink". Non-sparge backends are
 # excluded so head balancing is a clean no-op for them.
-_HEAD_BALANCE_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARGE,
-    AttentionBackendType.AITER_SPARGE_V2,
-    AttentionBackendType.FLEX_BLOCK_SPARGE,
-}) | AITER_MHA_V4_SPARGE_BACKEND_SET
+_HEAD_BALANCE_BACKENDS = attention_registry.types_where(head_balanced=True)
 
 _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
@@ -379,10 +377,47 @@ def _get_attention_function(backend=None):
         attention_backend = backend
     else:
         attention_backend = get_runtime_state().attention_backend
+
+    spec = attention_registry.REGISTRY.get(attention_backend)
+    if spec is not None:
+        return concat_joint_tensors_decorator(_spec_adapter(spec))
+
+    # Not yet migrated (AITER_MLA). Served by the legacy module until it is
+    # removed; see xfuser/core/attention/backends/__init__.py.
     func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
     if func is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
     return concat_joint_tensors_decorator(func)
+
+
+def _spec_adapter(spec):
+    """Present a Spec with the calling convention ring_attn and the direct
+    call sites already use.
+
+    This is also where the two things kernels used to fetch for themselves get
+    supplied: the varlen packing, previously rebuilt inside every kernel from
+    attention_kwargs, and the sequence-parallel degrees, previously read from
+    globals. Both now arrive on the call, which is what makes a backend
+    testable without an initialised process group.
+    """
+
+    def call(query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=None):
+        kwargs = attention_kwargs if attention_kwargs is not None else {}
+        return spec.run(
+            query, key, value,
+            AttnCall(
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                varlen=VarlenPacking.from_kwargs(kwargs),
+                ctx=ParallelContext(
+                    ulysses_world_size=get_ulysses_parallel_world_size(),
+                    ring_world_size=get_ring_parallel_world_size(),
+                ),
+                attention_kwargs=kwargs,
+            ),
+        )
+
+    return call
 
 def concat_joint_tensors_decorator(func):
     """

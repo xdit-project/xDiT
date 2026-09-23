@@ -202,6 +202,15 @@ if triton is not None:
         running_sum = tl.zeros([TILE], tl.float32)
         accumulator = tl.zeros([TILE, HEAD_DIM], tl.float32)
 
+        # The scale and the mask value both arrive as Python floats, which
+        # Triton versions type differently in promotion: one of them widens the
+        # score tile to fp64, which fails the loop's type check on running_max.
+        # Neither needs the range, so the score path below pins fp32 explicitly.
+        # Hoisting the scale as qk_scale.to(tl.float32) looks like the tidier
+        # way to do it and is not: it is correct in eager and silently wrong
+        # once Inductor compiles the call, so the cast goes on the product.
+        mask_score = tl.full([TILE, TILE], _MASK_SCORE, tl.float32)
+
         # The index list is padded to a multiple of TILES_PER_ITER with a
         # sentinel tile whose slots are all invalid, so the loop needs no tail
         # guard: a sentinel leaves the running max untouched and adds zero
@@ -228,8 +237,8 @@ if triton is not None:
                     mask=valid[:, None],
                     other=0.0,
                 )
-                scores = tl.dot(query, tl.trans(key)) * qk_scale
-                scores = tl.where(valid[None, :], scores, _MASK_SCORE)
+                scores = (tl.dot(query, tl.trans(key)) * qk_scale).to(tl.float32)
+                scores = tl.where(valid[None, :], scores, mask_score)
 
                 tile_max = tl.maximum(running_max, tl.max(scores, 1))
                 rescale = tl.exp2(running_max - tile_max)

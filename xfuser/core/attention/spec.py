@@ -18,6 +18,8 @@ Everything else -- quantisation formats, tile sizes, drop rates, routing
 conditions -- is private to the backend module that implements it.
 """
 
+import functools
+import importlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -133,6 +135,31 @@ AttnFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, AttnCall], tuple]
 
 
 @dataclass(frozen=True)
+class Impl:
+    """A reference to a kernel function, resolved when the backend is selected.
+
+    A kernel module imports its vendor library at module level, so it can only
+    be imported once that library is known present. Resolving here rather than
+    on first dispatch keeps the import out of any compiled region: Dynamo
+    refuses to trace importlib, which makes a lazy import a hard failure under
+    fullgraph=True (tests/attention/test_lazy_op_registration.py pins this).
+
+    ``target`` is "module:function" relative to the backend package. ``bound``
+    is applied with functools.partial, which is how the generated families bind
+    a table row to a shared launcher.
+    """
+
+    target: str
+    bound: dict = field(default_factory=dict)
+
+    def resolve(self, package: str) -> AttnFn:
+        module_name, _, symbol = self.target.partition(":")
+        module = importlib.import_module(f"{package}.{module_name}")
+        fn = getattr(module, symbol)
+        return functools.partial(fn, **self.bound) if self.bound else fn
+
+
+@dataclass(frozen=True)
 class Spec:
     """One named backend.
 
@@ -166,6 +193,11 @@ class Spec:
     prequant_rotate: Optional[Callable] = None
     accepts: CallConstraint = ANY_CALL
 
+    # Filled in by the registry from the module the spec came from, so Impl
+    # targets can be written relative to the backend package.
+    package: str = ""
+    _resolved: Optional[AttnFn] = None
+
     @property
     def is_sparse(self) -> bool:
         return self.sparsity is not None
@@ -179,11 +211,25 @@ class Spec:
         """Why this backend cannot serve this particular call, or None."""
         return self.accepts.unmet(query, key, value, call)
 
+    def resolved(self) -> AttnFn:
+        """The callable, importing the kernel module if it has not been yet.
+
+        Called when a backend is selected, never from the hot path -- see Impl.
+        """
+        if isinstance(self.impl, Impl):
+            fn = self.impl.resolve(self.package)
+            object.__setattr__(self, "_resolved", fn)
+            return fn
+        return self.impl
+
     def run(self, query, key, value, call: AttnCall):
         """Enforce ``accepts``, then dispatch. Callers use this rather than
         ``impl`` so the constraint is declared once and checked in one place;
         a kernel function stays pure kernel code."""
         reason = self.rejects(query, key, value, call)
         if reason is not None:
+            # Raised from inside the traced region this surfaces as
+            # torch._dynamo.exc.Unsupported; the message survives in the debug
+            # context. Only reachable on a misconfigured run.
             raise NotImplementedError(f"{self.type.name} {reason}")
-        return self.impl(query, key, value, call)
+        return (self._resolved or self.resolved())(query, key, value, call)

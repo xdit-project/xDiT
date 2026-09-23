@@ -252,6 +252,12 @@ class RuntimeState(metaclass=ABCMeta):
                 "it produces no softmax log-sumexp for the per-rank merge."
             )
 
+        # Import the kernel module now, while we are outside any compiled
+        # region. This is the single choke point: it runs for the attention
+        # backend, the cross-attention backend, and every backend in a hybrid
+        # schedule.
+        spec.resolved()
+
 
 
 

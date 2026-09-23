@@ -17,7 +17,7 @@ from xfuser.core.attention import registry
 from xfuser.core.attention.backends import MODULES as _BACKEND_MODULES
 
 for _module in _BACKEND_MODULES:
-    registry.register(_module.SPECS)
+    registry.register(_module.SPECS, package=_module.__name__)
 
 __all__ = [
     "AttentionBackendType",

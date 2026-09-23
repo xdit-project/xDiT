@@ -17,8 +17,14 @@ from xfuser.core.attention.spec import AttentionBackendType, Spec
 REGISTRY: Dict[AttentionBackendType, Spec] = {}
 
 
-def register(specs: Iterable[Spec]) -> None:
+def register(specs: Iterable[Spec], package: str = "") -> None:
+    """Register a module's SPECS. ``package`` is that module's import path, so
+    an Impl target can be written relative to it."""
+    from dataclasses import replace
+
     for spec in specs:
+        if package and not spec.package:
+            spec = replace(spec, package=package)
         if not isinstance(spec.type, AttentionBackendType):
             raise TypeError(f"{spec.type!r} is not an AttentionBackendType")
         if spec.type in REGISTRY:
@@ -63,6 +69,13 @@ def missing_specs() -> List[AttentionBackendType]:
 def available(backend: AttentionBackendType) -> Optional[str]:
     """None when the backend can run here, else why not."""
     return get(backend).unavailable()
+
+
+def prepare(backend: AttentionBackendType) -> None:
+    """Import the backend's kernel module. Called once when a backend is
+    selected, so the vendor import and any custom op registration happen
+    outside every compiled region."""
+    get(backend).resolved()
 
 
 def manifest() -> str:

@@ -3,9 +3,10 @@ AITER FlyDSL: a gfx1201 MHA kernel
 """
 
 import torch
+from aiter.ops.flydsl import flydsl_flash_attn_func, flydsl_fp8_quant
 from torch.library import custom_op, register_fake
 
-from xfuser.logger import init_logger
+from xfuser.logger import init_logger, log_once
 
 from xfuser.core.attention.backends.sdpa.kernel import sdpa_flash
 from xfuser.core.attention.numerics.layout import from_bshd, to_bshd
@@ -18,21 +19,11 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # custom ops
 #
-# Registered unconditionally: torch.library needs the function objects, not
-# AITER, and the bodies import it lazily. A build without FlyDSL therefore has
-# the ops but never reaches them, because the specs below refuse first.
-#
 # Two ops mirror the AITER / AITER_FP8 split: AITER_FLYDSL -> xfuser::flydsl_attn
 # (bf16), AITER_FLYDSL_FP8 -> xfuser::flydsl_attn_fp8. fp8 is unfused (faster
 # e2e) so it holds fp8 Q/K/V alongside the live bf16 Q/K/V -> higher peak VRAM;
 # pick AITER_FLYDSL when tight.
 # ---------------------------------------------------------------------------
-
-def _kernel():
-    from aiter.ops.flydsl import flydsl_flash_attn_func
-
-    return flydsl_flash_attn_func
-
 
 def _fp8_min_seq(head_dim: int, num_heads: int) -> int:
     """fp8 wins only above a sequence crossover (quant pre-pass cost vs K/V HBM
@@ -46,26 +37,12 @@ def _fp8_min_seq(head_dim: int, num_heads: int) -> int:
 
 def _fp8_attn(query, key, value, is_causal):
     # flydsl_fp8_quant returns fp8 q/k/v + descales (real = fp8 * descale).
-    from aiter.ops.flydsl import flydsl_fp8_quant
-
     qq, kk, vv, sq, sk, sv = flydsl_fp8_quant(query, key, value, rotation=True)
-    return _kernel()(
+    return flydsl_flash_attn_func(
         qq, kk, vv, causal=is_causal,
         q_descale=sq, k_descale=sk, v_descale=sv,
         waves_per_eu=2, daz=True,
     )
-
-
-# Attn shape is constant across denoise steps, so log the chosen path once per shape.
-_logged = set()
-
-
-def _log_once(key_t, msg):
-    if key_t in _logged:
-        return
-    _logged.add(key_t)
-    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        logger.info(msg)
 
 
 @custom_op("xfuser::flydsl_attn", mutates_args=())
@@ -74,11 +51,13 @@ def _flydsl_attn(
 ) -> torch.Tensor:
     B, S_real, H, D = query.shape
     is_cross = key.shape[1] != S_real
-    _log_once(
+    # Attn shape is constant across denoise steps, so this logs once per shape.
+    log_once(
+        logger,
         (B, S_real, H, D, is_cross, query.dtype),
         f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16",
     )
-    return _kernel()(query, key, value, causal=is_causal, waves_per_eu=2, daz=True)
+    return flydsl_flash_attn_func(query, key, value, causal=is_causal, waves_per_eu=2, daz=True)
 
 
 @register_fake("xfuser::flydsl_attn")
@@ -109,10 +88,10 @@ def _flydsl_attn_fp8_kernel(
             f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 "
             f"(not fp8-eligible: dtype={query.dtype}, cross={is_cross})"
         )
-    _log_once((B, S_real, H, D, is_cross, query.dtype), msg)
+    log_once(logger, (B, S_real, H, D, is_cross, query.dtype), msg)
     if use_fp8:
         return _fp8_attn(query, key, value, is_causal)
-    return _kernel()(query, key, value, causal=is_causal, waves_per_eu=2, daz=True)
+    return flydsl_flash_attn_func(query, key, value, causal=is_causal, waves_per_eu=2, daz=True)
 
 
 @register_fake("xfuser::flydsl_attn_fp8")
@@ -128,7 +107,7 @@ def _flydsl_attn_fp8_prequant_kernel(
     q_descale: torch.Tensor, k_descale: torch.Tensor, v_descale: torch.Tensor,
     is_causal: bool,
 ) -> torch.Tensor:
-    return _kernel()(
+    return flydsl_flash_attn_func(
         query, key, value, causal=is_causal,
         q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
         waves_per_eu=2, daz=True,

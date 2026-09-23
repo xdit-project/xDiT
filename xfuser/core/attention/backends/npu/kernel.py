@@ -1,11 +1,11 @@
 """Ascend NPU fused attention."""
 
+import torch_npu
+
 from xfuser.core.attention.spec import AttnCall
 
 
 def npu_attention(query, key, value, call: AttnCall):
-    import torch_npu
-
     q, k, v = (t.transpose(1, 2) for t in (query, key, value))
     out, lse = torch_npu.npu_fused_infer_attention_score(
         q, k, v,

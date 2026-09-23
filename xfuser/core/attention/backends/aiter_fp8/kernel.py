@@ -13,6 +13,7 @@ legacy path still serves varlen packing, which MHA v4 has no mask for.
 
 from typing import Optional
 
+import aiter
 import torch
 
 from xfuser.core.attention.numerics import hadamard
@@ -35,8 +36,6 @@ def _quantize(query, key, value):
     # aiter-shim cut 2026-09: AITER_FP8_HAS_DESCALE (added 2026-03-09) probed
     # whether flash_attn_fp8_pertensor_func took descale vectors. It does, so
     # the no-descale branch and its static scale of 1.0 are gone.
-    import aiter
-
     quant_dtype = aiter.dtypes.fp8
     static = _static_scale()
     scale = (
@@ -54,8 +53,6 @@ def _quantize(query, key, value):
 
 
 def _pre_quantized(query, key, value, call: AttnCall):
-    import aiter
-
     kwargs = call.attention_kwargs
     if call.varlen is not None:
         raise NotImplementedError(
@@ -94,6 +91,9 @@ def _mha_v4_eligible(query, call: AttnCall) -> bool:
 
 def _mha_v4(query, key, value, call: AttnCall):
     """The raw MHA v4 API owns canonical Q/K rotation and quantisation."""
+    # Deliberately not hoisted: this backend's requires does not include
+    # mha_v4, because the legacy path below serves builds without it. Hoisting
+    # would refuse AITER_FP8 on an AITER that predates MHA v4.
     from aiter.ops.mha_v4 import mha_v4, native_fp8_format
 
     q, k, v = to_bshd(query, key, value, contiguous=True)
@@ -102,8 +102,6 @@ def _mha_v4(query, key, value, call: AttnCall):
 
 
 def _legacy_dense(q, k, v, call: AttnCall):
-    import aiter
-
     (qq, q_descale), (kk, k_descale), (vv, v_descale) = _quantize(q, k, v)
     return aiter.flash_attn_fp8_pertensor_func(
         qq, kk, vv,
@@ -113,8 +111,6 @@ def _legacy_dense(q, k, v, call: AttnCall):
 
 
 def _legacy_varlen(q, k, v, call: AttnCall):
-    import aiter
-
     varlen_func = getattr(aiter, "flash_attn_varlen_fp8_pertensor_func", None)
     if varlen_func is None:
         raise RuntimeError(

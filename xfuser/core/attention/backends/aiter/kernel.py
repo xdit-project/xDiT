@@ -1,10 +1,5 @@
-"""AITER flash attention.
-
-Imported when the backend is selected, so AITER is present by the time this
-module loads and its imports can sit at the top where imports belong.
-
-Also the dense path several sparse backends route to when their metadata is
-absent; they import `aiter_attention` from here rather than duplicating it.
+"""
+AITER flash attention.
 """
 
 from aiter import flash_attn_func, flash_attn_varlen_func
@@ -12,8 +7,6 @@ from aiter import flash_attn_func, flash_attn_varlen_func
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
 from xfuser.core.attention.spec import AttnCall
 
-# aiter-shim cut 2026-09: the AITER_HAS_ROUND_MODE probe (added 2026-03-09)
-# guarded whether flash_attn_func accepted how_v3_bf16_cvt at all.
 # AITER FAv3 on gfx942 supports three different rounding modes:
 #   0 = RTNE (round to nearest even)
 #   1 = RTNA (round to nearest away)

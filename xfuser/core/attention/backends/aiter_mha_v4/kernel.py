@@ -39,6 +39,7 @@ HAS_SCALE_MODES = "q_scale_mode" in inspect.signature(mha_v4).parameters
 
 def _read_kv_tile() -> int:
     """Sparge's KV tile must match the kernel's sparse geometry."""
+    # Not hoisted: optional, with an arch-derived fallback below.
     try:
         from aiter.ops.mha_v4 import mha_v4_kv_tile
 
@@ -71,6 +72,7 @@ def _launch_mxfp8_legacy(q, k, v, block_mask):
     # aiter-shim: added 2026-08-24, drop once the floor passes the build that
     # gained scale modes. AITER deprecated mha_v4_mxfp8, and its
     # DeprecationWarning is untraceable by Dynamo, which breaks fullgraph=True.
+    # Not hoisted: the deprecated entry point, absent on newer AITER.
     from aiter.ops.mha_v4 import mha_v4_mxfp8
 
     if block_mask is None:
@@ -81,6 +83,8 @@ def _launch_mxfp8_legacy(q, k, v, block_mask):
 def _launch_mxfp8_packed(q, k, v, block_mask):
     """Hand-packed MXFP8 sparse path, used when mha_v4 takes no block_mask for
     the deprecated MXFP8 entry point."""
+    # Not hoisted: only the sparge specs require this symbol; the dense
+    # specs in this family must load without it.
     from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
 
     lut = block_attn_mask_to_ragged_lut(block_mask, return_none_if_dense=False)

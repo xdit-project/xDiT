@@ -1,5 +1,13 @@
 """Dao-AILab FlashAttention, v2 through v4, plus the fp8/fp4 recipes.
 
+These imports stay inside the functions, unlike every other kernel module.
+One module serves five specs across three independent upstream packages
+(flash_attn, flash_attn_interface, flash_attn.cute.interface), and a machine
+may have any subset -- FLASH v2 on ROCm without v3, say. Hoisting would make
+importing this module require all three, so selecting FLASH would fail on a
+box that has it. The fix is to split this family per version; until then the
+lazy imports are load-bearing.
+
 Four separate upstream packages with four separate import paths; grouped here
 because they share the dense/varlen shape and move together in practice.
 """

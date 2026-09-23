@@ -76,6 +76,8 @@ def dense(query, key, value, call: AttnCall, *, kernel: SageKernel):
 
 def ssta(query, key, value, call: AttnCall, *, kernel: SageKernel):
     """Tile-based static mask, supplied by the model's sparse config."""
+    # Not hoisted: only the SSTA and sparge specs require this symbol; the
+    # dense specs in this family must load without it.
     from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
 
     kwargs = call.attention_kwargs
@@ -105,6 +107,8 @@ def ssta(query, key, value, call: AttnCall, *, kernel: SageKernel):
 
 def sparge(query, key, value, call: AttnCall, *, kernel: SageKernel):
     """Data-dependent mask computed from Q/K."""
+    # Not hoisted: only the SSTA and sparge specs require this symbol; the
+    # dense specs in this family must load without it.
     from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
 
     query, key, value = _prepare(kernel, query, key, value)

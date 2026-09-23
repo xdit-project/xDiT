@@ -228,7 +228,10 @@ def test_minimax_h3_runner_registration():
 
 
 def test_fasth3_defaults_match_inference_contract():
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.distributed.attention_backend import (
+        AttentionBackendType,
+        VSA_H3_BACKENDS,
+    )
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
@@ -239,14 +242,13 @@ def test_fasth3_defaults_match_inference_contract():
     assert xFuserFastH3Model.settings.valid_tasks == ["t2va"]
     assert (
         xFuserFastH3Model.settings.default_attention_backend
-        == AttentionBackendType.FLEX_VSA_H3.name
+        == AttentionBackendType.TRITON_VSA_H3.name
     )
     assert xFuserFastH3Model.default_input_values.num_inference_steps == 5
     assert xFuserFastH3Model._warmup_num_inference_steps == 5
     assert xFuserFastH3Model._enable_fasth3_vsa
     assert xFuserFastH3Model._supported_attn_backends == (
-        xFuserMiniMaxH3Model._supported_attn_backends
-        | {AttentionBackendType.FLEX_VSA_H3}
+        xFuserMiniMaxH3Model._supported_attn_backends | VSA_H3_BACKENDS
     )
 
 
@@ -325,7 +327,7 @@ def test_fasth3_accepts_vsa_and_dense_attention_backends(monkeypatch):
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
 
-    for backend in ("AITER", "FLEX_VSA_H3"):
+    for backend in ("AITER", "FLEX_VSA_H3", "TRITON_VSA_H3"):
         config = xFuserArgs(
             model="FastH3",
             task="t2va",
@@ -336,7 +338,7 @@ def test_fasth3_accepts_vsa_and_dense_attention_backends(monkeypatch):
 
     defaulted = xFuserArgs(model="FastH3", task="t2va")
     xFuserFastH3Model(defaulted)
-    assert defaulted.attention_backend == "FLEX_VSA_H3"
+    assert defaulted.attention_backend == "TRITON_VSA_H3"
 
 
 def test_default_attention_backend_is_reusable_by_any_model(monkeypatch):
@@ -388,7 +390,6 @@ def test_fasth3_rejects_unsupported_attention_backend():
 @pytest.mark.parametrize(
     "unsupported",
     [
-        {"use_torch_compile": True},
         {
             "use_hybrid_attn_schedule": True,
             "hybrid_attn_high_precision_backend": "AITER",
@@ -396,7 +397,8 @@ def test_fasth3_rejects_unsupported_attention_backend():
         },
     ],
 )
-def test_fasth3_rejects_unsupported_compile_modes(unsupported):
+@pytest.mark.parametrize("backend", ["FLEX_VSA_H3", "TRITON_VSA_H3"])
+def test_fasth3_rejects_unsupported_compile_modes(unsupported, backend):
     from xfuser import xFuserArgs
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3Model,
@@ -405,11 +407,11 @@ def test_fasth3_rejects_unsupported_compile_modes(unsupported):
     config = xFuserArgs(
         model="FastH3",
         task="t2va",
-        attention_backend="FLEX_VSA_H3",
+        attention_backend=backend,
         **unsupported,
     )
 
-    with pytest.raises(ValueError, match="FLEX_VSA_H3"):
+    with pytest.raises(ValueError, match="VSA-H3"):
         xFuserFastH3Model(config)
 
 
@@ -1183,3 +1185,299 @@ def test_minimax_h3_forward_increments_hybrid_step_counter(monkeypatch):
         wrapper(**inputs)
 
     assert len(calls) == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="VSA-H3 needs a GPU")
+@pytest.mark.parametrize("vsa_backend", ["FLEX_VSA_H3", "TRITON_VSA_H3"])
+def test_fasth3_vsa_transformer_compiles_fullgraph(monkeypatch, vsa_backend):
+    """Both VSA-H3 kernels must trace without graph breaks under fullgraph."""
+    import torch._dynamo
+
+    from xfuser.core import vsa_h3_triton
+
+    if vsa_backend == "TRITON_VSA_H3" and not vsa_h3_triton.is_available():
+        pytest.skip("Triton is unavailable")
+
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(
+        transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(
+        transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0
+    )
+    _patch_minimax_runtime_state(monkeypatch)
+
+    device = torch.device("cuda")
+    # The token refiner falls back to the dense AITER kernel, which has no
+    # head_dim=16 variant, so this case needs a wider head than _tiny_config.
+    config = dict(
+        _tiny_config(),
+        attention_head_dim=64,
+        hidden_size=128,
+        time_embed_hidden_dim=128,
+    )
+    wrapper = (
+        xFuserMiniMaxH3Transformer3DWrapper(
+            **config,
+            attention_backend=AttentionBackendType[vsa_backend],
+            enable_fasth3_vsa=True,
+        )
+        .eval()
+        .to(device=device, dtype=torch.bfloat16)
+    )
+    assert wrapper.use_vsa_h3
+    # _tiny_inputs draws from a CPU generator, so build on CPU and move. The
+    # dense fallback kernel is bf16/fp16 only, hence the cast.
+    inputs = {
+        name: tensor.to(device)
+        for name, tensor in _tiny_inputs(torch.device("cpu")).items()
+    }
+    for name in ("hidden_states", "audio_hidden_states", "encoder_hidden_states"):
+        inputs[name] = inputs[name].to(torch.bfloat16)
+
+    with torch.no_grad():
+        eager = wrapper(**inputs)
+
+    # The runner primes the geometry outside the compiled region; do the same.
+    wrapper.prepare_vsa_h3_metadata(
+        inputs["position_ids"],
+        inputs["video_indices"],
+        inputs["audio_indices"],
+        inputs["text_indices"],
+    )
+    torch._dynamo.reset()
+    torch._dynamo.utils.counters.clear()
+    misses = build_h3_vsa_metadata.cache_info().misses
+    compiled = torch.compile(wrapper.forward, fullgraph=True)
+    with torch.no_grad():
+        compiled_out = compiled(**inputs)
+        graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
+        # A second call must not recompile: the attention_kwargs key set is
+        # stable and the geometry cache stays warm.
+        compiled(**inputs)
+    assert torch._dynamo.utils.counters["stats"]["unique_graphs"] == graphs
+    # The untraceable geometry recovery must stay out of the graph entirely.
+    assert build_h3_vsa_metadata.cache_info().misses == misses
+
+    # A smoke check that the graph computes the model, not an equivalence test:
+    # Inductor fuses reductions across the whole transformer in a different
+    # order than eager, so a few bf16 elements land a handful of ULP apart. What
+    # the sparse branch actually computes is pinned against a dense reference in
+    # tests/core/test_vsa_h3_attention.py.
+    torch.testing.assert_close(
+        compiled_out.sample, eager.sample, rtol=2e-2, atol=6e-2
+    )
+    torch.testing.assert_close(
+        compiled_out.audio_sample, eager.audio_sample, rtol=2e-2, atol=6e-2
+    )
+
+
+def _vsa_geometry_inputs(text_tokens, audio_tokens, video_shape):
+    """Packed T2VA indices and position_ids for one video grid."""
+    frames, height, width = video_shape
+    prefix = text_tokens + audio_tokens
+    sequence_length = prefix + frames * height * width
+
+    position_ids = torch.zeros(sequence_length, 3, dtype=torch.float32)
+    grid = torch.cartesian_prod(
+        torch.arange(frames, dtype=torch.float32),
+        torch.arange(height, dtype=torch.float32),
+        torch.arange(width, dtype=torch.float32),
+    )
+    position_ids[prefix:] = grid
+    return dict(
+        position_ids=position_ids,
+        text_indices=torch.arange(text_tokens),
+        audio_indices=torch.arange(text_tokens, prefix),
+        video_indices=torch.arange(prefix, sequence_length),
+    )
+
+
+def _vsa_geometry_transformer(monkeypatch):
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(
+        transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(
+        transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0
+    )
+    _patch_minimax_runtime_state(monkeypatch)
+    return xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        attention_backend=AttentionBackendType.FLEX_VSA_H3,
+        enable_fasth3_vsa=True,
+    ).eval()
+
+
+def test_fasth3_vsa_geometry_key_separates_transposed_video_grids(monkeypatch):
+    """Two grids with the same token count must not share a cached geometry."""
+    from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+
+    wrapper = _vsa_geometry_transformer(monkeypatch)
+    # Both grids split into two video tiles of the same two sizes; what differs
+    # is which token lands in which, so a sizes-only key cannot tell them apart.
+    upright = _vsa_geometry_inputs(4, 8, (2, 5, 4))
+    rotated = _vsa_geometry_inputs(4, 8, (2, 4, 5))
+    assert (
+        upright["position_ids"].shape == rotated["position_ids"].shape
+    ), "the two grids must pack the same token count for this to test anything"
+
+    wrapper.prepare_vsa_h3_metadata(**upright)
+    first = wrapper._vsa_h3_metadata
+    misses = build_h3_vsa_metadata.cache_info().misses
+
+    wrapper.prepare_vsa_h3_metadata(**rotated)
+    second = wrapper._vsa_h3_metadata
+    assert build_h3_vsa_metadata.cache_info().misses == misses + 1
+    assert torch.equal(first.variable_block_sizes, second.variable_block_sizes)
+    assert not torch.equal(first.packed_token_tile, second.packed_token_tile)
+
+
+def test_fasth3_vsa_tracing_rejects_a_stale_geometry(monkeypatch):
+    """A geometry left over from another resolution must not be traced against."""
+    wrapper = _vsa_geometry_transformer(monkeypatch)
+    wrapper.prepare_vsa_h3_metadata(**_vsa_geometry_inputs(4, 8, (2, 3, 4)))
+    longer = _vsa_geometry_inputs(4, 8, (2, 3, 8))
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+
+    def _no_device_reads(*args, **kwargs):
+        raise AssertionError("tracing must not read tensor values")
+
+    # Same geometry: tracing is fine, and the guard must stay off device values.
+    with monkeypatch.context() as traced:
+        traced.setattr(torch.Tensor, "tolist", _no_device_reads)
+        traced.setattr(torch, "equal", _no_device_reads)
+        wrapper.prepare_vsa_h3_metadata(**_vsa_geometry_inputs(4, 8, (2, 3, 4)))
+
+    with pytest.raises(RuntimeError, match="was not primed"):
+        wrapper.prepare_vsa_h3_metadata(**longer)
+
+    wrapper._vsa_h3_metadata = None
+    with pytest.raises(RuntimeError, match="was not primed"):
+        wrapper.prepare_vsa_h3_metadata(**longer)
+
+
+class _WrapperTransformer:
+    """Stand-in with the real forward's parameter names and order."""
+
+    def __init__(self, use_vsa_h3):
+        self.use_vsa_h3 = use_vsa_h3
+        self.primed = []
+
+    def prepare_vsa_h3_metadata(self, position_ids, video, audio, text):
+        self.primed.append(position_ids)
+
+    def forward(
+        self,
+        hidden_states,
+        timestep,
+        position_ids,
+        video_indices,
+        audio_indices,
+        text_indices,
+    ):
+        return hidden_states
+
+
+def test_fasth3_compile_wrapper_primes_geometry_and_marks_the_timestep(
+    monkeypatch,
+):
+    """Both jobs the compiled region cannot do itself, in one wrapper."""
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    marked = []
+    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+
+    transformer = _WrapperTransformer(use_vsa_h3=True)
+    compiled_calls = []
+    forward = minimax_h3._wrap_compiled_forward(
+        transformer,
+        transformer.forward,
+        lambda *args, **kwargs: compiled_calls.append((args, kwargs)),
+    )
+
+    # Timestep positionally, the rest by keyword: the wrapper binds the
+    # signature, so where an argument came from does not matter.
+    timestep = torch.tensor([0.7, 0.3])
+    forward(
+        1,
+        timestep,
+        position_ids=2,
+        video_indices=3,
+        audio_indices=4,
+        text_indices=5,
+    )
+
+    assert transformer.primed == [2]
+    assert marked == [timestep]
+    assert len(compiled_calls) == 1
+    assert inspect.signature(forward) == inspect.signature(transformer.forward)
+
+
+def test_fasth3_compile_wrapper_marks_the_timestep_for_other_backends(
+    monkeypatch,
+):
+    """Non-VSA-H3 backends skip the priming but keep the timestep marking."""
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    marked = []
+    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+
+    transformer = _WrapperTransformer(use_vsa_h3=False)
+    forward = minimax_h3._wrap_compiled_forward(
+        transformer, transformer.forward, lambda *args, **kwargs: None
+    )
+
+    timestep = torch.tensor([0.7])
+    forward(1, timestep, 2, 3, 4, 5)
+
+    assert transformer.primed == []
+    assert marked == [timestep]
+
+
+def test_fasth3_compile_wrapper_ignores_a_scalar_timestep(monkeypatch):
+    """Nothing to mark when the timestep has no length to vary."""
+    from xfuser.model_executor.models.runner_models import minimax_h3
+
+    marked = []
+    monkeypatch.setattr(minimax_h3, "_mark_dynamic_timestep", marked.append)
+
+    transformer = _WrapperTransformer(use_vsa_h3=False)
+    forward = minimax_h3._wrap_compiled_forward(
+        transformer, transformer.forward, lambda *args, **kwargs: None
+    )
+
+    forward(1, torch.tensor(0.7), 2, 3, 4, 5)
+
+    assert marked == []
+
+
+def test_fasth3_accepts_torch_compile(monkeypatch):
+    """--use_torch_compile is no longer rejected for the VSA-H3 backends."""
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3Model,
+    )
+
+    config = SimpleNamespace(
+        attention_backend="TRITON_VSA_H3",
+        use_hybrid_attn_schedule=False,
+        use_torch_compile=True,
+    )
+    monkeypatch.setattr(
+        xFuserFastH3Model.__mro__[1], "_validate_config", lambda self, config: None
+    )
+    xFuserFastH3Model._validate_config(
+        object.__new__(xFuserFastH3Model), config
+    )

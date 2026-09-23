@@ -20,7 +20,7 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.distributed.attention_backend import VSA_H3_BACKENDS
 from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
 from xfuser.model_executor.layers.usp import (
     ULYSSES_EXTRA_INPUTS_KEY,
@@ -44,9 +44,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
         self.use_ulysses_parallel_attention = use_ulysses_parallel_attention
         self.attention_kwargs = attention_kwargs
         self.backend = backend
-        self.use_vsa_h3 = (
-            use_fasth3_vsa and backend == AttentionBackendType.FLEX_VSA_H3
-        )
+        self.use_vsa_h3 = use_fasth3_vsa and backend in VSA_H3_BACKENDS
 
     def __call__(
         self,
@@ -89,7 +87,7 @@ class xFuserMiniMaxH3AttnProcessor(MiniMaxH3AttnProcessor):
                 hidden_states
             ).unflatten(-1, (attn.heads, -1)).transpose(1, 2)
             # The gate is per-head like QKV, so it has to follow them through
-            # the Ulysses exchange before FLEX_VSA_H3 consumes it.
+            # the Ulysses exchange before the VSA-H3 backend consumes it.
             self.attention_kwargs[ULYSSES_EXTRA_INPUTS_KEY] = ("vsa_h3_gate",)
 
         use_ulysses = (
@@ -185,9 +183,14 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 attention_backend = None
         self.attention_backend = attention_backend
         self.use_vsa_h3 = (
-            enable_fasth3_vsa
-            and attention_backend == AttentionBackendType.FLEX_VSA_H3
+            enable_fasth3_vsa and attention_backend in VSA_H3_BACKENDS
         )
+        # VSA-H3 tile geometry is fixed for a run but can only be recovered from
+        # position_ids, which costs device syncs and is untraceable. Derive it
+        # once and cache it, so the recovery branch folds away at trace time on
+        # every later forward.
+        self._vsa_h3_metadata_key: tuple | None = None
+        self._vsa_h3_metadata = None
 
         if enable_fasth3_vsa:
             for block in self.transformer_blocks:
@@ -273,6 +276,96 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
         )
         return hidden_states, timestep_indices, token_tags, position_ids, pad_amount
 
+    def prepare_vsa_h3_metadata(
+        self,
+        position_ids: torch.Tensor,
+        video_indices: torch.Tensor,
+        audio_indices: torch.Tensor,
+        text_indices: torch.Tensor,
+    ) -> None:
+        """Recover and cache FastH3's VSA-H3 tile geometry.
+
+        Validating the packed order and recovering the video grid both read
+        tensor *values*, which costs device syncs and cannot be traced. Neither
+        changes while the geometry holds, so the result is cached and the full
+        recovery runs once per geometry.
+
+        Sizes alone do not identify a geometry: a 768x1344 render and a 1344x768
+        one pack the same token count, so the key carries the last video token's
+        coordinates as well. For a complete grid those are ``(T-1, H-1, W-1)``,
+        which pins the grid exactly. Reading them is a three-element device
+        copy, and unlike the rest of the recovery it runs on every eager call,
+        not once per geometry -- one sync per denoise step, against the six a
+        full recovery runs.
+
+        Under ``torch.compile`` this does nothing: the runner's wrapper primes
+        the cache outside the compiled region, so no device read enters the
+        graph. Callers that compile ``forward`` must use that wrapper.
+        """
+        if torch.compiler.is_compiling():
+            # Sequence length is a shape, so it is free to check while tracing.
+            # A cached geometry from some earlier eager forward would otherwise
+            # satisfy a presence test and trace against the wrong tile map.
+            #
+            # Shape-only, and only evaluated while tracing, so it is a backstop
+            # against a stale length and nothing more: two grids that pack the
+            # same token count pass it. What keeps those apart under compile is
+            # the wrapper, which primes on every call against the full key.
+            if (
+                self._vsa_h3_metadata is None
+                or self._vsa_h3_metadata.total_seq_length != position_ids.shape[0]
+            ):
+                raise RuntimeError(
+                    "VSA-H3 tile geometry was not primed for the sequence being "
+                    "traced. Compiling MiniMax-H3's forward requires the "
+                    "runner's _wrap_compiled_forward wrapper, which "
+                    "recovers the geometry outside the compiled region."
+                )
+            return
+
+        sequence_length = position_ids.shape[0]
+        text_count = text_indices.numel()
+        audio_count = audio_indices.numel()
+        last_video_position = tuple(position_ids[-1].tolist())
+        key = (text_count, audio_count, sequence_length, last_video_position)
+        if self._vsa_h3_metadata_key == key:
+            return
+
+        expected_text = torch.arange(text_count, device=text_indices.device)
+        expected_audio = torch.arange(
+            text_count,
+            text_count + audio_count,
+            device=audio_indices.device,
+        )
+        expected_video = torch.arange(
+            text_count + audio_count,
+            sequence_length,
+            device=video_indices.device,
+        )
+        if not (
+            torch.equal(text_indices, expected_text)
+            and torch.equal(audio_indices, expected_audio)
+            and torch.equal(video_indices, expected_video)
+        ):
+            raise ValueError(
+                "FastH3 Preview v1 VSA requires the T2VA packed order "
+                "[text | audio | generated video]."
+            )
+        video_positions = position_ids.index_select(0, video_indices)
+        video_shape = tuple(
+            int(torch.unique(video_positions[:, axis]).numel())
+            for axis in range(3)
+        )
+        if math.prod(video_shape) != video_indices.numel():
+            raise ValueError(
+                "Could not recover FastH3's generated-video grid from "
+                f"position_ids: shape={video_shape}, rows={video_indices.numel()}."
+            )
+        self._vsa_h3_metadata = build_h3_vsa_metadata(
+            (text_count, audio_count), video_shape, position_ids.device
+        )
+        self._vsa_h3_metadata_key = key
+
     @apply_lora_scale("attention_kwargs")
     def forward(
         self,
@@ -304,45 +397,10 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             )
 
         if self.use_vsa_h3:
-            text_count = text_indices.numel()
-            audio_count = audio_indices.numel()
-            expected_text = torch.arange(text_count, device=text_indices.device)
-            expected_audio = torch.arange(
-                text_count,
-                text_count + audio_count,
-                device=audio_indices.device,
+            self.prepare_vsa_h3_metadata(
+                position_ids, video_indices, audio_indices, text_indices
             )
-            expected_video = torch.arange(
-                text_count + audio_count,
-                sequence_length,
-                device=video_indices.device,
-            )
-            if not (
-                torch.equal(text_indices, expected_text)
-                and torch.equal(audio_indices, expected_audio)
-                and torch.equal(video_indices, expected_video)
-            ):
-                raise ValueError(
-                    "FastH3 Preview v1 VSA requires the T2VA packed order "
-                    "[text | audio | generated video]."
-                )
-            video_positions = position_ids.index_select(0, video_indices)
-            video_shape = tuple(
-                int(torch.unique(video_positions[:, axis]).numel())
-                for axis in range(3)
-            )
-            if math.prod(video_shape) != video_indices.numel():
-                raise ValueError(
-                    "Could not recover FastH3's generated-video grid from "
-                    f"position_ids: shape={video_shape}, rows={video_indices.numel()}."
-                )
-            self._usp_attention_kwargs["vsa_h3_metadata"] = (
-                build_h3_vsa_metadata(
-                    (text_count, audio_count),
-                    video_shape,
-                    position_ids.device,
-                )
-            )
+            self._usp_attention_kwargs["vsa_h3_metadata"] = self._vsa_h3_metadata
         else:
             self._usp_attention_kwargs["vsa_h3_metadata"] = None
 

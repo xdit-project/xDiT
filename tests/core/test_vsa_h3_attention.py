@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from xfuser.core.vsa_h3_attention import (
+from xfuser.core.attention.backends.vsa_h3.attention import (
     FASTH3_VSA_TILE_ELEMENTS,
     build_h3_vsa_block_mask,
     build_h3_vsa_metadata,

@@ -505,7 +505,10 @@ if env_info["has_transformer_engine"]:
 if env_info["has_sage"]:
     from sageattention import sageattn
 if env_info["has_flex_block_attn"]:
-    from flex_block_attn import flex_block_attn_func
+    # The xfuser::flex_block_attn custom op now lives in
+    # xfuser/core/attention/backends/flex/kernel.py -- importing it is what
+    # registers the op. Registering it here too would collide.
+    from xfuser.core.attention.backends.flex.kernel import flex_block_attn as flex_block_attn_op
 if env_info["has_npu_flash_attn"]:
     import torch_npu
 
@@ -1631,7 +1634,7 @@ def _flex_vsa_h3_attn_call(
     if dropout_p not in (None, 0.0):
         raise ValueError("FLEX_VSA_H3 does not support attention dropout")
 
-    from xfuser.core.vsa_h3_attention import (
+    from xfuser.core.attention.backends.vsa_h3.attention import (
         flex_h3_vsa_attention,
         tile_h3_vsa_tensor,
         untile_h3_vsa_tensor,
@@ -1928,21 +1931,6 @@ def _sage_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=No
         return_lse=True
     )
     return output, softmax_lse
-
-@torch.library.custom_op("xfuser::flex_block_attn", mutates_args=())
-def flex_block_attn_op(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_m: int,
-    block_n: int,
-    block_mask: torch.Tensor,
-) -> torch.Tensor:
-    return flex_block_attn_func(q, k, v, block_m, block_n, block_mask)
-
-@flex_block_attn_op.register_fake
-def _(q, k, v, block_m, block_n, block_mask):
-    return torch.empty_like(q)
 
 @register_attention_function(AttentionBackendType.FLEX_BLOCK_ATTN)
 def _flex_block_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):

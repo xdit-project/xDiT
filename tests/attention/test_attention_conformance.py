@@ -37,12 +37,8 @@ from xfuser.core.distributed import (
     initialize_runtime_state,
     get_runtime_state,
 )
-from xfuser.core.distributed.attention_backend import (
-    ATTENTION_FUNCTION_REGISTRY,
-    AttentionBackendType,
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
-)
-
+from xfuser.core.attention import registry
+from xfuser.core.attention.spec import AttentionBackendType, AttnCall
 SNAPSHOT = Path(__file__).with_name("conformance_snapshot.json")
 
 # Relative-error drift above this between runs is worth a human look.
@@ -127,7 +123,7 @@ _SPARGE_BACKENDS = frozenset({
     AttentionBackendType.AITER_SPARGE,
     AttentionBackendType.AITER_SPARGE_V2,
     AttentionBackendType.FLEX_BLOCK_SPARGE,
-}) | AITER_MHA_V4_SPARGE_BACKEND_SET
+}) | registry.types_where(sparsity="sparge")
 
 # SSTA kwargs are supplied by a model's downloaded sparse config
 # (see hunyuan.py: sparse_config["attn_param"]), not by CLI args, so these
@@ -221,13 +217,15 @@ def run_case(backend: AttentionBackendType, case: Case, device: str, dtype) -> d
     query, key, value = make_tensors(case, device, dtype)
     expected = reference(query, key, value, case.is_causal)
 
-    function = ATTENTION_FUNCTION_REGISTRY[backend]
+    spec = registry.get(backend)
     try:
-        output, _lse = function(
+        output, _lse = spec.run(
             query, key, value,
-            dropout_p=0.0,
-            is_causal=case.is_causal,
-            attention_kwargs=attention_kwargs,
+            AttnCall(
+                dropout_p=0.0,
+                is_causal=case.is_causal,
+                attention_kwargs=attention_kwargs,
+            ),
         )
     except Exception as exc:                       # noqa: BLE001 - reporting only
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
@@ -245,7 +243,7 @@ def run_case(backend: AttentionBackendType, case: Case, device: str, dtype) -> d
 
 def run_all(device: str = "cuda", dtype=torch.bfloat16) -> dict:
     results: dict = {}
-    for backend in sorted(ATTENTION_FUNCTION_REGISTRY, key=lambda b: b.name):
+    for backend in sorted(registry.REGISTRY, key=lambda b: b.name):
         unavailable = availability_error(backend)
         if unavailable is not None:
             results[backend.name] = {

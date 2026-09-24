@@ -16,7 +16,7 @@ from xfuser.core.attention.requirements import (
     PARAM,
     SYMBOL,
     Requirement,
-    _resolve,
+    resolve,
 )
 from xfuser.core.attention.constraints import (
     ANY_CALL,
@@ -92,11 +92,11 @@ def test_requirement_is_not_truthy():
 
 
 def test_probes_are_memoised():
-    _resolve.cache_clear()
+    resolve.cache_clear()
     SYMBOL("math:sqrt").unmet()
     SYMBOL("math:sqrt").unmet()
     SYMBOL("math:sqrt").unmet()
-    assert _resolve.cache_info().hits >= 2
+    assert resolve.cache_info().hits >= 2
 
 
 def test_arch_reports_what_it_found():
@@ -302,15 +302,8 @@ def test_pack_kv_matches_legacy_semantics():
 # the enum move
 # --------------------------------------------------------------------------
 
-def test_enum_is_the_same_object_from_both_locations():
-    from xfuser.core.distributed.attention_backend import (
-        AttentionBackendType as Legacy,
-    )
-    assert Legacy is AttentionBackendType
-
-
 def test_enum_still_has_every_member():
-    assert len(list(AttentionBackendType)) == 45
+    assert len(list(AttentionBackendType)) == 44
 
 
 # --------------------------------------------------------------------------

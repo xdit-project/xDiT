@@ -102,7 +102,7 @@ def _tiny_inputs(device):
 def _patch_minimax_runtime_state(
     monkeypatch, *, track_steps=False, attention_backend=None
 ):
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.runner_models import minimax_h3 as minimax_h3_runner
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
 
@@ -135,7 +135,7 @@ def _patch_minimax_runtime_state(
 def test_minimax_h3_wrapper_matches_diffusers_u1(monkeypatch):
     from diffusers import MiniMaxH3Transformer3DModel
 
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.transformers import transformer_minimax_h3
     from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
         xFuserMiniMaxH3Transformer3DWrapper,
@@ -228,7 +228,7 @@ def test_minimax_h3_runner_registration():
 
 
 def test_fasth3_defaults_match_inference_contract():
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
@@ -287,7 +287,7 @@ def test_fasth3_wrapper_runs_vsa_attention(monkeypatch):
         lambda: 0,
     )
     monkeypatch.setattr(usp, "get_ulysses_parallel_world_size", lambda: 1)
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     _patch_minimax_runtime_state(
         monkeypatch,
         attention_backend=AttentionBackendType.FLEX_VSA_H3,

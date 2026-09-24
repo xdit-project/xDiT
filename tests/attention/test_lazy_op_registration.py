@@ -272,7 +272,7 @@ def test_function_level_import_statement_traces_under_fullgraph(tmp_path):
 @pytest.mark.xfail(
     strict=True,
     reason="Requirement.satisfied() reaches importlib through a memoised "
-           "_resolve, and Dynamo traces through the lru_cache wrapper rather "
+           "resolve(), and Dynamo traces through the lru_cache wrapper rather "
            "than honouring the cache -- so a requirement evaluated inside a "
            "compiled forward is a fullgraph failure. Backends must decide "
            "capability at module import (backend-selection time) and branch on "

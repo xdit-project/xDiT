@@ -225,6 +225,11 @@ def test_minimax_h3_runner_registration():
         "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
         in MODEL_REGISTRY
     )
+    assert "FastH3-Dense" in MODEL_REGISTRY
+    assert (
+        "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
+        in MODEL_REGISTRY
+    )
 
 
 def test_fasth3_defaults_match_inference_contract():
@@ -268,6 +273,149 @@ def test_fasth3_wrapper_defines_checkpoint_compression_gates(monkeypatch):
         assert gate.in_features == block.attn.to_q.in_features
         assert gate.out_features == block.attn.to_q.out_features
         assert gate.bias is None
+
+
+def test_fasth3_dense_defaults_match_inference_contract():
+    from xfuser.core.distributed.attention_backend import VSA_H3_BACKENDS
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
+        xFuserFastH3DenseModel,
+        xFuserMiniMaxH3Model,
+    )
+
+    assert (
+        xFuserFastH3DenseModel.settings.model_name
+        == FASTH3_V1_DENSE_DATAFREE_MODEL_ID
+    )
+    assert xFuserFastH3DenseModel.settings.output_name == "fasth3_dense"
+    assert xFuserFastH3DenseModel.settings.valid_tasks == ["t2va"]
+    # The dense ablation has no preferred backend, so --attention_backend decides.
+    assert xFuserFastH3DenseModel.settings.default_attention_backend is None
+    assert xFuserFastH3DenseModel.default_input_values.num_inference_steps == 5
+    assert xFuserFastH3DenseModel._warmup_num_inference_steps == 5
+    assert not xFuserFastH3DenseModel._enable_fasth3_vsa
+    assert (
+        xFuserFastH3DenseModel._supported_attn_backends
+        == xFuserMiniMaxH3Model._supported_attn_backends
+    )
+    assert not (
+        xFuserFastH3DenseModel._supported_attn_backends & VSA_H3_BACKENDS
+    )
+
+
+def test_fasth3_dense_accepts_dense_backends_and_rejects_vsa(monkeypatch):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3DenseModel,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    for backend in ("AITER", "CUDNN"):
+        config = xFuserArgs(
+            model="FastH3-Dense",
+            task="t2va",
+            attention_backend=backend,
+        )
+        xFuserFastH3DenseModel(config)
+        assert config.attention_backend == backend
+
+    defaulted = xFuserArgs(model="FastH3-Dense", task="t2va")
+    xFuserFastH3DenseModel(defaulted)
+    assert defaulted.attention_backend is None
+
+    with pytest.raises(ValueError, match="does not support attention backend"):
+        xFuserFastH3DenseModel(
+            xFuserArgs(
+                model="FastH3-Dense",
+                task="t2va",
+                attention_backend="TRITON_VSA_H3",
+            )
+        )
+
+
+def test_minimax_h3_excludes_mha_v4_only_attention_backends():
+    """MHA v4 carries no key-padding mask.
+
+    MiniMax-H3 pads its packed sequence to 64 rows and hands the pad-row indices
+    to attention as varlen metadata, which every MHA v4-only kernel rejects with
+    "MHA v4 does not support varlen packed keys". Listing one here would trade a
+    clear config error for a failure inside the compiled forward.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        AITER_MHA_V4_ONLY_BACKEND_SET,
+    )
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3DenseModel,
+        xFuserFastH3Model,
+        xFuserMiniMaxH3Model,
+    )
+
+    for cls in (
+        xFuserMiniMaxH3Model,
+        xFuserFastH3Model,
+        xFuserFastH3DenseModel,
+    ):
+        assert not (cls._supported_attn_backends & AITER_MHA_V4_ONLY_BACKEND_SET)
+
+
+@pytest.mark.parametrize("model", ["MiniMax-H3", "FastH3-Dense"])
+def test_minimax_h3_rejects_mha_v4_only_backend(monkeypatch, model):
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.base_model import (
+        MODEL_REGISTRY,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    with pytest.raises(ValueError, match="does not support attention backend"):
+        MODEL_REGISTRY[model](
+            xFuserArgs(
+                model=model,
+                task="t2va",
+                attention_backend="AITER_BF16",
+            )
+        )
+
+
+def test_fasth3_dense_allows_the_hybrid_attention_schedule(monkeypatch):
+    """Dense attention has no VSA step-coverage constraint, unlike VSA FastH3."""
+    from xfuser import xFuserArgs
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3DenseModel,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    config = xFuserArgs(
+        model="FastH3-Dense",
+        task="t2va",
+        use_hybrid_attn_schedule=True,
+        hybrid_attn_high_precision_backend="AITER",
+        hybrid_attn_low_precision_backend="AITER_FP8",
+    )
+    xFuserFastH3DenseModel(config)
+
+
+def test_fasth3_dense_wrapper_omits_compression_gates(monkeypatch):
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    _patch_minimax_runtime_state(monkeypatch)
+    model = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        enable_fasth3_vsa=False,
+    )
+
+    # The dense checkpoint ships no to_gate_compress keys, so defining the
+    # modules would leave them uninitialized after load.
+    for block in model.transformer_blocks:
+        assert not hasattr(block.attn, "to_gate_compress")
+    assert not model.use_vsa_h3
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/HIP")
@@ -917,6 +1065,75 @@ def test_fasth3_loads_published_checkpoint(monkeypatch):
                 "dtype": torch.bfloat16,
                 "enable_fasth3_vsa": True,
                 "attention_backend": None,
+            },
+        )
+    ]
+    assert pipe.transformer is transformer
+
+
+def test_fasth3_dense_loads_published_checkpoint(monkeypatch):
+    from diffusers import ModularPipeline
+
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.model_executor.models.runner_models import minimax_h3
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
+        xFuserFastH3DenseModel,
+    )
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    pipe = _FakeMiniMaxPipe()
+    transformer = _FakeTransformer()
+    pipeline_loads = []
+    transformer_loads = []
+
+    def fake_pipeline_from_pretrained(model_name, workflow):
+        pipeline_loads.append((model_name, workflow))
+        return pipe
+
+    def fake_transformer_from_pretrained(model_name, **kwargs):
+        transformer_loads.append((model_name, kwargs))
+        return transformer
+
+    monkeypatch.setattr(
+        ModularPipeline,
+        "from_pretrained",
+        fake_pipeline_from_pretrained,
+    )
+    monkeypatch.setattr(
+        xFuserMiniMaxH3Transformer3DWrapper,
+        "from_pretrained",
+        fake_transformer_from_pretrained,
+    )
+    monkeypatch.setattr(
+        minimax_h3,
+        "_patch_minimax_h3_text_encoder_broadcast",
+        lambda: None,
+    )
+    monkeypatch.setattr(minimax_h3, "log", lambda message: None)
+
+    model = object.__new__(xFuserFastH3DenseModel)
+    model.config = SimpleNamespace(
+        task="t2va",
+        text_encoder_tp_degree=1,
+        attention_backend="AITER",
+    )
+    model._parallelize_text_encoder = lambda text_encoder: None
+
+    actual = model._load_model()
+
+    assert actual is pipe
+    assert pipeline_loads == [(FASTH3_V1_DENSE_DATAFREE_MODEL_ID, "t2va")]
+    assert transformer_loads == [
+        (
+            FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
+            {
+                "subfolder": "transformer",
+                "dtype": torch.bfloat16,
+                "enable_fasth3_vsa": False,
+                "attention_backend": AttentionBackendType.AITER,
             },
         )
     ]

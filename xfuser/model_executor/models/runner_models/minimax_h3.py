@@ -48,8 +48,16 @@ _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 FASTH3_V1_DATAFREE_MODEL_ID = (
     "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 )
+# Dense-attention ablation of the same 4-step preview: distilled without VSA
+FASTH3_V1_DENSE_DATAFREE_MODEL_ID = (
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
+)
 FASTH3_V2_MODEL_ID = "FastVideo/FastVideo-FastH3-8-Step-V2"
-FASTH3_MODEL_IDS = (FASTH3_V1_DATAFREE_MODEL_ID, FASTH3_V2_MODEL_ID)
+FASTH3_MODEL_IDS = (
+    FASTH3_V1_DATAFREE_MODEL_ID,
+    FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
+    FASTH3_V2_MODEL_ID,
+)
 # Full set of FastH3 V1-VSA IDs. Used in _customize_settings to route the
 # correct checkpoint into from_pretrained when a weight variant is requested.
 FASTH3_V1_MODEL_IDS = frozenset({
@@ -766,6 +774,31 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
                 "FastH3 Preview v1 requires 5 scheduler points, which produce "
                 "the checkpoint's trained 4 transformer forwards."
             )
+
+
+@register_model(FASTH3_V1_DENSE_DATAFREE_MODEL_ID)
+@register_model("FastH3-Dense")
+class xFuserFastH3DenseModel(xFuserFastH3Model):
+    """FastH3 Preview v1 Dense-DataFree runner.
+
+    The dense ablation was distilled without VSA, so its checkpoint carries no
+    ``to_gate_compress`` weights and attention stays dense on whichever
+    MiniMax-H3 backend is selected. Like MiniMax-H3 it declares no default
+    backend.
+    """
+
+    settings = copy.deepcopy(xFuserFastH3Model.settings)
+    settings.model_name = FASTH3_V1_DENSE_DATAFREE_MODEL_ID
+    settings.output_name = "fasth3_dense"
+    settings.default_attention_backend = None
+
+    _enable_fasth3_vsa = False
+    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+
+    def _validate_config(self, config) -> None:
+        # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,
+        # and dense attention works with the hybrid schedule.
+        xFuserMiniMaxH3Model._validate_config(self, config)
 
 
 @register_model(FASTH3_V2_MODEL_ID)

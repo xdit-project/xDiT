@@ -2,7 +2,7 @@
 
 from xfuser.core.attention.backends.aiter.kernel import aiter_attention
 from xfuser.core.attention.spec import AttnCall
-
+from xfuser.core.vsa_attention import aiter_vsa_attention, jenga_scheduled_drop_rate
 
 
 def vsa_attention(query, key, value, call: AttnCall):
@@ -12,7 +12,6 @@ def vsa_attention(query, key, value, call: AttnCall):
     drop-rate schedule marks early/late steps dense; all three run dense AITER
     rather than failing.
     """
-    from xfuser.core.vsa_attention import aiter_vsa_attention, jenga_scheduled_drop_rate
 
     kwargs = call.attention_kwargs
     thw = kwargs.get("thw")

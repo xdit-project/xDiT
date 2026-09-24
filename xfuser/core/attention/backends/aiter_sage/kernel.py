@@ -9,9 +9,20 @@ but has never been given. A flag asserts those hold per version; they do not.
 
 import math
 
+from aiter.ops.triton.attention.fav3_sage import (
+    fav3_sage_wrapper_func as SAGE_V1,
+    get_sage_fwd_configs as CONFIG_V1,
+)
+from aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper import (
+    fav3_sage_mxfp4_wrapper as SAGE_V2,
+    get_sage_fwd_configs_mxfp4 as CONFIG_V2,
+)
+from aiter.ops.triton.attention.utils import (
+    block_attn_mask_to_ragged_lut as RAGGED_LUT,
+)
+
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.numerics.layout import make_contiguous
-from xfuser.core.attention.requirements import resolve
 from xfuser.core.attention.sparsity.sparge import (
     SpargeConfig,
     build_block_mask,
@@ -26,17 +37,7 @@ from xfuser.core.distributed.ssta import (
     untile_ssta_output,
 )
 
-from .spec import BLOCK_R, TRITON_SSTA_BLOCK, _RAGGED_LUT, _SAGE_V1, _SAGE_V2
-
-SAGE_V1 = resolve(_SAGE_V1)
-SAGE_V2 = resolve(_SAGE_V2)
-
-CONFIG_V1 = resolve("aiter.ops.triton.attention.fav3_sage:get_sage_fwd_configs")
-CONFIG_V2 = resolve(
-    "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper"
-    ":get_sage_fwd_configs_mxfp4"
-)
-RAGGED_LUT = resolve(_RAGGED_LUT)
+from .spec import BLOCK_R, TRITON_SSTA_BLOCK
 
 
 # ---------------------------------------------------------------------------

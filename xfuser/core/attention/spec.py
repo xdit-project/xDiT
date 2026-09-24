@@ -34,7 +34,6 @@ class AttentionBackendType(Enum):
     AITER = "AITER"
     AITER_BF16 = "AITER BF16 MHA v4"
     AITER_BF16FP8 = "AITER BF16/FP8 MHA v4"
-    AITER_MLA = "AITER MLA" # deprecated, use AITER_FP8
     AITER_I8FP8 = "AITER I8FP8"
     AITER_FP8 = "AITER FP8"
     AITER_MXFP8 = "AITER MXFP8"

@@ -49,8 +49,4 @@ MODULES = [
     npu,
 ]
 
-# AITER_MLA is deliberately not migrated: it is marked deprecated in favour of
-# AITER_FP8 and the current AITER breaks it outright (mla_reduce_v1 signature
-# change). It stays served by the legacy module pending removal.
-
 __all__ = ["MODULES"]

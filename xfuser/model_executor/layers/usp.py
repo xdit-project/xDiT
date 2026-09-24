@@ -28,8 +28,6 @@ from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall, ParallelContext
 from xfuser.core.attention.spec import AttentionBackendType
-# AITER_MLA alone is still served by the legacy module; see the fallback below.
-from xfuser.core.distributed.attention_backend import ATTENTION_FUNCTION_REGISTRY
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -378,15 +376,9 @@ def _get_attention_function(backend=None):
         attention_backend = get_runtime_state().attention_backend
 
     spec = attention_registry.REGISTRY.get(attention_backend)
-    if spec is not None:
-        return concat_joint_tensors_decorator(_spec_adapter(spec))
-
-    # Not yet migrated (AITER_MLA). Served by the legacy module until it is
-    # removed; see xfuser/core/attention/backends/__init__.py.
-    func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
-    if func is None:
+    if spec is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
-    return concat_joint_tensors_decorator(func)
+    return concat_joint_tensors_decorator(_spec_adapter(spec))
 
 
 def _spec_adapter(spec):

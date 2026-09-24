@@ -133,11 +133,10 @@ class RuntimeState(metaclass=ABCMeta):
         self.attention_backend = attention_backend
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
         # Each backend declares whether it quantises, so this no longer needs a
-        # list. AITER_MLA is named explicitly only until it is removed; it has
-        # no spec. Note this is broader than the list it replaces: the Sage
-        # family quantises to int8/fp8 and now warns accordingly.
+        # list. Note this is broader than the list it replaces: the Sage family
+        # quantises to int8/fp8 and now warns accordingly.
         low_precision = attention_registry.types_where(low_precision=True)
-        if attention_backend in low_precision or attention_backend is AttentionBackendType.AITER_MLA:
+        if attention_backend in low_precision:
             logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
@@ -230,10 +229,6 @@ class RuntimeState(metaclass=ABCMeta):
             )
 
         spec = attention_registry.REGISTRY.get(attention_backend)
-        if spec is None:
-            # Not yet migrated (AITER_MLA); nothing to check here.
-            return
-
         unavailable = spec.unavailable()
         if unavailable is not None:
             raise RuntimeError(

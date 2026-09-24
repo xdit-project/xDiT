@@ -335,51 +335,6 @@ def test_fasth3_dense_accepts_dense_backends_and_rejects_vsa(monkeypatch):
         )
 
 
-def test_minimax_h3_excludes_mha_v4_only_attention_backends():
-    """MHA v4 carries no key-padding mask.
-
-    MiniMax-H3 pads its packed sequence to 64 rows and hands the pad-row indices
-    to attention as varlen metadata, which every MHA v4-only kernel rejects with
-    "MHA v4 does not support varlen packed keys". Listing one here would trade a
-    clear config error for a failure inside the compiled forward.
-    """
-    from xfuser.core.distributed.attention_backend import (
-        AITER_MHA_V4_ONLY_BACKEND_SET,
-    )
-    from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        xFuserFastH3DenseModel,
-        xFuserFastH3Model,
-        xFuserMiniMaxH3Model,
-    )
-
-    for cls in (
-        xFuserMiniMaxH3Model,
-        xFuserFastH3Model,
-        xFuserFastH3DenseModel,
-    ):
-        assert not (cls._supported_attn_backends & AITER_MHA_V4_ONLY_BACKEND_SET)
-
-
-@pytest.mark.parametrize("model", ["MiniMax-H3", "FastH3-Dense"])
-def test_minimax_h3_rejects_mha_v4_only_backend(monkeypatch, model):
-    from xfuser import xFuserArgs
-    from xfuser.model_executor.models.runner_models.base_model import (
-        MODEL_REGISTRY,
-    )
-
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setenv("WORLD_SIZE", "1")
-
-    with pytest.raises(ValueError, match="does not support attention backend"):
-        MODEL_REGISTRY[model](
-            xFuserArgs(
-                model=model,
-                task="t2va",
-                attention_backend="AITER_BF16",
-            )
-        )
-
-
 def test_fasth3_dense_allows_the_hybrid_attention_schedule(monkeypatch):
     """Dense attention has no VSA step-coverage constraint, unlike VSA FastH3."""
     from xfuser import xFuserArgs

@@ -21,10 +21,6 @@ SPECS = [
         accepts=NO_DROPOUT,
         accepts_prequantized=True,
         prequant_rotate=hadamard.rotate_qk,
-        # The Hadamard symbol is needed by the legacy path, via _rotation.
-        # That path is always reachable -- varlen packing and head dims other
-        # than 128 never take MHA v4 -- so it gates the whole backend rather
-        # than being checked when that branch is taken.
         requires=SYMBOL("aiter:flash_attn_fp8_pertensor_func")
                & SYMBOL("aiter:per_tensor_quant")
                & hadamard.CREATE_HADAMARD,

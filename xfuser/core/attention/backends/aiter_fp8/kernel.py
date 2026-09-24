@@ -7,8 +7,6 @@ Three paths, picked by what the call carries:
                   and quantisation
   legacy          everything else: rotate Q/K here, quantise, dense or varlen
 
-Only the first two are reachable on a modern build for a typical model; the
-legacy path still serves varlen packing, which MHA v4 has no mask for.
 """
 
 from typing import Optional
@@ -18,7 +16,7 @@ import torch
 
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
-from xfuser.core.attention.requirements import ARCH
+from xfuser.core.attention.requirements import ARCH, SYMBOL
 from xfuser.core.attention.spec import AttnCall
 from xfuser.envs import environment_variables
 
@@ -72,16 +70,32 @@ def _pre_quantized(query, key, value, call: AttnCall):
     return from_bshd(out), None
 
 
-# Legacy gates this on architecture (_AITER_MHA_V4.enabled is
-# "gfx942" or "gfx950" in the arch name), not on whether mha_v4 imports. The
-# symbol is arch-independent, so an import test would take the MHA v4 path on
-# RDNA4, where legacy takes the legacy path.
-_MHA_V4_ARCH = ARCH("gfx950", "gfx942")
+# Decided once, at import, which is backend-selection time. Both halves matter:
+# the symbol is arch-independent, so importability alone would take this path on
+# RDNA4 where the kernel does not run, and the arch alone would take it on a
+# gfx942 build of AITER that predates MHA v4, where the import raises.
+#
+# It cannot be a per-call check. Requirement.satisfied() reaches importlib
+# through a memoised resolve(), and Dynamo traces through the lru_cache wrapper
+# and refuses importlib -- so evaluating it inside the compiled forward is a
+# fullgraph failure. See test_requirement_is_not_traceable_under_fullgraph.
+_USE_MHA_V4 = (
+    ARCH("gfx950", "gfx942")
+    & SYMBOL("aiter.ops.mha_v4:mha_v4")
+    & SYMBOL("aiter.ops.mha_v4:native_fp8_format")
+).satisfied()
+
+# The spec's requires deliberately omits mha_v4: the legacy path below serves
+# builds without it, and requiring it would refuse AITER_FP8 outright on an
+# older AITER. So the import is conditional rather than unconditional at the
+# top of the module.
+if _USE_MHA_V4:
+    from aiter.ops.mha_v4 import mha_v4, native_fp8_format
 
 
 def _mha_v4_eligible(query, call: AttnCall) -> bool:
     return (
-        _MHA_V4_ARCH.satisfied()
+        _USE_MHA_V4
         and call.varlen is None
         and query.is_cuda
         and query.shape[-1] == 128
@@ -91,11 +105,6 @@ def _mha_v4_eligible(query, call: AttnCall) -> bool:
 
 def _mha_v4(query, key, value, call: AttnCall):
     """The raw MHA v4 API owns canonical Q/K rotation and quantisation."""
-    # Deliberately not hoisted: this backend's requires does not include
-    # mha_v4, because the legacy path below serves builds without it. Hoisting
-    # would refuse AITER_FP8 on an AITER that predates MHA v4.
-    from aiter.ops.mha_v4 import mha_v4, native_fp8_format
-
     q, k, v = to_bshd(query, key, value, contiguous=True)
     fp8 = native_fp8_format()
     return from_bshd(mha_v4(q, k, v, fp8, fp8, fp8)), None

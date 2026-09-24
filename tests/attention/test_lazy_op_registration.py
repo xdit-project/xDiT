@@ -240,3 +240,73 @@ def test_repeated_dispatch_does_not_recompile():
     for _ in range(5):
         run(q)
     assert compiles == 1, f"recompiled {compiles} times for identical shapes"
+
+
+# --------------------------------------------------------------------------
+# requirements must be evaluated before compilation, not per call
+# --------------------------------------------------------------------------
+
+def test_function_level_import_statement_traces_under_fullgraph(tmp_path):
+    """A bare ``from vendor import fn`` inside a traced region is fine: Dynamo
+    implements IMPORT_NAME by performing the import at trace time. It is
+    importlib.import_module -- a call into skipped code -- that is refused. The
+    distinction decides whether a kernel may import a vendor symbol lazily."""
+    module = _make_kernel_module(tmp_path)
+    _reset_dynamo()
+
+    # The module name is generated per test, so the import statement has to be
+    # built rather than written literally.
+    namespace = {}
+    exec(                                   # noqa: S102 - the shape under test
+        f"def run(x):\n"
+        f"    from {module} import call\n"
+        f"    return call(x)\n",
+        namespace,
+    )
+    compiled = torch.compile(namespace["run"], fullgraph=True, backend="eager")
+
+    x = torch.ones(4)
+    assert torch.allclose(compiled(x), x * 2)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Requirement.satisfied() reaches importlib through a memoised "
+           "_resolve, and Dynamo traces through the lru_cache wrapper rather "
+           "than honouring the cache -- so a requirement evaluated inside a "
+           "compiled forward is a fullgraph failure. Backends must decide "
+           "capability at module import (backend-selection time) and branch on "
+           "a plain bool. Strict: if torch starts honouring lru_cache, per-call "
+           "capability checks become available.",
+)
+def test_requirement_is_not_traceable_under_fullgraph():
+    from xfuser.core.attention.requirements import SYMBOL
+
+    requirement = SYMBOL("torch:nn")
+    assert requirement.satisfied()      # prime the memo; still fails below
+    _reset_dynamo()
+
+    @torch.compile(fullgraph=True, backend="eager")
+    def run(x):
+        return x + 1 if requirement.satisfied() else x
+
+    x = torch.ones(4)
+    assert torch.allclose(run(x), x + 1)
+
+
+def test_hoisted_capability_bool_folds_away():
+    """The shape backends must use instead: a module-level bool, which Dynamo
+    specialises on, pruning the unavailable branch entirely."""
+    _reset_dynamo()
+
+    unavailable = False
+
+    @torch.compile(fullgraph=True, backend="eager")
+    def run(x):
+        if unavailable:
+            import definitely_not_a_module   # noqa: F401 - never traced
+            return x
+        return x + 1
+
+    x = torch.ones(4)
+    assert torch.allclose(run(x), x + 1)

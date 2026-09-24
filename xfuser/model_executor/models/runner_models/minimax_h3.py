@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from xfuser.core.distributed.attention_backend import (
+    AITER_MHA_V4_ONLY_BACKEND_SET,
     AttentionBackendType,
     VSA_H3_BACKENDS,
 )
@@ -35,13 +36,23 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 )
 
 
+# AITER's dense MXFP4 V rows require sequence length to be 128
+# MiniMax-H3 aligns its packed sequence to 64 and hands the kernels a K trimmed to
+# the token count, so neither length is ever reliably 128-aligned.
+_UNALIGNED_MHA_V4_BACKENDS = frozenset({
+    AttentionBackendType.AITER_F4F4,
+    AttentionBackendType.AITER_F6F4,
+})
+# The remaining dense MHA v4 rows are in: MiniMax-H3 pads its packed sequence to
+# 64 rows and declares the pad through valid_kv_len, which those kernels serve by
+# slicing K/V instead of masking.
 _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.AITER,
     AttentionBackendType.AITER_FP8,
     AttentionBackendType.CUDNN,
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
-})
+}) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNALIGNED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})

@@ -1190,9 +1190,41 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs=None):
     _validate_aiter_low_precision_dropout(dropout_p)
     if is_causal:
         raise NotImplementedError("MHA v4 does not support causal masking")
-    # MHA v4 has no key-padding mask, so honouring these would need packed K/V.
-    if (attention_kwargs or {}).get("indices_k") is not None:
+
+
+def _trim_mha_v4_trailing_pad(key, value, attention_kwargs):
+    """Slice a declared trailing K/V pad so dense MHA v4 can serve a padded request.
+
+    MHA v4 has no key-padding mask. When the pad is a uniform trailing block the
+    mask is unnecessary: keeping every query row and shortening K/V is the same
+    computation, which is what ``valid_kv_len`` declares (see
+    ``usp._trim_trailing_kv_padding``). Only the producer knows the pad is
+    trailing -- ``cu_seqlens_k`` having one segment does not imply it, and a mask
+    with interior gaps would be silently mis-served -- so a request that packs
+    keys without declaring ``valid_kv_len`` is still refused.
+
+    Q is deliberately left alone. It is never packed, its pad rows are discarded
+    downstream, and trimming it by a key-side length would be wrong for cross
+    attention, where the two sequences differ.
+    """
+    kwargs = attention_kwargs or {}
+    if kwargs.get("indices_k") is None:
+        return key, value
+
+    valid_kv_len = kwargs.get("valid_kv_len")
+    if valid_kv_len is None:
         raise NotImplementedError("MHA v4 does not support varlen packed keys")
+    if not 0 < valid_kv_len <= key.shape[2]:
+        raise ValueError(
+            f"valid_kv_len must be in [1, {key.shape[2]}], got {valid_kv_len}."
+        )
+    max_seqlen_k = kwargs.get("max_seqlen_k")
+    if max_seqlen_k is not None and max_seqlen_k != valid_kv_len:
+        raise ValueError(
+            "A trailing K/V pad has as many valid keys as its longest segment, "
+            f"got valid_kv_len={valid_kv_len} and max_seqlen_k={max_seqlen_k}."
+        )
+    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
 
 
 def _use_aiter_mha_v4_fp8(query, is_causal):
@@ -1322,6 +1354,7 @@ def _aiter_mixed_attn_call(
     query, key, value, qk_format, v_format, dropout_p, is_causal, attention_kwargs=None
 ):
     _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
+    key, value = _trim_mha_v4_trailing_pad(key, value, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -1387,6 +1420,7 @@ def _aiter_i8fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
 def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """Run the AITER MXFP8 Q/K and per-tensor FP8 V recipe."""
     _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
+    key, value = _trim_mha_v4_trailing_pad(key, value, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -1531,6 +1565,9 @@ def _validate_aiter_mha_v4_sparge_request(
     if query.shape[1] != key.shape[1] or query.shape[1] != value.shape[1]:
         raise NotImplementedError("MHA v4 Sparge currently supports MHA only")
     if (attention_kwargs or {}).get("indices_k") is not None:
+        # The dense rows serve a trailing pad by slicing K/V, but the sorted-sparse
+        # launch needs the key length padded to its KV tile, which is the very
+        # alignment such a slice removes.
         raise NotImplementedError("MHA v4 Sparge does not support varlen packed keys")
 
 

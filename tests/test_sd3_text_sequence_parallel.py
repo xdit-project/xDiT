@@ -91,3 +91,22 @@ def test_trailing_kv_padding_uses_views():
     assert trimmed_value.shape == (1, 2, 13, 8)
     assert trimmed_key.untyped_storage().data_ptr() == key.untyped_storage().data_ptr()
     assert trimmed_value.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
+
+
+def test_trailing_kv_padding_defers_to_a_varlen_producer():
+    """A producer publishing both leaves the choice to the backend.
+
+    Trimming here would leave indices_k pointing past the end of K for the
+    varlen-capable backends that pack it themselves.
+    """
+    key = torch.randn(1, 2, 14, 8)
+    value = torch.randn_like(key)
+
+    trimmed_key, trimmed_value = _trim_trailing_kv_padding(
+        key,
+        value,
+        {"valid_kv_len": 13, "indices_k": torch.arange(13)},
+    )
+
+    assert trimmed_key is key
+    assert trimmed_value is value

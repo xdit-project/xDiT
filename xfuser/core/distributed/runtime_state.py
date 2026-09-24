@@ -29,6 +29,7 @@ from xfuser.core.distributed.attention_backend import (
     AITER_LOW_PRECISION_BACKENDS,
     AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET,
     AITER_MHA_V4_ONLY_BACKEND_SET,
+    AITER_MHA_V4_RING_SAFE_BACKEND_SET,
     AITER_MHA_V4_SPARGE_BACKENDS,
     AITER_MHA_V4_SPARGE_BACKEND_SET,
     AttentionBackendType,
@@ -264,6 +265,13 @@ class RuntimeState(metaclass=ABCMeta):
                     # buffer in the same change, whereas return_lse has always been accepted
                     # and always raised. AITER_FP8 is excluded on purpose: it only reaches
                     # MHA v4 for some shapes and would silently yield no LSE for the rest.
+                    if attention_backend not in AITER_MHA_V4_RING_SAFE_BACKEND_SET:
+                        raise RuntimeError(
+                            f"{attention_backend} cannot be used with ring parallelism: its "
+                            "exported LSE carries a per-chunk bias that the ring merge cannot "
+                            "cancel, which corrupts the merged output even though single-rank "
+                            "output is correct. Use ulysses parallelism for this backend."
+                        )
                     module_path = "aiter.ops.mha_v4"
                     symbol = "mha_v4_packed"
                     required = ("lse",)

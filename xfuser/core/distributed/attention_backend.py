@@ -507,7 +507,9 @@ if env_info["has_sage"]:
 if env_info["has_flex_block_attn"]:
     # The xfuser::flex_block_attn custom op now lives in
     # xfuser/core/attention/backends/flex/kernel.py -- importing it is what
-    # registers the op. Registering it here too would collide.
+    # registers the op. Defining it here too would not raise: the later
+    # registration silently wins for both callers, so which one ran would
+    # depend on import order.
     from xfuser.core.attention.backends.flex.kernel import flex_block_attn as flex_block_attn_op
 if env_info["has_npu_flash_attn"]:
     import torch_npu

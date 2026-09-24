@@ -25,10 +25,7 @@ def _tiny_config():
     }
 
 
-def _tiny_inputs(device):
-    text_tokens = 4
-    audio_tokens = 12
-    video_tokens = 48
+def _tiny_inputs(device, text_tokens=4, audio_tokens=12, video_tokens=48):
     sequence_length = text_tokens + audio_tokens + video_tokens
     text_indices = torch.arange(text_tokens, device=device)
     audio_indices = torch.arange(
@@ -197,6 +194,43 @@ def test_minimax_h3_padding_alignment():
     assert padded[2].shape == (128,)
     assert padded[3].shape == (128, 3)
     assert torch.all(padded[2][65:] == -1)
+
+
+def test_minimax_h3_publishes_the_trailing_pad_length(monkeypatch):
+    """Backends without a key-padding mask slice K/V by valid_kv_len instead.
+
+    The key is published on every forward, carrying None when the sequence
+    already aligns, because torch.compile guards on this dict's key set.
+    """
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.model_executor.models.transformers import transformer_minimax_h3
+    from xfuser.model_executor.models.transformers.transformer_minimax_h3 import (
+        xFuserMiniMaxH3Transformer3DWrapper,
+    )
+
+    monkeypatch.setattr(
+        transformer_minimax_h3, "get_ulysses_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(
+        transformer_minimax_h3, "get_ulysses_parallel_rank", lambda: 0
+    )
+    _patch_minimax_runtime_state(monkeypatch)
+
+    wrapper = xFuserMiniMaxH3Transformer3DWrapper(
+        **_tiny_config(),
+        attention_backend=AttentionBackendType.SDPA,
+    ).eval()
+
+    with torch.no_grad():
+        wrapper(**_tiny_inputs(torch.device("cpu")))
+    aligned_keys = set(wrapper._usp_attention_kwargs)
+    assert wrapper._usp_attention_kwargs["valid_kv_len"] is None
+
+    with torch.no_grad():
+        wrapper(**_tiny_inputs(torch.device("cpu"), text_tokens=5))
+    assert wrapper._usp_attention_kwargs["valid_kv_len"] == 65
+    assert wrapper._usp_attention_kwargs["max_seqlen_k"] == 65
+    assert set(wrapper._usp_attention_kwargs) == aligned_keys
 
 
 def test_minimax_h3_wrapper_exposes_diffusers_config_signature():
@@ -488,6 +522,58 @@ def test_fasth3_rejects_unsupported_attention_backend():
 
     with pytest.raises(ValueError, match="does not support attention backend"):
         xFuserFastH3Model(config)
+
+
+def test_minimax_h3_accepts_dense_mha_v4_backends(monkeypatch):
+    """Dense MHA v4 serves the 64-row pad by slicing K/V, so those rows are in.
+
+    Their Sparge counterparts are not: the sorted-sparse launch requires the key
+    length to stay padded to its KV tile.
+    """
+    from xfuser import xFuserArgs
+    from xfuser.core.distributed.attention_backend import (
+        AITER_MHA_V4_ONLY_BACKENDS,
+        AITER_MHA_V4_SPARGE_BACKEND_SET,
+    )
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        xFuserFastH3DenseModel,
+        xFuserMiniMaxH3Model,
+    )
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    from xfuser.model_executor.models.runner_models.minimax_h3 import (
+        _UNALIGNED_MHA_V4_BACKENDS,
+    )
+
+    for backend in AITER_MHA_V4_ONLY_BACKENDS:
+        if backend in _UNALIGNED_MHA_V4_BACKENDS:
+            # AITER's dense MXFP4 V rows are wrong at S % 128 != 0, which the
+            # trimmed key length essentially always is.
+            assert backend not in xFuserMiniMaxH3Model._supported_attn_backends
+            continue
+        assert backend in xFuserMiniMaxH3Model._supported_attn_backends
+        config = xFuserArgs(
+            model="MiniMax-H3", task="t2va", attention_backend=backend.name
+        )
+        xFuserMiniMaxH3Model(config)
+        assert config.attention_backend == backend.name
+
+    assert not (
+        xFuserFastH3DenseModel._supported_attn_backends
+        & AITER_MHA_V4_SPARGE_BACKEND_SET
+    )
+    # Rejected one step earlier than an unknown backend would be: the runner
+    # declares no Sparge capability at all.
+    with pytest.raises(ValueError, match="does not support Sparge"):
+        xFuserFastH3DenseModel(
+            xFuserArgs(
+                model="FastH3-Dense",
+                task="t2va",
+                attention_backend="AITER_I8FP8_SPARGE",
+            )
+        )
 
 
 @pytest.mark.parametrize(

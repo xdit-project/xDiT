@@ -171,6 +171,9 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
             "indices_k": None,
             "cu_seqlens_k": None,
             "max_seqlen_k": None,
+            # The pad rows are a trailing block, so backends without a
+            # key-padding mask can slice K/V here instead of packing.
+            "valid_kv_len": None,
             "vsa_h3_metadata": None,
             "vsa_h3_gate": None,
             ULYSSES_EXTRA_INPUTS_KEY: None,
@@ -493,6 +496,9 @@ class xFuserMiniMaxH3Transformer3DWrapper(MiniMaxH3Transformer3DModel):
                 "indices_k": indices_k,
                 "cu_seqlens_k": cu_seqlens_k,
                 "max_seqlen_k": max_seqlen_k,
+                # _pad_rows appends its rows, so the valid keys are the leading
+                # sequence_length rows and nothing beyond them is real.
+                "valid_kv_len": max_seqlen_k,
             }
         )
 

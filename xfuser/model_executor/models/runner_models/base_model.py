@@ -46,9 +46,7 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.distributed.attention_backend import (
-    AttentionBackendType,
-)
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
     AttentionSchedule,

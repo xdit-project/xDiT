@@ -7,7 +7,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.envs import _is_hip
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
     DefaultInputValues,

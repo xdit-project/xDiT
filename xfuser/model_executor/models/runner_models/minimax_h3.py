@@ -7,7 +7,7 @@ from types import MethodType, SimpleNamespace
 import numpy as np
 import torch
 
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,

@@ -13,7 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     _parse_attention_backend,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,

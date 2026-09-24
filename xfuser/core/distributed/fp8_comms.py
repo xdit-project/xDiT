@@ -19,6 +19,15 @@ import torch.distributed as dist
 
 import xfuser.envs as envs
 from xfuser.logger import init_logger
+
+# The dtype the kernel will actually quantise to: e4m3fnuz on gfx942, e4m3fn on
+# gfx950, and their maxima differ (240 vs 448), so the calibration scale depends
+# on which one it is. The fallback only matters on a machine without AITER,
+# where fp8 comms cannot run at all.
+try:
+    from aiter.dtypes import fp8 as _FP8_DTYPE
+except Exception:                       # noqa: BLE001 - absence is the answer
+    _FP8_DTYPE = torch.float8_e4m3fn
 from xfuser.config.config import DEFAULT_FP8_COMMS_SAFETY_FACTOR
 
 if torch.cuda.is_available() or envs._is_npu():
@@ -223,9 +232,7 @@ class Fp8CommsState:
                 f"AITER_FLYDSL_FP8) on the self-attention layers: check that the bound "
                 f"attention modules are the ones USP actually runs."
             )
-        from xfuser.core.distributed.attention_backend import AITER_FP8_DTYPE
-
-        dtype_max = torch.finfo(AITER_FP8_DTYPE).max
+        dtype_max = torch.finfo(_FP8_DTYPE).max
         maxes = torch.stack(
             [
                 model_state.q_running_max,
@@ -553,9 +560,8 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
     """Raise if --use_fp8_comms is requested but unsupported by the model/config; no-op if off."""
     if not config.use_fp8_comms:
         return
-    from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.attention import registry as attention_registry
-    from xfuser.core.distributed.attention_backend import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType
     from xfuser.core.distributed.attention_schedule import AttentionSchedule
 
     def _parse(name, kind):
@@ -616,11 +622,6 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
             f"Set --attention_backend, --hybrid_attn_schedule, or "
             f"--hybrid_attn_low_precision_backend / --hybrid_attn_high_precision_backend "
             f"so at least one scheduled backend supports pre-quantization."
-        )
-    if not getattr(ab, "AITER_FP8_HAS_DESCALE", False):
-        raise ValueError(
-            "--use_fp8_comms needs an AITER build whose flash_attn_fp8_pertensor_func "
-            "accepts q_descale/k_descale/v_descale."
         )
     logger.info(
         "fp8 comms feeds pre-quantized Q/K/V to the dense FP8 attention kernel; "

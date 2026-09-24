@@ -20,7 +20,7 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
-from xfuser.core.distributed.attention_backend import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
 from xfuser.model_executor.layers.usp import (
     ULYSSES_EXTRA_INPUTS_KEY,

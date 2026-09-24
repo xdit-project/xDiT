@@ -1,10 +1,17 @@
-"""Sage mask sources. Imported when a Sage backend is selected."""
+"""Sage mask sources, one function per backend.
+
+Six functions rather than three parameterised by a version flag: the two
+versions share only their mask construction, and what they do differ in is not
+uniform. Sage v2 wants contiguous inputs -- except under SSTA, where legacy
+never applied that shim -- and is passed `causal`, which v1's wrapper accepts
+but has never been given. A flag asserts those hold per version; they do not.
+"""
 
 import math
 
-from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-
 from xfuser.core.attention.numerics import hadamard
+from xfuser.core.attention.numerics.layout import make_contiguous
+from xfuser.core.attention.requirements import resolve
 from xfuser.core.attention.sparsity.sparge import (
     SpargeConfig,
     build_block_mask,
@@ -19,101 +26,54 @@ from xfuser.core.distributed.ssta import (
     untile_ssta_output,
 )
 
-from .spec import _TRITON_SSTA_BLOCK, _block_r
+from .spec import BLOCK_R, TRITON_SSTA_BLOCK, _RAGGED_LUT, _SAGE_V1, _SAGE_V2
+
+SAGE_V1 = resolve(_SAGE_V1)
+SAGE_V2 = resolve(_SAGE_V2)
+
+CONFIG_V1 = resolve("aiter.ops.triton.attention.fav3_sage:get_sage_fwd_configs")
+CONFIG_V2 = resolve(
+    "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper"
+    ":get_sage_fwd_configs_mxfp4"
+)
+RAGGED_LUT = resolve(_RAGGED_LUT)
 
 
-def _resolve(target: str):
-    module, _, symbol = target.partition(":")
-    return getattr(__import__(module, fromlist=[symbol]), symbol)
+# ---------------------------------------------------------------------------
+# shared by both versions
+# ---------------------------------------------------------------------------
 
-
-def _attn(kernel):
-    return _resolve(kernel.wrapper)
-
-
-def _config(kernel) -> dict:
-    return _resolve(kernel.configs)()
-
-
-def _extra(kernel, query) -> dict:
-    if not kernel.rotates:
-        return {}
-    return {"hadamard_rotation": True, "R": hadamard.matrix(_block_r(), str(query.device))}
-
-
-def _prepare(kernel, *tensors):
-    # aiter-shim: added 2026-03-12. Sage v2 needed contiguous inputs in older
-    # builds. Pre-floor, so it is a removal candidate -- but unlike the
-    # probe-guarded shims this is an unconditional copy, and "AITER no longer
-    # needs it" cannot be established by introspection, only by a bitwise run
-    # with and without. Kept until that is measured.
-    if not kernel.force_contiguous:
-        return tensors
-    return tuple(t.contiguous() for t in tensors)
-
-
-def _causal(kernel, call: AttnCall) -> dict:
-    return {"causal": call.is_causal} if kernel.passes_causal else {}
-
-def dense(query, key, value, call: AttnCall, *, kernel: SageKernel):
-    """No mask. The only cell that can participate in ring attention, and only
-    then does the wrapper produce an LSE."""
-    q, k, v = _prepare(kernel, query, key, value)
-    attn = _attn(kernel)
-    extra = _extra(kernel, q)
-
-    if call.ctx.ring_world_size > 1:
-        # aiter-shim cut 2026-09: AITER_SAGE_SUPPORTS_RING /
-        # AITER_SAGE_V2_SUPPORTS_RING (both added 2026-06-17) probed for these
-        # parameters. Every build at or after the July floor has them.
-        lse_args = {"return_lse": True}
-        if not kernel.rotates:
-            lse_args["smooth_k"] = True
-        return attn(q, k, v, layout="bhsd", **extra, **lse_args, **_causal(kernel, call))
-
-    return attn(q, k, v, layout="bhsd", **extra, **_causal(kernel, call)), None
-
-
-def ssta(query, key, value, call: AttnCall, *, kernel: SageKernel):
-    """Tile-based static mask, supplied by the model's sparse config."""
-    # Not hoisted: only the SSTA and sparge specs require this symbol; the
-    # dense specs in this family must load without it.
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-
+def _ssta_mask(query, key, value, call: AttnCall):
+    """Tile Q/K/V against the model's static sparse config and build the LUT."""
     kwargs = call.attention_kwargs
     kwargs["sp_size"] = call.ctx.ulysses_world_size
     block_size = math.prod(kwargs["tile_size"])
 
-    config = _config(kernel)
-    config["BLOCK_M"] = _TRITON_SSTA_BLOCK
-    config["BLOCK_N"] = _TRITON_SSTA_BLOCK
-
     q, k, v, mask_config, state = setup_ssta(query, key, value, kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=kwargs["attn_sparse_type"])
-    if block_size != _TRITON_SSTA_BLOCK:
-        block_mask = expand_block_mask(block_mask, factor=block_size // _TRITON_SSTA_BLOCK)
+    if block_size != TRITON_SSTA_BLOCK:
+        block_mask = expand_block_mask(block_mask, factor=block_size // TRITON_SSTA_BLOCK)
 
-    output = _attn(kernel)(
-        q, k, v,
-        layout="bhsd", config=config, **_extra(kernel, q),
-        block_lut=block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1]),
-        **_causal(kernel, call),
-    )
-    output = untile_ssta_output(
+    return q, k, v, RAGGED_LUT(block_mask, num_heads=q.shape[1]), state
+
+
+def _ssta_config(config_fn) -> dict:
+    """SSTA drives the Triton kernels at a fixed block size, not the tuned one."""
+    config = config_fn()
+    config["BLOCK_M"] = TRITON_SSTA_BLOCK
+    config["BLOCK_N"] = TRITON_SSTA_BLOCK
+    return config
+
+
+def _untile(output, state, call: AttnCall):
+    kwargs = call.attention_kwargs
+    return untile_ssta_output(
         output, state, kwargs["encoder_sequence_length"], kwargs["sp_size"]
     )
-    return output, None
 
 
-def sparge(query, key, value, call: AttnCall, *, kernel: SageKernel):
-    """Data-dependent mask computed from Q/K."""
-    # Not hoisted: only the SSTA and sparge specs require this symbol; the
-    # dense specs in this family must load without it.
-    from aiter.ops.triton.attention.utils import block_attn_mask_to_ragged_lut
-
-    query, key, value = _prepare(kernel, query, key, value)
-    config = _config(kernel)
-
+def _sparge_mask(query, key, value, call: AttnCall, config: dict):
+    """Reorder Q/K/V by a mask computed from Q/K, at the config's tile size."""
     q, k, v, state, block_mask = build_block_mask(
         query, key, value,
         is_causal=call.is_causal,
@@ -122,17 +82,78 @@ def sparge(query, key, value, call: AttnCall, *, kernel: SageKernel):
         ulysses_world_size=call.ctx.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
     )
+    return q, k, v, RAGGED_LUT(block_mask, num_heads=q.shape[1]), state
 
-    output = _attn(kernel)(
-        q, k, v,
-        layout="bhsd", config=config, **_extra(kernel, q),
-        block_lut=block_attn_mask_to_ragged_lut(block_mask, num_heads=q.shape[1]),
-        **_causal(kernel, call),
-    )
+
+def _rotation(query) -> dict:
+    """Sage v2 rotates Q/K by a Hadamard matrix inside the kernel."""
+    return {"hadamard_rotation": True, "R": hadamard.matrix(BLOCK_R, str(query.device))}
+
+
+# ---------------------------------------------------------------------------
+# v1
+# ---------------------------------------------------------------------------
+
+def sage(query, key, value, call: AttnCall):
+    """No mask. The only cell that can join a ring, and only then is there an
+    LSE to merge."""
+    if call.ctx.ring_world_size > 1:
+        return SAGE_V1(query, key, value, layout="bhsd", return_lse=True, smooth_k=True)
+    return SAGE_V1(query, key, value, layout="bhsd"), None
+
+
+def sparse_sage(query, key, value, call: AttnCall):
+    """Tile-based static mask, supplied by the model's sparse config."""
+    config = _ssta_config(CONFIG_V1)
+    q, k, v, block_lut, state = _ssta_mask(query, key, value, call)
+    output = SAGE_V1(q, k, v, layout="bhsd", config=config, block_lut=block_lut)
+    return _untile(output, state, call), None
+
+
+def sparge(query, key, value, call: AttnCall):
+    """Data-dependent mask computed from Q/K."""
+    config = CONFIG_V1()
+    q, k, v, block_lut, state = _sparge_mask(query, key, value, call, config)
+    output = SAGE_V1(q, k, v, layout="bhsd", config=config, block_lut=block_lut)
     return restore_sparge_output(output, state), None
 
 
 # ---------------------------------------------------------------------------
-# specs
+# v2
 # ---------------------------------------------------------------------------
 
+def sage_v2(query, key, value, call: AttnCall):
+    """No mask. The only cell that can join a ring, and only then is there an
+    LSE to merge."""
+    q, k, v = make_contiguous(query, key, value)
+    rotation = _rotation(q)
+    if call.ctx.ring_world_size > 1:
+        return SAGE_V2(q, k, v, layout="bhsd", **rotation,
+                       return_lse=True, causal=call.is_causal)
+    return SAGE_V2(q, k, v, layout="bhsd", **rotation, causal=call.is_causal), None
+
+
+def sparse_sage_v2(query, key, value, call: AttnCall):
+    """Tile-based static mask. The one v2 path that does not make its inputs
+    contiguous -- legacy does not either, and setup_ssta reshapes and expands
+    Q/K/V on the way through, so what the wrapper receives here is not what the
+    other two hand it. Faithful to legacy, not established as safe."""
+    config = _ssta_config(CONFIG_V2)
+    q, k, v, block_lut, state = _ssta_mask(query, key, value, call)
+    output = SAGE_V2(
+        q, k, v, layout="bhsd", config=config, **_rotation(q),
+        block_lut=block_lut, causal=call.is_causal,
+    )
+    return _untile(output, state, call), None
+
+
+def sparge_v2(query, key, value, call: AttnCall):
+    """Data-dependent mask computed from Q/K."""
+    query, key, value = make_contiguous(query, key, value)
+    config = CONFIG_V2()
+    q, k, v, block_lut, state = _sparge_mask(query, key, value, call, config)
+    output = SAGE_V2(
+        q, k, v, layout="bhsd", config=config, **_rotation(q),
+        block_lut=block_lut, causal=call.is_causal,
+    )
+    return restore_sparge_output(output, state), None

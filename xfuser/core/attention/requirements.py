@@ -30,11 +30,6 @@ TESTED_AGAINST = "AITER @ 49c6fdd45 (2026-09-22)"
 def resolve(target: str):
     """Import "module:name" and return the object, or None when absent.
 
-    Public because kernel modules need the same answer the requirements gave:
-    a spec that declares SYMBOL(target) has already established availability
-    through this function, so the kernel fetching that symbol any other way
-    could disagree with its own gate. Memoised, so both cost one import.
-
     Anything raised while importing means absent -- vendor modules fail at
     import for reasons beyond ImportError, AITER's device probe among them.
     """

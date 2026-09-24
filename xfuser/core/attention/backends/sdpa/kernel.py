@@ -32,8 +32,6 @@ def sdpa_flash(query, key, value, call: AttnCall):
 
 
 def sdpa_math(query, key, value, call: AttnCall):
-    # The second value is the attention weight matrix, not a log-sumexp, so it
-    # cannot be merged across ring ranks -- hence returns_lse=False below.
     output, attn_weights = aten._scaled_dot_product_attention_math(
         query, key, value,
         attn_mask=call.attention_kwargs.get("attn_mask"),

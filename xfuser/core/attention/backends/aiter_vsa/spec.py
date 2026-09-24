@@ -13,9 +13,6 @@ SPECS = [
         impl=Impl("kernel:vsa_attention"),
         sparsity="vsa",
         low_precision=True,
-        # Causal and dropout are refused outright; the dense-routing cases are
-        # handled inside the kernel because they depend on the metadata, not
-        # the tensors.
         accepts=NON_CAUSAL & NO_DROPOUT & NO_VARLEN,
         requires=SYMBOL(_VSA) & AITER_ARCH,
     ),

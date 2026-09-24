@@ -11,11 +11,6 @@ import torch
 
 from xfuser.core.attention.requirements import FIRST_OF
 
-# aiter-shim cut 2026-09: a local Sylvester construction (added 2026-06-18)
-# stood in when create_hadamard_matrix was unavailable. Builds at or after the
-# July floor all ship it, and a matrix that does not match what the kernel
-# expects is worse than a clear failure.
-#
 # The symbol moved modules between versions; both spellings are alive in the
 # wild. FIRST_OF gates on either resolving and hands back whichever does, so
 # backends can require this without repeating the paths.

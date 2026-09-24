@@ -3,19 +3,6 @@
 A backend is a callable plus a small set of facts that subsystems *outside* the
 attention layer need in order to reason about it. That set is deliberately
 closed: a field belongs here only if something else in xDiT consumes it.
-
-    returns_lse    ring attention merges per-rank outputs via the LSE
-    requires       availability gating, and skip decisions in the test suite
-    sparsity       which strategy, if any; model capability checks read it
-    head_balanced  the Ulysses head balancer in usp
-    low_precision  the quality warning in runtime_state
-    accepts        pre-call validation, and shape selection in the test suite
-    accepts_prequantized / prequant_rotate
-                   fp8 comms: whether Q/K/V may arrive already quantised, and
-                   how to rotate Q/K before quantising them
-
-Everything else -- quantisation formats, tile sizes, drop rates, routing
-conditions -- is private to the backend module that implements it.
 """
 
 import functools
@@ -172,9 +159,22 @@ class Spec:
     ``requires`` defaults to ALWAYS -- nothing to check.
     """
 
+    # The enum member this spec answers to. The registry keys on it, and it is
+    # what --attention_backend names on the command line.
     type: AttentionBackendType
+
+    # The kernel. Written as an Impl("module:function") relative to the backend
+    # package; the registry turns it into the callable when the backend is
+    # selected.
     impl: AttnFn
+
+    # Whether the second return value is a softmax log-sumexp that ring
+    # attention can merge across ranks. runtime_state refuses the backend when
+    # ring_degree > 1 and this is False.
     returns_lse: bool = False
+
+    # What the machine must provide. Checked once, at backend selection, and a
+    # failure names the missing piece rather than crashing mid-denoising.
     requires: Requirement = ALWAYS
 
     # Which sparsity strategy, if any: "ssta", "sparge", "vsa", "h3".
@@ -182,7 +182,14 @@ class Spec:
     # base_model gates SSTA and sparge separately, and they are not
     # interchangeable for a given model.
     sparsity: Optional[str] = None
+
+    # The kernel writes per-head cost into the head-balance cost sink, so usp
+    # can even out the Ulysses split. True only where the kernel actually does
+    # it; elsewhere head balancing is a no-op.
     head_balanced: bool = False
+
+    # The kernel quantises internally (fp8, mxfp8, int8, mxfp4...), which
+    # runtime_state warns about at startup since it costs output quality.
     low_precision: bool = False
 
     # fp8 comms quantises Q/K/V before the Ulysses all-to-all and hands the
@@ -191,11 +198,18 @@ class Spec:
     # calibration measures the distribution that is actually quantised.
     accepts_prequantized: bool = False
     prequant_rotate: Optional[Callable] = None
+
+    # Which calls the kernel can serve -- head dim, causality, varlen packing,
+    # dropout, self- vs cross-attention. Enforced by run() before dispatch, so
+    # an unsupported call raises with a reason instead of computing something
+    # wrong. Anything not declared here is silently accepted.
     accepts: CallConstraint = ANY_CALL
 
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
     package: str = ""
+
+    # The resolved kernel, cached by resolved() so dispatch is not an import.
     _resolved: Optional[AttnFn] = None
 
     @property

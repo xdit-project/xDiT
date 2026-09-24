@@ -29,6 +29,13 @@ def from_bshd(tensor: torch.Tensor) -> torch.Tensor:
     return torch.permute(tensor, _BHSD_TO_BSHD)
 
 
+def make_contiguous(*tensors: torch.Tensor):
+    """Contiguous copies, for kernels that take a layout argument instead of a
+    permuted view and so have no to_bshd call to ask for it."""
+    out = tuple(t.contiguous() for t in tensors)
+    return out[0] if len(out) == 1 else out
+
+
 @dataclass(frozen=True)
 class PackedQKV:
     """Flattened Q with packed K/V, ready for a varlen kernel."""

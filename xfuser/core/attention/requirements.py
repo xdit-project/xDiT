@@ -27,8 +27,17 @@ TESTED_AGAINST = "AITER @ 49c6fdd45 (2026-09-22)"
 # ---------------------------------------------------------------------------
 
 @functools.lru_cache(maxsize=None)
-def _resolve(target: str):
-    """Import "module:name" and return the object, or None."""
+def resolve(target: str):
+    """Import "module:name" and return the object, or None when absent.
+
+    Public because kernel modules need the same answer the requirements gave:
+    a spec that declares SYMBOL(target) has already established availability
+    through this function, so the kernel fetching that symbol any other way
+    could disagree with its own gate. Memoised, so both cost one import.
+
+    Anything raised while importing means absent -- vendor modules fail at
+    import for reasons beyond ImportError, AITER's device probe among them.
+    """
     module_name, _, symbol = target.partition(":")
     try:
         module = importlib.import_module(module_name)
@@ -42,7 +51,7 @@ def _signature_params(target: str) -> Optional[frozenset]:
     """Parameter names of "module:name", or None when the signature cannot be
     read at all -- C extensions without argument clinic behave this way, and
     that is a different answer from "the parameter is absent"."""
-    obj = _resolve(target)
+    obj = resolve(target)
     if obj is None:
         return None
     try:
@@ -153,7 +162,7 @@ class SYMBOL(Requirement):
     target: str
 
     def unmet(self) -> Optional[str]:
-        if _resolve(self.target) is None:
+        if resolve(self.target) is None:
             return f"{self.target.replace(':', '.')} is not importable"
         return None
 
@@ -167,7 +176,7 @@ class PARAM(Requirement):
 
     def unmet(self) -> Optional[str]:
         name = self.target.replace(":", ".")
-        if _resolve(self.target) is None:
+        if resolve(self.target) is None:
             return f"{name} is not importable"
         params = _signature_params(self.target)
         if params is None:
@@ -197,13 +206,13 @@ class FIRST_OF(Requirement):
         return ", ".join(t.replace(":", ".") for t in self.targets)
 
     def unmet(self) -> Optional[str]:
-        if any(_resolve(t) is not None for t in self.targets):
+        if any(resolve(t) is not None for t in self.targets):
             return None
         return f"none of these is importable: {self._names()}"
 
     def resolve(self):
         for target in self.targets:
-            obj = _resolve(target)
+            obj = resolve(target)
             if obj is not None:
                 return obj
         raise ImportError(self.unmet())

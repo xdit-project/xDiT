@@ -13,6 +13,7 @@ from typing import Optional
 
 import aiter
 import torch
+from torch.library import custom_op, register_fake
 
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
@@ -110,31 +111,72 @@ def _mha_v4(query, key, value, call: AttnCall):
     return from_bshd(mha_v4(q, k, v, fp8, fp8, fp8)), None
 
 
-def _legacy_dense(q, k, v, call: AttnCall):
-    (qq, q_descale), (kk, k_descale), (vv, v_descale) = _quantize(q, k, v)
+# Quantisation and the kernel sit behind a custom op so Dynamo steps over them
+# rather than tracing the per-tensor max and the dtype casts. Only these two
+# paths are wrapped: pre-quantised takes fp8 straight from fp8 comms, and MHA
+# v4 quantises inside AITER. Rotation stays outside, as it is a plain matmul
+# Dynamo traces happily and fp8 comms may have applied it already.
+#
+# Named without the _attention suffix the legacy module uses for the same two
+# ops. Registering a name twice does not raise -- the second registration wins
+# silently, for both callers -- so sharing a name while both modules exist
+# would have the equivalence suite compare this implementation with itself.
+_VARLEN = getattr(aiter, "flash_attn_varlen_fp8_pertensor_func", None)
+
+
+@custom_op("xfuser::aiter_fp8_dense", mutates_args=())
+def _dense_op(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    softmax_scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    (q, q_descale), (k, k_descale), (v, v_descale) = _quantize(query, key, value)
     return aiter.flash_attn_fp8_pertensor_func(
-        qq, kk, vv,
-        causal=call.is_causal, softmax_scale=q.shape[-1] ** -0.5,
+        q, k, v,
+        causal=is_causal, softmax_scale=softmax_scale,
         q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
     )
 
 
-def _legacy_varlen(q, k, v, call: AttnCall):
-    varlen_func = getattr(aiter, "flash_attn_varlen_fp8_pertensor_func", None)
-    if varlen_func is None:
+@register_fake("xfuser::aiter_fp8_dense")
+def _dense_op_fake(query, key, value, softmax_scale, is_causal):
+    return torch.empty_like(query)
+
+
+@custom_op("xfuser::aiter_fp8_varlen", mutates_args=())
+def _varlen_op(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    is_causal: bool,
+) -> torch.Tensor:
+    if _VARLEN is None:
         raise RuntimeError(
             "aiter.flash_attn_varlen_fp8_pertensor_func is not available"
         )
-
-    p = pack_kv(q, k, v, call.varlen)
-    (qq, q_descale), (kk, k_descale), (vv, v_descale) = _quantize(p.q, p.k, p.v)
-    return p.unflatten(varlen_func(
-        qq, kk, vv,
-        cu_seqlens_q=p.cu_seqlens_q, cu_seqlens_k=p.cu_seqlens_k,
-        max_seqlen_q=p.max_seqlen_q, max_seqlen_k=p.max_seqlen_k,
-        softmax_scale=p.head_dim ** -0.5, causal=call.is_causal,
+    (q, q_descale), (k, k_descale), (v, v_descale) = _quantize(query, key, value)
+    return _VARLEN(
+        q, k, v,
+        cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale, causal=is_causal,
         q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
-    ))
+    )
+
+
+@register_fake("xfuser::aiter_fp8_varlen")
+def _varlen_op_fake(
+    query, key, value, cu_seqlens_q, cu_seqlens_k,
+    max_seqlen_q, max_seqlen_k, softmax_scale, is_causal,
+):
+    return torch.empty_like(query)
 
 
 def _legacy(query, key, value, call: AttnCall):
@@ -143,8 +185,15 @@ def _legacy(query, key, value, call: AttnCall):
     q, k, v = to_bshd(query, key, value, contiguous=True)
     q, k = hadamard.rotate_qk(q, k)
 
-    launch = _legacy_dense if call.varlen is None else _legacy_varlen
-    return from_bshd(launch(q, k, v, call)), None
+    if call.varlen is None:
+        out = _dense_op(q, k, v, q.shape[-1] ** -0.5, call.is_causal)
+    else:
+        p = pack_kv(q, k, v, call.varlen)
+        out = p.unflatten(_varlen_op(
+            p.q, p.k, p.v, p.cu_seqlens_q, p.cu_seqlens_k,
+            p.max_seqlen_q, p.max_seqlen_k, p.head_dim ** -0.5, call.is_causal,
+        ))
+    return from_bshd(out), None
 
 
 def aiter_fp8(query, key, value, call: AttnCall):

@@ -751,15 +751,10 @@ AITER_MHA_V4_ONLY_BACKENDS = tuple(
     ]
 )
 AITER_MHA_V4_ONLY_BACKEND_SET = frozenset(AITER_MHA_V4_ONLY_BACKENDS)
-# Ring weights each K/V chunk by exp(lse), so only a bias IDENTICAL across chunks cancels. K
-# smoothing shifts every score in a call by q.k_mean and ring derives a separate k_mean per chunk;
-# aiter now adds that shift back into the exported LSE. BF16FP8 is the one recipe that never
-# smooths K, so the correction does not reach it and it keeps a separate ~1 nat per-chunk bias: on
-# a captured Wan layer it merges at relL2 0.93 against its own single-shot output, where every
-# other row lands at 0.10 or below.
-AITER_MHA_V4_RING_SAFE_BACKEND_SET = AITER_MHA_V4_ONLY_BACKEND_SET - frozenset(
-    {AttentionBackendType.AITER_BF16FP8}
-)
+# Ring weights each K/V chunk by exp(lse), so a recipe is only safe here once its exported LSE
+# carries a bias IDENTICAL across chunks. Output correctness says nothing about that, because O
+# never reads the LSE; both defects found this way passed every output test. Measure the per-chunk
+# bias spread on real tensors before adding a recipe.
 AITER_MHA_V4_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_SPARGE_BACKENDS)
 AITER_MHA_V4_GFX942_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_I8FP8_SPARGE,

@@ -25,14 +25,9 @@ if envs._is_npu():
     from torch.npu import manual_seed as device_manual_seed
     from torch.npu import manual_seed_all as device_manual_seed_all
 
-from xfuser.core.distributed.attention_backend import (
-    AITER_LOW_PRECISION_BACKENDS,
-    AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET,
-    AITER_MHA_V4_ONLY_BACKEND_SET,
-    AITER_MHA_V4_SPARGE_BACKENDS,
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
-    AttentionBackendType,
-)
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.requirements import TESTED_AGAINST
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
 from xfuser.config.config import (

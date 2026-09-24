@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Tuple
 
-from xfuser.core.attention.requirements import ARCH, PARAM, SYMBOL, Requirement
+from xfuser.core.attention.requirements import ALWAYS, ARCH, PARAM, SYMBOL, Requirement
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
     MHA_ONLY,
@@ -97,20 +97,12 @@ FORMATS = [
     MhaV4Format("F4F4",      Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
     MhaV4Format("MXFP8",     Fmt.NATIVE_FP8,  Fmt.NATIVE_FP8,  GFX950,
                 qk_scale=Scale.E8M0_PER_1X32, v_scale=Scale.F32_PER_TENSOR),
-    # Dense AITER_FP8 lives in the legacy module until its fp8 helpers migrate;
-    # the sparge variant needs nothing but mha_v4 and is generated here.
     MhaV4Format("FP8",       Fmt.NATIVE_FP8,  Fmt.NATIVE_FP8,  GFX950_OR_GFX942,
                 dense=False),
 ]
 
 
 DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128)
-
-# SELF_ATTENTION is stricter than the legacy validator, which checks head
-# counts but never that Q and K/V are the same length. Sparge reorders both
-# against one spatial layout, so a cross-attention call indexes K/V out of
-# bounds -- observed as GPU memory corruption and a cored process, not an
-# exception. Declared rather than left latent.
 SPARGE_CALLS = DENSE_CALLS & MHA_ONLY & SELF_ATTENTION
 
 
@@ -118,13 +110,19 @@ SPARGE_CALLS = DENSE_CALLS & MHA_ONLY & SELF_ATTENTION
 # specs
 # ---------------------------------------------------------------------------
 
+def _scale_modes(fmt: MhaV4Format) -> Requirement:
+    if fmt.qk_scale is None:
+        return ALWAYS
+    return PARAM(_MHA_V4, "q_scale_mode")
+
+
 def _dense_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}"],
         impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=DENSE_CALLS,
-        requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942,
+        requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942 & _scale_modes(fmt),
     )
 
 
@@ -136,7 +134,8 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
         head_balanced=True,
         low_precision=True,
         accepts=SPARGE_CALLS,
-        requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask") & fmt.sparge_on,
+        requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask")
+               & _scale_modes(fmt) & fmt.sparge_on,
     )
 
 

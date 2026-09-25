@@ -609,3 +609,78 @@ def test_impl_bound_arguments_are_accepted_by_the_target():
         accepted = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
         missing = set(spec.impl.bound) - accepted
         assert not missing, f"{spec.type.name}: {symbol} takes no {sorted(missing)}"
+
+
+# --------------------------------------------------------------------------
+# trailing-pad packing
+# --------------------------------------------------------------------------
+
+def _packed(max_seqlen_k, **kwargs):
+    from xfuser.core.attention.spec import VarlenPacking
+
+    return AttnCall(
+        varlen=VarlenPacking(
+            indices_k=torch.zeros(1, dtype=torch.int64),
+            cu_seqlens_k=torch.tensor([0, max_seqlen_k], dtype=torch.int32),
+            max_seqlen_k=max_seqlen_k,
+        ),
+        attention_kwargs=kwargs,
+    )
+
+
+def test_trailing_pad_only_accepts_a_dense_call():
+    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+
+    t = torch.empty((1, 2, 8, 128))
+    assert TRAILING_PAD_ONLY.unmet(t, t, t, AttnCall()) is None
+
+
+def test_trailing_pad_only_refuses_packing_that_is_not_declared():
+    """cu_seqlens_k having one segment does not make the pad trailing; only the
+    producer knows, so an undeclared packed call is refused rather than served
+    with interior gaps silently ignored."""
+    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+
+    t = torch.empty((1, 2, 8, 128))
+    reason = TRAILING_PAD_ONLY.unmet(t, t, t, _packed(4))
+    assert reason is not None and "varlen packed keys" in reason
+
+
+def test_trailing_pad_only_accepts_a_declared_pad():
+    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+
+    t = torch.empty((1, 2, 8, 128))
+    assert TRAILING_PAD_ONLY.unmet(t, t, t, _packed(4, valid_kv_len=4)) is None
+
+
+def test_trailing_pad_only_checks_the_declared_length():
+    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+
+    t = torch.empty((1, 2, 8, 128))
+    assert "valid_kv_len" in TRAILING_PAD_ONLY.unmet(t, t, t, _packed(9, valid_kv_len=9))
+    assert "valid_kv_len" in TRAILING_PAD_ONLY.unmet(t, t, t, _packed(4, valid_kv_len=0))
+
+
+def test_trailing_pad_only_requires_the_longest_segment_to_be_the_valid_count():
+    """A trailing pad has one run of real keys, so its longest segment is the
+    valid count. A disagreement means the pad is not trailing."""
+    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+
+    t = torch.empty((1, 2, 8, 128))
+    reason = TRAILING_PAD_ONLY.unmet(t, t, t, _packed(6, valid_kv_len=4))
+    assert reason is not None and "max_seqlen_k" in reason
+
+
+def test_dense_mha_v4_serves_a_declared_pad_but_sparge_does_not():
+    """Sparge needs the key length padded to its KV tile, which is exactly the
+    alignment a trailing-pad slice removes."""
+    from xfuser.core.attention import registry
+
+    t = torch.empty((1, 2, 8, 128))
+    call = _packed(4, valid_kv_len=4)
+
+    dense = registry.get(AttentionBackendType.AITER_BF16)
+    assert dense.rejects(t, t, t, call) is None
+
+    sparge = registry.get(AttentionBackendType.AITER_FP8_SPARGE)
+    assert sparge.rejects(t, t, t, call) is not None

@@ -356,8 +356,14 @@ def _has_kv_cache(attn_layer) -> bool:
 
 def _trim_trailing_kv_padding(key, value, attention_kwargs):
     """Slice a uniform padded K/V suffix while retaining every query row."""
-    valid_kv_len = (attention_kwargs or {}).get("valid_kv_len")
+    kwargs = attention_kwargs or {}
+    valid_kv_len = kwargs.get("valid_kv_len")
     if valid_kv_len is None:
+        return key, value
+    if kwargs.get("indices_k") is not None:
+        # A producer that publishes both leaves the choice to the backend: a
+        # varlen-capable one packs K/V itself, and slicing here would leave its
+        # indices pointing past the end of K.
         return key, value
     if not 0 < valid_kv_len <= key.shape[2]:
         raise ValueError(

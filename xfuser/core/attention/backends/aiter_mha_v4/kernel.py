@@ -53,6 +53,14 @@ def _launch(q, k, v, fmt: MhaV4Format, block_mask=None):
 
 
 def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
+    # A declared trailing pad is served by shortening K/V rather than masking;
+    # accepts has already established the pad is trailing and its length valid.
+    # Q is left alone: it is never packed, and trimming it by a key-side length
+    # would be wrong for cross attention, where the two sequences differ.
+    if call.varlen is not None:
+        valid = call.attention_kwargs["valid_kv_len"]
+        key, value = key[:, :, :valid], value[:, :, :valid]
+
     q, k, v = to_bshd(query, key, value, contiguous=True)
     return from_bshd(_launch(q, k, v, fmt)), None
 

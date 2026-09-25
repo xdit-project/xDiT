@@ -104,6 +104,37 @@ class _NoVarlen(CallConstraint):
         return "does not support varlen packed keys" if call.varlen else None
 
 
+class _TrailingPadOnly(CallConstraint):
+    """Packed keys are acceptable only as a declared uniform trailing pad.
+
+    A kernel with no key-padding mask can still serve a padded request when the
+    pad is one trailing block: keeping every query row and shortening K/V is
+    the same computation. Only the producer knows the pad is trailing --
+    cu_seqlens_k having one segment does not imply it, and interior gaps would
+    be silently mis-served -- so the declaration is what makes it safe, and a
+    packed call without one is refused.
+    """
+
+    def unmet(self, query, key, value, call) -> Optional[str]:
+        if call.varlen is None:
+            return None
+
+        valid_kv_len = call.attention_kwargs.get("valid_kv_len")
+        if valid_kv_len is None:
+            return "does not support varlen packed keys"
+        if not 0 < valid_kv_len <= key.shape[2]:
+            return (
+                f"needs valid_kv_len in [1, {key.shape[2]}], got {valid_kv_len}"
+            )
+        if call.varlen.max_seqlen_k != valid_kv_len:
+            return (
+                "needs a trailing pad, whose longest segment is its valid key "
+                f"count: valid_kv_len={valid_kv_len} but "
+                f"max_seqlen_k={call.varlen.max_seqlen_k}"
+            )
+        return None
+
+
 @dataclass(frozen=True)
 class _NoDropout(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
@@ -116,4 +147,5 @@ NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
+TRAILING_PAD_ONLY = _TrailingPadOnly()
 NO_DROPOUT = _NoDropout()

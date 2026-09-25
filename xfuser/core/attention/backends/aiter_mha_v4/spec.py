@@ -22,6 +22,7 @@ from xfuser.core.attention.constraints import (
     NO_DROPOUT,
     NO_VARLEN,
     SELF_ATTENTION,
+    TRAILING_PAD_ONLY,
 )
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
@@ -102,8 +103,13 @@ FORMATS = [
 ]
 
 
-DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128)
-SPARGE_CALLS = DENSE_CALLS & MHA_ONLY & SELF_ATTENTION
+# Dense serves a declared trailing pad by shortening K/V; sparge cannot, since
+# its sorted-sparse launch needs the key length padded to its KV tile, which is
+# the alignment such a slice removes.
+DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & TRAILING_PAD_ONLY & HEAD_DIM(128)
+SPARGE_CALLS = (
+    NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128) & MHA_ONLY & SELF_ATTENTION
+)
 
 
 # ---------------------------------------------------------------------------

@@ -2,9 +2,9 @@
 
 Six functions rather than three parameterised by a version flag: the two
 versions share only their mask construction, and what they do differ in is not
-uniform. Sage v2 wants contiguous inputs -- except under SSTA, where legacy
-never applied that shim -- and is passed `causal`, which v1's wrapper accepts
-but has never been given. A flag asserts those hold per version; they do not.
+uniform. Sage v2 wants contiguous inputs -- except under SSTA, which does not
+apply them -- and is passed `causal`, which v1's wrapper accepts but is never
+given. A flag would assert those hold per version; they do not.
 """
 
 import math
@@ -136,9 +136,9 @@ def sage_v2(query, key, value, call: AttnCall):
 
 def sparse_sage_v2(query, key, value, call: AttnCall):
     """Tile-based static mask. The one v2 path that does not make its inputs
-    contiguous -- legacy does not either, and setup_ssta reshapes and expands
-    Q/K/V on the way through, so what the wrapper receives here is not what the
-    other two hand it. Faithful to legacy, not established as safe."""
+    contiguous: setup_ssta reshapes and expands Q/K/V on the way through, so
+    what the wrapper receives here is not what the other two hand it. Whether
+    that is safe has not been established."""
     config = _ssta_config(CONFIG_V2)
     q, k, v, block_lut, state = _ssta_mask(query, key, value, call)
     output = SAGE_V2(

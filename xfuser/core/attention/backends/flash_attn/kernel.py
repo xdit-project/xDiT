@@ -44,7 +44,7 @@ def flash_2(query, key, value, call: AttnCall):
     from flash_attn import flash_attn_func, flash_attn_varlen_func
 
     # Deliberately not contiguous: FAv2 accepts the permuted view, and the
-    # legacy backend never forced a copy here.
+    # this path never forces a copy.
     q, k, v = to_bshd(query, key, value)
 
     if call.varlen is None:

@@ -93,8 +93,8 @@ class VarlenPacking:
 class ParallelContext:
     """Sequence-parallel degrees, passed in rather than read from globals.
 
-    Backends previously called get_ulysses_parallel_world_size() and friends
-    directly, which made them untestable without an initialised process group.
+    A backend that called get_ulysses_parallel_world_size() directly could not
+    be exercised without an initialised process group.
     """
 
     ulysses_world_size: int = 1
@@ -110,9 +110,8 @@ class AttnCall:
     varlen: Optional[VarlenPacking] = None
     ctx: ParallelContext = field(default_factory=ParallelContext)
 
-    # Transitional: the untyped attention_kwargs dict carried through from the
-    # model. Phase 6 replaces this with per-strategy typed config objects owned
-    # by the sparsity strategy that reads them.
+    # The untyped dict the model passes through. Each sparsity strategy digs
+    # out its own keys; a typed config per strategy would be better.
     attention_kwargs: dict = field(default_factory=dict)
 
 
@@ -152,8 +151,7 @@ class Spec:
     ``returns_lse`` defaults to False: a backend that produces a softmax
     log-sumexp ring attention can merge on must say so. Conservative, because
     a wrong True yields silently incorrect ring output while a wrong False only
-    forgoes ring. The old-vs-new equivalence suite checks this field against
-    the legacy ring blocklist, so an omission surfaces as a failing test.
+    forgoes ring.
 
     ``requires`` defaults to ALWAYS -- nothing to check.
     """

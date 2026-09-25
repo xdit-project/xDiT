@@ -49,20 +49,17 @@ LUT = SYMBOL(_RAGGED_LUT)
 
 # The rotation matrix is BLOCK_R wide and the kernel reads a full block per
 # head, so a smaller head dimension reads past its end: two allocations of the
-# same matrix give different results. The legacy path has no guard and returns
+# same matrix give different results. Without this guard the kernel returns
 # whatever was in adjacent memory.
 V2_CALLS = HEAD_DIM(BLOCK_R)
 
 # Both masked sources reorder Q and K/V against one spatial layout, so a
-# cross-attention call indexes K/V out of bounds. The legacy path has no such
-# guard and cores the process rather than raising.
+# cross-attention call indexes K/V out of bounds, which cores the process
+# rather than raising.
 MASKED_CALLS = SELF_ATTENTION & NO_VARLEN
 
 
 SPECS = [
-    # NOTE: v1's wrapper accepts `causal`, but the legacy backend never passed
-    # it -- a causal request silently returns non-causal output. Ported
-    # unchanged; declaring NON_CAUSAL here is the one-line fix.
     Spec(
         AttentionBackendType.AITER_SAGE,
         impl=Impl("kernel:sage"),

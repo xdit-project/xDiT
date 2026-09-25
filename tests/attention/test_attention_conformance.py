@@ -1,11 +1,9 @@
-"""Phase 0 baseline: characterise every registered attention backend.
+"""Characterise every registered attention backend.
 
-This measures what the *current* backends do today, before the refactor moves
-anything. It is a characterisation harness, not a correctness gate: for each
-backend it records the deviation from an fp32 SDPA reference and writes a
-snapshot. Sparse backends deviate a lot by design, so nothing here asserts a
-quality threshold -- the snapshot is the baseline that later phases compare
-against.
+A characterisation harness, not a correctness gate: for each backend it
+records the deviation from an fp32 SDPA reference and writes a snapshot.
+Sparse backends deviate a lot by design, so nothing here asserts a quality
+threshold -- the snapshot is what later runs are compared against.
 
 Run standalone for the report:
 

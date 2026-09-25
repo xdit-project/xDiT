@@ -1,8 +1,8 @@
-"""Phase 1: the attention framework, with no backends registered yet.
+"""The attention framework itself, with no backends registered.
 
-These exercise the pieces that everything later depends on -- predicates,
-shape constraints, the registry and the layout helpers -- without needing a
-GPU or any vendor library.
+These exercise the pieces every backend depends on -- predicates, call
+constraints, the registry and the layout helpers -- without needing a GPU or
+any vendor library.
 """
 
 import pytest
@@ -211,7 +211,7 @@ def test_queries_replace_the_group_tuples(clean_registry):
     )
 
 
-def test_missing_specs_tracks_migration_progress(clean_registry):
+def test_missing_specs_lists_members_without_a_spec(clean_registry):
     assert len(clean_registry.missing_specs()) == len(list(AttentionBackendType))
     clean_registry.register([_spec(AttentionBackendType.SDPA)])
     assert AttentionBackendType.SDPA not in clean_registry.missing_specs()
@@ -273,7 +273,7 @@ def test_varlen_packing_absent_without_indices():
 
 
 def test_pack_kv_matches_legacy_semantics():
-    """Ported from _varlen_pack_keys: Q is never filtered, K/V are gathered."""
+    """Q is never filtered; K/V are gathered by the packing indices."""
     batch, seq_len, heads, head_dim = 2, 4, 3, 8
     q = torch.randn(batch, seq_len, heads, head_dim)
     k = torch.randn(batch, seq_len, heads, head_dim)
@@ -421,14 +421,14 @@ def test_run_enforces_accepts_before_dispatching():
 
 
 def test_backends_without_an_lse_cannot_join_ring():
-    """The property the legacy 22-member blocklist was a hand-maintained proxy
-    for. A spec claiming returns_lse must actually produce one."""
+    """Ring attention merges a softmax log-sumexp across ranks, so a backend
+    that produces none cannot join. Every spec must answer that question."""
     from xfuser.core.attention import registry
 
     for spec in registry.where(returns_lse=False):
         assert spec.returns_lse is False   # trivially true; the value is the point
-    # Every registered spec answers the question at all, which the blocklist
-    # could not guarantee -- a backend absent from it was assumed ring-capable.
+    # The value matters less than every spec having one: an unanswered
+    # backend would otherwise be assumed ring-capable by default.
     assert all(isinstance(s.returns_lse, bool) for s in registry.REGISTRY.values())
 
 
@@ -489,10 +489,9 @@ def test_hadamard_declares_its_symbol_once():
 # --------------------------------------------------------------------------
 
 def test_every_live_shim_carries_a_date():
-    """Shims accumulated in the legacy module because nobody could tell when
-    one became safe to delete. A live marker must say when it was introduced,
-    so shim_report.py can age it; historical "aiter-shim cut" notes are not
-    subject to this."""
+    """Shims accumulate when nobody can tell which are safe to delete. A live
+    marker must say when it was introduced, so shim_report.py can age it;
+    historical "aiter-shim cut" notes are not subject to this."""
     import sys
     from pathlib import Path
 

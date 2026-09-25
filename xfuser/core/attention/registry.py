@@ -5,9 +5,9 @@ imports them explicitly and registers the result. Explicit rather than
 auto-discovered, so that grep finds every backend and a forgotten import is a
 loud KeyError rather than a silently absent backend.
 
-Queries over the registry replace the hand-maintained group tuples that
-currently live in attention_backend.py and are consumed across runtime_state,
-base_model and usp.
+Consumers ask the registry rather than keeping their own lists: runtime_state
+asks which backends quantise, usp which balance heads, base_model which carry
+each sparsity strategy. A new backend joins those sets by declaring the field.
 """
 
 from typing import Dict, Iterable, List, Optional
@@ -55,14 +55,13 @@ def where(**flags) -> List[Spec]:
 
 
 def types_where(**flags) -> frozenset:
-    """The same query as a set of enum members, which is what the old group
-    tuples were."""
+    """The same query, as a set of enum members."""
     return frozenset(spec.type for spec in where(**flags))
 
 
 def missing_specs() -> List[AttentionBackendType]:
-    """Enum members with no spec. Empty once migration completes; until then
-    this is the list of backends still served by the legacy module."""
+    """Enum members with no spec. Should be empty: a member without one cannot
+    be selected."""
     return [b for b in AttentionBackendType if b not in REGISTRY]
 
 

@@ -1,9 +1,7 @@
 """Sparge: data-dependent block masking.
 
-Ported from _build_sparge_block_mask in the legacy attention_backend module.
-The only behavioural change is that the Ulysses degree arrives on the call
-rather than being read from a global, so this is testable without a process
-group.
+The Ulysses degree is a parameter rather than a global read, so a mask can be
+built without a process group.
 """
 
 from dataclasses import dataclass

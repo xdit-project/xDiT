@@ -5,7 +5,7 @@ Three paths, picked by what the call carries:
   pre-quantised   Q/K/V already fp8 from fp8 comms, descales in the kwargs
   MHA v4          dense, head_dim 128, non-causal -- the kernel owns rotation
                   and quantisation
-  legacy          everything else: rotate Q/K here, quantise, dense or varlen
+  rotate here     everything else: rotate Q/K, quantise, then dense or varlen
 
 """
 
@@ -86,10 +86,10 @@ _USE_MHA_V4 = (
     & SYMBOL("aiter.ops.mha_v4:native_fp8_format")
 ).satisfied()
 
-# The spec's requires deliberately omits mha_v4: the legacy path below serves
-# builds without it, and requiring it would refuse AITER_FP8 outright on an
-# older AITER. So the import is conditional rather than unconditional at the
-# top of the module.
+# The spec's requires deliberately omits mha_v4: the rotate-here path below
+# serves builds without it, and requiring it would refuse AITER_FP8 outright on
+# an AITER that has no MHA v4. Hence a conditional import rather than a plain
+# one at the top of the module.
 if _USE_MHA_V4:
     from aiter.ops.mha_v4 import mha_v4, native_fp8_format
 
@@ -116,11 +116,6 @@ def _mha_v4(query, key, value, call: AttnCall):
 # paths are wrapped: pre-quantised takes fp8 straight from fp8 comms, and MHA
 # v4 quantises inside AITER. Rotation stays outside, as it is a plain matmul
 # Dynamo traces happily and fp8 comms may have applied it already.
-#
-# Named without the _attention suffix the legacy module uses for the same two
-# ops. Registering a name twice does not raise -- the second registration wins
-# silently, for both callers -- so sharing a name while both modules exist
-# would have the equivalence suite compare this implementation with itself.
 _VARLEN = getattr(aiter, "flash_attn_varlen_fp8_pertensor_func", None)
 
 
@@ -179,7 +174,7 @@ def _varlen_op_fake(
     return torch.empty_like(query)
 
 
-def _legacy(query, key, value, call: AttnCall):
+def _rotate_and_quantize(query, key, value, call: AttnCall):
     """Rotate Q/K here, quantise, then dense or varlen. Both kernels expect
     pre-rotated Q/K, unlike MHA v4 which does its own."""
     q, k, v = to_bshd(query, key, value, contiguous=True)
@@ -201,6 +196,6 @@ def aiter_fp8(query, key, value, call: AttnCall):
         return _pre_quantized(query, key, value, call)
     if _mha_v4_eligible(query, call):
         return _mha_v4(query, key, value, call)
-    return _legacy(query, key, value, call)
+    return _rotate_and_quantize(query, key, value, call)
 
 

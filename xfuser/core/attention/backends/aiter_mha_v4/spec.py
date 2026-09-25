@@ -5,7 +5,7 @@ table of (Q/K format, V format). Adding a format is a row plus two enum
 members; everything else is derived.
 
 AITER_FP8's *dense* path is not here -- it predates MHA v4 and still carries a
-Hadamard-rotation and varlen fallback, so it migrates with those helpers. Its
+Hadamard-rotation and varlen fallback, so it lives with those helpers. Its
 sparge variant is pure table and is generated below.
 """
 

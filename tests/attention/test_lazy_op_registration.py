@@ -131,9 +131,9 @@ def test_lazy_import_through_inductor(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_spec_run_is_traceable_under_fullgraph():
-    """Phase 5 put Spec.run on the hot path: it builds an AttnCall, walks the
-    constraint chain, then calls impl. All of that now sits inside the region
-    the transformer forward traces, where there used to be a dict lookup."""
+    """Spec.run is on the hot path: it builds an AttnCall, walks the constraint
+    chain, then calls impl -- all inside the region the transformer forward
+    traces."""
     from xfuser.core.attention import registry
     from xfuser.core.attention.spec import AttentionBackendType, AttnCall
 

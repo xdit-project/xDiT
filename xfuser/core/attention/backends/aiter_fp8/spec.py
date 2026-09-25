@@ -5,7 +5,7 @@ Three paths, picked by what the call carries:
   pre-quantised   Q/K/V already fp8 from fp8 comms, descales in the kwargs
   MHA v4          dense, head_dim 128, non-causal -- the kernel owns rotation
                   and quantisation
-  legacy          everything else: rotate Q/K here, quantise, dense or varlen
+  rotate here     everything else: rotate Q/K, quantise, then dense or varlen
 """
 
 from xfuser.core.attention.numerics import hadamard

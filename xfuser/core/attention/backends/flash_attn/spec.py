@@ -1,10 +1,5 @@
-"""Dao-AILab FlashAttention, v2 through v4, plus the fp8/fp4 recipes.
-
-FAv2 is NOT CUDA-only: envs.check_flash_attn admits ROCm, and
-_select_attention_backend picks FLASH on HIP when aiter is absent. Gating it on
-cuda would take that path away from AMD users, so it stays symbol-gated. FAv3
-(Hopper), FAv4 (CUTE DSL) and SageAttention have no ROCm build; the platform
-check turns "not importable" into a message that says why.
+"""
+FlashAttention, v2 through v4, plus the fp8/fp4 recipes.
 """
 
 from xfuser.core.attention.constraints import NO_VARLEN

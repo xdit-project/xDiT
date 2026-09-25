@@ -823,7 +823,7 @@ def flex_h3_vsa_attention(
 
 def h3_vsa_triton_is_usable(device: torch.device) -> bool:
     """Whether the hand-written kernel can run on ``device``."""
-    from xfuser.core import vsa_h3_triton
+    from . import triton_kernel as vsa_h3_triton
 
     # The kernel is launched on the tensors' own device, so a CPU tensor cannot
     # use it however Triton is built.
@@ -855,7 +855,7 @@ def h3_vsa_attention(
     the ones that may fall back.
     """
     if use_triton:
-        from xfuser.core.vsa_h3_triton import (
+        from .triton_kernel import (
             triton_h3_vsa_attention,
             triton_pool_h3_vsa_tiles,
         )

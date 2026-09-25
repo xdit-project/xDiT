@@ -1,6 +1,9 @@
 from typing import Callable, List, Optional, Type, TypeVar
 
-from xfuser.core.distributed.attention_backend import AttentionBackendType, env_info
+from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.envs import PACKAGES_CHECKER
+
+env_info = PACKAGES_CHECKER.get_packages_info()
 
 T = TypeVar("T", bound="AttentionSchedule")
 

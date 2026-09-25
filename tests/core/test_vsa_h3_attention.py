@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from xfuser.core.vsa_h3_attention import (
+from xfuser.core.attention.backends.vsa_h3.attention import (
     FASTH3_VSA_KV_LIST_ALIGNMENT,
     FASTH3_VSA_SPARSITY,
     FASTH3_VSA_TILE_ELEMENTS,
@@ -336,8 +336,9 @@ def test_flex_h3_vsa_attention_matches_the_dense_reference():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_triton_vsa_h3_backend_falls_back_to_flex(monkeypatch):
     """TRITON_VSA_H3 must run the Flex path where the kernel cannot go."""
-    from xfuser.core import vsa_h3_attention
-    from xfuser.core.distributed import attention_backend
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.backends.vsa_h3 import attention as vsa_h3_attention
+    from xfuser.core.attention.spec import AttentionBackendType, AttnCall
 
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -353,13 +354,15 @@ def test_triton_vsa_h3_backend_falls_back_to_flex(monkeypatch):
     monkeypatch.setattr(
         vsa_h3_attention, "h3_vsa_triton_is_usable", lambda device: False
     )
-    monkeypatch.setattr(attention_backend, "_warned_vsa_h3_triton_missing", False)
-    fell_back, _ = attention_backend._triton_vsa_h3_attn_call(
-        query, key, value, 0.0, False, kwargs
-    )
-    flex, _ = attention_backend._flex_vsa_h3_attn_call(
-        query, key, value, 0.0, False, kwargs
-    )
+
+    def run(backend):
+        spec = registry.get(backend)
+        spec.resolved()
+        out, _ = spec.run(query, key, value, AttnCall(attention_kwargs=kwargs))
+        return out
+
+    fell_back = run(AttentionBackendType.TRITON_VSA_H3)
+    flex = run(AttentionBackendType.FLEX_VSA_H3)
 
     assert torch.equal(fell_back, flex)
 
@@ -368,7 +371,9 @@ def test_triton_vsa_h3_backend_falls_back_to_flex(monkeypatch):
 @pytest.mark.parametrize("use_triton", [False, True])
 def test_h3_vsa_attention_backends_agree_with_the_dense_reference(use_triton):
     """Both kernels must produce the same gated, packed-order output."""
-    from xfuser.core import vsa_h3_triton
+    from xfuser.core.attention.backends.vsa_h3 import (
+        triton_kernel as vsa_h3_triton,
+    )
 
     if use_triton and not vsa_h3_triton.is_available():
         pytest.skip("Triton is unavailable")
@@ -464,7 +469,9 @@ def test_h3_vsa_triton_pooling_selects_the_same_tiles_as_torch():
     tile means differ by an ULP or so; the contract is that the *selection*
     that reads them is unchanged.
     """
-    from xfuser.core import vsa_h3_triton
+    from xfuser.core.attention.backends.vsa_h3 import (
+        triton_kernel as vsa_h3_triton,
+    )
 
     if not vsa_h3_triton.is_available():
         pytest.skip("Triton is unavailable")
@@ -524,6 +531,6 @@ def test_h3_vsa_tiled_to_packed_row_marks_padding_out_of_range():
 
 def test_h3_vsa_triton_is_not_usable_on_cpu():
     """The kernel launches on the tensors' device, so CPU rules it out."""
-    from xfuser.core.vsa_h3_attention import h3_vsa_triton_is_usable
+    from xfuser.core.attention.backends.vsa_h3.attention import h3_vsa_triton_is_usable
 
     assert not h3_vsa_triton_is_usable(torch.device("cpu"))

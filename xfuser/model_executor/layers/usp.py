@@ -13,6 +13,7 @@ else:
     PROCESS_GROUP = None
 
 from xfuser.core.distributed import (
+    model_parallel_is_initialized,
     get_sequence_parallel_world_size,
     get_ulysses_parallel_world_size,
     get_ring_parallel_world_size,
@@ -24,11 +25,10 @@ from xfuser.core.distributed import (
 from xfuser.compat import version_at_least
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
-from xfuser.core.distributed.attention_backend import (
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
-    ATTENTION_FUNCTION_REGISTRY,
-    AttentionBackendType,
-)
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import VarlenPacking
+from xfuser.core.attention.spec import AttnCall, ParallelContext
+from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -44,11 +44,7 @@ from xfuser.core.sparge_attention.head_balance import (
 # These all build a block mask via _build_sparge_block_mask and write the
 # per-head cost into the head-balance "cost sink". Non-sparge backends are
 # excluded so head balancing is a clean no-op for them.
-_HEAD_BALANCE_BACKENDS = frozenset({
-    AttentionBackendType.AITER_SPARGE,
-    AttentionBackendType.AITER_SPARGE_V2,
-    AttentionBackendType.FLEX_BLOCK_SPARGE,
-}) | AITER_MHA_V4_SPARGE_BACKEND_SET
+_HEAD_BALANCE_BACKENDS = attention_registry.types_where(head_balanced=True)
 
 _FP8_NCCL_NEEDS_VIEW = not version_at_least(torch.__version__, "2.11.0")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz)
@@ -359,22 +355,48 @@ def _has_kv_cache(attn_layer) -> bool:
     )
 
 
-def _trim_trailing_kv_padding(key, value, attention_kwargs):
-    """Slice a uniform padded K/V suffix while retaining every query row."""
+def _serves_packed_keys(backend, key, attention_kwargs) -> bool:
+    """Whether the selected backend will honour the packing itself."""
+    spec = attention_registry.REGISTRY.get(backend)
+    if spec is None:
+        return False
+    probe = AttnCall(
+        varlen=VarlenPacking.from_kwargs(attention_kwargs),
+        attention_kwargs=attention_kwargs,
+    )
+    return spec.rejects(key, key, key, probe) is None
+
+
+def _trim_trailing_kv_padding(key, value, attention_kwargs, backend=None):
+    """Slice a uniform padded K/V suffix while retaining every query row.
+
+    Returns the kwargs the backend should see: once the pad has been sliced
+    the packing has been honoured, so it is cleared -- left in place, it would
+    describe keys that are no longer there. Keys are set to None rather than
+    removed, because torch.compile guards on this dict's key set.
+    """
     kwargs = attention_kwargs or {}
     valid_kv_len = kwargs.get("valid_kv_len")
     if valid_kv_len is None:
-        return key, value
-    if kwargs.get("indices_k") is not None:
-        # A producer that publishes both leaves the choice to the backend: a
-        # varlen-capable one packs K/V itself, and slicing here would leave its
-        # indices pointing past the end of K.
-        return key, value
+        return key, value, attention_kwargs
+    if kwargs.get("indices_k") is not None and _serves_packed_keys(
+        backend, key, kwargs
+    ):
+        # A backend that accepts packed keys handles the pad itself, and
+        # slicing first would leave its indices pointing past the end of K.
+        return key, value, attention_kwargs
     if not 0 < valid_kv_len <= key.shape[2]:
         raise ValueError(
             f"valid_kv_len must be in [1, {key.shape[2]}], got {valid_kv_len}."
         )
-    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
+
+    consumed = kwargs
+    if kwargs.get("indices_k") is not None:
+        consumed = dict(kwargs)
+        consumed["indices_k"] = None
+        consumed["cu_seqlens_k"] = None
+        consumed["max_seqlen_k"] = None
+    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len], consumed
 
 
 def _get_attention_function(backend=None):
@@ -385,10 +407,54 @@ def _get_attention_function(backend=None):
         attention_backend = backend
     else:
         attention_backend = get_runtime_state().attention_backend
-    func = ATTENTION_FUNCTION_REGISTRY.get(attention_backend, None)
-    if func is None:
+
+    spec = attention_registry.REGISTRY.get(attention_backend)
+    if spec is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
-    return concat_joint_tensors_decorator(func)
+    return concat_joint_tensors_decorator(_spec_adapter(spec))
+
+
+def _parallel_context() -> ParallelContext:
+    """The sequence-parallel degrees, or the single-rank default.
+
+    `attention()` is the entry point for calls that need no sequence
+    parallelism, and it is reached before -- or entirely without -- an
+    initialised process group. Asking for the degrees there must not be what
+    fails.
+    """
+    if not model_parallel_is_initialized():
+        return ParallelContext()
+    return ParallelContext(
+        ulysses_world_size=get_ulysses_parallel_world_size(),
+        ring_world_size=get_ring_parallel_world_size(),
+    )
+
+
+def _spec_adapter(spec):
+    """Present a Spec with the calling convention ring_attn and the direct
+    call sites already use.
+
+    This is also where the two things kernels used to fetch for themselves get
+    supplied: the varlen packing, previously rebuilt inside every kernel from
+    attention_kwargs, and the sequence-parallel degrees, previously read from
+    globals. Both now arrive on the call, which is what makes a backend
+    testable without an initialised process group.
+    """
+
+    def call(query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=None):
+        kwargs = attention_kwargs if attention_kwargs is not None else {}
+        return spec.run(
+            query, key, value,
+            AttnCall(
+                dropout_p=dropout_p,
+                is_causal=is_causal,
+                varlen=VarlenPacking.from_kwargs(kwargs),
+                ctx=_parallel_context(),
+                attention_kwargs=kwargs,
+            ),
+        )
+
+    return call
 
 def concat_joint_tensors_decorator(func):
     """
@@ -587,7 +653,9 @@ def USP(
     # Uniform trailing padding needs no mask or varlen packing. Keeping all Q
     # rows but slicing K/V is equivalent to masking those keys and lets dense
     # backends retain their optimized cross-attention path.
-    key, value = _trim_trailing_kv_padding(key, value, attention_kwargs)
+    key, value, attention_kwargs = _trim_trailing_kv_padding(
+        key, value, attention_kwargs, hb_backend
+    )
 
     if kv_head_repeat > 1:
         key, value = _repeat_kv_heads(key, value, kv_head_repeat)
@@ -667,6 +735,12 @@ def attention(
     no head sharding or FP8 all-to-all.
     """
     attention_function = _get_attention_function(backend=backend)
+    # Same rule as USP: a backend that cannot serve packed keys gets the pad
+    # sliced instead, which is the same computation.
+    resolved = backend if backend is not None else get_runtime_state().attention_backend
+    key, value, attention_kwargs = _trim_trailing_kv_padding(
+        key, value, attention_kwargs, resolved
+    )
     out, _ = attention_function(
         query,
         key,

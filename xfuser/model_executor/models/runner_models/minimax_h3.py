@@ -8,11 +8,15 @@ from types import MethodType, SimpleNamespace
 import numpy as np
 import torch
 
-from xfuser.core.distributed.attention_backend import (
-    AITER_MHA_V4_ONLY_BACKEND_SET,
-    AttentionBackendType,
-    VSA_H3_BACKENDS,
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.backends.aiter_mha_v4.spec import (
+    DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKEND_SET,
 )
+from xfuser.core.attention.spec import AttentionBackendType
+
+# Both VSA-H3 backends declare the same sparsity strategy, so the set follows
+# from the specs rather than being listed here.
+VSA_H3_BACKENDS = attention_registry.types_where(sparsity="h3")
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,
@@ -377,7 +381,7 @@ class xFuserMiniMaxH3Model(xFuserModel):
     _transformer_component_name = "transformer"
     _warmup_num_inference_steps = 3
     _enable_fasth3_vsa = False
-    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _get_runtime_state_pipeline(self):
         if self._transformer_component_name == "transformer":
@@ -423,14 +427,6 @@ class xFuserMiniMaxH3Model(xFuserModel):
             if (backend := _parse_attention_backend(value, label)) is not None
         ]
         for backend in backends:
-            if backend not in self._supported_attn_backends:
-                supported = ", ".join(
-                    sorted(item.name for item in self._supported_attn_backends)
-                )
-                raise ValueError(
-                    f"{self.settings.output_name} does not support attention "
-                    f"backend {backend.name}. Supported backends: {supported}."
-                )
             if backend == AttentionBackendType.AITER_FP8:
                 try:
                     from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
@@ -757,7 +753,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
 
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
-    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS | _FASTH3_ATTN_BACKENDS
 
     def _customize_settings(self, config) -> None:
         super()._customize_settings(config)
@@ -804,7 +800,7 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
     settings.default_attention_backend = None
 
     _enable_fasth3_vsa = False
-    _supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
 
     def _validate_config(self, config) -> None:
         # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,

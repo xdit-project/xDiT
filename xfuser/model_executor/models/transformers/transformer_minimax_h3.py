@@ -20,8 +20,13 @@ from xfuser.core.distributed import (
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
-from xfuser.core.distributed.attention_backend import VSA_H3_BACKENDS
-from xfuser.core.vsa_h3_attention import build_h3_vsa_metadata
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.core.attention.backends.vsa_h3.attention import build_h3_vsa_metadata
+
+# Both VSA-H3 backends declare the same sparsity strategy, so the set follows
+# from the specs rather than being listed here.
+VSA_H3_BACKENDS = attention_registry.types_where(sparsity="h3")
 from xfuser.model_executor.layers.usp import (
     ULYSSES_EXTRA_INPUTS_KEY,
     USP,

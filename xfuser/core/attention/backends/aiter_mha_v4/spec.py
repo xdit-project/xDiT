@@ -149,3 +149,10 @@ SPECS = (
     [_dense_spec(f) for f in FORMATS if f.dense]
     + [_sparge_spec(f) for f in FORMATS if f.sparge_on is not None]
 )
+
+# Named for consumers that mean "the dense MHA v4 rows" rather than a set of
+# call constraints -- MiniMax-H3 checks it before relying on the trailing-pad
+# path. Derived from the table, so a new row joins by being added there.
+DENSE_BACKENDS = frozenset(
+    AttentionBackendType[f"AITER_{fmt.name}"] for fmt in FORMATS if fmt.dense
+)

@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import copy
 import functools
+import inspect
 from types import MethodType, SimpleNamespace
 
 import numpy as np
 import torch
 
+from xfuser.core.attention import registry as attention_registry
+from xfuser.core.attention.backends.aiter_mha_v4.spec import (
+    DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKEND_SET,
+)
 from xfuser.core.attention.spec import AttentionBackendType
+
+# Both VSA-H3 backends declare the same sparsity strategy, so the set follows
+# from the specs rather than being listed here.
+VSA_H3_BACKENDS = attention_registry.types_where(sparsity="h3")
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,
@@ -31,21 +40,39 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 )
 
 
+# AITER's dense MXFP4 V rows require sequence length to be 128
+# MiniMax-H3 aligns its packed sequence to 64 and hands the kernels a K trimmed to
+# the token count, so neither length is ever reliably 128-aligned.
+_UNALIGNED_MHA_V4_BACKENDS = frozenset({
+    AttentionBackendType.AITER_F4F4,
+    AttentionBackendType.AITER_F6F4,
+})
+# The remaining dense MHA v4 rows are in: MiniMax-H3 pads its packed sequence to
+# 64 rows and declares the pad through valid_kv_len, which those kernels serve by
+# slicing K/V instead of masking.
 _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.AITER,
     AttentionBackendType.AITER_FP8,
     AttentionBackendType.CUDNN,
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
-})
-_FASTH3_ATTN_BACKENDS = frozenset({AttentionBackendType.FLEX_VSA_H3})
+}) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNALIGNED_MHA_V4_BACKENDS)
+_FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})
 FASTH3_V1_DATAFREE_MODEL_ID = (
     "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
 )
+# Dense-attention ablation of the same 4-step preview: distilled without VSA
+FASTH3_V1_DENSE_DATAFREE_MODEL_ID = (
+    "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
+)
 FASTH3_V2_MODEL_ID = "FastVideo/FastVideo-FastH3-8-Step-V2"
-FASTH3_MODEL_IDS = (FASTH3_V1_DATAFREE_MODEL_ID, FASTH3_V2_MODEL_ID)
+FASTH3_MODEL_IDS = (
+    FASTH3_V1_DATAFREE_MODEL_ID,
+    FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
+    FASTH3_V2_MODEL_ID,
+)
 # Full set of FastH3 V1-VSA IDs. Used in _customize_settings to route the
 # correct checkpoint into from_pretrained when a weight variant is requested.
 FASTH3_V1_MODEL_IDS = frozenset({
@@ -219,6 +246,65 @@ def _patch_minimax_h3_text_encoder_broadcast() -> None:
 
     encoders.get_qwen3vl_prompt_embeds = distributed_get_prompt_embeds
     encoders._xfuser_broadcast_patched = True
+
+
+def _mark_dynamic_timestep(timestep):
+    """Keep the timestep's length out of dynamo's guards.
+
+    Without this dynamo specializes on timestep shape 1 vs >1 and recompiles
+    when it changes; the timestep is a 1-D tensor whose length varies along the
+    denoising steps. ``mark_unbacked`` is only exposed on
+    ``torch._dynamo.decorators``, not on ``torch._dynamo`` itself, and
+    ``mark_dynamic`` is the weaker fallback: it avoids specializing on the exact
+    size but still splits 1 from >1.
+    """
+    from torch._dynamo import decorators as dynamo_decorators
+
+    mark = getattr(
+        dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
+    )
+    mark(timestep, 0)
+
+
+def _wrap_compiled_forward(transformer, original_forward, compiled_forward):
+    """Do everything that has to happen outside the compiled region.
+
+    Two jobs, both of which would otherwise force a recompile or a graph break:
+
+    * mark the timestep's length dynamic, since marking must happen outside the
+      compiled region to take effect;
+    * prime VSA-H3's tile geometry, which is recovered from ``position_ids``
+      *values*. That forces device syncs and cannot be traced, so
+      ``fullgraph=True`` would reject it. It is constant for a run, so priming
+      the cache here leaves the lookup inside ``forward`` as a branch that folds
+      against the shape guards. Skipped for non-VSA-H3 backends.
+
+    One ``signature.bind`` serves both, which is also what lets the timestep be
+    found by name whether it arrived positionally or not.
+    """
+    signature = inspect.signature(original_forward)
+    prime_vsa_h3 = getattr(transformer, "use_vsa_h3", False)
+
+    def forward_outside_the_graph(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        timestep = bound.arguments.get("timestep")
+        if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
+            _mark_dynamic_timestep(timestep)
+        if prime_vsa_h3:
+            transformer.prepare_vsa_h3_metadata(
+                bound.arguments["position_ids"],
+                bound.arguments["video_indices"],
+                bound.arguments["audio_indices"],
+                bound.arguments["text_indices"],
+            )
+        return compiled_forward(*args, **kwargs)
+
+    # The denoise block picks which layout fields to pass by inspecting
+    # signature(transformer.forward), so the wrapper has to expose the real
+    # parameter list rather than (*args, **kwargs).
+    functools.update_wrapper(forward_outside_the_graph, original_forward)
+    return forward_outside_the_graph
 
 
 class MiniMaxH3DiffusionOutput(DiffusionOutput):
@@ -558,35 +644,11 @@ class xFuserMiniMaxH3Model(xFuserModel):
             fullgraph=not use_hybrid,
         )
 
-        # The below fixes a recompile: avoids more than one graph realizing
-        # after compile-warmup.
-
-        # mark_unbacked is only exposed on torch._dynamo.decorators, not on
-        # torch._dynamo itself. mark_dynamic is the weaker fallback: it avoids
-        # specializing on the exact size but still splits 1 from >1.
-        from torch._dynamo import decorators as dynamo_decorators
-
-        mark_timestep = getattr(
-            dynamo_decorators, "mark_unbacked", dynamo_decorators.mark_dynamic
+        # Marking the timestep dynamic fixes a recompile: it avoids more than
+        # one graph realizing after compile-warmup.
+        transformer.forward = _wrap_compiled_forward(
+            transformer, original_forward, compiled_forward
         )
-
-        def forward_with_dynamic_timestep(*args, **kwargs):
-            # Marking must happen outside the compiled region. Without it dynamo
-            # specializes on timestep shape 1 vs >1 and recompiles when it changes.
-            # Remember that the timestep is a 1D tensor of variable length along
-            # the denoising steps.
-            timestep = kwargs.get("timestep")
-            if timestep is None and len(args) > 3:
-                timestep = args[3]
-            if isinstance(timestep, torch.Tensor) and timestep.dim() > 0:
-                mark_timestep(timestep, 0)
-            return compiled_forward(*args, **kwargs)
-
-        # The denoise block selects which layout fields to pass by inspecting
-        # signature(transformer.forward), so the wrapper must expose the real
-        # parameter list rather than (*args, **kwargs).
-        functools.update_wrapper(forward_with_dynamic_timestep, original_forward)
-        transformer.forward = forward_with_dynamic_timestep
         compile_args = copy.deepcopy(input_args)
         if not get_runtime_state().has_attention_schedule():
             compile_args["num_inference_steps"] = (
@@ -668,9 +730,10 @@ class xFuserMiniMaxH3Model(xFuserModel):
 class xFuserFastH3Model(xFuserMiniMaxH3Model):
     """FastH3 Preview v1 runner.
 
-    Transformer attention goes through USP's backend selector. ``FLEX_VSA_H3``
-    is the default and runs the sparse-distilled VSA-H3 kernel; other
-    MiniMax-H3 backends stay dense when selected explicitly.
+    Transformer attention goes through USP's backend selector.
+    ``TRITON_VSA_H3`` is the default and runs the sparse-distilled VSA-H3
+    kernel; ``FLEX_VSA_H3`` runs the same selection through FlexAttention;
+    other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
     default_input_values = DefaultInputValues(
@@ -686,7 +749,7 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     settings.model_name = FASTH3_V1_DATAFREE_MODEL_ID
     settings.output_name = "fasth3"
     settings.valid_tasks = ["t2va"]
-    settings.default_attention_backend = AttentionBackendType.FLEX_VSA_H3.name
+    settings.default_attention_backend = AttentionBackendType.TRITON_VSA_H3.name
 
     _warmup_num_inference_steps = 5
     _enable_fasth3_vsa = True
@@ -703,17 +766,11 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
         backend = _parse_attention_backend(
             config.attention_backend, "attention backend"
         )
-        if backend == AttentionBackendType.FLEX_VSA_H3:
+        if backend in VSA_H3_BACKENDS:
             if config.use_hybrid_attn_schedule:
                 raise ValueError(
-                    "FLEX_VSA_H3 uses VSA-H3 for every transformer step and "
-                    "does not support xDiT's hybrid attention schedule."
-                )
-            if config.use_torch_compile:
-                raise ValueError(
-                    "FLEX_VSA_H3 does not support wrapping the full transformer "
-                    "with --use_torch_compile yet. Its FlexAttention kernel is "
-                    "compiled independently."
+                    "VSA-H3 runs on every transformer step and does not "
+                    "support xDiT's hybrid attention schedule."
                 )
         super()._validate_config(config)
 
@@ -724,6 +781,31 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
                 "FastH3 Preview v1 requires 5 scheduler points, which produce "
                 "the checkpoint's trained 4 transformer forwards."
             )
+
+
+@register_model(FASTH3_V1_DENSE_DATAFREE_MODEL_ID)
+@register_model("FastH3-Dense")
+class xFuserFastH3DenseModel(xFuserFastH3Model):
+    """FastH3 Preview v1 Dense-DataFree runner.
+
+    The dense ablation was distilled without VSA, so its checkpoint carries no
+    ``to_gate_compress`` weights and attention stays dense on whichever
+    MiniMax-H3 backend is selected. Like MiniMax-H3 it declares no default
+    backend.
+    """
+
+    settings = copy.deepcopy(xFuserFastH3Model.settings)
+    settings.model_name = FASTH3_V1_DENSE_DATAFREE_MODEL_ID
+    settings.output_name = "fasth3_dense"
+    settings.default_attention_backend = None
+
+    _enable_fasth3_vsa = False
+    supported_attn_backends = _SUPPORTED_ATTN_BACKENDS
+
+    def _validate_config(self, config) -> None:
+        # Skip V1's VSA/hybrid-schedule check: no VSA backend is supported here,
+        # and dense attention works with the hybrid schedule.
+        xFuserMiniMaxH3Model._validate_config(self, config)
 
 
 @register_model(FASTH3_V2_MODEL_ID)

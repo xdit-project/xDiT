@@ -210,6 +210,38 @@ def test_aiter_mixed_attention_compiles_fullgraph(backend_name):
     assert torch.isfinite(output).all()
 
 
+def test_aiter_mixed_attention_compiles_fullgraph_with_a_trailing_pad():
+    """The trim is Python-level, so it must fold away rather than break the graph."""
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+
+    valid_length = 128
+    shape = (1, 5, 192, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    spec = registry.get(AttentionBackendType.AITER_BF16)
+    spec.resolved()
+    call = AttnCall(
+        varlen=VarlenPacking(
+            indices_k=torch.arange(valid_length, device="cuda"),
+            cu_seqlens_k=torch.tensor(
+                [0, valid_length], dtype=torch.int32, device="cuda"
+            ),
+            max_seqlen_k=valid_length,
+        ),
+        attention_kwargs={"valid_kv_len": valid_length},
+    )
+
+    def attention(query, key, value):
+        return spec.run(query, key, value, call)[0]
+
+    output = torch.compile(attention, fullgraph=True)(query, key, value)
+    assert output.shape == query.shape
+    assert torch.isfinite(output).all()
+
+
 def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
     _require_mha_v4_aiter("AITER_MXFP8")
 
@@ -362,3 +394,71 @@ def test_mha_v4_refuses_calls_it_cannot_serve(case, call):
         assert reason is not None, f"{backend.name} accepts {case}"
         checked += 1
     assert checked, "no MHA v4 backend was available to check"
+
+
+@pytest.mark.parametrize(
+    "backend_name",
+    [
+        "AITER_BF16",
+        "AITER_BF16FP8",
+        "AITER_MXFP8",
+        "AITER_F8F6",
+        "AITER_F6F4",
+        "AITER_MXFP4",
+        pytest.param(
+            "AITER_F4F4",
+            marks=pytest.mark.skip(
+                reason="faults the GPU once allocations accumulate; fixed in newer AITER"
+            ),
+        ),
+    ],
+)
+def test_mha_v4_serves_a_declared_trailing_pad(backend_name, request):
+    """A declared trailing pad is served by slicing K/V, matching the same maths.
+
+    Every query row is kept, including the pad rows: they are not packed, their
+    outputs are discarded by the caller, and trimming them by a key-side length
+    would be wrong wherever Q and K differ.
+    """
+    _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
+
+    valid_length = 256
+    padded_length = 384
+    torch.manual_seed(1234)
+    shape = (1, 5, padded_length, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    # MiniMax-H3's pad rows are zero hidden states, so their projections are zero
+    # vectors: unmasked they score exp(0) against every query.
+    key[:, :, valid_length:] = 0
+    value[:, :, valid_length:] = 0
+
+    call = AttnCall(
+        varlen=VarlenPacking(
+            indices_k=torch.arange(valid_length, device="cuda"),
+            cu_seqlens_k=torch.tensor(
+                [0, valid_length], dtype=torch.int32, device="cuda"
+            ),
+            max_seqlen_k=valid_length,
+        ),
+        attention_kwargs={"valid_kv_len": valid_length},
+    )
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(
+            query, key[:, :, :valid_length], value[:, :, :valid_length]
+        )
+        spec = registry.get(AttentionBackendType[backend_name])
+        spec.resolved()
+        output, lse = spec.run(query, key, value, call)
+
+    cosine_similarity = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+
+    assert output.shape == query.shape
+    assert torch.isfinite(output).all()
+    assert lse is None
+    assert cosine_similarity > 0.95

@@ -1,0 +1,9 @@
+line-length = 120
+
+[lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["E402"]
+"xfuser/envs.py" = ["E722", "F401"]

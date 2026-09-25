@@ -7,16 +7,11 @@ import torch
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from xfuser.core.utils.runner_utils import log
-from xfuser.core.distributed.attention_backend import (
-    AITER_MHA_V4_ONLY_BACKEND_SET,
-    AITER_MHA_V4_SPARGE_BACKEND_SET,
-)
 from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
     ModelCapabilities,
     ModelSettings,
-    _parse_attention_backend,
     register_model,
     xFuserModel,
 )
@@ -38,12 +33,6 @@ FP8_SCALE_SUFFIX = ".weight_scale"
 # What the checkpoint appends to a weight's own name to name its scale, which is
 # how the scale is found from the weight rather than the other way round
 _SCALE_SUFFIX = "_scale"
-
-# MHA v4 serves head dimension 128 only, and every one of these selects it. Ideogram 4 runs 256,
-# so each would fall through to another kernel for every layer and quietly mean nothing.
-_IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS = (
-    AITER_MHA_V4_ONLY_BACKEND_SET | AITER_MHA_V4_SPARGE_BACKEND_SET
-)
 
 
 def _resolve_pretrained_file(model_id: str, filename: str) -> str:
@@ -297,7 +286,7 @@ class xFuserIdeogram4Model(xFuserModel):
     # The transformer config states this too, and runtime_state re-checks it against the loaded
     # model. Stated here so a Ulysses degree that cannot work is refused before the download.
     attention_heads = 18
-    attention_head_dim = 256
+    attention_head_dims = frozenset({256})
 
     load_support = LoadSupport(
         meta_transformers=('transformer', 'unconditional_transformer'),
@@ -351,24 +340,6 @@ class xFuserIdeogram4Model(xFuserModel):
                 f"Ideogram 4 has {heads} attention heads, so --ulysses_degree must "
                 f"divide {heads}."
             )
-        if config.use_hybrid_attn_schedule:
-            specs = [
-                (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
-                (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
-            ]
-        else:
-            specs = [(config.attention_backend, "attention backend")]
-
-        for value, label in specs:
-            backend = _parse_attention_backend(value, label)
-            if backend in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS:
-                raise ValueError(
-                    f"Ideogram 4 does not support --attention_backend {backend.name}. "
-                    f"MHA v4 serves head dimension 128 and Ideogram 4 runs "
-                    f"{self.attention_head_dim}, so every layer would fall through to another "
-                    "kernel and the selection would have no effect. Use AITER, or another "
-                    "backend that covers this head dimension."
-                )
 
     def _validate_args(self, input_args: dict) -> None:
         super()._validate_args(input_args)

@@ -773,6 +773,15 @@ AITER_MHA_V4_GFX942_SPARGE_BACKENDS = (
 )
 AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_GFX942_SPARGE_BACKENDS)
 
+# Head dimensions a backend can serve, for the backends that constrain them. MHA v4 raises
+# "requires logical V head dimension 128", and every dense row in its manifest is hdim 128.
+# A backend absent here makes no claim and is never refused on head dimension, so silence
+# means unknown rather than unrestricted.
+ATTENTION_BACKEND_HEAD_DIMS = {
+    backend: frozenset({128})
+    for backend in AITER_MHA_V4_ONLY_BACKEND_SET | AITER_MHA_V4_SPARGE_BACKEND_SET
+}
+
 
 def _mha_v4_sparge_tile():
     """Return Sparge tile sizes matching the active MHA v4 sparse KV geometry."""

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import types
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -419,18 +421,46 @@ def test_ideogram4_refuses_the_mha_v4_backends():
     """
     from xfuser.core.distributed.attention_backend import (
         AITER_MHA_V4_ONLY_BACKENDS,
+        ATTENTION_BACKEND_HEAD_DIMS,
         AttentionBackendType,
     )
-    from xfuser.model_executor.models.runner_models.ideogram4 import (
-        _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS,
+    from xfuser.model_executor.models.runner_models.base_model import (
+        _validate_attention_head_dims,
+    )
+    from xfuser.model_executor.models.runner_models.ideogram4 import xFuserIdeogram4Model
+    from xfuser.model_executor.models.runner_models.ltx import (
+        _xFuserLTX25VideoModelBase,
     )
 
-    accepted = [b.name for b in AITER_MHA_V4_ONLY_BACKENDS
-                if b not in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS]
-    assert not accepted, accepted
-    # v3 covers head dimension 256, so it stays selectable and is what the error points at.
-    assert AttentionBackendType.AITER not in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS
-    assert AttentionBackendType.SDPA not in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS
+    class _Config:
+        use_hybrid_attn_schedule = False
+        cross_attention_backend = None
+
+        def __init__(self, backend):
+            self.attention_backend = backend
+
+    class _Model:
+        def __init__(self, dims):
+            self.attention_head_dims = dims
+            self.settings = types.SimpleNamespace(model_name="model")
+
+    ideogram4 = _Model(xFuserIdeogram4Model.attention_head_dims)
+    for backend in AITER_MHA_V4_ONLY_BACKENDS:
+        with pytest.raises(ValueError, match="head dimension"):
+            _validate_attention_head_dims(ideogram4, _Config(backend.name))
+
+    # v3 covers 256 and declares no constraint, so it stays selectable.
+    assert AttentionBackendType.AITER not in ATTENTION_BACKEND_HEAD_DIMS
+    _validate_attention_head_dims(ideogram4, _Config("AITER"))
+    _validate_attention_head_dims(ideogram4, _Config("SDPA"))
+
+    # LTX-2.5 mixes 128-wide video with 64-wide audio; one served width is enough to keep it.
+    ltx25 = _Model(_xFuserLTX25VideoModelBase.attention_head_dims)
+    assert 64 in ltx25.attention_head_dims
+    _validate_attention_head_dims(ltx25, _Config("AITER_BF16"))
+
+    # A model that declares nothing is never refused on head dimension.
+    _validate_attention_head_dims(_Model(frozenset()), _Config("AITER_BF16"))
 
 
 def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():

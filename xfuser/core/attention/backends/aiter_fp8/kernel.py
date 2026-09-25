@@ -17,7 +17,7 @@ from torch.library import custom_op, register_fake
 
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
-from xfuser.core.attention.requirements import ARCH, SYMBOL
+from xfuser.core.attention.requirements import ARCH, SYMBOL, resolve
 from xfuser.core.attention.spec import AttnCall
 from xfuser.envs import environment_variables
 
@@ -113,7 +113,7 @@ def _mha_v4(query, key, value, call: AttnCall):
 # paths are wrapped: pre-quantised takes fp8 straight from fp8 comms, and MHA
 # v4 quantises inside AITER. Rotation stays outside, as it is a plain matmul
 # Dynamo traces happily and fp8 comms may have applied it already.
-_VARLEN = getattr(aiter, "flash_attn_varlen_fp8_pertensor_func", None)
+_VARLEN = resolve("aiter:flash_attn_varlen_fp8_pertensor_func")
 
 
 @custom_op("xfuser::aiter_fp8_dense", mutates_args=())

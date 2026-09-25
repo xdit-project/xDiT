@@ -575,3 +575,37 @@ def test_every_enum_member_has_a_spec():
     from xfuser.core.attention import registry
 
     assert registry.missing_specs() == []
+
+
+def test_sparsity_kinds_are_known():
+    """Consumers select by exact string -- base_model groups "ssta" apart from
+    "sparge" and "vsa". A typo here is not an error, it is a backend that
+    quietly belongs to no group and so is never gated."""
+    from xfuser.core.attention import registry
+
+    known = {None, "ssta", "sparge", "vsa", "h3"}
+    for spec in registry.REGISTRY.values():
+        assert spec.sparsity in known, (
+            f"{spec.type.name}: unknown sparsity {spec.sparsity!r}"
+        )
+
+
+def test_impl_bound_arguments_are_accepted_by_the_target():
+    """A generated family binds a table row to a shared launcher by keyword.
+    Rename the launcher's parameter and every spec in the family breaks at its
+    first call; the binding is a plain dict, so nothing else notices."""
+    import ast
+
+    from xfuser.core.attention import registry
+
+    for spec in registry.REGISTRY.values():
+        if not spec.impl.bound:
+            continue
+        path, symbol = _impl_source(spec)
+        fn = next(
+            node for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == symbol
+        )
+        accepted = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+        missing = set(spec.impl.bound) - accepted
+        assert not missing, f"{spec.type.name}: {symbol} takes no {sorted(missing)}"

@@ -80,18 +80,14 @@ def register_model(name: str) -> Callable:
     return decorator
 
 
-# Derived from the backend specs rather than listed here: each backend
-# declares its sparsity strategy, so adding one cannot miss these sets.
-# "sparge" and "vsa" are grouped because both need a separate, dense
-# cross-attention backend.
-def _backends_with_sparsity(*kinds: str) -> frozenset:
-    return frozenset().union(
-        *(attention_registry.types_where(sparsity=kind) for kind in kinds)
-    )
-
-
-_SPARSE_ATTENTION_BACKENDS = _backends_with_sparsity("ssta")
-_SPARGE_ATTENTION_BACKENDS = _backends_with_sparsity("sparge", "vsa")
+# Derived from the backend specs rather than listed here: each backend declares
+# its sparsity strategy, so adding one cannot miss these sets. "sparge" and
+# "vsa" are grouped because both need a separate, dense cross-attention backend.
+_SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity="ssta")
+_SPARGE_ATTENTION_BACKENDS = (
+    attention_registry.types_where(sparsity="sparge")
+    | attention_registry.types_where(sparsity="vsa")
+)
 
 
 def _parse_attention_backend(name: Optional[str], kind: str) -> Optional[AttentionBackendType]:

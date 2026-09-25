@@ -624,7 +624,6 @@ def validate_fp8_comms_config(config, capabilities, settings) -> None:
             f"so at least one scheduled backend supports pre-quantization."
         )
     logger.info(
-        "fp8 comms feeds pre-quantized Q/K/V to the dense FP8 attention kernel; "
-        "AITER MHA v4 is bypassed on the AITER_FP8 self-attention path where it "
-        "would otherwise be selected."
+        "fp8 comms feeds pre-quantized Q/K/V to AITER MHA v4 when eligible, "
+        "with the dense FP8 attention kernel retained as the fallback."
     )

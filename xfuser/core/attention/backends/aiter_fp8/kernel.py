@@ -50,26 +50,6 @@ def _quantize(query, key, value):
     return out
 
 
-def _pre_quantized(query, key, value, call: AttnCall):
-    kwargs = call.attention_kwargs
-    if call.varlen is not None:
-        raise NotImplementedError(
-            "fp8 comms pre-quantized attention does not support varlen packing; "
-            "the indices_k mask would be silently dropped and dense attention "
-            "would run over padded keys."
-        )
-    q, k, v = to_bshd(query, key, value, contiguous=True)
-    out = aiter.flash_attn_fp8_pertensor_func(
-        q, k, v,
-        causal=call.is_causal,
-        softmax_scale=q.shape[-1] ** -0.5,
-        q_descale=kwargs["q_descale"],
-        k_descale=kwargs["k_descale"],
-        v_descale=kwargs["v_descale"],
-    )
-    return from_bshd(out), None
-
-
 # Both halves matter: the symbol is arch-independent, so importability alone
 # would take this path on an arch the kernel does not run on, and the arch alone
 # would take it on a build that predates MHA v4, where the import raises.
@@ -80,7 +60,9 @@ def _pre_quantized(query, key, value, call: AttnCall):
 _USE_MHA_V4 = (
     ARCH("gfx950", "gfx942")
     & SYMBOL("aiter.ops.mha_v4:mha_v4")
+    & SYMBOL("aiter.ops.mha_v4:mha_v4_packed")
     & SYMBOL("aiter.ops.mha_v4:native_fp8_format")
+    & SYMBOL("aiter.ops.mha_v4:AttentionScaleMode")
 ).satisfied()
 
 # The spec's requires deliberately omits mha_v4: the rotate-here path below
@@ -88,7 +70,12 @@ _USE_MHA_V4 = (
 # an AITER that has no MHA v4. Hence a conditional import rather than a plain
 # one at the top of the module.
 if _USE_MHA_V4:
-    from aiter.ops.mha_v4 import mha_v4, native_fp8_format
+    from aiter.ops.mha_v4 import (
+        AttentionScaleMode,
+        mha_v4,
+        mha_v4_packed,
+        native_fp8_format,
+    )
 
 
 def _mha_v4_eligible(query, call: AttnCall) -> bool:
@@ -99,6 +86,41 @@ def _mha_v4_eligible(query, call: AttnCall) -> bool:
         and query.shape[-1] == 128
         and not call.is_causal
     )
+
+
+def _pre_quantized(query, key, value, call: AttnCall):
+    kwargs = call.attention_kwargs
+    if call.varlen is not None:
+        raise NotImplementedError(
+            "fp8 comms pre-quantized attention does not support varlen packing; "
+            "the indices_k mask would be silently dropped and dense attention "
+            "would run over padded keys."
+        )
+    q, k, v = to_bshd(query, key, value, contiguous=True)
+    softmax_scale = q.shape[-1] ** -0.5
+
+    if _mha_v4_eligible(query, call):
+        # Already fp8 with per-tensor descales, which is exactly what the
+        # packed entry point takes -- no quantisation step in between.
+        fp8 = native_fp8_format()
+        per_tensor = AttentionScaleMode.F32_PER_TENSOR
+        out = mha_v4_packed(
+            q, k, v,
+            kwargs["q_descale"], kwargs["k_descale"], kwargs["v_descale"],
+            fp8, fp8, fp8,
+            per_tensor, per_tensor, per_tensor,
+            softmax_scale=softmax_scale,
+        )
+    else:
+        out = aiter.flash_attn_fp8_pertensor_func(
+            q, k, v,
+            causal=call.is_causal,
+            softmax_scale=softmax_scale,
+            q_descale=kwargs["q_descale"],
+            k_descale=kwargs["k_descale"],
+            v_descale=kwargs["v_descale"],
+        )
+    return from_bshd(out), None
 
 
 def _mha_v4(query, key, value, call: AttnCall):

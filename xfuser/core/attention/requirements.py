@@ -17,9 +17,6 @@ from typing import Optional, Tuple
 
 import torch
 
-# Informational only: what CI has actually verified. Not a floor, not enforced.
-TESTED_AGAINST = "AITER @ 49c6fdd45 (2026-09-22)"
-
 
 # ---------------------------------------------------------------------------
 # probes (memoised)

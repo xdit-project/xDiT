@@ -411,6 +411,28 @@ def test_krea2_can_select_the_mha_v4_backends():
     assert not unsupported, unsupported
 
 
+def test_ideogram4_refuses_the_mha_v4_backends():
+    """Ideogram 4 runs head dimension 256, which MHA v4 does not serve.
+
+    Selecting one used to be accepted and then quietly bypassed for every layer, so the choice
+    read as applied while nothing about the run changed.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        AITER_MHA_V4_ONLY_BACKENDS,
+        AttentionBackendType,
+    )
+    from xfuser.model_executor.models.runner_models.ideogram4 import (
+        _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS,
+    )
+
+    accepted = [b.name for b in AITER_MHA_V4_ONLY_BACKENDS
+                if b not in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS]
+    assert not accepted, accepted
+    # v3 covers head dimension 256, so it stays selectable and is what the error points at.
+    assert AttentionBackendType.AITER not in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS
+    assert AttentionBackendType.SDPA not in _IDEOGRAM4_UNSUPPORTED_ATTN_BACKENDS
+
+
 def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
     """Several ragged sequences ride as a padded batch with their lengths in seqlens_k.
 

@@ -43,6 +43,15 @@ class _AiterMhaV4Capabilities:
 _AITER_MHA_V4 = _AiterMhaV4Capabilities()
 
 
+def aiter_mha_v4_is_gfx942() -> bool:
+    """MI300-class check that does not depend on the capability probe having run yet."""
+    return "gfx942" in (
+        torch.cuda.get_device_properties(0).gcnArchName
+        if torch.cuda.is_available()
+        else ""
+    )
+
+
 def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     arch_name = (
         torch.cuda.get_device_properties(0).gcnArchName
@@ -66,9 +75,11 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
         try:
             from aiter.ops.mha_v4 import mha_v4_packed as _aiter_mha_v4_packed_probe
             # return_lse has always been accepted and always raised; the lse output buffer only
-            # exists once the kernels actually write one, so probe for that instead.
+            # exists once the kernels actually write one, so probe for that instead. The buffer
+            # exists on gfx942 too, but AITER refuses LSE there until its value is measured.
             lse = (
-                "lse"
+                not is_gfx942
+                and "lse"
                 in inspect.signature(_aiter_mha_v4_packed_probe).parameters
             )
         except ImportError:
@@ -1210,7 +1221,7 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs=None):
         raise NotImplementedError("MHA v4 does not support causal masking")
 
 
-def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs):
+def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs, qk_format=None):
     """Fold a key-padding request into a dense call, carrying key lengths when there are several.
 
     MHA v4 has no key-padding mask. One sequence does not need one: its packed keys are simply
@@ -1234,6 +1245,14 @@ def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs):
         raise NotImplementedError(
             "this AITER build cannot express per-batch key lengths for MHA v4, "
             "so varlen packed keys with batch size > 1 are unsupported"
+        )
+    # Only the BF16 Q/K objects consume the seqlens_k kernarg; AITER rejects the rest rather than
+    # attend over the padding, so name the usable backends here instead of relaying that.
+    if qk_format is not None and qk_format is not _AiterAttentionFormat.BF16:
+        raise NotImplementedError(
+            f"MHA v4 carries per-batch key lengths only on its BF16 Q/K rows, so {qk_format.name} "
+            "Q/K cannot serve a batch of several padded sequences. Use AITER_BF16 or "
+            "AITER_BF16FP8 for this model, or a configuration whose per-call batch is one."
         )
     cu_k = cu_k.to(device=k_packed.device, dtype=torch.int32)
     lengths = (cu_k[1:] - cu_k[:-1]).contiguous()
@@ -1407,7 +1426,7 @@ def _aiter_mixed_attn_call(
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
     query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
-        query, key, value, attention_kwargs
+        query, key, value, attention_kwargs, qk_format
     )
 
     want_lse = _aiter_mha_v4_wants_lse()
@@ -1481,7 +1500,7 @@ def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
     query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
-        query, key, value, attention_kwargs
+        query, key, value, attention_kwargs, _aiter_native_fp8_format()
     )
     output, softmax_lse = _aiter_launch_mxfp8(
         query,

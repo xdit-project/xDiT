@@ -466,6 +466,58 @@ def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
         assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
 
 
+@pytest.mark.parametrize(
+    "backend_name", ["AITER_I8FP8", "AITER_MXFP8", "AITER_MXFP6", "AITER_F8F6"]
+)
+def test_aiter_mha_v4_rejects_multi_sequence_padding_off_the_bf16_rows(backend_name):
+    """Only the BF16 Q/K objects read seqlens_k, so the rest must say so rather than attend padding.
+
+    One sequence stays served on every recipe: its keys are packed into a shorter dense K/V and
+    no per-batch length is needed, so the restriction applies to a batch of several only.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    _require_mha_v4_aiter(backend_name)
+    backend = getattr(AttentionBackendType, backend_name)
+    heads, head_dim, padded = 4, 128, 384
+
+    def run(batch, valid):
+        query = torch.randn(
+            (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
+        )
+        indices_k = torch.cat(
+            [
+                torch.arange(b * padded, b * padded + n, device="cuda")
+                for b, n in enumerate(valid)
+            ]
+        )
+        cumulative = torch.tensor(valid, device="cuda").cumsum(0)
+        with torch.no_grad():
+            return ATTENTION_FUNCTION_REGISTRY[backend](
+                query,
+                torch.randn_like(query),
+                torch.randn_like(query),
+                dropout_p=0.0,
+                is_causal=False,
+                attention_kwargs={
+                    "indices_k": indices_k,
+                    "cu_seqlens_k": torch.cat(
+                        [torch.zeros(1, device="cuda"), cumulative]
+                    ).to(torch.int32),
+                    "max_seqlen_k": max(valid),
+                },
+            )
+
+    output, _ = run(1, (300,))
+    assert torch.isfinite(output.float()).all()
+
+    with pytest.raises(NotImplementedError, match="BF16 Q/K rows"):
+        run(2, (300, 137))
+
+
 def test_aiter_mha_v4_serves_single_sequence_padding():
     """One sequence needs no key-padding mask: the valid keys are just a shorter K/V."""
     from xfuser.core.distributed.attention_backend import (
@@ -531,3 +583,48 @@ def test_aiter_mha_v4_falls_back_below_head_dim_128():
 
     assert output.shape == reference.shape
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+def test_aiter_mha_v4_lse_capability_excludes_gfx942(monkeypatch):
+    """The lse buffer exists in AITER's signature on gfx942 too, but AITER refuses to fill it.
+
+    Probing the signature alone would report a capability that raises on the first ring step.
+    """
+    from xfuser.core.distributed import attention_backend
+
+    monkeypatch.setattr(attention_backend.torch.cuda, "is_available", lambda: True)
+
+    class _Props:
+        gcnArchName = "gfx942:sramecc+:xnack-"
+
+    monkeypatch.setattr(
+        attention_backend.torch.cuda, "get_device_properties", lambda _=0: _Props()
+    )
+
+    def _mha_v4(query, key, value, block_mask=None, seqlens_k=None, q_scale_mode=None):
+        raise AssertionError("probe must not call the kernel")
+
+    caps = attention_backend._probe_aiter_mha_v4_capabilities(_mha_v4)
+
+    assert caps.is_gfx942
+    assert caps.enabled
+    assert not caps.lse
+
+
+def test_aiter_mha_v4_ring_is_refused_on_gfx942(monkeypatch):
+    """Ring weights each chunk by exp(lse); an unmeasured LSE must fail before the run starts."""
+    from xfuser.core.distributed import runtime_state
+    from xfuser.core.distributed.attention_backend import AttentionBackendType
+
+    monkeypatch.setattr(runtime_state, "aiter_mha_v4_is_gfx942", lambda: True)
+
+    class _Parallel:
+        ring_degree = 2
+
+    state = object.__new__(runtime_state.DiTRuntimeState)
+    state.parallel_config = _Parallel()
+
+    with pytest.raises(RuntimeError, match="gfx942"):
+        runtime_state.RuntimeState._check_if_backend_compatible_with_current_configuration(
+            state, AttentionBackendType.AITER_BF16
+        )

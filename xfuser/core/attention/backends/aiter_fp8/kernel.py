@@ -71,15 +71,13 @@ def _pre_quantized(query, key, value, call: AttnCall):
     return from_bshd(out), None
 
 
-# Decided once, at import, which is backend-selection time. Both halves matter:
-# the symbol is arch-independent, so importability alone would take this path on
-# RDNA4 where the kernel does not run, and the arch alone would take it on a
-# gfx942 build of AITER that predates MHA v4, where the import raises.
+# Both halves matter: the symbol is arch-independent, so importability alone
+# would take this path on an arch the kernel does not run on, and the arch alone
+# would take it on a build that predates MHA v4, where the import raises.
 #
-# It cannot be a per-call check. Requirement.satisfied() reaches importlib
-# through a memoised resolve(), and Dynamo traces through the lru_cache wrapper
-# and refuses importlib -- so evaluating it inside the compiled forward is a
-# fullgraph failure. See test_requirement_is_not_traceable_under_fullgraph.
+# Decided at import, not per call: evaluating a Requirement inside a compiled
+# region is a fullgraph failure, which
+# test_requirement_is_not_traceable_under_fullgraph pins.
 _USE_MHA_V4 = (
     ARCH("gfx950", "gfx942")
     & SYMBOL("aiter.ops.mha_v4:mha_v4")

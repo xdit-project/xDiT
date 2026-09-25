@@ -2,13 +2,11 @@
 
 Distinct from requirements: a requirement is about the machine and resolves
 once at startup; these are about the call and can only be checked when it
-arrives. Some constrain tensor geometry (HEAD_DIM, MHA_ONLY, SELF_ATTENTION),
-others constrain call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN) -- both
-answer the same question, "can this backend serve this call", and are checked
-at the same moment, so they are one family.
+arrives. They cover tensor geometry (HEAD_DIM, MHA_ONLY, SELF_ATTENTION) and
+call parameters (NON_CAUSAL, NO_DROPOUT, NO_VARLEN) alike.
 
-Two things read them from one declaration: the generic pre-call check, and the
-conformance suite choosing which shapes to exercise.
+One declaration serves two readers: the pre-call check, and the conformance
+suite choosing which shapes to exercise.
 """
 
 from dataclasses import dataclass

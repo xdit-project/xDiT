@@ -1,6 +1,4 @@
-"""FastH3 VSA-H3: 64-token tiles through torch's own FlexAttention.
-
-"""
+"""FastH3 VSA-H3: 64-token tiles through torch's own FlexAttention."""
 
 from xfuser.core.attention.constraints import NO_DROPOUT, NON_CAUSAL, NO_VARLEN
 from xfuser.core.attention.requirements import SYMBOL

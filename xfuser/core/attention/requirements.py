@@ -2,13 +2,11 @@
 
 A requirement answers one question: can this backend run on this machine?
 Predicates are lazy -- nothing is probed until something asks -- and memoised,
-so eighteen backends naming the same symbol cause one import attempt.
+so many backends naming the same symbol cause one import attempt.
 
-Failure messages name what is missing and never prescribe a remedy. AITER has
-no usable version and changes in both directions, so a missing symbol means
-"too old" exactly as often as it means "too new"; saying "please update" is a
-guess that is wrong half the time. TESTED_AGAINST records what CI verified and
-is not quoted at users, who are often not on AITER at all.
+Failure messages say what is missing and why, but never prescribe a remedy: a
+vendor library moves in both directions, so a missing symbol means "too old"
+as often as "too new".
 """
 
 import functools
@@ -30,8 +28,8 @@ TESTED_AGAINST = "AITER @ 49c6fdd45 (2026-09-22)"
 def resolve(target: str):
     """Import "module:name" and return the object, or None when absent.
 
-    Anything raised while importing means absent -- vendor modules fail at
-    import for reasons beyond ImportError, AITER's device probe among them.
+    Anything raised while importing means absent: vendor modules fail at
+    import for reasons beyond ImportError, device probes among them.
 
     Not cached itself: it delegates to the memoised _resolve_with_reason, so
     one cache backs both this and the reasons the requirements report.

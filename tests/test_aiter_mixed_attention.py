@@ -560,8 +560,13 @@ def test_aiter_mha_v4_serves_single_sequence_padding():
     assert cosine > 0.99, f"cosine {cosine.item()}"
 
 
-def test_aiter_mha_v4_falls_back_below_head_dim_128():
-    """LTX-2 pairs 128-wide video blocks with 64-wide audio ones in a single backend selection."""
+@pytest.mark.parametrize("head_dim", [64, 256])
+def test_aiter_mha_v4_falls_back_to_v3_off_head_dim_128(head_dim):
+    """LTX-2 pairs 128-wide video blocks with 64-wide audio ones in a single backend selection.
+
+    The fallback goes to v3 rather than SDPA so it still returns an LSE: ring parallelism merges
+    on it, and a None would reach the merge only for the odd-sized blocks.
+    """
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
         AttentionBackendType,
@@ -570,19 +575,21 @@ def test_aiter_mha_v4_falls_back_below_head_dim_128():
     _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
 
     torch.manual_seed(1234)
-    shape = (1, 4, 256, 64)
+    shape = (1, 4, 256, head_dim)
     query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
     value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
 
     with torch.no_grad():
         reference = F.scaled_dot_product_attention(query, key, value)
-        output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
-            query, key, value, dropout_p=0.0, is_causal=False
-        )
+        output, softmax_lse = ATTENTION_FUNCTION_REGISTRY[
+            AttentionBackendType.AITER_BF16
+        ](query, key, value, dropout_p=0.0, is_causal=False)
 
     assert output.shape == reference.shape
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+    assert softmax_lse is not None
+    assert softmax_lse.shape == shape[:3]
 
 
 def test_aiter_mha_v4_lse_capability_excludes_gfx942(monkeypatch):

@@ -16,6 +16,7 @@ from xfuser.core.attention.requirements import (
     PARAM,
     SYMBOL,
     Requirement,
+    _resolve_with_reason,
     resolve,
 )
 from xfuser.core.attention.constraints import (
@@ -67,13 +68,13 @@ def test_param_distinguishes_unreadable_signature_from_absent_parameter():
     cases get different messages."""
     reason = PARAM("functools:reduce", "function").unmet()
     assert reason is not None
-    assert "cannot be introspected" in reason
+    assert "signature cannot be read" in reason
     assert "has no parameter" not in reason
 
 
 def test_param_reports_import_failure_rather_than_missing_param():
     reason = PARAM("no_such_module_xyz:thing", "whatever").unmet()
-    assert "not importable" in reason
+    assert "not installed" in reason
 
 
 def test_and_returns_first_failure_and_short_circuits():
@@ -92,11 +93,11 @@ def test_requirement_is_not_truthy():
 
 
 def test_probes_are_memoised():
-    resolve.cache_clear()
+    _resolve_with_reason.cache_clear()
     SYMBOL("math:sqrt").unmet()
     SYMBOL("math:sqrt").unmet()
     SYMBOL("math:sqrt").unmet()
-    assert resolve.cache_info().hits >= 2
+    assert _resolve_with_reason.cache_info().hits >= 2
 
 
 def test_arch_reports_what_it_found():
@@ -234,7 +235,7 @@ def test_spec_defaults_are_conservative():
 
 def test_spec_unavailable_surfaces_the_requirement_reason():
     spec = _spec(AttentionBackendType.SDPA, requires=SYMBOL("no_such_module_xyz:x"))
-    assert "not importable" in spec.unavailable()
+    assert "not installed" in spec.unavailable()
 
 
 def test_spec_rejects_unacceptable_calls():
@@ -365,7 +366,7 @@ def test_missing_module_is_reported_not_raised():
         returns_lse=False,
         requires=SYMBOL("aiter.ops.definitely_not_here:kernel"),
     )
-    assert "not importable" in spec.unavailable()
+    assert "not installed" in spec.unavailable()
 
 
 def test_or_is_satisfied_when_any_branch_holds():

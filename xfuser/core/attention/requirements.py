@@ -7,7 +7,8 @@ so eighteen backends naming the same symbol cause one import attempt.
 Failure messages name what is missing and never prescribe a remedy. AITER has
 no usable version and changes in both directions, so a missing symbol means
 "too old" exactly as often as it means "too new"; saying "please update" is a
-guess that is wrong half the time. TESTED_AGAINST is offered as context.
+guess that is wrong half the time. TESTED_AGAINST records what CI verified and
+is not quoted at users, who are often not on AITER at all.
 """
 
 import functools
@@ -26,19 +27,40 @@ TESTED_AGAINST = "AITER @ 49c6fdd45 (2026-09-22)"
 # probes (memoised)
 # ---------------------------------------------------------------------------
 
-@functools.lru_cache(maxsize=None)
 def resolve(target: str):
     """Import "module:name" and return the object, or None when absent.
 
     Anything raised while importing means absent -- vendor modules fail at
     import for reasons beyond ImportError, AITER's device probe among them.
+
+    Not cached itself: it delegates to the memoised _resolve_with_reason, so
+    one cache backs both this and the reasons the requirements report.
     """
+    return _resolve_with_reason(target)[0]
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_with_reason(target: str):
+    """(object, why-it-is-missing). The reason matters: "not installed" and
+    "installed but its extension will not load" are different problems, and a
+    bare "not importable" sends people looking for the wrong one."""
     module_name, _, symbol = target.partition(":")
     try:
         module = importlib.import_module(module_name)
-    except Exception:                       # noqa: BLE001 - absence is the answer
-        return None
-    return getattr(module, symbol, None) if symbol else module
+    except ModuleNotFoundError as exc:
+        if exc.name and exc.name.split(".")[0] != module_name.split(".")[0]:
+            # The module is present; something it imports is not.
+            return None, f"{module_name} needs {exc.name}, which is not installed"
+        return None, f"{module_name} is not installed"
+    except Exception as exc:                # noqa: BLE001 - absence is the answer
+        return None, f"{module_name} failed to import: {type(exc).__name__}: {exc}"
+
+    if not symbol:
+        return module, None
+    obj = getattr(module, symbol, None)
+    if obj is None:
+        return None, f"{module_name} has no {symbol}"
+    return obj, None
 
 
 @functools.lru_cache(maxsize=None)
@@ -157,8 +179,9 @@ class SYMBOL(Requirement):
     target: str
 
     def unmet(self) -> Optional[str]:
-        if resolve(self.target) is None:
-            return f"{self.target.replace(':', '.')} is not importable"
+        obj, reason = _resolve_with_reason(self.target)
+        if obj is None:
+            return f"{self.target.replace(':', '.')} is unavailable -- {reason}"
         return None
 
 
@@ -171,15 +194,19 @@ class PARAM(Requirement):
 
     def unmet(self) -> Optional[str]:
         name = self.target.replace(":", ".")
-        if resolve(self.target) is None:
-            return f"{name} is not importable"
+        obj, reason = _resolve_with_reason(self.target)
+        if obj is None:
+            return f"{name} is unavailable -- {reason}"
         params = _signature_params(self.target)
         if params is None:
             # Refusing is the safe answer under a hard-fail policy, but say why:
             # silently treating this as "absent" would disable a working backend.
-            return f"{name} signature cannot be introspected"
+            return (f"{name} is unavailable -- its signature cannot be read, so "
+                    f"the {self.parameter!r} parameter cannot be confirmed")
         if self.parameter not in params:
-            return f"{name} has no parameter {self.parameter!r}"
+            # The function is here; this build's version of it differs. Say so,
+            # because "not importable" would send people to the install.
+            return f"{name} takes no {self.parameter!r} parameter in this build"
         return None
 
 
@@ -203,7 +230,10 @@ class FIRST_OF(Requirement):
     def unmet(self) -> Optional[str]:
         if any(resolve(t) is not None for t in self.targets):
             return None
-        return f"none of these is importable: {self._names()}"
+        why = "; ".join(
+            f"{t.replace(':', '.')}: {_resolve_with_reason(t)[1]}" for t in self.targets
+        )
+        return f"none of these is available -- {why}"
 
     def resolve(self):
         for target in self.targets:
@@ -269,6 +299,3 @@ class CUDA_CAPABILITY(Requirement):
         return None
 
 
-def describe(reason: str) -> str:
-    """Attach the tested-against note to a failure reason."""
-    return f"{reason}. {TESTED_AGAINST} is the last verified build."

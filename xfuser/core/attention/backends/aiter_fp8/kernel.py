@@ -32,9 +32,8 @@ def _static_scale() -> Optional[float]:
 
 
 def _quantize(query, key, value):
-    # aiter-shim cut 2026-09: AITER_FP8_HAS_DESCALE (added 2026-03-09) probed
-    # whether flash_attn_fp8_pertensor_func took descale vectors. It does, so
-    # the no-descale branch and its static scale of 1.0 are gone.
+    # flash_attn_fp8_pertensor_func takes descale vectors, so they are always
+    # passed; there is no no-descale branch.
     quant_dtype = aiter.dtypes.fp8
     static = _static_scale()
     scale = (

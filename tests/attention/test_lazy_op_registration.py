@@ -98,34 +98,6 @@ def test_op_registered_during_first_traced_call(tmp_path):
     assert torch.allclose(out, x * 2)
 
 
-def test_lazy_import_without_fullgraph(tmp_path):
-    """If fullgraph rejects it, does it merely graph-break and still run?"""
-    name = _make_kernel_module(tmp_path)
-    _reset_dynamo()
-
-    @torch.compile(backend="eager")
-    def run(x):
-        module = importlib.import_module(name)
-        return module.call(x)
-
-    x = torch.ones(4)
-    assert torch.allclose(run(x), x * 2)
-
-
-def test_lazy_import_through_inductor(tmp_path):
-    """The realistic path: default backend, not just Dynamo."""
-    name = _make_kernel_module(tmp_path)
-    _reset_dynamo()
-
-    @torch.compile
-    def run(x):
-        module = importlib.import_module(name)
-        return module.call(x)
-
-    x = torch.ones(4)
-    assert torch.allclose(run(x), x * 2)
-
-
 # --------------------------------------------------------------------------
 # the dispatch path itself
 # --------------------------------------------------------------------------

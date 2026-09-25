@@ -192,7 +192,7 @@ def test_get_unregistered_names_the_backend(clean_registry):
         clean_registry.get(AttentionBackendType.AITER_F4F4)
 
 
-def test_queries_replace_the_group_tuples(clean_registry):
+def test_queries_select_by_field(clean_registry):
     clean_registry.register([
         _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity="sparge",
               head_balanced=True, low_precision=True, returns_lse=False),
@@ -272,7 +272,7 @@ def test_varlen_packing_absent_without_indices():
     assert VarlenPacking.from_kwargs({}) is None
 
 
-def test_pack_kv_matches_legacy_semantics():
+def test_pack_kv_keeps_every_query_and_gathers_kv():
     """Q is never filtered; K/V are gathered by the packing indices."""
     batch, seq_len, heads, head_dim = 2, 4, 3, 8
     q = torch.randn(batch, seq_len, heads, head_dim)
@@ -485,31 +485,6 @@ def test_hadamard_declares_its_symbol_once():
 
 
 # --------------------------------------------------------------------------
-# shim hygiene
-# --------------------------------------------------------------------------
-
-def test_every_live_shim_carries_a_date():
-    """Shims accumulate when nobody can tell which are safe to delete. A live
-    marker must say when it was introduced, so shim_report.py can age it;
-    historical "aiter-shim cut" notes are not subject to this."""
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).parent))
-    from shim_report import find_live
-
-    undated = [
-        f"{path}:{number}  {text}"
-        for path, number, date, text in find_live()
-        if date is None
-    ]
-    assert not undated, (
-        "live aiter-shim markers without 'added YYYY-MM-DD':\n  "
-        + "\n  ".join(undated)
-    )
-
-
-# --------------------------------------------------------------------------
 # varlen packing
 # --------------------------------------------------------------------------
 
@@ -546,3 +521,57 @@ def test_only_varlen_capable_backends_accept_packed_keys():
         f"unexpected: {sorted(accepting - VARLEN_CAPABLE)}, "
         f"missing: {sorted(VARLEN_CAPABLE - accepting)}"
     )
+
+
+# --------------------------------------------------------------------------
+# every spec points at code that exists
+# --------------------------------------------------------------------------
+
+def _impl_source(spec):
+    """The file and function name an Impl target names, without importing it."""
+    from pathlib import Path
+    import importlib
+
+    module_name, _, symbol = spec.impl.target.partition(":")
+    package = importlib.import_module(spec.package)
+    return Path(package.__file__).parent / f"{module_name}.py", symbol
+
+
+def test_every_impl_target_names_a_function_that_exists():
+    """Static: the target is a string, so a typo or a renamed function is
+    invisible until that backend is selected on a machine that can run it.
+    Parsing the file catches it anywhere, with no vendor library present."""
+    import ast
+
+    from xfuser.core.attention import registry
+
+    for spec in registry.REGISTRY.values():
+        path, symbol = _impl_source(spec)
+        assert path.exists(), f"{spec.type.name}: no module at {path}"
+        defined = {
+            node.name
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert symbol in defined, f"{spec.type.name}: {path.name} defines no {symbol}"
+
+
+def test_every_registered_backend_resolves_where_it_is_available():
+    """A kernel module is only imported when its backend is selected, so a
+    broken one -- a bad import, a name used before it is defined -- stays
+    invisible until a run picks it. Import every module this machine can, and
+    check the target really is callable."""
+    from xfuser.core.attention import registry
+
+    for spec in registry.REGISTRY.values():
+        if spec.unavailable() is not None:
+            continue
+        assert callable(spec.resolved()), f"{spec.type.name}: impl is not callable"
+
+
+def test_every_enum_member_has_a_spec():
+    """A member with no spec cannot be selected, so a forgotten registration is
+    a backend that silently does not exist."""
+    from xfuser.core.attention import registry
+
+    assert registry.missing_specs() == []

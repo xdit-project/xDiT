@@ -26,7 +26,6 @@ if envs._is_npu():
     from torch.npu import manual_seed_all as device_manual_seed_all
 
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.requirements import TESTED_AGAINST
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
@@ -232,8 +231,7 @@ class RuntimeState(metaclass=ABCMeta):
         unavailable = spec.unavailable()
         if unavailable is not None:
             raise RuntimeError(
-                f"{attention_backend.value} attention is unavailable: {unavailable}. "
-                f"{TESTED_AGAINST} is the last verified build."
+                f"{attention_backend.value} attention is unavailable: {unavailable}"
             )
 
         if self.parallel_config.ring_degree > 1 and not spec.returns_lse:

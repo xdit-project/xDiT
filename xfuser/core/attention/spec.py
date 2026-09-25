@@ -58,6 +58,7 @@ class AttentionBackendType(Enum):
     AITER_SPARGE_V2 = "AITER Sparge V2"
     AITER_VSA = "AITER VSA CK"
     FLEX_VSA_H3 = "Flex VSA-H3"
+    TRITON_VSA_H3 = "FastH3 VSA-H3 (Triton)"
     FLEX_BLOCK_SPARGE = "Flex Block Sparge"
     AITER_FLYDSL = "AITER FlyDSL"
     AITER_FLYDSL_FP8 = "AITER FlyDSL FP8"

@@ -304,7 +304,7 @@ def test_pack_kv_keeps_every_query_and_gathers_kv():
 # --------------------------------------------------------------------------
 
 def test_enum_still_has_every_member():
-    assert len(list(AttentionBackendType)) == 44
+    assert len(list(AttentionBackendType)) == 45
 
 
 # --------------------------------------------------------------------------

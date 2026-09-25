@@ -243,4 +243,9 @@ class Spec:
             # torch._dynamo.exc.Unsupported; the message survives in the debug
             # context. Only reachable on a misconfigured run.
             raise NotImplementedError(f"{self.type.name} {reason}")
-        return (self._resolved or self.resolved())(query, key, value, call)
+        # `is None` rather than `or`: a bound impl is a functools.partial, whose
+        # truthiness Dynamo cannot evaluate, and the branch is on the hot path.
+        fn = self._resolved
+        if fn is None:
+            fn = self.resolved()
+        return fn(query, key, value, call)

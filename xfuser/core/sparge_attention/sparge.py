@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from xfuser.core.sparge_attention.block_mask import get_block_map_meansim
 from xfuser.core.sparge_attention.gilbert import (
     curve as gilbert_curve,
     sliced_curve,
@@ -30,12 +29,14 @@ def _device_key(device: torch.device) -> tuple:
 
 # ── State carried from setup -> restore ──────────────────────────────────────
 
+
 @dataclass
 class SpargeState:
     """State produced by ``setup_sparge`` and consumed by
     ``restore_sparge_output`` so the post-attention path can reverse the
     permutation, re-append stripped SP padding, and re-interleave the
     text/image partition back into Ulysses rank-chunks."""
+
     sp_pad_len: int
     text_len: int
     sp_size: int
@@ -52,8 +53,8 @@ class SpargeState:
 
 # ── Cache builders ───────────────────────────────────────────────────────────
 
-def get_gilbert_perm(thw: Tuple[int, int, int], device: torch.device
-                     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+def get_gilbert_perm(thw: Tuple[int, int, int], device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     key = ("3d", tuple(thw), _device_key(device))
     cached = _GILBERT_PERM_CACHE.get(key)
     if cached is not None:
@@ -64,25 +65,22 @@ def get_gilbert_perm(thw: Tuple[int, int, int], device: torch.device
     return fwd_perm, inv_perm
 
 
-def get_sliced_gilbert_perm(
-    thw: Tuple[int, int, int], device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def get_sliced_gilbert_perm(thw: Tuple[int, int, int], device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     key = ("sliced", tuple(thw), _device_key(device))
     cached = _GILBERT_PERM_CACHE.get(key)
     if cached is not None:
         return cached
     t, h, w = thw
     linear_to_gilbert, gilbert_to_linear = sliced_gilbert_mapping(t, h, w)
-    inv_perm, fwd_perm = sliced_curve(
-        linear_to_gilbert, gilbert_to_linear, device
-    )
+    inv_perm, fwd_perm = sliced_curve(linear_to_gilbert, gilbert_to_linear, device)
     _GILBERT_PERM_CACHE[key] = (fwd_perm, inv_perm)
     return fwd_perm, inv_perm
 
 
 def get_static_block_neighbor_mask(
     thw: Tuple[int, int, int],
-    block_m: int, block_n: int,
+    block_m: int,
+    block_n: int,
     device: torch.device,
     gilbert_mapping: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     *,
@@ -110,13 +108,20 @@ def get_static_block_neighbor_mask(
         identity = torch.arange(t * h * w, dtype=torch.int64, device=device)
         gilbert_mapping = (identity, identity)
     mask = sliced_gilbert_block_neighbor_mapping(
-        t, h, w, block_m, block_n, device, gilbert_mapping=gilbert_mapping,
+        t,
+        h,
+        w,
+        block_m,
+        block_n,
+        device,
+        gilbert_mapping=gilbert_mapping,
     )
     _STATIC_BLOCK_MASK_CACHE[key] = mask
     return mask
 
 
 # ── Ulysses de-/re-interleave ────────────────────────────────────────────────
+
 
 def _deinterleave(x: torch.Tensor, u: int, txt_len: int) -> torch.Tensor:
     b, h, s, d = x.shape
@@ -140,6 +145,7 @@ def _reinterleave(x: torch.Tensor, u: int, txt_len: int) -> torch.Tensor:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
+
 def setup_sparge(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -154,9 +160,7 @@ def setup_sparge(
     block_n: int = 128,
     pad_block_divisible: bool = False,
     use_sliced_gilbert: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-           SpargeState, Optional[torch.Tensor]]:
-
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, SpargeState, Optional[torch.Tensor]]:
     b, hd, s, d = query.shape
 
     text_len_post_deint = encoder_sequence_length * sp_size
@@ -182,8 +186,7 @@ def setup_sparge(
 
     if reorder_sequence and thw is None:
         raise ValueError(
-            "Sparge with reorder_sequence=True requires "
-            "`attention_kwargs['thw']` to be published by the model wrapper."
+            "Sparge with reorder_sequence=True requires `attention_kwargs['thw']` to be published by the model wrapper."
         )
 
     if thw is not None and (reorder_sequence or use_static_block_mask):
@@ -198,20 +201,15 @@ def setup_sparge(
             )
 
     if reorder_sequence:
-        perm_builder = (
-            get_sliced_gilbert_perm
-            if use_sliced_gilbert
-            else get_gilbert_perm
-        )
+        perm_builder = get_sliced_gilbert_perm if use_sliced_gilbert else get_gilbert_perm
         fwd_perm, inv_perm = perm_builder(thw, query.device)
         if use_static_block_mask:
-            mapping_kind = (
-                "sliced_gilbert"
-                if use_sliced_gilbert
-                else "gilbert"
-            )
+            mapping_kind = "sliced_gilbert" if use_sliced_gilbert else "gilbert"
             static_mask = get_static_block_neighbor_mask(
-                thw, block_m, block_n, query.device,
+                thw,
+                block_m,
+                block_n,
+                query.device,
                 gilbert_mapping=(inv_perm, fwd_perm),
                 mapping_kind=mapping_kind,
             )
@@ -226,7 +224,10 @@ def setup_sparge(
         # Linear (row-major) order: feed the neighbour builder an identity
         # linear_to_hilbert so it emits a *linear*-block neighbour mask.
         static_mask = get_static_block_neighbor_mask(
-            thw, block_m, block_n, query.device,
+            thw,
+            block_m,
+            block_n,
+            query.device,
             mapping_kind="linear",
         )
         static_mask_cache_key = (
@@ -276,9 +277,7 @@ def setup_sparge(
             n_ik = (image_len + img_pad) // block_n
             if use_sliced_gilbert:
                 if static_mask_cache_key is None:
-                    raise RuntimeError(
-                        "Static block mask cache metadata is missing"
-                    )
+                    raise RuntimeError("Static block mask cache metadata is missing")
                 padded_key = (*static_mask_cache_key, n_iq, n_ik)
                 padded_static = _PADDED_STATIC_BLOCK_MASK_CACHE.get(padded_key)
                 if padded_static is None:
@@ -287,9 +286,7 @@ def setup_sparge(
                         dtype=static_mask.dtype,
                         device=static_mask.device,
                     )
-                    padded_static[
-                        : static_mask.shape[0], : static_mask.shape[1]
-                    ] = static_mask
+                    padded_static[: static_mask.shape[0], : static_mask.shape[1]] = static_mask
                     _PADDED_STATIC_BLOCK_MASK_CACHE[padded_key] = padded_static
             else:
                 # Preserve the existing Sparge backends' allocation behavior;
@@ -299,9 +296,7 @@ def setup_sparge(
                     dtype=static_mask.dtype,
                     device=static_mask.device,
                 )
-                padded_static[
-                    : static_mask.shape[0], : static_mask.shape[1]
-                ] = static_mask
+                padded_static[: static_mask.shape[0], : static_mask.shape[1]] = static_mask
             static_mask = padded_static
 
     # Re-concatenate text tail.
@@ -350,14 +345,24 @@ def compute_sparge_block_mask(
     block_m: int = 128,
     block_n: int = 128,
 ) -> torch.Tensor:
-    image_q = q[:, :, :q.shape[2] - text_len, :] if text_len > 0 else q
-    image_k = k[:, :, :k.shape[2] - text_len, :] if text_len > 0 else k
+    try:
+        from xfuser.core.sparge_attention.block_mask import get_block_map_meansim
+    except ModuleNotFoundError as error:
+        if error.name == "triton":
+            raise RuntimeError("SpargeAttention requires Triton, but Triton is not installed") from error
+        raise
+
+    image_q = q[:, :, : q.shape[2] - text_len, :] if text_len > 0 else q
+    image_k = k[:, :, : k.shape[2] - text_len, :] if text_len > 0 else k
 
     image_block_mask = get_block_map_meansim(
-        image_q, image_k,
+        image_q,
+        image_k,
         is_causal=is_causal,
-        BLKQ=block_m, BLKK=block_n,
-        simthreshd1=simthreshd1, cdfthreshd=cdfthreshd,
+        BLKQ=block_m,
+        BLKK=block_n,
+        simthreshd1=simthreshd1,
+        cdfthreshd=cdfthreshd,
         attention_sink=False,
     )
 
@@ -376,7 +381,10 @@ def compute_sparge_block_mask(
     n_total_k = n_ik + n_text_k
 
     full = torch.zeros(
-        B, H, n_total_q, n_total_k,
+        B,
+        H,
+        n_total_q,
+        n_total_k,
         dtype=image_block_mask.dtype,
         device=image_block_mask.device,
     )
@@ -385,10 +393,10 @@ def compute_sparge_block_mask(
     full[:, :, :, -n_text_k:] = True
     full[:, :, -n_text_q:, :] = True
     # --- treat the image/text boundary block (if there is one) as dense ---
-    image_len_q = q.shape[2] - text_len   # length of image portion in q
-    image_len_k = k.shape[2] - text_len   # length of image portion in k
+    image_len_q = q.shape[2] - text_len  # length of image portion in q
+    image_len_k = k.shape[2] - text_len  # length of image portion in k
     if image_len_q % block_m != 0:
-        boundary_q = image_len_q // block_m   # last (partial) image block, contains text spillover
+        boundary_q = image_len_q // block_m  # last (partial) image block, contains text spillover
         full[:, :, boundary_q, :] = True
     if image_len_k % block_n != 0:
         boundary_k = image_len_k // block_n
@@ -401,7 +409,7 @@ def restore_sparge_output(o: torch.Tensor, state: SpargeState) -> torch.Tensor:
         o = o[:, :, : o.shape[2] - state.tail_pad, :]
 
     if state.text_len > 0:
-        text_o = o[:, :, -state.text_len:, :]
+        text_o = o[:, :, -state.text_len :, :]
         image_o = o[:, :, : o.shape[2] - state.text_len, :]
     else:
         image_o = o
@@ -415,8 +423,12 @@ def restore_sparge_output(o: torch.Tensor, state: SpargeState) -> torch.Tensor:
 
     if state.sp_pad_len > 0:
         sp_pad = torch.zeros(
-            state.b, state.hd, state.sp_pad_len, state.d,
-            dtype=image_o.dtype, device=image_o.device,
+            state.b,
+            state.hd,
+            state.sp_pad_len,
+            state.d,
+            dtype=image_o.dtype,
+            device=image_o.device,
         )
         image_o = torch.cat([image_o, sp_pad], dim=2)
 
@@ -432,9 +444,7 @@ def restore_sparge_output(o: torch.Tensor, state: SpargeState) -> torch.Tensor:
     return out
 
 
-def mask_padded_kv_blocks(
-    block_mask: torch.Tensor, state: SpargeState, block_n: int
-) -> torch.Tensor:
+def mask_padded_kv_blocks(block_mask: torch.Tensor, state: SpargeState, block_n: int) -> torch.Tensor:
     if state.img_pad == 0 and state.tail_pad == 0:
         return block_mask
 

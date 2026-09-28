@@ -53,7 +53,7 @@ from xfuser.core.utils.checkpoint_io import (
     component_shard_paths,
 )
 from xfuser.core.utils.dtype_policy import cast_preserving_fp32_modules
-from xfuser.core.utils.runner_utils import log, rgetattr, _use_aiter_fp8_rdna4
+from xfuser.core.utils.runner_utils import log, rgetattr
 from xfuser.envs import _is_cuda
 from .checkpoint import CheckpointManifest, CheckpointRequest
 from .contracts import (
@@ -424,10 +424,17 @@ class ModelLoader:
         assert_requested_materialization_is_honoured(config, world_size=world_size)
         assert_offload_is_compatible_with_sharding(config)
         mode = select_effective_materialization_mode(config, world_size=world_size)
+        from .fp8_backends import (
+            AITER_FP8,
+            fp8_backend_name,
+            probe_fp8_backend_capabilities,
+        )
+
         requested_format, backend = select_runtime_quantization(
             config,
             aiter_fp8_active=bool(
-                config.use_fp8_gemms and _use_aiter_fp8_rdna4()
+                config.use_fp8_gemms
+                and fp8_backend_name(probe_fp8_backend_capabilities()) == AITER_FP8
             ),
             cuda_active=_is_cuda(),
         )

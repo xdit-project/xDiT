@@ -28,6 +28,29 @@ class Fp8BackendCapabilities:
     torchao_fsdp_reason: str | None = None
 
 
+#: The two FP8 implementations, spelled as QuantizationBackend values so a
+#: caller maps the answer onto its own enum without a second table.
+AITER_FP8 = "aiter"
+TORCHAO_FP8 = "torchao"
+
+
+def fp8_backend_name(capabilities: Fp8BackendCapabilities) -> str:
+    """Which FP8 implementation this machine stores FP8 with.
+
+    The only place that decides. AITER's ``gemm_a8w8_blockscale`` is a Triton
+    kernel confirmed to reach FP8 WMMA on gfx1200+ (RDNA4), so it is taken
+    there; every other target -- CUDA, MI300, gfx950 -- stores FP8 as torchao
+    per-tensor dynamic scaling. ``aiter_block_scale`` carries that gate.
+
+    Every FP8 consumer asks here, so a pure FP8 run, the high tier of a tiered
+    run, a text encoder and a block carved out of a low-format target all get
+    the same implementation rather than each reaching for its own predicate.
+    Widening the gate to another architecture is an edit to this function.
+    """
+
+    return AITER_FP8 if capabilities.aiter_block_scale else TORCHAO_FP8
+
+
 def _probe_torchao_fp8_conversion_api() -> tuple[bool, str | None]:
     """Import and instantiate the exact TorchAO APIs used by conversion."""
 
@@ -578,11 +601,7 @@ def select_blockwise_fp8_backend(
         fp8_contract = contract
     else:
         backend_enum = contract.selected_backend.__class__
-        fp8_backend = (
-            backend_enum.AITER
-            if capabilities.aiter_block_scale
-            else backend_enum.TORCHAO
-        )
+        fp8_backend = backend_enum(fp8_backend_name(capabilities))
         fp8_contract = SimpleNamespace(
             requested_format=contract.requested_format.__class__.FP8,
             selected_backend=fp8_backend,

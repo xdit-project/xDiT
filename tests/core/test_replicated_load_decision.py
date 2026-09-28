@@ -18,6 +18,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from xfuser.model_executor.models.runner_models.loading import (
+    fp8_backends,
     meta_load,
     text_encoder_plan,
     transformer_load,
@@ -499,7 +500,9 @@ def test_runner_fsdp_meta_support_matches_capabilities_and_strategy():
 def test_base_runner_selects_the_production_contract_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: True)
+    monkeypatch.setattr(
+        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.AITER_FP8
+    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
     model_capabilities = base_model.ModelCapabilities(
         fully_shard_degree=True,
@@ -542,7 +545,9 @@ def test_base_runner_selects_the_production_contract_before_loading(monkeypatch)
 def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: False)
+    monkeypatch.setattr(
+        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.TORCHAO_FP8
+    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
@@ -572,7 +577,9 @@ def test_base_runner_rejects_unsupported_meta_mode_before_loading(monkeypatch):
 def test_base_runner_uses_effective_single_rank_mode(monkeypatch):
     from xfuser.model_executor.models.runner_models import base_model
 
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: False)
+    monkeypatch.setattr(
+        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.TORCHAO_FP8
+    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: True)
     runner = SimpleNamespace(
         config=SimpleNamespace(
@@ -620,7 +627,9 @@ def test_wan22_spec_resolves_after_dynamic_instance_settings(monkeypatch):
         use_int8_gemms=False,
     )
     runner._customize_settings(SimpleNamespace())
-    monkeypatch.setattr(meta_load, "_use_aiter_fp8_rdna4", lambda: True)
+    monkeypatch.setattr(
+        fp8_backends, "fp8_backend_name", lambda _caps: fp8_backends.AITER_FP8
+    )
     monkeypatch.setattr(meta_load, "_is_cuda", lambda: False)
 
     loader = ModelLoader(runner)

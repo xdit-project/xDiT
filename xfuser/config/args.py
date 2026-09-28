@@ -241,7 +241,7 @@ class xFuserArgs:
     gemm_config: Optional[str] = None
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
-    use_fp8_text_encoder: bool = False
+    quantize_text_encoder: bool = False
     use_fp4_gemms: bool = False
     # Internal compatibility bridge derived from gemm_quantization.
     use_fp6_gemms: bool = False
@@ -1032,12 +1032,13 @@ class xFuserArgs:
             help="Quantize the transformer linear layers (selected models only).",
         )
         parser.add_argument(
-            "--use_fp8_text_encoder",
+            "--quantize_text_encoder",
             action="store_true",
-            help="Also quantize the text encoder's linear layers to FP8 (selected models only). "
-                 "Requires a GEMM profile containing FP8. Frees several GB "
-                 "for large bf16 text encoders, at whatever output-quality cost FP8 carries for "
-                 "the encoder; off by default because that is a quality trade-off, not a free win.",
+            help="Also quantize the text encoder's linear layers (selected models only). "
+                 "It takes the same format as the rest of the run, unless the model holds it "
+                 "higher. Frees several GB for large bf16 text encoders, at whatever "
+                 "output-quality cost that format carries for the encoder; off by default "
+                 "because that is a quality trade-off, not a free win.",
         )
         parser.add_argument(
             "--use_fp4_gemms",
@@ -1372,9 +1373,9 @@ class xFuserArgs:
     def _validate_gemm_quantization_flags(self) -> None:
         """Validate ownership of mutually exclusive generic GEMM quantizers."""
         spec = self.gemm_quantization_spec
-        if self.use_fp8_text_encoder and "fp8" not in spec.formats:
+        if self.quantize_text_encoder and "fp8" not in spec.formats:
             raise ValueError(
-                "--use_fp8_text_encoder requires a gemm_quantization profile "
+                "--quantize_text_encoder requires a gemm_quantization profile "
                 "containing FP8."
             )
         has_advanced_targets = (

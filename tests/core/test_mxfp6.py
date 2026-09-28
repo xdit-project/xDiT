@@ -46,7 +46,7 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
     model = object.__new__(xFuserWan22T2VModel)
     model.settings = copy.deepcopy(xFuserWan22T2VModel.settings)
     model._customize_settings(SimpleNamespace())
-    model.config = SimpleNamespace(use_fp8_text_encoder=False, use_fp6_gemms=True)
+    model.config = SimpleNamespace(quantize_text_encoder=False, use_fp6_gemms=True)
     plan = QuantizationPlan(model)
 
     assert plan.module_list("fp4") == ["transformer.blocks"]

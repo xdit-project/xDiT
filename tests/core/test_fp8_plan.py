@@ -2,7 +2,7 @@
 
 Every FP8 consumer (the post-load walks on any hardware, the per-block FSDP quantize, the streaming
 quantize-on-load, the meta-init paths) reads its target list from here, so the
---use_fp8_text_encoder opt-in and the prefix matching are pinned here rather than left to a GPU run
+--quantize_text_encoder opt-in and the prefix matching are pinned here rather than left to a GPU run
 to discover.
 
 Run with:
@@ -23,7 +23,7 @@ def make_plan(
     transformer_targets=None,
     te_targets=None,
     use_fp8_gemms=True,
-    use_fp8_text_encoder=False,
+    quantize_text_encoder=False,
 ):
     """A QuantizationPlan over a stand-in runner."""
     model = SimpleNamespace(
@@ -35,14 +35,14 @@ def make_plan(
         ),
         config=SimpleNamespace(
             use_fp8_gemms=use_fp8_gemms,
-            use_fp8_text_encoder=use_fp8_text_encoder,
+            quantize_text_encoder=quantize_text_encoder,
         ),
     )
     return QuantizationPlan(model)
 
 
 # ============================================================================
-# module_list: the --use_fp8_text_encoder opt-in
+# module_list: the --quantize_text_encoder opt-in
 # ============================================================================
 
 
@@ -61,7 +61,7 @@ def test_text_encoder_targets_included_when_flag_set(monkeypatch):
         monkeypatch,
         transformer_targets=["transformer.blocks"],
         te_targets=["text_encoder.encoder.block"],
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
     )
     assert plan.module_list() == ["transformer.blocks", "text_encoder.encoder.block"]
 
@@ -71,7 +71,7 @@ def test_flag_without_declared_targets_is_inert(monkeypatch):
     plan = make_plan(
         monkeypatch,
         transformer_targets=["transformer.blocks"],
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
     )
     assert plan.module_list() == ["transformer.blocks"]
 
@@ -183,7 +183,7 @@ def test_targets_are_stripped_of_the_component_prefix(monkeypatch):
     plan = make_plan(
         monkeypatch,
         te_targets=["text_encoder.model.language_model.layers"],
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
     )
     assert plan.targets_for("text_encoder") == ["model.language_model.layers"]
 
@@ -207,11 +207,11 @@ def test_registered_runner_text_encoder_capability_matches_declared_targets():
 
     mismatches = {
         cls.__name__: {
-            "capability": cls.capabilities.use_fp8_text_encoder,
+            "capability": cls.capabilities.quantize_text_encoder,
             "targets": cls.settings.fp8_text_encoder_module_list,
         }
         for cls in dict.fromkeys(MODEL_REGISTRY.values())
-        if cls.capabilities.use_fp8_text_encoder
+        if cls.capabilities.quantize_text_encoder
         != bool(cls.settings.fp8_text_encoder_module_list)
     }
 
@@ -243,5 +243,5 @@ def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
 
     assert not leaks, (
         "these runners list non-transformer targets in fp8_gemm_module_list; move them to "
-        f"fp8_text_encoder_module_list so --use_fp8_text_encoder gates them: {leaks}"
+        f"fp8_text_encoder_module_list so --quantize_text_encoder gates them: {leaks}"
     )

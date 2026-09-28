@@ -62,7 +62,7 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
     )
     config = SimpleNamespace(
         gemm_quantization_spec=spec,
-        use_fp8_text_encoder=text_encoder,
+        quantize_text_encoder=text_encoder,
         use_hybrid_gemm_schedule=False,
     )
     model = SimpleNamespace(

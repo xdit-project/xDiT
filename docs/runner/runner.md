@@ -172,7 +172,7 @@ Individual model classes that inherit from `xFuserModel`:
 | `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `int8`, `low=fp4,high=fp8`, or `low=fp4,high=fp6` | none |
 | `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit FP8/FP4 schedule | None |
 | `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms` | Deprecated format selectors retained for compatibility | False |
-| `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well; requires a profile containing FP8 | False |
+| `--quantize_text_encoder` | Extend FP8 quantization to the text encoder as well; requires a profile containing FP8 | False |
 | `--use_hybrid_gemm_schedule` | Use the profile's FP8 or FP6 high format at the endpoints and FP4 in the middle | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |
@@ -317,8 +317,8 @@ list rather than adding to it.
 
 #### Flag Combinations and Exclusions
 
-- `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 is opt-in everywhere: add `--use_fp8_text_encoder` when you want it.
-- `--use_fp8_text_encoder` requires `--use_fp8_gemms` and a runner that explicitly declares text-encoder FP8 capability and targets. Other runners reject the text-encoder flag during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
+- `--use_fp8_gemms` quantizes transformer targets only. Text-encoder FP8 is opt-in everywhere: add `--quantize_text_encoder` when you want it.
+- `--quantize_text_encoder` requires `--use_fp8_gemms` and a runner that explicitly declares text-encoder FP8 capability and targets. Other runners reject the text-encoder flag during capability validation. Quantizing a supported text encoder may reduce text-conditioning quality.
 - RDNA4+AITER streaming FP8 for a text encoder requires `transformers>=5.0` with `transformers.core_model_loading`. On Transformers 4.x, xDiT logs the reason and uses AITER post-load conversion where placement permits it; memory-efficient FSDP rejects the fallback before allocation because its sharded meta layout cannot be changed safely. The general `transformers>=4.39.1` package floor remains valid.
 - Native torchao text-encoder loading requires `torchao>=0.15.0`, Diffusers `PipelineQuantizationConfig`, and Transformers `TorchAoConfig` quantize-on-load APIs. Native torchao transformer loading separately requires Diffusers `TorchAoConfig` accepting the exact `AOBaseConfig`; this includes NVFP4 and INT8 when installed APIs support them. These APIs are feature-probed lazily and unavailable paths fall back explicitly where placement permits it.
 - `--use_int8_gemms` cannot be combined with `--use_fp8_gemms` or `--use_fp4_gemms`, and that exclusion includes explicit hybrid FP8/FP4 mode.
@@ -348,7 +348,7 @@ RDNA4 transformer and text-encoder streaming FP8 (Transformers 5 required):
 xdit --model FLUX.2-dev \
     --prompt "A lighthouse in a winter storm" \
     --use_fp8_gemms \
-    --use_fp8_text_encoder
+    --quantize_text_encoder
 ```
 
 Memory-efficient FP8 FSDP load:

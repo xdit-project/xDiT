@@ -132,8 +132,8 @@ def preflight_loader(runner):
     ):
         if not hasattr(runner.settings, name):
             setattr(runner.settings, name, None)
-    if not hasattr(runner.config, "use_fp8_text_encoder"):
-        runner.config.use_fp8_text_encoder = False
+    if not hasattr(runner.config, "quantize_text_encoder"):
+        runner.config.quantize_text_encoder = False
     if not hasattr(runner.config, "use_hybrid_gemm_schedule"):
         runner.config.use_hybrid_gemm_schedule = False
     loader = object.__new__(ModelLoader)

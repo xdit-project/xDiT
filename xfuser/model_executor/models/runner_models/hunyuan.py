@@ -53,7 +53,7 @@ class xFuserHunyuanvideoModel(xFuserModel):
         use_hybrid_attn_schedule=True,
         use_fp8_gemms=True,
         supports_step_caching=True,
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
         fully_shard_degree=True,
         use_parallel_vae=True,
     )

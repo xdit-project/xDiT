@@ -103,7 +103,7 @@ class QuantizationPlan:
         if spec is None:
             spec = GemmQuantizationSpec()
         enable = ["transformer"]
-        if getattr(self.model.config, "use_fp8_text_encoder", False):
+        if getattr(self.model.config, "quantize_text_encoder", False):
             enable.append("text_encoder")
         return resolve(targets, spec, enable=tuple(enable))
 
@@ -132,7 +132,7 @@ class QuantizationPlan:
         if spec is not None and spec.is_pure("fp4"):
             # A pure fp4 run folds the fp8 targets into fp4 and empties fp8.
             entries = []
-        if self.model.config.use_fp8_text_encoder:
+        if self.model.config.quantize_text_encoder:
             entries += list(targets.text_encoder.roots())
         return entries
 
@@ -147,7 +147,7 @@ class QuantizationPlan:
             return self._declared_targets(targets, format_name)
         if format_name == "fp8":
             targets = list(settings.fp8_gemm_module_list or ())
-            if self.model.config.use_fp8_text_encoder:
+            if self.model.config.quantize_text_encoder:
                 targets += list(settings.fp8_text_encoder_module_list or ())
             return targets
         if format_name == "fp4":

@@ -133,12 +133,12 @@ def test_unsupported_runner_rejects_fp8_text_encoder_via_capability_validation(
     config = _args(
         runtime,
         use_fp8_gemms=True,
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
     )
 
     with pytest.raises(
         ValueError,
-        match="does not support use_fp8_text_encoder",
+        match="does not support quantize_text_encoder",
     ):
         model._validate_config(config)
 
@@ -280,7 +280,7 @@ def test_tiered_fp8_profile_supports_text_encoder_fp8(runtime):
     config = _args(
         runtime,
         gemm_quantization="low=fp4,high=fp8",
-        use_fp8_text_encoder=True,
+        quantize_text_encoder=True,
     )
     config._validate_gemm_quantization_flags()
 
@@ -288,7 +288,7 @@ def test_tiered_fp8_profile_supports_text_encoder_fp8(runtime):
         _args(
             runtime,
             gemm_quantization="low=fp4,high=fp6",
-            use_fp8_text_encoder=True,
+            quantize_text_encoder=True,
         )._validate_gemm_quantization_flags()
 
 

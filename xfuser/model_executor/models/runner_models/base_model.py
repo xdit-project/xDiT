@@ -145,7 +145,7 @@ class ModelCapabilities:
     # Other features
     use_int8_gemms: bool = False
     use_fp8_gemms: bool = False
-    use_fp8_text_encoder: bool = False
+    quantize_text_encoder: bool = False
     use_fp4_gemms: bool = False
     use_fp6_gemms: bool = False
     supports_step_caching: bool = False
@@ -314,11 +314,11 @@ class xFuserModel(abc.ABC):
         if config.use_fp4_gemms:
             apply_fp8_override_cli_to_settings(config, self.settings)
         te_targets = self.settings.fp8_text_encoder_module_list
-        if te_targets and config.use_fp8_gemms and not config.use_fp8_text_encoder:
+        if te_targets and config.use_fp8_gemms and not config.quantize_text_encoder:
             # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
             # indistinguishable from --use_fp8_gemms failing to take effect.
             log(f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
-                f"{len(te_targets)} text-encoder target(s) stay bf16. Add --use_fp8_text_encoder "
+                f"{len(te_targets)} text-encoder target(s) stay bf16. Add --quantize_text_encoder "
                 f"to quantize them too, for less memory at some risk to text conditioning.")
 
     def _load_model_checked(self) -> DiffusionPipeline:

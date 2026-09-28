@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     ModelCapabilities,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
@@ -140,13 +141,20 @@ class xFuserZImageModel(xFuserModel):
                 "wrap_attrs": ["layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
-        fp8_text_encoder_module_list=["text_encoder.layers"],
-        int8_gemm_module_list=[
-            "transformer.layers",
-            "transformer.noise_refiner",
-            "transformer.context_refiner"
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.layers",
+                "transformer.noise_refiner",
+                "transformer.context_refiner",
+            )),
+            text_encoder=Select(modules=("text_encoder.layers",)),
+            # context_refiner refines the caption embeddings, and sequence
+            # parallelism chunks that sequence before those layers run, so
+            # their GEMMs can see an M of a handful of tokens. A format whose
+            # kernel refuses a small M leaves them alone; the rest are
+            # unaffected, and so is a run on one rank.
+            short_sequence=Select(modules=("transformer.context_refiner",)),
+        ),
         step_cache_config={
             "dbcache":DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
@@ -156,21 +164,6 @@ class xFuserZImageModel(xFuserModel):
             ),
         },
     )
-
-    def _customize_settings(self, config) -> None:
-        """Exclude context_refiner from INT8 quant when sequence parallelism is active.
-
-        Both Ulysses and Ring attention split the sequence across GPUs.  The
-        caption features processed by ``context_refiner`` may be very short; 
-        after SP chunking each GPU may see M <= 16, which is below the minimum 
-        M required by the ``torch._int_mm`` kernel used by torch.compile.
-        """
-        sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
-        if sp_world_size > 1 and config.use_int8_gemms:
-            self.settings.int8_gemm_module_list = [
-                m for m in self.settings.int8_gemm_module_list
-                if m != "transformer.context_refiner"
-            ]
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline
@@ -243,25 +236,21 @@ class xFuserZImageTurboModel(xFuserModel):
                 "wrap_attrs": ["layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
-        fp8_text_encoder_module_list=["text_encoder.layers"],
-        int8_gemm_module_list=["transformer.layers", "transformer.noise_refiner", "transformer.context_refiner"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.layers",
+                "transformer.noise_refiner",
+                "transformer.context_refiner",
+            )),
+            text_encoder=Select(modules=("text_encoder.layers",)),
+            # context_refiner refines the caption embeddings, and sequence
+            # parallelism chunks that sequence before those layers run, so
+            # their GEMMs can see an M of a handful of tokens. A format whose
+            # kernel refuses a small M leaves them alone; the rest are
+            # unaffected, and so is a run on one rank.
+            short_sequence=Select(modules=("transformer.context_refiner",)),
+        ),
     )
-
-    def _customize_settings(self, config) -> None:
-        """Exclude context_refiner from INT8 quant when sequence parallelism is active.
-
-        Both Ulysses and Ring attention split the sequence across GPUs.  The
-        caption features processed by ``context_refiner`` may be very short; 
-        after SP chunking each GPU may see M <= 16, which is below the minimum 
-        M required by the ``torch._int_mm`` kernel used by torch.compile.
-        """
-        sp_world_size = (config.ulysses_degree or 1) * (config.ring_degree or 1)
-        if sp_world_size > 1 and config.use_int8_gemms:
-            self.settings.int8_gemm_module_list = [
-                m for m in self.settings.int8_gemm_module_list
-                if m != "transformer.context_refiner"
-            ]
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import ZImagePipeline

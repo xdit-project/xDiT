@@ -169,3 +169,45 @@ def test_a_translated_pattern_holds_back_exactly_what_it_used_to(cls, entry):
             assert plan.format_for(f"{root}.{local}") == expected, (
                 f"{cls.__name__}: {root}.{local}"
             )
+
+
+@pytest.mark.parametrize(
+    ("raw", "sp_world_size", "quantized"),
+    [
+        ("int8", 1, True),   # one rank sees the whole caption
+        ("int8", 8, False),  # chunked below torch._int_mm's minimum M
+        ("int8", 4, False),
+        ("fp8", 8, True),    # no floor, so the chunking does not matter
+    ],
+)
+def test_z_image_context_refiner_follows_the_kernels_floor(
+    raw, sp_world_size, quantized
+):
+    """What `_customize_settings` used to do by editing the INT8 list.
+
+    Nothing else in the suite covered it, and the oracle cannot: it compares
+    declarations, and this one only differs once a run names both a format and
+    a parallel degree.
+    """
+    from xfuser.model_executor.models.runner_models.z_image import xFuserZImageModel
+
+    config = SimpleNamespace(
+        gemm_quantization_spec=GemmQuantizationSpec.parse(raw),
+        _gemm_config_loaded=False,
+        quantize_text_encoder=False,
+        ulysses_degree=sp_world_size,
+        ring_degree=1,
+        use_hybrid_gemm_schedule=False,
+        gemm_high_precision_targets="model",
+    )
+    plan = QuantizationPlan(
+        SimpleNamespace(
+            settings=copy.deepcopy(xFuserZImageModel.settings), config=config
+        )
+    ).gemm_plan
+
+    refiner = plan.format_for("transformer.context_refiner.0.attn.to_q")
+    assert (refiner is not None) == quantized
+    # its neighbours are quantized whatever the parallel degree
+    assert plan.format_for("transformer.layers.0.attn.to_q") == raw
+    assert plan.format_for("transformer.noise_refiner.0.attn.to_q") == raw

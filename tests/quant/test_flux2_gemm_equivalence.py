@@ -393,3 +393,50 @@ def test_declared_components_is_empty_without_text_encoder_targets():
     settings.gemm_targets = GemmTargets(transformer=Select(modules=TRANSFORMER))
     settings.fp8_text_encoder_module_list = None
     assert _declared_components(SimpleNamespace(settings=settings)) == ()
+
+
+# ---------------------------------------------------------------------------
+# the advanced GEMM config overrides keep_high
+# ---------------------------------------------------------------------------
+
+def _configured(raw, **yaml):
+    """A plan with an advanced GEMM config file applied."""
+    plan = _plan_for(raw, text_encoder=True, legacy=False)
+    plan.model.config._gemm_config_loaded = True
+    plan.model.config.gemm_high_precision_targets = yaml.get("targets", "model")
+    plan.model.config.gemm_high_precision_module_patterns = yaml.get("modules")
+    plan.model.config.gemm_high_precision_prefix_patterns = yaml.get("prefixes")
+    plan.model.config.gemm_high_precision_suffix_patterns = yaml.get("suffixes")
+    return plan.gemm_plan
+
+
+def test_a_config_file_can_hold_extra_modules_high():
+    plan = _configured("low=fp4,high=fp8", modules=TRANSFORMER[1])
+    assert plan.format_for(f"{TRANSFORMER[1]}.0.attn.to_qkv") == "fp8"
+    assert plan.format_for(f"{TRANSFORMER[0]}.0.attn.to_qkv") == "fp4"
+    # the model's own keep_high still applies
+    assert plan.format_for(f"{TEXT_ENCODER}.3.mlp") == "fp8"
+
+
+def test_a_config_file_can_clear_the_models_keep_high():
+    plan = _configured("low=fp4,high=fp8", targets="none")
+    assert plan.format_for(f"{TEXT_ENCODER}.3.mlp") == "fp4"
+    assert plan.format_for(f"{TRANSFORMER[0]}.0.attn.to_qkv") == "fp4"
+
+
+def test_config_suffixes_hold_matching_leaves_high():
+    plan = _configured("low=fp4,high=fp8", suffixes="attn.to_out.0")
+    assert plan.format_for(f"{TRANSFORMER[0]}.3.attn.to_out.0") == "fp8"
+    assert plan.format_for(f"{TRANSFORMER[0]}.3.attn.to_qkv") == "fp4"
+
+
+def test_a_pattern_outside_the_targets_is_refused_not_ignored():
+    """The legacy path raised on unknown modules; silence would be worse."""
+    with pytest.raises(ValueError, match="outside the target set"):
+        _configured("low=fp4,high=fp8", modules="transformer.norm_out")
+
+
+def test_no_config_file_leaves_the_declaration_alone():
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False).gemm_plan
+    assert plan.format_for(f"{TRANSFORMER[0]}.0.attn.to_qkv") == "fp4"
+    assert plan.format_for(f"{TEXT_ENCODER}.3.mlp") == "fp8"

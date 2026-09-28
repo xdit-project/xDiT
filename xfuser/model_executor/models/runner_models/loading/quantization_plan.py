@@ -1,10 +1,11 @@
 """Backend-neutral quantization target planning for one model run."""
 
+from dataclasses import replace
 from typing import Optional
 
 from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.core.utils.runner_utils import log
-from xfuser.model_executor.quant.targets import resolve
+from xfuser.model_executor.quant.targets import Select, resolve
 
 
 def apply_fp8_override_cli_to_settings(config, settings) -> None:
@@ -83,6 +84,45 @@ def apply_fp8_override_cli_to_settings(config, settings) -> None:
         )
 
 
+def _csv(raw) -> tuple:
+    if raw is None or not str(raw).strip():
+        return ()
+    return tuple(part.strip() for part in str(raw).split(",") if part.strip())
+
+
+def _with_config_overrides(targets, config):
+    """Apply an advanced GEMM config file to the model's declaration.
+
+    The file says which modules to hold at the better format, which is exactly
+    what `keep_high` means -- and its three pattern kinds are Select's three
+    fields. So it overrides that one field and nothing else.
+
+    Unlike the legacy mechanism its prefixes are absolute paths, matching the
+    rest of Select, rather than block-relative indices.
+    """
+    if not getattr(config, "_gemm_config_loaded", False):
+        return targets
+
+    keep = targets.keep_high
+    if getattr(config, "gemm_high_precision_targets", "model") == "none":
+        keep = Select()
+
+    modules = _csv(getattr(config, "gemm_high_precision_module_patterns", None))
+    prefixes = _csv(getattr(config, "gemm_high_precision_prefix_patterns", None))
+    suffixes = _csv(getattr(config, "gemm_high_precision_suffix_patterns", None))
+    if modules or prefixes or suffixes:
+        keep = Select(
+            modules=keep.modules + modules,
+            prefixes=keep.prefixes + prefixes,
+            suffixes=keep.suffixes + suffixes,
+        )
+    if keep == targets.keep_high:
+        return targets
+    # GemmTargets validates that keep_high stays inside the target set, so a
+    # pattern naming something undeclared is refused here rather than ignored.
+    return replace(targets, keep_high=keep)
+
+
 class QuantizationPlan:
     """Resolve declared FP8, FP4, FP6, and INT8 targets from one runner."""
 
@@ -99,6 +139,7 @@ class QuantizationPlan:
         targets = getattr(self.model.settings, "gemm_targets", None)
         if targets is None:
             return None
+        targets = _with_config_overrides(targets, self.model.config)
         spec = getattr(self.model.config, "gemm_quantization_spec", None)
         if spec is None:
             spec = GemmQuantizationSpec()

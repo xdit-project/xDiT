@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.envs import PACKAGES_CHECKER
 from xfuser.core.utils.runner_utils import (
     log,
@@ -307,6 +308,21 @@ class xFuserFlux2Model(xFuserModel):
         output_name="flux_2_dev",
         model_output_type="image",
         mod_value=16,
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.transformer_blocks",
+                "transformer.single_transformer_blocks",
+            )),
+            text_encoder=Select(modules=(
+                "text_encoder.model.language_model.layers",
+            )),
+            # The text encoder is held at the better precision: it is
+            # quantized to save host RAM at load, not to chase the smallest
+            # format, and a tiered run should not drag it down with the DiT.
+            keep_high=Select(modules=(
+                "text_encoder.model.language_model.layers",
+            )),
+        ),
         fp8_gemm_module_list=[
             "transformer.transformer_blocks",
             "transformer.single_transformer_blocks",

@@ -32,6 +32,7 @@ from xfuser.model_executor.models.runner_models.vae_manager import (
 )
 
 from xfuser.model_executor.cache.presets import DBCacheSettings, ModelCacheConfig
+from xfuser.model_executor.quant.targets import GemmTargets
 from xfuser.core.distributed import (
     get_world_group,
     get_model_replica_group,
@@ -181,6 +182,9 @@ class ModelSettings:
     model_output_type: Optional[str] = None
     mod_value: Optional[int] = None
     fps: Optional[int] = None
+    # Format-agnostic GEMM targets. Supersedes the per-format lists below,
+    # which stay until every model has been migrated.
+    gemm_targets: Optional[GemmTargets] = None
     int8_gemm_module_list: List[str] = None
     fp8_gemm_module_list: List[str] = None
     fp8_text_encoder_module_list: List[str] = None

@@ -2,7 +2,9 @@
 
 from typing import Optional
 
+from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.core.utils.runner_utils import log
+from xfuser.model_executor.quant.targets import resolve
 
 
 def apply_fp8_override_cli_to_settings(config, settings) -> None:
@@ -87,8 +89,62 @@ class QuantizationPlan:
     def __init__(self, model) -> None:
         self.model = model
 
+    @property
+    def gemm_plan(self):
+        """This run's resolved GEMM plan, or None for an unmigrated model.
+
+        The formats come from the run, the modules from the model, and the
+        components from whichever switch enables them.
+        """
+        targets = getattr(self.model.settings, "gemm_targets", None)
+        if targets is None:
+            return None
+        spec = getattr(self.model.config, "gemm_quantization_spec", None)
+        if spec is None:
+            spec = GemmQuantizationSpec()
+        enable = ["transformer"]
+        if getattr(self.model.config, "use_fp8_text_encoder", False):
+            enable.append("text_encoder")
+        return resolve(targets, spec, enable=tuple(enable))
+
+    def _declared_targets(self, targets, format_name: str) -> list[str]:
+        """The per-format list that one `gemm_targets` declaration stands in for.
+
+        Temporary scaffolding, in the old dialect on purpose: consumers
+        recover the high tier by subtracting one list from another, and read a
+        list before the run gates it. Until they are rewritten onto GemmPlan,
+        handing them a narrower list would change what they compute.
+
+        A format the model cannot run never reaches here -- `_validate_config`
+        refuses it against ModelCapabilities first.
+        """
+        entries = list(targets.transformer.roots())
+        spec = getattr(self.model.config, "gemm_quantization_spec", None)
+        tiered = spec is not None and spec.is_tiered
+
+        if tiered and format_name == spec.low:
+            # Held-high modules are absent from the low list, so the
+            # subtraction the consumers do recovers exactly keep_high.
+            entries = [e for e in entries if not targets.keep_high.matches(e)]
+        if format_name != "fp8":
+            return entries
+
+        if spec is not None and spec.is_pure("fp4"):
+            # A pure fp4 run folds the fp8 targets into fp4 and empties fp8.
+            entries = []
+        if self.model.config.use_fp8_text_encoder:
+            entries += list(targets.text_encoder.roots())
+        return entries
+
     def module_list(self, format_name: str = "fp8") -> list[str]:
         settings = self.model.settings
+        targets = getattr(settings, "gemm_targets", None)
+        if targets is not None:
+            if format_name not in ("fp8", "fp4", "fp6", "int8"):
+                raise ValueError(
+                    f"unsupported quantization target format: {format_name}"
+                )
+            return self._declared_targets(targets, format_name)
         if format_name == "fp8":
             targets = list(settings.fp8_gemm_module_list or ())
             if self.model.config.use_fp8_text_encoder:

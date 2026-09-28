@@ -116,26 +116,6 @@ def _require_mha_v4_recipe(backend_name):
         pytest.skip(f"Installed AITER has no kernel row for {backend_name}: {exc}")
 
 
-# Dense MXFP4 V returns garbage at any sequence length that is not a multiple of 128 on AITER
-# main: cosine against SDPA measures 0.040 at S=257 and -0.012 at S=129, while FP8 V and MXFP6 V
-# stay correct. AITER's own unaligned-sequence test asserts only eager==compiled and isfinite,
-# so it does not catch this.
-_MXFP4_V_BACKENDS = ("AITER_F4F4", "AITER_F6F4")
-
-
-def _xfail_broken_mxfp4_v(request, backend_name, sequence_length):
-    if backend_name in _MXFP4_V_BACKENDS and sequence_length % 128:
-        request.applymarker(
-            pytest.mark.xfail(
-                reason=(
-                    f"AITER dense MXFP4 V is numerically wrong at S={sequence_length} "
-                    "(S % 128 != 0); tracked upstream"
-                ),
-                strict=False,
-            )
-        )
-
-
 @pytest.mark.parametrize(
     "backend_name",
     [
@@ -152,10 +132,8 @@ def _xfail_broken_mxfp4_v(request, backend_name, sequence_length):
 def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length, request):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
-    _xfail_broken_mxfp4_v(request, backend_name, sequence_length)
 
-    from xfuser.core.distributed.attention_backend import (
-        ATTENTION_FUNCTION_REGISTRY,
+    from xfuser.core.distributed.attention_backend import (        ATTENTION_FUNCTION_REGISTRY,
         AttentionBackendType,
     )
 

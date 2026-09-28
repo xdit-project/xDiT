@@ -37,14 +37,10 @@ class QuantizationLedger:
     streaming_targets: set = field(default_factory=set)
     fp8_streaming_targets: set = field(default_factory=set)
 
-    def describe(self, component_name, *, fp8, any_format=True):
-        """Record that this component's quantization plan has been logged.
+    def describe(self, component_name, *, fp8):
+        """Record that this component's quantization plan has been logged."""
 
-        ``any_format=False`` records only the FP8 half, for the text-encoder route: a text encoder
-        never appears in the FP4 or INT8 module lists the format-agnostic walks iterate.
-        """
-        if any_format:
-            self.descriptor_components.add(component_name)
+        self.descriptor_components.add(component_name)
         if fp8:
             self.fp8_descriptor_components.add(component_name)
 
@@ -61,12 +57,18 @@ class QuantizationLedger:
         described.add(component_name)
         return True
 
-    def record_streamed(self, component_name, targets, *, fp8, any_format=True):
-        """Record the module paths that will hold quantized weights once this route finishes."""
+    def record_streamed(self, component_name, targets, *, fp8):
+        """Record the module paths that will hold quantized weights once this route finishes.
+
+        Recorded for every format, not only the one that did the quantizing. A
+        walk skips these paths because the weights are already quantized, and
+        that is true whatever format the walk is placing -- the text encoder is
+        quantized to FP8 by its own route and a pure FP4 run must still leave
+        it alone.
+        """
 
         paths = component_target_paths(component_name, targets)
-        if any_format:
-            self.streaming_targets.update(paths)
+        self.streaming_targets.update(paths)
         if fp8:
             self.fp8_streaming_targets.update(paths)
 

@@ -98,13 +98,13 @@ def plan_text_encoders(loader, existing_quantization_config=None):
                 ),
             )
             log(prepared.descriptor.log_message())
-            # Only the FP8 half: a text encoder never appears in the FP4 or INT8 module lists
-            # the format-agnostic walks iterate.
-            ledger.describe(component_name, fp8=True, any_format=False)
+            # This route is the only one that quantizes a text encoder, and it
+            # only knows FP8. A declared encoder is part of the plan the
+            # format-agnostic walks iterate, so it is recorded for every format
+            # and they leave it where this route put it.
+            ledger.describe(component_name, fp8=True)
             if prepared.descriptor.materialization_mode == "streaming":
-                ledger.record_streamed(
-                    component_name, targets, fp8=True, any_format=False
-                )
+                ledger.record_streamed(component_name, targets, fp8=True)
             if prepared.quantization_config is not None:
                 component_configs[component_name] = prepared.quantization_config
 

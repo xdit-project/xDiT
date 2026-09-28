@@ -345,3 +345,35 @@ def test_the_tier_log_names_the_high_modules(monkeypatch):
 
 def test_an_unquantized_run_logs_nothing(monkeypatch):
     assert _logged(_plan_for("none", text_encoder=False, legacy=False), monkeypatch) == []
+
+
+# ---------------------------------------------------------------------------
+# phase 4, step 2: the text-encoder readers
+# ---------------------------------------------------------------------------
+
+def test_declared_components_reads_the_declaration_not_the_run():
+    """It lists encoders to plan for, which the run's format cannot change."""
+    from xfuser.model_executor.models.runner_models.loading.text_encoder_plan import (
+        _declared_components,
+    )
+
+    declared = SimpleNamespace(settings=xFuserFlux2Model.settings)
+    legacy_settings = copy.deepcopy(xFuserFlux2Model.settings)
+    legacy_settings.gemm_targets = None
+
+    assert _declared_components(declared) == ("text_encoder",)
+    assert _declared_components(declared) == _declared_components(
+        SimpleNamespace(settings=legacy_settings)
+    )
+
+
+def test_declared_components_is_empty_without_text_encoder_targets():
+    from xfuser.model_executor.models.runner_models.loading.text_encoder_plan import (
+        _declared_components,
+    )
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
+
+    settings = copy.deepcopy(xFuserFlux2Model.settings)
+    settings.gemm_targets = GemmTargets(transformer=Select(modules=TRANSFORMER))
+    settings.fp8_text_encoder_module_list = None
+    assert _declared_components(SimpleNamespace(settings=settings)) == ()

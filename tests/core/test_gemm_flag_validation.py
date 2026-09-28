@@ -149,6 +149,7 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(
     messages = []
     model = object.__new__(runtime.model_cls)
     model.settings = SimpleNamespace(
+        gemm_targets=None,  # unmigrated: the legacy list is the declaration
         fp8_text_encoder_module_list=["text_encoder.layers"],
     )
     config = _args(runtime, use_fp8_gemms=True)

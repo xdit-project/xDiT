@@ -20,9 +20,18 @@ from .blockwise_ownership import (
 
 
 def _declared_components(model):
-    """The encoders with FP8 targets, in declaration order and without repeats."""
+    """The encoders with declared targets, in declaration order, no repeats.
 
-    entries = model.settings.fp8_text_encoder_module_list or ()
+    The declaration rather than the run's plan: this lists the encoders to
+    plan for, which is the same set whether or not the run quantizes them.
+    """
+
+    targets = getattr(model.settings, "gemm_targets", None)
+    entries = (
+        targets.text_encoder.roots()
+        if targets is not None
+        else (model.settings.fp8_text_encoder_module_list or ())
+    )
     return tuple(
         dict.fromkeys(entry.partition(".")[0] for entry in entries if "." in entry)
     )

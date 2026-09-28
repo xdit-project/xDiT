@@ -311,13 +311,25 @@ class xFuserModel(abc.ABC):
         pass
 
     def _update_model_settings(self, config: xFuserArgs) -> None:
-        if config.use_fp4_gemms:
+        targets = self.settings.gemm_targets
+        if targets is None and config.use_fp4_gemms:
+            # Reshuffles the legacy per-format lists so the subtraction their
+            # consumers do comes out right; a declared model needs none of it.
             apply_fp8_override_cli_to_settings(config, self.settings)
-        te_targets = self.settings.fp8_text_encoder_module_list
-        if te_targets and config.use_fp8_gemms and not config.quantize_text_encoder:
-            # Said out loud because text-encoder FP8 is opt-in: an encoder left bf16 is otherwise
-            # indistinguishable from --use_fp8_gemms failing to take effect.
-            log(f"--use_fp8_gemms covers the transformer; {type(self).__name__}'s "
+
+        te_targets = (
+            targets.text_encoder.roots()
+            if targets is not None
+            else self.settings.fp8_text_encoder_module_list
+        )
+        spec = getattr(config, "gemm_quantization_spec", None)
+        quantizing = (
+            not spec.is_pure("none") if spec is not None else config.use_fp8_gemms
+        )
+        if te_targets and quantizing and not config.quantize_text_encoder:
+            # Said out loud because quantizing the encoder is opt-in: one left bf16 is otherwise
+            # indistinguishable from --gemm_quantization failing to take effect.
+            log(f"--gemm_quantization covers the transformer; {type(self).__name__}'s "
                 f"{len(te_targets)} text-encoder target(s) stay bf16. Add --quantize_text_encoder "
                 f"to quantize them too, for less memory at some risk to text conditioning.")
 

@@ -214,7 +214,7 @@ class QuantizationBackends:
         if self._uses_mxfp6_contract():
             return False
 
-        settings, config = self.model.settings, self.model.config
+        config = self.model.config
         fp8_only_targets = self.high_tier_targets()
         is_torchao = assume_torchao_fp8 or (
             fp8_adapter is not None and fp8_adapter.backend.value == "torchao"
@@ -226,12 +226,10 @@ class QuantizationBackends:
         ):
             return True
 
-        # An fp4 run still emits fp8 tensors wherever a precision override or the hybrid schedule
-        # holds a layer back from fp4, so fp4 targets count too once any of those is in play.
+        # An fp4 run still emits fp8 tensors wherever a carve-out or the hybrid schedule
+        # holds a layer back from fp4, so fp4 targets count too once either is in play.
         fp4_can_emit_fp8 = bool(
-            settings.fp8_precision_overrides
-            or settings.fp8_precision_override_suffixes
-            or config.use_hybrid_gemm_schedule
+            self._high_tier_scattered() or config.use_hybrid_gemm_schedule
         )
         return bool(
             config.use_fp4_gemms
@@ -260,22 +258,35 @@ class QuantizationBackends:
         fsdp_target_paths = self._fsdp_target_paths()
         if not fsdp_target_paths or not self._uses_mxfp6_contract():
             return False
-        settings = self.model.settings
         if self._format_value() == "fp6":
             fp6_targets = set(self.loader.quantization_plan.module_list("fp6"))
         else:
             fp6_targets = self.high_tier_targets()
-            if (
-                settings.fp8_precision_overrides
-                or settings.fp8_precision_override_suffixes
-            ):
-                # Overrides scatter the better format inside the low-tier
+            if self._high_tier_scattered():
+                # A carve-out scatters the better format inside the low-tier
                 # blocks too, so those components count as well.
                 fp6_targets.update(self.primary_targets())
         return any(
             module_paths_overlap(target, fsdp_path)
             for target in fp6_targets
             for fsdp_path in fsdp_target_paths
+        )
+
+    def _high_tier_scattered(self) -> bool:
+        """Whether the better format lands inside the primary format's targets.
+
+        A whole-module high-tier target is visible in `high_tier_targets`; one
+        carved out below a target root -- a block prefix, a leaf suffix -- is
+        not, and a predicate reading only that set would answer "no high tier
+        here" about a block that holds one.
+        """
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is not None:
+            return plan.splits_a_target
+        settings = self.model.settings
+        return bool(
+            settings.fp8_precision_overrides
+            or settings.fp8_precision_override_suffixes
         )
 
     def primary_targets(self) -> set:

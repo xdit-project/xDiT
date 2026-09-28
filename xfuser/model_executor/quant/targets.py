@@ -140,6 +140,43 @@ class GemmPlan:
         found = [leaf for select in self.targeted.values() for leaf in select.only]
         return tuple(dict.fromkeys(found))
 
+    def declared_roots(
+        self, *, component: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Every subtree this run quantizes, whatever format each leaf takes.
+
+        The starting points for a walk. `roots` answers a different question --
+        which subtrees one format owns whole -- and a walk started from those
+        would never reach a carve-out named by suffix, because a suffix belongs
+        to no subtree of its own. Walk from here and ask `format_for` per leaf.
+        """
+        if not self.quantizes:
+            return ()
+        if component is None:
+            selects = list(self.targeted.values())
+        else:
+            selects = [self.targeted[component]] if component in self.targeted else []
+        return tuple(dict.fromkeys(r for select in selects for r in select.roots()))
+
+    @property
+    def splits_a_target(self) -> bool:
+        """Whether the high format lands inside a target rather than at it.
+
+        A consumer reasoning in whole subtrees -- "will this FSDP block hold the
+        high format?" -- cannot answer from `roots` alone when the carve-out is
+        a block prefix or a leaf suffix, because those sit below a target root
+        rather than at one. This says when that is so.
+        """
+        if self.high is None or not self.keep_high:
+            return False
+        if self.keep_high.suffixes:
+            return True
+        declared = self.declared_roots()
+        return any(
+            root not in declared and any(_is_under(root, d) for d in declared)
+            for root in self.keep_high.roots()
+        )
+
     def format_for(self, path: str) -> Optional[str]:
         """The format this module is quantized to, or None to leave it alone.
 

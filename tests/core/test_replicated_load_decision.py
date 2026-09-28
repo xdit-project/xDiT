@@ -76,6 +76,10 @@ def loader_for(runner):
     ledger = getattr(runner, "quantization_ledger", QuantizationLedger())
     runner.quantization_ledger = ledger
     plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
+    if not hasattr(plan, "gemm_plan"):
+        # An unmigrated model is what these stubs describe; the routes ask the
+        # plan whether one was declared before they ask it anything else.
+        plan.gemm_plan = None
     backends = getattr(runner, "backends", SimpleNamespace())
     transformer_adapter = getattr(
         runner,

@@ -82,10 +82,33 @@ def _resolve_request(loader, subfolder, checkpoint_request):
     return request
 
 
+def _plan_residual_match(plan, component_name, high_format):
+    """Which streamed leaves the high format keeps, in the component's own terms.
+
+    The stream plan names modules relative to the component; the plan speaks in
+    full pipeline paths, so rejoin before asking it.
+    """
+
+    def matches(name):
+        path = f"{component_name}.{name}" if name else component_name
+        return plan.format_for(path) == high_format
+
+    return matches
+
+
 def _prepare_native_load(
-    model, adapter, component_name, targets, stream_quant, model_factory
+    model, adapter, component_name, targets, stream_quant, model_factory, plan=None
 ):
     """The quantization config an ordinary ``from_pretrained`` should carry, if any."""
+
+    # A declaration that names its leaves narrows the same way the legacy
+    # setting did, and a native config that cannot express the narrowing has to
+    # stay a post-load conversion either way.
+    narrowed = bool(
+        plan.only_suffixes
+        if plan is not None
+        else getattr(model.settings, "fp8_gemm_include_suffixes", None)
+    )
 
     if adapter.format.value == "fp8":
         from .fp8_backends import prepare_native_transformer_fp8_load
@@ -97,29 +120,35 @@ def _prepare_native_load(
             # Native FP8 configs quantize every linear under each target. A suffix-restricted
             # policy must remain a post-load/blockwise conversion so the ledger does not claim
             # broader coverage than was requested.
-            stream_quant=(
-                stream_quant
-                and not getattr(
-                    model.settings, "fp8_gemm_include_suffixes", None
-                )
-            ),
+            stream_quant=stream_quant and not narrowed,
             model_factory=model_factory,
         )
     from .format_backends import prepare_native_transformer_format_load
 
     is_fp4 = adapter.format.value in {"fp4", "fp8_fp4", "fp4_fp6"}
+    legacy = plan is None
     return prepare_native_transformer_format_load(
         adapter,
         component_name=component_name,
         targets=targets,
-        stream_quant=stream_quant,
+        stream_quant=stream_quant and not narrowed,
         precision_prefixes=(
-            (model.settings.fp8_precision_overrides or ()) if is_fp4 else ()
+            (model.settings.fp8_precision_overrides or ())
+            if is_fp4 and legacy
+            else ()
         ),
         precision_suffixes=(
             (model.settings.fp8_precision_override_suffixes or ())
-            if is_fp4
+            if is_fp4 and legacy
             else ()
+        ),
+        # A declared run keeps its high tier out of the stream the same way the
+        # post-load walks keep it out of the primary converter: by asking the
+        # plan, rather than by re-deriving it from patterns.
+        residual_match=(
+            _plan_residual_match(plan, component_name, plan.high)
+            if is_fp4 and not legacy and plan.high is not None
+            else None
         ),
         hybrid=(model.config.use_hybrid_gemm_schedule if is_fp4 else False),
         model_factory=model_factory,
@@ -214,6 +243,7 @@ def load_transformer(
             targets,
             stream_quant,
             lambda: build_transformer_structure(wrapper_cls, request, init_kwargs),
+            plan=loader.quantization_plan.gemm_plan,
         )
         local_plan = loader.plan_eager_blockwise_fallback(prepared, targets, wrap_attrs)
         if local_plan is not None and local_plan.enabled:

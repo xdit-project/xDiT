@@ -193,29 +193,33 @@ def _plan_block_quantize_fn(
     One pass per format the run named, rather than a boolean per format the
     loader knows about. Each converter's filter asks the plan what a leaf
     becomes, so a block whose format is split -- the whole block low, one
-    submodule held high -- needs no target arithmetic to stay disjoint.
+    submodule held high -- needs no target arithmetic to stay disjoint, and a
+    pass whose format owns nothing in a block simply converts nothing.
     """
 
     model = loader.model
-    settings = model.settings
     device = f"cuda:{local_rank}"
 
-    by_format = {}
-    for format_name in (plan.low, plan.high):
-        if not format_name or format_name in by_format:
-            continue
-        roots = plan.roots(format_name)
-        if roots:
-            by_format[format_name] = roots
+    roots = plan.declared_roots()
+    formats = tuple(dict.fromkeys(name for name in (plan.low, plan.high) if name))
 
     paths = [f"{component_name}.{attr}" for attr in wrap_attrs]
     if not any(
-        module_paths_overlap(path, root)
-        for path in paths
-        for roots in by_format.values()
-        for root in roots
+        module_paths_overlap(path, root) for path in paths for root in roots
     ):
         return None
+
+    # Resolved once rather than per block: a format this run named needs a
+    # converter whether or not this particular block has leaves for it.
+    adapters = {}
+    for format_name in formats:
+        adapter = loader.backends.adapter_for(format_name)
+        if adapter is None:
+            raise RuntimeError(
+                f"{format_name.upper()} block conversion requested without "
+                "a selected backend"
+            )
+        adapters[format_name] = adapter
 
     block_paths = (
         _wrapped_block_paths(component, component_name, wrap_attrs)
@@ -228,48 +232,19 @@ def _plan_block_quantize_fn(
             "block indices"
         )
 
-    fp8_overrides = settings.fp8_precision_overrides or ()
-    fp8_suffix_overrides = settings.fp8_precision_override_suffixes
-
     def quantize_fn(block, block_idx: int) -> None:
         block_path = (
             block_paths[block_idx]
             if block_paths is not None
             else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
         )
-        present = {
-            format_name: targets
-            for format_name, roots in by_format.items()
-            if (targets := _block_local_targets(roots, block_path)) is not None
-        }
-        if not present:
+        if _block_local_targets(roots, block_path) is None:
             return
 
-        block_prefix = f"{block_idx}."
-        # Strip the block-index prefix so the quantize functions see local FQN paths.
-        local_fp8 = (
-            tuple(
-                o[len(block_prefix) :]
-                for o in fp8_overrides
-                if o.startswith(block_prefix)
-            )
-            or None
-        )
-
-        for format_name in present:
-            adapter = loader.backends.adapter_for(format_name)
-            if adapter is None:
-                raise RuntimeError(
-                    f"{format_name.upper()} block conversion requested without "
-                    "a selected backend"
-                )
+        for format_name, adapter in adapters.items():
             convert_kwargs = {}
             if adapter is loader.backends.format:
-                convert_kwargs.update(
-                    fp8_layers=local_fp8,
-                    fp8_suffix_layers=fp8_suffix_overrides,
-                    hybrid=model.config.use_hybrid_gemm_schedule,
-                )
+                convert_kwargs.update(hybrid=model.config.use_hybrid_gemm_schedule)
             adapter.convert_block(
                 block,
                 device=device,

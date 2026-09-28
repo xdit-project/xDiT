@@ -122,15 +122,40 @@ def place_pipeline_components(loader) -> None:
         _convert_int8_on_device(loader, local_rank)
 
 
+def _plan_conversion_filter(plan, module_path, format_name, already_quantized):
+    """Keep the leaves under ``module_path`` the plan gives to ``format_name``.
+
+    ``fqn`` arrives relative to the module being converted, so it is rejoined
+    to that module's path before the plan is asked -- the plan speaks in full
+    pipeline paths.
+    """
+
+    def filter_fn(_module, fqn):
+        path = f"{module_path}.{fqn}" if fqn else module_path
+        if any(module_path_is_covered(path, owner) for owner in already_quantized):
+            return False
+        return plan.format_for(path) == format_name
+
+    return filter_fn
+
+
 def setup_gemm_quantization(
     loader, local_rank, *, offload_requested, before_device_move
 ) -> None:
     """Quantize every declared target to the format the plan gives it.
 
-    One walk over the plan. Which converter owns a module follows from its
-    format, and which side of the device move it runs on follows from the
-    converter, so neither is a branch here. Called once before the move and
-    once after; each call skips the adapters belonging to the other side.
+    One walk per format over the declared subtrees. Which converter owns a leaf
+    follows from its format, and which side of the device move a walk runs on
+    follows from its converter, so neither is a branch here. Called once before
+    the move and once after; each call skips the adapters belonging to the other
+    side.
+
+    The walks start from the declared roots rather than from the subtrees one
+    format owns, because a carve-out need not have a subtree to start from:
+    ``keep_high`` can name a leaf suffix that occurs inside every block. Asking
+    ``format_for`` per leaf is the rule the sharded path already applies, so the
+    two agree by construction, and a leaf belongs to exactly one format so the
+    walks cannot collide.
     """
 
     plan = loader.quantization_plan.gemm_plan
@@ -139,17 +164,10 @@ def setup_gemm_quantization(
 
     model = loader.model
     ledger = loader.quantization_ledger
-    # A declaration that names its leaves supersedes the legacy setting.
-    include_suffixes = plan.only_suffixes or model.settings.fp8_gemm_include_suffixes
-    by_format = {}
-    for format_name in (plan.low, plan.high):
-        if not format_name or format_name in by_format:
-            continue
-        roots = plan.roots(format_name)
-        if roots:
-            by_format[format_name] = roots
+    roots = plan.declared_roots()
+    formats = tuple(dict.fromkeys(name for name in (plan.low, plan.high) if name))
 
-    for format_name, roots in by_format.items():
+    for format_name in formats:
         adapter = loader.backends.adapter_for(format_name)
         if adapter is None:
             continue
@@ -157,36 +175,25 @@ def setup_gemm_quantization(
         if converts_first != before_device_move:
             continue
 
-        # Another format owns these, so this walk must not descend into them.
-        owned_elsewhere = {
-            root
-            for other, other_roots in by_format.items()
-            if other != format_name
-            for root in other_roots
-        }
         is_primary = adapter is loader.backends.format
 
         for module_name in roots:
-            excluded_paths = owned_elsewhere | ledger.already_quantized(
-                fp8=format_name == "fp8"
-            )
-            convert, filter_fn = conversion_filter(
-                module_name,
-                excluded_paths,
-                include_suffixes=include_suffixes,
-            )
-            if not convert:
+            already = ledger.already_quantized(fp8=format_name == "fp8")
+            if any(module_path_is_covered(module_name, owner) for owner in already):
                 continue
 
-            convert_kwargs = {"device": f"cuda:{local_rank}"}
-            if filter_fn is not None:
-                convert_kwargs["filter_fn"] = filter_fn
+            convert_kwargs = {
+                "device": f"cuda:{local_rank}",
+                "filter_fn": _plan_conversion_filter(
+                    plan, module_name, format_name, already
+                ),
+            }
             if before_device_move and offload_requested:
                 convert_kwargs["offload_to_cpu"] = True
             if is_primary:
                 # Only the primary-format converter builds per-block wrappers,
-                # so only it takes the within-block overrides and the hybrid
-                # schedule.
+                # so only it takes the hybrid schedule. The carve-outs it used
+                # to be handed as precision patterns are now the filter's.
                 component_name = module_name.partition(".")[0]
                 if ledger.claim_description(component_name):
                     descriptor = prepare_native_transformer_format_load(
@@ -194,19 +201,9 @@ def setup_gemm_quantization(
                         component_name=component_name,
                         targets=loader.backends.format_targets_for(component_name),
                         stream_quant=not _is_cuda(),
-                        precision_prefixes=(
-                            model.settings.fp8_precision_overrides or ()
-                        ),
-                        precision_suffixes=(
-                            model.settings.fp8_precision_override_suffixes or ()
-                        ),
                         hybrid=model.config.use_hybrid_gemm_schedule,
                     ).descriptor
                     log(descriptor.log_message())
-                convert_kwargs["fp8_layers"] = model.settings.fp8_precision_overrides
-                convert_kwargs["fp8_suffix_layers"] = (
-                    model.settings.fp8_precision_override_suffixes
-                )
                 convert_kwargs["hybrid"] = model.config.use_hybrid_gemm_schedule
 
             adapter.convert_module(

@@ -913,6 +913,7 @@ def prepare_native_transformer_format_load(
     model_factory=None,
     precision_prefixes=(),
     precision_suffixes=(),
+    residual_match=None,
     hybrid=False,
 ) -> PreparedFormatLoad:
     targets = tuple(targets)
@@ -927,12 +928,12 @@ def prepare_native_transformer_format_load(
     elif isinstance(adapter, TorchaoNvfp4BackendAdapter) and hybrid:
         fallback = "native NVFP4 streaming cannot preserve hybrid FP8/FP4 ownership"
     else:
-        residual_match = (
-            _precision_override_matcher(targets, precision_prefixes, precision_suffixes)
-            if isinstance(adapter, TorchaoNvfp4BackendAdapter)
-            and (precision_prefixes or precision_suffixes)
-            else None
-        )
+        if not isinstance(adapter, TorchaoNvfp4BackendAdapter):
+            residual_match = None
+        elif residual_match is None and (precision_prefixes or precision_suffixes):
+            residual_match = _precision_override_matcher(
+                targets, precision_prefixes, precision_suffixes
+            )
         try:
             config, ownership = adapter.transformer_stream_plan(
                 targets,

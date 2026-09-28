@@ -28,8 +28,27 @@ TARGETS = GemmTargets(
 )
 
 
+#: The linear leaves the fake pipeline carries inside every block, chosen so a
+#: declaration can name one by suffix and leave its neighbours alone.
+LEAVES = ("attn.to_qkv", "attn.to_out.0", "ff.net.0.proj", "ff.net.2")
+BLOCK_COUNT = 4
+
+
+def _leaves_under(root):
+    return tuple(
+        f"{root}.{index}.{leaf}"
+        for index in range(BLOCK_COUNT)
+        for leaf in LEAVES
+    )
+
+
 class _Recorder:
-    """An adapter that records what it was asked to convert."""
+    """An adapter that records what it converted, and what its filter kept.
+
+    Which subtree a converter is handed says little now that every converter is
+    handed the declared roots and the plan decides each leaf, so the assertions
+    are about `kept`: the leaves this converter would actually replace.
+    """
 
     def __init__(self, name, *, before_device_move=False):
         self.name = name
@@ -38,6 +57,16 @@ class _Recorder:
 
     def convert_module(self, module, **kwargs):
         self.seen.append((module.path, kwargs))
+
+    @property
+    def kept(self):
+        found = []
+        for path, kwargs in self.seen:
+            filter_fn = kwargs.get("filter_fn")
+            for leaf in _leaves_under(path):
+                if filter_fn is None or filter_fn(None, leaf[len(path) + 1 :]):
+                    found.append(leaf)
+        return sorted(found)
 
 
 def _pipe(paths):
@@ -111,29 +140,33 @@ def _run(loader, **kwargs):
     )
 
 
+def _block_leaves():
+    return sorted(leaf for root in BLOCKS for leaf in _leaves_under(root))
+
+
 def test_each_format_goes_to_its_own_converter():
     loader = _loader("low=fp4,high=fp8")
     _run(loader, before_device_move=True)
     _run(loader, before_device_move=False)
 
-    assert [p for p, _ in loader.backends.blockwise_fp8.seen] == [TEXT_ENCODER]
-    assert sorted(p for p, _ in loader.backends.format.seen) == sorted(BLOCKS)
+    assert loader.backends.blockwise_fp8.kept == sorted(_leaves_under(TEXT_ENCODER))
+    assert loader.backends.format.kept == _block_leaves()
 
 
 def test_the_adapter_decides_which_side_of_the_device_move_it_runs_on():
     """The ordering is data now, not an if/elif around the `.to(cuda)`."""
     loader = _loader("low=fp4,high=fp8", fp8_before_move=True)
     _run(loader, before_device_move=True)
-    assert [p for p, _ in loader.backends.blockwise_fp8.seen] == [TEXT_ENCODER]
-    assert loader.backends.format.seen == []
+    assert loader.backends.blockwise_fp8.kept == sorted(_leaves_under(TEXT_ENCODER))
+    assert loader.backends.format.kept == []
 
     loader = _loader("low=fp4,high=fp8", fp8_before_move=False)
     _run(loader, before_device_move=True)
-    assert loader.backends.blockwise_fp8.seen == []
-    assert loader.backends.format.seen == []
+    assert loader.backends.blockwise_fp8.kept == []
+    assert loader.backends.format.kept == []
     _run(loader, before_device_move=False)
-    assert [p for p, _ in loader.backends.blockwise_fp8.seen] == [TEXT_ENCODER]
-    assert sorted(p for p, _ in loader.backends.format.seen) == sorted(BLOCKS)
+    assert loader.backends.blockwise_fp8.kept == sorted(_leaves_under(TEXT_ENCODER))
+    assert loader.backends.format.kept == _block_leaves()
 
 
 def test_one_format_sends_everything_to_one_converter():
@@ -142,18 +175,18 @@ def test_one_format_sends_everything_to_one_converter():
     loader = _loader("fp4", text_encoder=True)
     _run(loader, before_device_move=True)
     _run(loader, before_device_move=False)
-    assert sorted(p for p, _ in loader.backends.format.seen) == sorted(
-        BLOCKS + (TEXT_ENCODER,)
+    assert loader.backends.format.kept == sorted(
+        leaf for root in BLOCKS + (TEXT_ENCODER,) for leaf in _leaves_under(root)
     )
-    assert loader.backends.blockwise_fp8.seen == []
+    assert loader.backends.blockwise_fp8.kept == []
 
 
 def test_the_text_encoder_is_skipped_unless_the_run_asks():
     loader = _loader("low=fp4,high=fp8", text_encoder=False)
     _run(loader, before_device_move=True)
     _run(loader, before_device_move=False)
-    assert loader.backends.blockwise_fp8.seen == []
-    assert sorted(p for p, _ in loader.backends.format.seen) == sorted(BLOCKS)
+    assert loader.backends.blockwise_fp8.kept == []
+    assert loader.backends.format.kept == _block_leaves()
 
 
 def test_only_the_primary_converter_takes_the_hybrid_arguments():
@@ -164,9 +197,12 @@ def test_only_the_primary_converter_takes_the_hybrid_arguments():
 
     _, fp8_kwargs = loader.backends.blockwise_fp8.seen[0]
     _, primary_kwargs = loader.backends.format.seen[0]
-    assert "hybrid" not in fp8_kwargs and "fp8_layers" not in fp8_kwargs
+    assert "hybrid" not in fp8_kwargs
     assert primary_kwargs["hybrid"] is False
-    assert primary_kwargs["fp8_layers"] is None
+    # The carve-out patterns the primary converter used to be handed are the
+    # filter's business now, so neither converter is given them.
+    assert "fp8_layers" not in primary_kwargs
+    assert "fp8_suffix_layers" not in primary_kwargs
 
 
 def test_nothing_is_quantized_twice():
@@ -174,10 +210,52 @@ def test_nothing_is_quantized_twice():
     loader = _loader("low=fp4,high=fp8")
     _run(loader, before_device_move=True)
     _run(loader, before_device_move=False)
-    seen = [p for p, _ in loader.backends.format.seen] + [
-        p for p, _ in loader.backends.blockwise_fp8.seen
-    ]
-    assert len(seen) == len(set(seen))
+    low = loader.backends.format.kept
+    high = loader.backends.blockwise_fp8.kept
+    assert low and high
+    assert not set(low) & set(high)
+
+
+def test_a_suffix_carve_out_reaches_the_placement_walk():
+    """A carve-out named by suffix has no subtree of its own to walk from.
+
+    Starting from what each format owns would never reach it, and it would
+    quietly take the low format instead of the high one.
+    """
+    scattered = GemmTargets(
+        transformer=Select(modules=("transformer.transformer_blocks",)),
+        keep_high=Select(suffixes=("ff.net.2",)),
+    )
+    loader = _loader("low=fp4,high=fp8", targets=scattered, text_encoder=False)
+    _run(loader, before_device_move=True)
+    _run(loader, before_device_move=False)
+
+    root = "transformer.transformer_blocks"
+    assert loader.backends.blockwise_fp8.kept == sorted(
+        f"{root}.{index}.ff.net.2" for index in range(BLOCK_COUNT)
+    )
+    assert loader.backends.format.kept == sorted(
+        leaf for leaf in _leaves_under(root) if not leaf.endswith("ff.net.2")
+    )
+
+
+def test_a_block_prefix_carve_out_reaches_the_placement_walk():
+    """Segment-aware, so naming block 3 must not take block 30 with it."""
+    endpoints = GemmTargets(
+        transformer=Select(modules=("transformer.transformer_blocks",)),
+        keep_high=Select(prefixes=("transformer.transformer_blocks.3",)),
+    )
+    loader = _loader("low=fp4,high=fp8", targets=endpoints, text_encoder=False)
+    _run(loader, before_device_move=True)
+    _run(loader, before_device_move=False)
+
+    root = "transformer.transformer_blocks"
+    assert loader.backends.blockwise_fp8.kept == sorted(
+        f"{root}.3.{leaf}" for leaf in LEAVES
+    )
+    assert loader.backends.format.kept == sorted(
+        leaf for leaf in _leaves_under(root) if not leaf.startswith(f"{root}.3.")
+    )
 
 
 def test_an_unquantized_run_walks_nothing():
@@ -222,13 +300,13 @@ def test_a_whole_block_goes_to_one_converter():
         loader, "transformer", ["transformer_blocks"], local_rank=0
     )
     fn(object(), 3)
+    path = "transformer.transformer_blocks.3"
+    leaves = ["attn.to_qkv", "ff.net.0.proj"]
     assert len(loader.backends.format.seen) == 1
-    assert loader.backends.blockwise_fp8.seen == []
-    assert _kept(
-        loader.backends.format,
-        "transformer.transformer_blocks.3",
-        ["attn.to_qkv", "ff.net.0.proj"],
-    ) == ["attn.to_qkv", "ff.net.0.proj"]
+    assert _kept(loader.backends.format, path, leaves) == leaves
+    # The other converter is still offered the block -- it simply owns no leaf
+    # in it, which is the filter's answer rather than a target subtraction.
+    assert _kept(loader.backends.blockwise_fp8, path, leaves) == []
 
 
 def test_a_block_split_by_keep_high_stays_disjoint():
@@ -251,6 +329,24 @@ def test_a_block_split_by_keep_high_stays_disjoint():
     assert high == ["attn.to_qkv"]
     assert low == ["ff.net.0.proj"]
     assert not set(low) & set(high)
+
+
+def test_a_suffix_carve_out_survives_sharding():
+    """The same declaration the placement walk honours, per wrapped block."""
+    scattered = GemmTargets(
+        transformer=Select(modules=("transformer.transformer_blocks",)),
+        keep_high=Select(suffixes=("ff.net.2",)),
+    )
+    loader = _shard_loader("low=fp4,high=fp8", targets=scattered, text_encoder=False)
+    fn = shard.build_block_quantize_fn(
+        loader, "transformer", ["transformer_blocks"], local_rank=0
+    )
+    fn(object(), 2)
+
+    path = "transformer.transformer_blocks.2"
+    leaves = ["attn.to_qkv", "ff.net.2"]
+    assert _kept(loader.backends.blockwise_fp8, path, leaves) == ["ff.net.2"]
+    assert _kept(loader.backends.format, path, leaves) == ["attn.to_qkv"]
 
 
 def test_an_untargeted_component_gets_no_callable():

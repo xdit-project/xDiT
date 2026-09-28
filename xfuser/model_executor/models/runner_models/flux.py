@@ -323,17 +323,6 @@ class xFuserFlux2Model(xFuserModel):
                 "text_encoder.model.language_model.layers",
             )),
         ),
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder.model.language_model.layers",
-        ],
-        fp4_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],

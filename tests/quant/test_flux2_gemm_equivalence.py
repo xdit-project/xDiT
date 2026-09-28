@@ -32,10 +32,28 @@ assert not xFuserFlux2Model.settings.fp8_precision_overrides
 assert not xFuserFlux2Model.settings.fp8_precision_override_suffixes
 
 
+#: What FLUX.2-dev declared before it was migrated, recorded here so the
+#: comparison outlives the fields themselves. Every test below that says
+#: "the legacy path" means these values through the unchanged legacy code.
+LEGACY_FP8_GEMM = ["transformer.transformer_blocks", "transformer.single_transformer_blocks"]
+LEGACY_FP4_GEMM = ["transformer.transformer_blocks", "transformer.single_transformer_blocks"]
+LEGACY_TEXT_ENCODER = ["text_encoder.model.language_model.layers"]
+assert LEGACY_FP8_GEMM == LEGACY_FP4_GEMM  # the split was never by format
+
+
+def _legacy_settings():
+    """FLUX.2-dev's settings as they were before `gemm_targets` replaced them."""
+    settings = copy.deepcopy(xFuserFlux2Model.settings)
+    settings.gemm_targets = None
+    settings.fp8_gemm_module_list = list(LEGACY_FP8_GEMM)
+    settings.fp4_gemm_module_list = list(LEGACY_FP4_GEMM)
+    settings.fp8_text_encoder_module_list = list(LEGACY_TEXT_ENCODER)
+    return settings
+
+
 def _legacy(spec: GemmQuantizationSpec, *, text_encoder: bool) -> dict:
     """What today's code targets per format, via today's code."""
-    settings = copy.deepcopy(xFuserFlux2Model.settings)
-    settings.gemm_targets = None  # the legacy lists are the point here
+    settings = _legacy_settings()
     config = SimpleNamespace(
         gemm_quantization_spec=spec,
         _gemm_config_loaded=False,
@@ -144,9 +162,9 @@ FORMATS = ("fp8", "fp4", "fp6")
 def _plan_for(raw: str, *, text_encoder: bool, legacy: bool) -> QuantizationPlan:
     """A QuantizationPlan reading either the legacy lists or gemm_targets."""
     spec = GemmQuantizationSpec.parse(raw)
-    settings = copy.deepcopy(xFuserFlux2Model.settings)
-    if legacy:
-        settings.gemm_targets = None
+    settings = _legacy_settings() if legacy else copy.deepcopy(
+        xFuserFlux2Model.settings
+    )
     config = SimpleNamespace(
         gemm_quantization_spec=spec,
         _gemm_config_loaded=False,
@@ -358,12 +376,10 @@ def test_declared_components_reads_the_declaration_not_the_run():
     )
 
     declared = SimpleNamespace(settings=xFuserFlux2Model.settings)
-    legacy_settings = copy.deepcopy(xFuserFlux2Model.settings)
-    legacy_settings.gemm_targets = None
 
     assert _declared_components(declared) == ("text_encoder",)
     assert _declared_components(declared) == _declared_components(
-        SimpleNamespace(settings=legacy_settings)
+        SimpleNamespace(settings=_legacy_settings())
     )
 
 

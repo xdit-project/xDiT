@@ -205,14 +205,20 @@ def test_prefix_match_does_not_leak_across_sibling_components(monkeypatch):
 def test_registered_runner_text_encoder_capability_matches_declared_targets():
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
+    def declared(cls):
+        """Text-encoder targets, from gemm_targets or the legacy list."""
+        targets = cls.settings.gemm_targets
+        if targets is not None:
+            return list(targets.text_encoder.roots())
+        return cls.settings.fp8_text_encoder_module_list
+
     mismatches = {
         cls.__name__: {
             "capability": cls.capabilities.quantize_text_encoder,
-            "targets": cls.settings.fp8_text_encoder_module_list,
+            "targets": declared(cls),
         }
         for cls in dict.fromkeys(MODEL_REGISTRY.values())
-        if cls.capabilities.quantize_text_encoder
-        != bool(cls.settings.fp8_text_encoder_module_list)
+        if cls.capabilities.quantize_text_encoder != bool(declared(cls))
     }
 
     assert not mismatches

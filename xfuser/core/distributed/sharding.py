@@ -17,7 +17,7 @@ Functions:
 """
 import logging
 from functools import partial
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Union
 
 import torch
 import functools
@@ -34,9 +34,28 @@ from xfuser.core.utils.dtype_policy import (
     fp32_modules_for,
     pinned_fp32_parameters,
 )
+from xfuser.envs import _is_npu, get_device
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_device(device_id: Optional[Union[int, torch.device]]) -> Optional[torch.device]:
+    """Resolve a device id to the ``torch.device`` of the accelerator actually in use.
+
+    ``torch.device(<int>)`` is always read as a *CUDA* index, so an int has to be mapped through
+    the active accelerator before it reaches FSDP -- otherwise an NPU (or MUSA) rank is placed on
+    CUDA. A CPU device resolves to ``None`` so FSDP keeps its own CPU handling.
+    """
+    if device_id is None:
+        if torch.cuda.is_available():
+            device_id = torch.cuda.current_device()
+        elif _is_npu():
+            device_id = torch.npu.current_device()
+        else:
+            return None
+    device = device_id if isinstance(device_id, torch.device) else get_device(device_id)
+    return None if device.type == "cpu" else device
 
 
 def _save_nonpersistent_buffers(module: torch.nn.Module, device: str):
@@ -166,13 +185,13 @@ def shard_dit(
         ... )
     """
     # Move any non-FSDP submodules to device (but NOT the blocks, they're already handled)
-    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    device = get_device(local_rank)
     children_to_device(transformer, device, [block_attr])
 
     transformer = shard_component(
         transformer,
         wrap_attrs=[block_attr],
-        device_id=local_rank,
+        device_id=device,
         process_group=process_group,
         dtype=torch.bfloat16,
         use_orig_params=True,
@@ -222,14 +241,14 @@ def shard_t5_encoder(
         ... )
     """
     # Move any non-FSDP submodules to device (but NOT the block_attr, they're already handled)
-    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    device = get_device(local_rank)
     children_to_device(transformer.encoder, device, [block_attr])
     children_to_device(transformer, device, ["encoder"])
 
     transformer.encoder = shard_component(
         transformer.encoder,
         wrap_attrs=[block_attr],
-        device_id=local_rank,
+        device_id=device,
         process_group=process_group,
         use_orig_params=True,
         sync_module_states=True,
@@ -275,7 +294,7 @@ def shard_component(
     component: torch.nn.Module,
     wrap_attrs: list[str],
     process_group: Optional[torch.distributed.ProcessGroup] = None,
-    device_id: Optional[int] = None,
+    device_id: Optional[Union[int, torch.device]] = None,
     dtype: Optional[torch.dtype] = None,
     use_orig_params: bool = True,
     sync_module_states: bool = True,
@@ -304,8 +323,9 @@ def shard_component(
             FSDP communication. If None, uses the default process group.
             **Important**: Pass `group.device_group` if using a GroupCoordinator wrapper
             (e.g., from `get_sp_group()` or `get_world_group()`), not the coordinator itself.
-        device_id (int, optional): CUDA device ID to place the model on. If None,
-            uses the current CUDA device.
+        device_id (int or torch.device, optional): Device to place the model on. An int is
+            resolved through the accelerator in use (CUDA/NPU/MUSA). If None, uses the
+            current device of that accelerator.
         dtype (torch.dtype, optional): Target dtype to convert the model to before
             wrapping. If None, keeps the original dtype.
         use_orig_params (bool, optional): Whether to use the original parameters.
@@ -372,8 +392,9 @@ def shard_component(
     """
     use_fsdp2 = quantize_fn is not None or memory_efficient_init or meta_init or load_block_fn is not None
 
-    if device_id is None and torch.cuda.is_available():
-        device_id = torch.cuda.current_device()
+    # ``device_id`` used to mean "index on the current CUDA device". Resolve it to an explicit
+    # device of the accelerator in use, so NPU/MUSA ranks are not handed to FSDP as CUDA indices.
+    device = _resolve_device(device_id)
 
     wrapped_blocks = []
     for wrap_attr in wrap_attrs:
@@ -395,10 +416,7 @@ def shard_component(
         device move themselves; meta ones get it from the caller's fill.
         """
         pinned = pinned_fp32_parameters(module, fp32_modules)
-        if pinned and device_id is not None:
-            device = torch.device(
-                "cuda" if torch.cuda.is_available() else "cpu", device_id
-            )
+        if pinned and device is not None:
             for parameter in pinned:
                 if not parameter.is_meta and parameter.device != device:
                     parameter.data = parameter.data.to(device)
@@ -410,7 +428,7 @@ def shard_component(
         return FSDP(
             component,
             process_group=process_group,
-            device_id=device_id,
+            device_id=device,
             auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=lambda m: m in wrapped_blocks),
             sharding_strategy=ShardingStrategy.FULL_SHARD if reshard_after_forward else ShardingStrategy.SHARD_GRAD_OP,
             sync_module_states=sync_module_states,
@@ -422,8 +440,8 @@ def shard_component(
     # FSDP2: Required for torchao quantized tensors, or when use_fsdp2=True for
     # sequential block-by-block init to reduce peak GPU memory during model load.
     from torch.distributed._composable.fsdp import fully_shard, CPUOffloadPolicy  # noqa: PLC0415
-    device_type = "cuda" if torch.cuda.is_available() else "cpu"
-    device_str = f"{device_type}:{device_id}"
+    device_type = device.type if device is not None else "cpu"
+    device_str = str(device) if device is not None else "cpu"
     mesh = _make_mesh(process_group, device_type)
     cpu_offload = CPUOffloadPolicy() if offload_policy == "cpu" else None
 

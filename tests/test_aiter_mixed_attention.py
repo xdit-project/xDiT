@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import types
+from pathlib import Path
 
 import pytest
 import torch
@@ -427,7 +426,9 @@ def test_ideogram4_refuses_the_mha_v4_backends():
     from xfuser.model_executor.models.runner_models.base_model import (
         _validate_attention_head_dims,
     )
-    from xfuser.model_executor.models.runner_models.ideogram4 import xFuserIdeogram4Model
+    from xfuser.model_executor.models.runner_models.ideogram4 import (
+        xFuserIdeogram4Model,
+    )
     from xfuser.model_executor.models.runner_models.ltx import (
         _xFuserLTX25VideoModelBase,
     )
@@ -749,3 +750,219 @@ def test_aiter_mha_v4_ring_is_refused_on_gfx942(monkeypatch):
         runtime_state.RuntimeState._check_if_backend_compatible_with_current_configuration(
             state, AttentionBackendType.AITER_BF16
         )
+
+
+def test_aiter_mixed_attention_compiles_fullgraph_with_a_trailing_pad():
+    """The trim is Python-level, so it must fold away rather than break the graph."""
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    valid_length = 128
+    shape = (1, 5, 192, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    attention_function = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16]
+    attention_kwargs = {
+        "indices_k": torch.arange(valid_length, device="cuda"),
+        "cu_seqlens_k": torch.tensor(
+            [0, valid_length], dtype=torch.int32, device="cuda"
+        ),
+        "max_seqlen_k": valid_length,
+        "valid_kv_len": valid_length,
+    }
+
+    def attention(query, key, value):
+        return attention_function(
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )[0]
+
+    output = torch.compile(attention, fullgraph=True)(query, key, value)
+    assert output.shape == query.shape
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize(
+    "backend_name",
+    [
+        "AITER_BF16",
+        "AITER_BF16FP8",
+        "AITER_MXFP8",
+        "AITER_F8F6",
+        "AITER_F6F4",
+        "AITER_MXFP4",
+        "AITER_F4F4",
+    ],
+)
+def test_aiter_mixed_attention_serves_a_declared_trailing_pad(backend_name, request):
+    """A declared trailing pad is served by slicing K/V, matching the same maths.
+
+    Every query row is kept, including the pad rows: they are not packed, their
+    outputs are discarded by the caller, and trimming them by a key-side length
+    would be wrong wherever Q and K differ.
+    """
+    _require_mha_v4_aiter(backend_name)
+    _require_mha_v4_recipe(backend_name)
+
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    valid_length = 256
+    padded_length = 384
+    torch.manual_seed(1234)
+    shape = (1, 5, padded_length, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    # MiniMax-H3's pad rows are zero hidden states, so their projections are zero
+    # vectors: unmasked they score exp(0) against every query.
+    key[:, :, valid_length:] = 0
+    value[:, :, valid_length:] = 0
+
+    attention_kwargs = {
+        "indices_k": torch.arange(valid_length, device="cuda"),
+        "cu_seqlens_k": torch.tensor(
+            [0, valid_length], dtype=torch.int32, device="cuda"
+        ),
+        "max_seqlen_k": valid_length,
+        "valid_kv_len": valid_length,
+    }
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(
+            query, key[:, :, :valid_length], value[:, :, :valid_length]
+        )
+        output, lse = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType[backend_name]](
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )
+
+    cosine_similarity = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+
+    assert output.shape == query.shape
+    assert torch.isfinite(output).all()
+    assert lse is None
+    assert cosine_similarity > 0.95
+
+
+def test_aiter_mha_v4_gather_padded_keys_contract():
+    """A declared trailing pad is sliced; anything else falls through to the gather."""
+    from xfuser.core.distributed.attention_backend import (
+        _aiter_mha_v4_gather_padded_keys,
+    )
+
+    # Post-permute layout, so the key length is dim 1.
+    query = torch.randn(1, 14, 2, 8)
+    key = torch.randn(1, 14, 2, 8)
+    value = torch.randn_like(key)
+    indices_k = torch.arange(13)
+
+    for kwargs in (None, {"indices_k": None}):
+        assert _aiter_mha_v4_gather_padded_keys(query, key, value, kwargs) == (
+            query,
+            key,
+            value,
+            None,
+        )
+
+    _q, trimmed_key, trimmed_value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
+        query,
+        key,
+        value,
+        {"indices_k": indices_k, "max_seqlen_k": 13, "valid_kv_len": 13},
+    )
+    assert trimmed_key.shape == (1, 13, 2, 8)
+    assert trimmed_value.shape == (1, 13, 2, 8)
+    assert seqlens_k is None
+    torch.testing.assert_close(trimmed_key, key[:, :13])
+
+    with pytest.raises(ValueError, match="valid_kv_len must be in"):
+        _aiter_mha_v4_gather_padded_keys(
+            query, key, value, {"indices_k": indices_k, "valid_kv_len": 15}
+        )
+    with pytest.raises(ValueError, match="as many valid keys"):
+        _aiter_mha_v4_gather_padded_keys(
+            query,
+            key,
+            value,
+            {"indices_k": indices_k, "max_seqlen_k": 12, "valid_kv_len": 13},
+        )
+
+
+def test_aiter_mha_v4_serves_an_undeclared_mask_with_interior_gaps():
+    """Without valid_kv_len the keys are gathered, which a mask with interior gaps needs.
+
+    Slicing to a trailing length is only correct when the producer promises the pad is one
+    trailing block. Gathering by indices_k carries no such assumption, so the rows between
+    the gaps are poisoned here: anything that sliced instead would attend over them.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+    _require_mha_v4_recipe(AttentionBackendType.AITER_BF16.name)
+
+    torch.manual_seed(11)
+    heads, padded = 4, 384
+    shape = (1, heads, padded, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    indices_k = torch.cat(
+        [
+            torch.arange(0, 100, device="cuda"),
+            torch.arange(200, 300, device="cuda"),
+        ]
+    )
+    key[:, :, 100:200] = 50.0
+    value[:, :, 100:200] = 50.0
+    key[:, :, 300:] = 50.0
+    value[:, :, 300:] = 50.0
+
+    attention_kwargs = {
+        "indices_k": indices_k,
+        "cu_seqlens_k": torch.tensor(
+            [0, indices_k.numel()], dtype=torch.int32, device="cuda"
+        ),
+        "max_seqlen_k": indices_k.numel(),
+    }
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(
+            query, key[:, :, indices_k], value[:, :, indices_k]
+        )
+        output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )
+
+    assert output.shape == query.shape
+    cosine = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.99, cosine

@@ -1,47 +1,126 @@
 """The backend registry.
 
 Backend modules each expose a module-level ``SPECS`` list; the package __init__
-imports them explicitly and registers the result. Explicit rather than
+imports them explicitly and installs the result. Explicit rather than
 auto-discovered, so that grep finds every backend and a forgotten import is a
-loud KeyError rather than a silently absent backend.
+loud failure rather than a silently absent backend.
+
+Built once, at import, by a pure function, and read-only afterwards. REGISTRY
+is a view onto a dict nothing outside this module holds, so a consumer that
+means to query the registry cannot accidentally edit it: the lists other
+subsystems used to keep by hand are now derived from it, and a stray write
+would quietly change what every one of them believes.
 
 Consumers ask the registry rather than keeping their own lists: runtime_state
 asks which backends quantise, usp which balance heads, base_model which carry
 each sparsity strategy. A new backend joins those sets by declaring the field.
 """
 
-from typing import Dict, Iterable, List, Optional
+import contextlib
+from dataclasses import replace
+from types import MappingProxyType
+from typing import Dict, Iterable, List, Mapping, Optional
 
 from xfuser.core.attention.spec import AttentionBackendType, Spec
 
-REGISTRY: Dict[AttentionBackendType, Spec] = {}
+# The proxy is a live view, so this is rebound by content, never by name --
+# a consumer that imported REGISTRY keeps seeing the installed registry.
+#
+# Every lookup in this module reads _REGISTRY, not the proxy. Partly because
+# the proxy is the outward face and has no business in the implementation, but
+# concretely because find() runs inside a traced region and Dynamo cannot
+# subscript a mappingproxy by a non-constant key.
+_REGISTRY: Dict[AttentionBackendType, Spec] = {}
+REGISTRY: Mapping[AttentionBackendType, Spec] = MappingProxyType(_REGISTRY)
 
 
-def register(specs: Iterable[Spec], package: str = "") -> None:
-    """Register a module's SPECS. ``package`` is that module's import path, so
-    an Impl target can be written relative to it."""
-    from dataclasses import replace
+def build_registry(modules: Iterable) -> Mapping[AttentionBackendType, Spec]:
+    """Every module's SPECS as one read-only mapping, or an exception.
 
+    Pure -- nothing global is touched, so a caller can build a registry to
+    inspect it without installing it. Each module's __name__ becomes the
+    package its specs' Impl targets resolve against.
+    """
+    built: Dict[AttentionBackendType, Spec] = {}
+    for module in modules:
+        for spec in module.SPECS:
+            _place(built, spec, module.__name__)
+    return MappingProxyType(built)
+
+
+def install(modules: Iterable) -> None:
+    """Build the registry and publish it. Called once, from the package
+    __init__.
+
+    Completeness is checked here rather than in build_registry because it is
+    an invariant of *the* registry, not of any registry: an enum member with
+    no spec is selectable on the command line and resolves to nothing.
+    """
+    built = build_registry(modules)
+    missing = [b.name for b in AttentionBackendType if b not in built]
+    if missing:
+        raise ValueError(
+            "every AttentionBackendType needs a spec; no module declares one "
+            f"for: {', '.join(missing)}"
+        )
+    _REGISTRY.clear()
+    _REGISTRY.update(built)
+
+
+def _place(built: Dict[AttentionBackendType, Spec], spec: Spec, package: str) -> None:
+    if package and not spec.package:
+        spec = replace(spec, package=package)
+    if not isinstance(spec.type, AttentionBackendType):
+        raise TypeError(f"{spec.type!r} is not an AttentionBackendType")
+    if spec.type in built:
+        raise ValueError(
+            f"{spec.type.name} is already registered, by {built[spec.type].package}"
+        )
+    built[spec.type] = spec
+
+
+@contextlib.contextmanager
+def using(specs: Iterable[Spec], package: str = ""):
+    """Swap in a registry built from ``specs`` for the duration of the block.
+
+    The one supported way to change the registry after import, and it exists
+    for tests: they need a registry holding two or three known specs, which is
+    not a state install() would ever produce. Restores on the way out, so a
+    failing test cannot leave the real registry short of its backends.
+    """
+    saved = dict(_REGISTRY)
+    built: Dict[AttentionBackendType, Spec] = {}
     for spec in specs:
-        if package and not spec.package:
-            spec = replace(spec, package=package)
-        if not isinstance(spec.type, AttentionBackendType):
-            raise TypeError(f"{spec.type!r} is not an AttentionBackendType")
-        if spec.type in REGISTRY:
-            raise ValueError(f"{spec.type.name} is already registered")
-        REGISTRY[spec.type] = spec
-
-
-def clear() -> None:
-    """Drop every registration. For tests."""
-    REGISTRY.clear()
+        _place(built, spec, package)
+    _REGISTRY.clear()
+    _REGISTRY.update(built)
+    try:
+        yield REGISTRY
+    finally:
+        _REGISTRY.clear()
+        _REGISTRY.update(saved)
 
 
 def get(backend: AttentionBackendType) -> Spec:
+    """The spec, or KeyError naming the backend. Use find() where absence is
+    an ordinary answer."""
     try:
-        return REGISTRY[backend]
+        return _REGISTRY[backend]
     except KeyError:
         raise KeyError(f"{backend.name} has no registered spec") from None
+
+
+def find(backend: AttentionBackendType) -> Optional[Spec]:
+    """The spec, or None. The lookup usp and runtime_state make when they do
+    not yet know a backend is registered.
+
+    Reads the dict rather than the REGISTRY proxy, and must keep doing so:
+    this runs inside the traced region, and Dynamo refuses a mappingproxy
+    subscripted by anything it cannot constant-fold -- "non-const keys in
+    mappingproxy" -- which a backend enum read from runtime state is not.
+    A plain dict with the same keys traces.
+    """
+    return _REGISTRY.get(backend)
 
 
 def where(**flags) -> List[Spec]:
@@ -49,7 +128,7 @@ def where(**flags) -> List[Spec]:
     Derived properties work too, so where(is_sparse=True) is valid."""
     return [
         spec
-        for spec in REGISTRY.values()
+        for spec in _REGISTRY.values()
         if all(getattr(spec, key) == value for key, value in flags.items())
     ]
 
@@ -60,9 +139,10 @@ def types_where(**flags) -> frozenset:
 
 
 def missing_specs() -> List[AttentionBackendType]:
-    """Enum members with no spec. Should be empty: a member without one cannot
-    be selected."""
-    return [b for b in AttentionBackendType if b not in REGISTRY]
+    """Enum members with no spec. Empty on the installed registry -- install()
+    refuses to publish one that is short -- so this is for inspecting a
+    registry built but not installed, or one swapped in by using()."""
+    return [b for b in AttentionBackendType if b not in _REGISTRY]
 
 
 def available(backend: AttentionBackendType) -> Optional[str]:
@@ -80,7 +160,7 @@ def prepare(backend: AttentionBackendType) -> None:
 def manifest() -> str:
     """The registry as a table. Rendered from the specs themselves, so it
     cannot drift from them; suitable as a golden-file test in review."""
-    rows = sorted(REGISTRY.values(), key=lambda s: s.type.name)
+    rows = sorted(_REGISTRY.values(), key=lambda s: s.type.name)
     if not rows:
         return "registry is empty"
 

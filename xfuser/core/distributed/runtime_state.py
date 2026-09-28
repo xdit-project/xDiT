@@ -252,7 +252,7 @@ class RuntimeState(metaclass=ABCMeta):
                 "be used with a hybrid attention schedule."
             )
 
-        spec = attention_registry.REGISTRY.get(attention_backend)
+        spec = attention_registry.find(attention_backend)
         unavailable = spec.unavailable()
         if unavailable is not None:
             raise RuntimeError(

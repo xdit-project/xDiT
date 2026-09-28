@@ -448,7 +448,7 @@ def fp8_observe_output(fp8_comms, attn, out, is_cross_attention) -> None:
 def _spec(backend):
     from xfuser.core.attention import registry
 
-    return registry.REGISTRY.get(backend)
+    return registry.find(backend)
 
 
 def _accepts_prequantized(backend) -> bool:

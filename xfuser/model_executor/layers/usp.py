@@ -357,7 +357,7 @@ def _has_kv_cache(attn_layer) -> bool:
 
 def _serves_packed_keys(backend, key, attention_kwargs) -> bool:
     """Whether the selected backend will honour the packing itself."""
-    spec = attention_registry.REGISTRY.get(backend)
+    spec = attention_registry.find(backend)
     if spec is None:
         return False
     probe = AttnCall(
@@ -408,7 +408,7 @@ def _get_attention_function(backend=None):
     else:
         attention_backend = get_runtime_state().attention_backend
 
-    spec = attention_registry.REGISTRY.get(attention_backend)
+    spec = attention_registry.find(attention_backend)
     if spec is None:
         raise NotImplementedError(f"Attention backend {attention_backend} not registered.")
     return concat_joint_tensors_decorator(_spec_adapter(spec))

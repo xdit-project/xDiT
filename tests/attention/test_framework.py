@@ -5,6 +5,7 @@ constraints, the registry and the layout helpers -- without needing a GPU or
 any vendor library.
 """
 
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -217,60 +218,124 @@ def _spec(backend, **kwargs):
     return Spec(backend, **defaults)
 
 
-@pytest.fixture
-def clean_registry():
-    saved = dict(registry.REGISTRY)
-    registry.clear()
-    yield registry
-    registry.REGISTRY.clear()
-    registry.REGISTRY.update(saved)
+def _module(name, *specs):
+    """A stand-in for a backend package: build_registry wants SPECS and a
+    __name__ to resolve Impl targets against."""
+    return SimpleNamespace(__name__=name, SPECS=list(specs))
 
 
-def test_register_and_get(clean_registry):
+def test_using_swaps_the_registry_and_restores_it():
     spec = _spec(AttentionBackendType.SDPA)
-    clean_registry.register([spec])
-    assert clean_registry.get(AttentionBackendType.SDPA) is spec
+    before = dict(registry.REGISTRY)
+
+    with registry.using([spec]):
+        assert registry.get(AttentionBackendType.SDPA) is spec
+        assert len(registry.REGISTRY) == 1
+
+    assert registry.REGISTRY == before
 
 
-def test_duplicate_registration_is_rejected(clean_registry):
-    clean_registry.register([_spec(AttentionBackendType.SDPA)])
+def test_using_restores_the_registry_after_a_failure():
+    """Otherwise one failing test leaves every later one querying a registry
+    with three backends in it."""
+    before = dict(registry.REGISTRY)
+
+    with pytest.raises(RuntimeError):
+        with registry.using([_spec(AttentionBackendType.SDPA)]):
+            raise RuntimeError("boom")
+
+    assert registry.REGISTRY == before
+
+
+def test_the_registry_cannot_be_written_through():
+    """A consumer holds REGISTRY to query it. The derived sets other
+    subsystems keep would all shift under a stray write."""
+    with pytest.raises(TypeError):
+        registry.REGISTRY[AttentionBackendType.SDPA] = _spec(AttentionBackendType.SDPA)
+    with pytest.raises(AttributeError):
+        registry.REGISTRY.clear()
+
+
+def test_duplicate_registration_is_rejected():
+    """Two modules claiming one backend: whichever imported last would win,
+    silently, and which that is depends on the order of the MODULES list."""
+    duplicate = _module("pkg.b", _spec(AttentionBackendType.SDPA))
     with pytest.raises(ValueError, match="already registered"):
-        clean_registry.register([_spec(AttentionBackendType.SDPA)])
+        registry.build_registry([
+            _module("pkg.a", _spec(AttentionBackendType.SDPA)),
+            duplicate,
+        ])
 
 
-def test_get_unregistered_names_the_backend(clean_registry):
-    with pytest.raises(KeyError, match="AITER_F4F4"):
-        clean_registry.get(AttentionBackendType.AITER_F4F4)
+def test_build_registry_stamps_each_spec_with_its_package():
+    built = registry.build_registry([_module("pkg.a", _spec(AttentionBackendType.SDPA))])
+    assert built[AttentionBackendType.SDPA].package == "pkg.a"
 
 
-def test_queries_select_by_field(clean_registry):
-    clean_registry.register([
+def test_build_registry_does_not_install():
+    """Pure: a registry can be built and inspected without the real one
+    moving under everything that already queried it."""
+    before = dict(registry.REGISTRY)
+    registry.build_registry([_module("pkg.a", _spec(AttentionBackendType.SDPA))])
+    assert registry.REGISTRY == before
+
+
+def test_install_refuses_a_registry_missing_a_backend():
+    """An enum member with no spec is selectable on the command line and
+    resolves to nothing, so the package must fail to import rather than wait
+    for a run to pick it."""
+    with pytest.raises(ValueError, match="AITER_F4F4"):
+        registry.install([_module("pkg.a", _spec(AttentionBackendType.SDPA))])
+    assert registry.missing_specs() == [], "a refused install must not be applied"
+
+
+def test_get_unregistered_names_the_backend():
+    with registry.using([_spec(AttentionBackendType.SDPA)]):
+        with pytest.raises(KeyError, match="AITER_F4F4"):
+            registry.get(AttentionBackendType.AITER_F4F4)
+
+
+def test_find_returns_none_rather_than_raising():
+    """usp and runtime_state look a backend up before knowing it is
+    registered, and do so inside a traced region -- so this reads the dict,
+    not the REGISTRY proxy, which Dynamo cannot subscript by a non-constant
+    key. tests/test_minimax_h3.py's fullgraph cases are what catch a
+    regression here."""
+    spec = _spec(AttentionBackendType.SDPA)
+    with registry.using([spec]):
+        assert registry.find(AttentionBackendType.SDPA) is spec
+        assert registry.find(AttentionBackendType.AITER_F4F4) is None
+
+
+def test_queries_select_by_field():
+    with registry.using([
         _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity=Sparsity.SPARGE,
               head_balanced=True, low_precision=True, returns_lse=False),
         _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, returns_lse=False),
         _spec(AttentionBackendType.SDPA),
-    ])
-    assert clean_registry.types_where(is_sparse=True) == frozenset(
-        {AttentionBackendType.AITER_MXFP4_SPARGE}
-    )
-    assert clean_registry.types_where(low_precision=True) == frozenset({
-        AttentionBackendType.AITER_MXFP4_SPARGE,
-        AttentionBackendType.AITER_MXFP4,
-    })
-    assert clean_registry.types_where(returns_lse=True) == frozenset(
-        {AttentionBackendType.SDPA}
-    )
+    ]):
+        assert registry.types_where(is_sparse=True) == frozenset(
+            {AttentionBackendType.AITER_MXFP4_SPARGE}
+        )
+        assert registry.types_where(low_precision=True) == frozenset({
+            AttentionBackendType.AITER_MXFP4_SPARGE,
+            AttentionBackendType.AITER_MXFP4,
+        })
+        assert registry.types_where(returns_lse=True) == frozenset(
+            {AttentionBackendType.SDPA}
+        )
 
 
-def test_missing_specs_lists_members_without_a_spec(clean_registry):
-    assert len(clean_registry.missing_specs()) == len(list(AttentionBackendType))
-    clean_registry.register([_spec(AttentionBackendType.SDPA)])
-    assert AttentionBackendType.SDPA not in clean_registry.missing_specs()
+def test_missing_specs_lists_members_without_a_spec():
+    with registry.using([]):
+        assert len(registry.missing_specs()) == len(list(AttentionBackendType))
+    with registry.using([_spec(AttentionBackendType.SDPA)]):
+        assert AttentionBackendType.SDPA not in registry.missing_specs()
 
 
-def test_manifest_renders_from_specs(clean_registry):
-    clean_registry.register([_spec(AttentionBackendType.SDPA)])
-    text = clean_registry.manifest()
+def test_manifest_renders_from_specs():
+    with registry.using([_spec(AttentionBackendType.SDPA)]):
+        text = registry.manifest()
     assert "SDPA" in text and "BACKEND" in text
 
 
@@ -419,7 +484,8 @@ def test_framework_only_depends_on_torch_stdlib_and_itself():
     import xfuser.core.attention as package
 
     allowed = {"torch", "xfuser", "__future__", "dataclasses", "enum", "typing",
-               "functools", "importlib", "inspect", "ast", "pathlib"}
+               "functools", "importlib", "inspect", "ast", "pathlib",
+               "contextlib", "types"}
     root = Path(package.__file__).parent
     for name in FRAMEWORK_MODULES:
         unexpected = _imported_top_level_modules(root / f"{name}.py") - allowed

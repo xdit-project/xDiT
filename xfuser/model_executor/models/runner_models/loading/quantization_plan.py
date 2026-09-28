@@ -193,8 +193,38 @@ class QuantizationPlan:
                 f"{suffixes} (suffix match)"
             )
 
+    def _log_resolved_plan(self, plan) -> None:
+        """Say what each declared target becomes, straight from the plan.
+
+        The legacy version recovered the high tier by subtracting one list
+        from another; the plan already knows, so this only has to read it out.
+        """
+        if not plan.quantizes:
+            return
+
+        high_roots = plan.roots(plan.high) if plan.high else ()
+        if high_roots:
+            log(
+                f"GEMM high-precision tier: format={plan.high}, "
+                f"modules={tuple(high_roots)}"
+            )
+
+        hybrid = getattr(self.model.config, "use_hybrid_gemm_schedule", False)
+        low_detail = plan.low.upper()
+        if hybrid and plan.high:
+            low_detail = f"{plan.high.upper()} endpoints / {plan.low.upper()} middle"
+        for root in plan.roots(plan.low):
+            log(f"GEMM quantization: {root} -> {low_detail}")
+        for root in high_roots:
+            log(f"GEMM quantization: {root} -> {plan.high.upper()}")
+
     def log_gemm_plan(self) -> None:
         """Log the resolved transformer target-to-format mapping."""
+
+        plan = self.gemm_plan
+        if plan is not None:
+            self._log_resolved_plan(plan)
+            return
 
         spec = getattr(self.model.config, "gemm_quantization_spec", None)
         if spec is None:

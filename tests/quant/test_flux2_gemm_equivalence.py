@@ -284,3 +284,64 @@ def test_the_high_format_drives_the_adapter_choice():
     """It was `use_fp6_gemms and use_fp4_gemms`; now any tier names its own."""
     plan = _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False).gemm_plan
     assert plan.high == "fp8"
+
+
+# ---------------------------------------------------------------------------
+# phase 4, step 1: the log says what the plan decided
+# ---------------------------------------------------------------------------
+
+def _logged(plan_obj, monkeypatch):
+    lines = []
+    from xfuser.model_executor.models.runner_models.loading import quantization_plan
+    monkeypatch.setattr(quantization_plan, "log", lines.append)
+    plan_obj.log_gemm_plan()
+    return lines
+
+
+def _mapping(lines, *, component="transformer"):
+    """The target -> format decisions for one component, sans tier header."""
+    return sorted(
+        l
+        for l in lines
+        if l.startswith(f"GEMM quantization: {component}")
+    )
+
+
+@pytest.mark.parametrize("raw, text_encoder", CASES)
+def test_the_log_reports_what_it_did_before(raw, text_encoder, monkeypatch):
+    """Transformer lines only: the legacy logger never mentioned the encoder."""
+    old = _logged(_plan_for(raw, text_encoder=text_encoder, legacy=True), monkeypatch)
+    new = _logged(_plan_for(raw, text_encoder=text_encoder, legacy=False), monkeypatch)
+    assert _mapping(new) == _mapping(old)
+
+
+def test_the_log_now_mentions_the_text_encoder(monkeypatch):
+    """A deliberate addition: it is quantized, so the log should say so.
+
+    The legacy logger reported "the resolved transformer target-to-format
+    mapping" and stopped there, leaving the encoder's format invisible in the
+    one place a run tells you what it did.
+    """
+    args = dict(text_encoder=True)
+    old = _logged(_plan_for("fp8", legacy=True, **args), monkeypatch)
+    new = _logged(_plan_for("fp8", legacy=False, **args), monkeypatch)
+
+    assert _mapping(old, component="text_encoder") == []
+    assert _mapping(new, component="text_encoder") == [
+        f"GEMM quantization: {TEXT_ENCODER} -> FP8"
+    ]
+
+
+def test_the_tier_log_names_the_high_modules(monkeypatch):
+    lines = _logged(
+        _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False), monkeypatch
+    )
+    header = [l for l in lines if l.startswith("GEMM high-precision tier:")]
+    assert len(header) == 1
+    assert "format=fp8" in header[0] and TEXT_ENCODER in header[0]
+    assert f"GEMM quantization: {TEXT_ENCODER} -> FP8" in lines
+    assert f"GEMM quantization: {TRANSFORMER[0]} -> FP4" in lines
+
+
+def test_an_unquantized_run_logs_nothing(monkeypatch):
+    assert _logged(_plan_for("none", text_encoder=False, legacy=False), monkeypatch) == []

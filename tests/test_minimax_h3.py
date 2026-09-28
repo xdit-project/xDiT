@@ -544,13 +544,12 @@ def test_minimax_h3_accepts_dense_mha_v4_backends(monkeypatch):
     monkeypatch.setenv("WORLD_SIZE", "1")
 
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
-        _UNALIGNED_MHA_V4_BACKENDS,
+        _UNSERVED_MHA_V4_BACKENDS,
     )
 
     for backend in AITER_MHA_V4_ONLY_BACKENDS:
-        if backend in _UNALIGNED_MHA_V4_BACKENDS:
-            # AITER's dense MXFP4 V rows are wrong at S % 128 != 0, which the
-            # trimmed key length essentially always is.
+        if backend in _UNSERVED_MHA_V4_BACKENDS:
+            # f4f4 has no manifest row of its own; mxfp4 covers it.
             assert backend not in xFuserMiniMaxH3Model._supported_attn_backends
             continue
         assert backend in xFuserMiniMaxH3Model._supported_attn_backends

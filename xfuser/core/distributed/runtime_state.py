@@ -32,6 +32,7 @@ from xfuser.core.distributed.attention_backend import (
     AITER_MHA_V4_SPARGE_BACKENDS,
     AITER_MHA_V4_SPARGE_BACKEND_SET,
     AttentionBackendType,
+    aiter_mha_v4_is_gfx942,
 )
 from xfuser.core.distributed.attention_schedule import AttentionSchedule, GemmPrecisionSchedule
 from xfuser.core.distributed.fp8_comms import Fp8CommsState
@@ -259,7 +260,23 @@ class RuntimeState(metaclass=ABCMeta):
                 # smooth_k, shipped with the LSE-correction fix needed for
                 # correct merging). Pick (module, symbol, required params)
                 # for the selected backend and validate the wrapper's signature.
-                if attention_backend == AttentionBackendType.AITER_SAGE:
+                if attention_backend in AITER_MHA_V4_ONLY_BACKEND_SET:
+                    # The dense MHA v4 kernels export LSE; mha_v4_packed grew the lse output
+                    # buffer in the same change, whereas return_lse has always been accepted
+                    # and always raised. AITER_FP8 is excluded on purpose: it only reaches
+                    # MHA v4 for some shapes and would silently yield no LSE for the rest.
+                    if aiter_mha_v4_is_gfx942():
+                        raise RuntimeError(
+                            f"{attention_backend} cannot be used with ring parallelism on "
+                            "gfx942: AITER exports an LSE there that has never been measured "
+                            "against a reference, and a wrong one is invisible to output "
+                            "checks because O never reads it. Use ulysses parallelism, or "
+                            "gfx950 where the LSE is validated."
+                        )
+                    module_path = "aiter.ops.mha_v4"
+                    symbol = "mha_v4_packed"
+                    required = ("lse",)
+                elif attention_backend == AttentionBackendType.AITER_SAGE:
                     module_path = "aiter.ops.triton.attention.fav3_sage"
                     symbol = "fav3_sage_wrapper_func"
                     required = ("return_lse", "smooth_k")

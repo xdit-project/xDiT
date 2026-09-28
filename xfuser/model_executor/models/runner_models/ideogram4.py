@@ -286,6 +286,7 @@ class xFuserIdeogram4Model(xFuserModel):
     # The transformer config states this too, and runtime_state re-checks it against the loaded
     # model. Stated here so a Ulysses degree that cannot work is refused before the download.
     attention_heads = 18
+    attention_head_dims = frozenset({256})
 
     load_support = LoadSupport(
         meta_transformers=('transformer', 'unconditional_transformer'),

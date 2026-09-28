@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import torch
 import inspect
 import math
+import typing
 import torch.nn.functional as F
 from enum import Enum
 from xfuser.envs import PACKAGES_CHECKER, environment_variables
@@ -12,7 +13,7 @@ from xfuser.core.distributed.ssta import (
     untile_ssta_output,
     expand_block_mask,
 )
-from xfuser.core.distributed import get_ulysses_parallel_world_size, get_ring_parallel_world_size
+from xfuser.core.distributed import get_ulysses_parallel_world_size, get_ring_parallel_world_size, model_parallel_is_initialized
 from xfuser.core.sparge_attention.sparge import (
     setup_sparge,
     compute_sparge_block_mask,
@@ -34,10 +35,21 @@ class _AiterMhaV4Capabilities:
     block_mask: bool = False
     mxfp8_block_mask: bool = False
     scale_modes: bool = False
+    seqlens_k: bool = False
+    lse: bool = False
     kv_tile: int = 128
 
 
 _AITER_MHA_V4 = _AiterMhaV4Capabilities()
+
+
+def aiter_mha_v4_is_gfx942() -> bool:
+    """MI300-class check that does not depend on the capability probe having run yet."""
+    return "gfx942" in (
+        torch.cuda.get_device_properties(0).gcnArchName
+        if torch.cuda.is_available()
+        else ""
+    )
 
 
 def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
@@ -51,11 +63,25 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
     parameters = inspect.signature(mha_v4_fn).parameters
     block_mask = parameters.get("block_mask") is not None
     scale_modes = parameters.get("q_scale_mode") is not None
+    seqlens_k = parameters.get("seqlens_k") is not None
     kv_tile = 64 if is_gfx942 else 128
+    lse = False
     if enabled:
         try:
             from aiter.ops.mha_v4 import mha_v4_kv_tile as _aiter_mha_v4_kv_tile
             kv_tile = int(_aiter_mha_v4_kv_tile())
+        except ImportError:
+            pass
+        try:
+            from aiter.ops.mha_v4 import mha_v4_packed as _aiter_mha_v4_packed_probe
+            # return_lse has always been accepted and always raised; the lse output buffer only
+            # exists once the kernels actually write one, so probe for that instead. The buffer
+            # exists on gfx942 too, but AITER refuses LSE there until its value is measured.
+            lse = (
+                not is_gfx942
+                and "lse"
+                in inspect.signature(_aiter_mha_v4_packed_probe).parameters
+            )
         except ImportError:
             pass
     return _AiterMhaV4Capabilities(
@@ -63,6 +89,8 @@ def _probe_aiter_mha_v4_capabilities(mha_v4_fn) -> _AiterMhaV4Capabilities:
         is_gfx942=is_gfx942,
         block_mask=block_mask,
         scale_modes=scale_modes,
+        seqlens_k=seqlens_k,
+        lse=lse,
         mxfp8_block_mask=scale_modes and block_mask,
         kv_tile=kv_tile,
     )
@@ -676,6 +704,8 @@ class AttentionBackendType(Enum):
     AITER_F6F4 = "AITER F6F4"
     AITER_MXFP4 = "AITER MXFP4"
     AITER_F4F4 = "AITER F4F4"
+    AITER_BF16_SPARGE = "AITER BF16 Sparge"
+    AITER_BF16FP8_SPARGE = "AITER BF16/FP8 Sparge"
     AITER_I8FP8_SPARGE = "AITER I8FP8 Sparge"
     AITER_FP8_SPARGE = "AITER FP8 Sparge"
     AITER_MXFP8_SPARGE = "AITER MXFP8 Sparge"
@@ -716,6 +746,8 @@ VSA_H3_BACKENDS = frozenset({
     AttentionBackendType.TRITON_VSA_H3,
 })
 AITER_MHA_V4_SPARGE_BACKENDS = (
+    AttentionBackendType.AITER_BF16_SPARGE,
+    AttentionBackendType.AITER_BF16FP8_SPARGE,
     AttentionBackendType.AITER_I8FP8_SPARGE,
     AttentionBackendType.AITER_FP8_SPARGE,
     AttentionBackendType.AITER_MXFP8_SPARGE,
@@ -725,6 +757,12 @@ AITER_MHA_V4_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_MXFP4_SPARGE,
     AttentionBackendType.AITER_F4F4_SPARGE,
 )
+# Backends served only by MHA v4, which is also the set runtime_state admits for ring. AITER_FP8
+# stays out because it is dual-path: it falls back to v3 for a padded or non-128 request.
+# Ring weights each K/V chunk by exp(lse), so a recipe is only safe to add once its exported LSE
+# carries a bias IDENTICAL across chunks. Output correctness says nothing about that, because O
+# never reads the LSE; both defects found this way passed every output test. Measure the per-chunk
+# bias spread on real tensors before adding one.
 AITER_MHA_V4_ONLY_BACKENDS = tuple(
     [
         AttentionBackendType.AITER_BF16,
@@ -743,6 +781,15 @@ AITER_MHA_V4_GFX942_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_FP8_SPARGE,
 )
 AITER_MHA_V4_GFX942_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_GFX942_SPARGE_BACKENDS)
+
+# Head dimensions a backend can serve, for the backends that constrain them. MHA v4 raises
+# "requires logical V head dimension 128", and every dense row in its manifest is hdim 128.
+# A backend absent here makes no claim and is never refused on head dimension, so silence
+# means unknown rather than unrestricted.
+ATTENTION_BACKEND_HEAD_DIMS = {
+    backend: frozenset({128})
+    for backend in AITER_MHA_V4_ONLY_BACKEND_SET | AITER_MHA_V4_SPARGE_BACKEND_SET
+}
 
 
 def _mha_v4_sparge_tile():
@@ -924,11 +971,9 @@ def _flash_attn_3_fp8_call(query, key, value, dropout_p, is_causal, attention_kw
     Performs the necessary tensor permutes and
     then calls attention through flash_attn V3
     """
-    # quantize
     query, scale_query = per_tensor_quant(query)
     key, scale_key = per_tensor_quant(key)
     value, scale_value = per_tensor_quant(value)
-    # run
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -1192,39 +1237,83 @@ def _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs=None):
         raise NotImplementedError("MHA v4 does not support causal masking")
 
 
-def _trim_mha_v4_trailing_pad(key, value, attention_kwargs):
-    """Slice a declared trailing K/V pad so dense MHA v4 can serve a padded request.
+def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs, qk_format=None):
+    """Fold a key-padding request into a dense call, carrying key lengths when there are several.
 
-    MHA v4 has no key-padding mask. When the pad is a uniform trailing block the
-    mask is unnecessary: keeping every query row and shortening K/V is the same
-    computation, which is what ``valid_kv_len`` declares (see
-    ``usp._trim_trailing_kv_padding``). Only the producer knows the pad is
-    trailing -- ``cu_seqlens_k`` having one segment does not imply it, and a mask
-    with interior gaps would be silently mis-served -- so a request that packs
-    keys without declaring ``valid_kv_len`` is still refused.
+    MHA v4 has no key-padding mask. One sequence does not need one: its packed keys are simply
+    a shorter dense K/V, so attending over the valid length is exact. Several sequences are
+    regrouped into a padded batch and their true lengths travel in seqlens_k, which the kernels
+    read per batch; the padding is never visited, so its contents do not reach the softmax.
 
-    Q is deliberately left alone. It is never packed, its pad rows are discarded
-    downstream, and trimming it by a key-side length would be wrong for cross
+    ``valid_kv_len`` is a producer's promise that the pad is one trailing block, which a slice
+    serves without the two copies gathering costs. Gathering is the general case and stays
+    correct for a mask with interior gaps, which a slice would silently mis-serve. Q is left
+    alone either way: it is never packed, and a key-side length would be wrong for cross
     attention, where the two sequences differ.
     """
     kwargs = attention_kwargs or {}
     if kwargs.get("indices_k") is None:
-        return key, value
+        return query, key, value, None
 
     valid_kv_len = kwargs.get("valid_kv_len")
-    if valid_kv_len is None:
-        raise NotImplementedError("MHA v4 does not support varlen packed keys")
-    if not 0 < valid_kv_len <= key.shape[2]:
-        raise ValueError(
-            f"valid_kv_len must be in [1, {key.shape[2]}], got {valid_kv_len}."
+    if valid_kv_len is not None:
+        if not 0 < valid_kv_len <= key.shape[1]:
+            raise ValueError(
+                f"valid_kv_len must be in [1, {key.shape[1]}], got {valid_kv_len}."
+            )
+        max_seqlen_k = kwargs.get("max_seqlen_k")
+        if max_seqlen_k is not None and max_seqlen_k != valid_kv_len:
+            raise ValueError(
+                "A trailing K/V pad has as many valid keys as its longest segment, "
+                f"got valid_kv_len={valid_kv_len} and max_seqlen_k={max_seqlen_k}."
+            )
+        # Already contiguous for the single packed row this declares; a no-op copy otherwise.
+        return (
+            query,
+            key[:, :valid_kv_len].contiguous(),
+            value[:, :valid_kv_len].contiguous(),
+            None,
         )
-    max_seqlen_k = kwargs.get("max_seqlen_k")
-    if max_seqlen_k is not None and max_seqlen_k != valid_kv_len:
-        raise ValueError(
-            "A trailing K/V pad has as many valid keys as its longest segment, "
-            f"got valid_kv_len={valid_kv_len} and max_seqlen_k={max_seqlen_k}."
+
+    packed = _varlen_pack_keys(query, key, value, attention_kwargs)
+    if packed is None:
+        return query, key, value, None
+    q_flat, k_packed, v_packed, _cu_q, cu_k, max_k, batch, seqlen, heads, head_dim = packed
+    query = q_flat.reshape(batch, seqlen, heads, head_dim)
+    if batch == 1:
+        return (
+            query,
+            k_packed.reshape(1, -1, heads, head_dim),
+            v_packed.reshape(1, -1, heads, head_dim),
+            None,
         )
-    return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len]
+    if not _AITER_MHA_V4.seqlens_k:
+        raise NotImplementedError(
+            "this AITER build cannot express per-batch key lengths for MHA v4, "
+            "so varlen packed keys with batch size > 1 are unsupported"
+        )
+    # Only the BF16 Q/K objects consume the seqlens_k kernarg; AITER rejects the rest rather than
+    # attend over the padding, so name the usable backends here instead of relaying that.
+    if qk_format is not None and qk_format is not _AiterAttentionFormat.BF16:
+        raise NotImplementedError(
+            f"MHA v4 carries per-batch key lengths only on its BF16 Q/K rows, so {qk_format.name} "
+            "Q/K cannot serve a batch of several padded sequences. Use AITER_BF16 or "
+            "AITER_BF16FP8 for this model, or a configuration whose per-call batch is one."
+        )
+    cu_k = cu_k.to(device=k_packed.device, dtype=torch.int32)
+    lengths = (cu_k[1:] - cu_k[:-1]).contiguous()
+    counts = lengths.to(torch.int64)
+    starts = cu_k[:-1].to(torch.int64)
+    rows = torch.arange(k_packed.shape[0], device=k_packed.device)
+    slot = rows - torch.repeat_interleave(starts, counts)
+    row_batch = torch.repeat_interleave(
+        torch.arange(batch, device=k_packed.device), counts
+    )
+    key = k_packed.new_zeros((batch, int(max_k), heads, head_dim))
+    value = v_packed.new_zeros((batch, int(max_k), heads, head_dim))
+    key[row_batch, slot] = k_packed
+    value[row_batch, slot] = v_packed
+    return query, key, value, lengths
 
 
 def _use_aiter_mha_v4_fp8(query, is_causal):
@@ -1263,7 +1352,8 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
         if _use_aiter_mha_v4_fp8(query, is_causal):
             fp8_format = _aiter_native_fp8_format()
             per_tensor = _AiterAttentionScaleMode.F32_PER_TENSOR
-            output = _aiter_mha_v4_packed(
+            want_lse = _aiter_mha_v4_wants_lse()
+            result = _aiter_mha_v4_packed(
                 query,
                 key,
                 value,
@@ -1277,7 +1367,9 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
                 per_tensor,
                 per_tensor,
                 softmax_scale=softmax_scale,
+                **({"return_lse": True} if want_lse else {}),
             )
+            output, softmax_lse = result if want_lse else (result, None)
         else:
             output = aiter.flash_attn_fp8_pertensor_func(
                 query,
@@ -1289,22 +1381,27 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
                 k_descale=attention_kwargs["k_descale"],
                 v_descale=attention_kwargs["v_descale"],
             )
+            softmax_lse = None
         output = torch.permute(output, [0, 2, 1, 3])
-        return output, None
+        return output, softmax_lse
 
     packed = _varlen_pack_keys(query, key, value, attention_kwargs)
     use_mha_v4 = packed is None and _use_aiter_mha_v4_fp8(query, is_causal)
+    softmax_lse = None
     if use_mha_v4:
         # The raw MHA v4 API owns canonical Q/K rotation and FP8 quantization.
         fp8_format = _aiter_native_fp8_format()
-        output = _aiter_mha_v4(
+        want_lse = _aiter_mha_v4_wants_lse()
+        result = _aiter_mha_v4(
             query,
             key,
             value,
             fp8_format,
             fp8_format,
             fp8_format,
+            **({"return_lse": True} if want_lse else {}),
         )
+        output, softmax_lse = result if want_lse else (result, None)
     else:
         if packed is not None:
             (
@@ -1347,28 +1444,50 @@ def _aiter_fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwar
             )
 
     output = torch.permute(output, [0, 2, 1, 3])
-    return output, None
+    return output, softmax_lse
+
+
+def _aiter_mha_v4_wants_lse():
+    """Ring attention merges per-rank partials, so it needs each rank's LSE; nothing else does."""
+    # get_ring_parallel_world_size() asserts when there is no SP group, and Dynamo cannot trace
+    # through that assert, so gate on the assert-free check first.
+    return (
+        _AITER_MHA_V4.lse
+        and model_parallel_is_initialized()
+        and get_ring_parallel_world_size() > 1
+    )
 
 
 def _aiter_mixed_attn_call(
     query, key, value, qk_format, v_format, dropout_p, is_causal, attention_kwargs=None
 ):
+    # MHA v4 is head_dim 128 only. LTX-2 pairs 128-wide video blocks with 64-wide audio ones, so
+    # the odd sizes fall through to v3, which covers every head dim and, unlike SDPA, returns the
+    # LSE that ring parallelism merges on.
+    if query.shape[-1] != 128:
+        return _aiter_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
     _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
-    key, value = _trim_mha_v4_trailing_pad(key, value, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-
-    output = _aiter_mha_v4(
-        query,
-        key,
-        value,
-        qk_format,
-        qk_format,
-        v_format,
+    query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
+        query, key, value, attention_kwargs, qk_format
     )
+
+    want_lse = _aiter_mha_v4_wants_lse()
+    extra = {} if seqlens_k is None else {"seqlens_k": seqlens_k}
+    if want_lse:
+        extra["return_lse"] = True
+    result = _aiter_mha_v4(
+        query, key, value, qk_format, qk_format, v_format, **extra
+    )
+    # The kernel writes LSE as [batch, heads, Sq], which is already the layout the ring merge
+    # expects, so only O needs permuting back to BHSD.
+    output, softmax_lse = result if want_lse else (result, None)
     output = torch.permute(output, [0, 2, 1, 3])
-    return output, None
+    return output, softmax_lse
 
 
 @register_attention_function(AttentionBackendType.AITER_BF16)
@@ -1419,21 +1538,35 @@ def _aiter_i8fp8_attn_call(query, key, value, dropout_p, is_causal, attention_kw
 @register_attention_function(AttentionBackendType.AITER_MXFP8)
 def _aiter_mxfp8_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """Run the AITER MXFP8 Q/K and per-tensor FP8 V recipe."""
+    if query.shape[-1] != 128:
+        return _aiter_attn_call(
+            query, key, value, dropout_p, is_causal, attention_kwargs
+        )
     _validate_aiter_mha_v4_request(dropout_p, is_causal, attention_kwargs)
-    key, value = _trim_mha_v4_trailing_pad(key, value, attention_kwargs)
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
-    output = _aiter_launch_mxfp8(query, key, value)
-    return torch.permute(output, [0, 2, 1, 3]), None
+    query, key, value, seqlens_k = _aiter_mha_v4_gather_padded_keys(
+        query, key, value, attention_kwargs, _aiter_native_fp8_format()
+    )
+    output, softmax_lse = _aiter_launch_mxfp8(
+        query,
+        key,
+        value,
+        seqlens_k=seqlens_k,
+        return_lse=_aiter_mha_v4_wants_lse(),
+    )
+    return torch.permute(output, [0, 2, 1, 3]), softmax_lse
 
 
-def _aiter_launch_mxfp8(query, key, value, block_mask=None):
+def _aiter_launch_mxfp8(
+    query, key, value, block_mask=None, seqlens_k=None, return_lse=False
+):
     # Prefer the generic API: AITER deprecated mha_v4_mxfp8, and its DeprecationWarning is
     # untraceable by Dynamo, which breaks torch.compile(fullgraph=True).
     if _AITER_MHA_V4.scale_modes:
         fp8_format = _aiter_native_fp8_format()
-        return _aiter_mha_v4(
+        result = _aiter_mha_v4(
             query,
             key,
             value,
@@ -1444,14 +1577,26 @@ def _aiter_launch_mxfp8(query, key, value, block_mask=None):
             q_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
             k_scale_mode=_AiterAttentionScaleMode.E8M0_PER_1X32,
             v_scale_mode=_AiterAttentionScaleMode.F32_PER_TENSOR,
+            **({} if seqlens_k is None else {"seqlens_k": seqlens_k}),
+            **({"return_lse": True} if return_lse else {}),
+        )
+        return result if return_lse else (result, None)
+    if return_lse:
+        raise NotImplementedError(
+            "ring attention needs the LSE, which the deprecated AITER mha_v4_mxfp8 entry point "
+            "cannot return; please update AITER"
         )
     if _aiter_mha_v4_mxfp8 is None:
         raise RuntimeError(
             "AITER MXFP8 MHA v4 is not available, please update AITER."
         )
+    if seqlens_k is not None:
+        raise NotImplementedError(
+            "the deprecated AITER mha_v4_mxfp8 entry point cannot carry per-batch key lengths"
+        )
     if block_mask is None:
-        return _aiter_mha_v4_mxfp8(query, key, value)
-    return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask)
+        return _aiter_mha_v4_mxfp8(query, key, value), None
+    return _aiter_mha_v4_mxfp8(query, key, value, block_mask=block_mask), None
 
 
 @register_attention_function(AttentionBackendType.AITER_F8F6)
@@ -1472,13 +1617,13 @@ def _aiter_f8f6_attn_call(query, key, value, dropout_p, is_causal, attention_kwa
 
 @register_attention_function(AttentionBackendType.AITER_MXFP4)
 def _aiter_mxfp4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    """Run the AITER MXFP4 Q/K and FP8 V recipe."""
+    """Run the AITER MXFP4 Q/K/V recipe."""
     return _aiter_mixed_attn_call(
         query,
         key,
         value,
         _AiterAttentionFormat.MXFP4,
-        _aiter_native_fp8_format(),
+        _AiterAttentionFormat.MXFP4,
         dropout_p,
         is_causal,
         attention_kwargs,
@@ -1487,7 +1632,11 @@ def _aiter_mxfp4_attn_call(query, key, value, dropout_p, is_causal, attention_kw
 
 @register_attention_function(AttentionBackendType.AITER_F4F4)
 def _aiter_f4f4_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    """Run the AITER MXFP4 Q/K/V recipe."""
+    """Run the AITER MXFP4 Q/K/V recipe.
+
+    NOTE! AITER temporarily retired its separate f4f4 row, so this now resolves to the
+    same kernel as AITER_MXFP4 until that row is reinstated.
+    """
     return _aiter_mixed_attn_call(
         query,
         key,
@@ -1565,9 +1714,9 @@ def _validate_aiter_mha_v4_sparge_request(
     if query.shape[1] != key.shape[1] or query.shape[1] != value.shape[1]:
         raise NotImplementedError("MHA v4 Sparge currently supports MHA only")
     if (attention_kwargs or {}).get("indices_k") is not None:
-        # The dense rows serve a trailing pad by slicing K/V, but the sorted-sparse
-        # launch needs the key length padded to its KV tile, which is the very
-        # alignment such a slice removes.
+        # The dense rows shorten K/V instead, by a declared trailing slice or by gathering;
+        # the sorted-sparse launch needs the key length padded to its KV tile, which is the
+        # alignment either of those removes.
         raise NotImplementedError("MHA v4 Sparge does not support varlen packed keys")
 
 
@@ -1647,7 +1796,7 @@ def _aiter_mha_v4_sparge_call(
     v = torch.permute(v, [0, 2, 1, 3]).contiguous()
     if mxfp8:
         if _AITER_MHA_V4.mxfp8_block_mask:
-            output = _aiter_launch_mxfp8(q, k, v, block_mask=block_mask)
+            output, _ = _aiter_launch_mxfp8(q, k, v, block_mask=block_mask)
         else:
             output = _aiter_launch_mxfp8_sparse(q, k, v, block_mask)
     else:
@@ -1662,6 +1811,36 @@ def _aiter_mha_v4_sparge_call(
         )
     output = torch.permute(output, [0, 2, 1, 3])
     return restore_sparge_output(output, state), None
+
+
+@register_attention_function(AttentionBackendType.AITER_BF16_SPARGE)
+def _aiter_bf16_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run Sparge + the AITER BF16 Q/K/V MHA v4 row."""
+    return _aiter_mha_v4_sparge_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.BF16,
+        _AiterAttentionFormat.BF16,
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+    )
+
+
+@register_attention_function(AttentionBackendType.AITER_BF16FP8_SPARGE)
+def _aiter_bf16fp8_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
+    """Run Sparge + the AITER BF16 Q/K and per-tensor FP8 V MHA v4 row."""
+    return _aiter_mha_v4_sparge_call(
+        query,
+        key,
+        value,
+        _AiterAttentionFormat.BF16,
+        _aiter_native_fp8_format(),
+        dropout_p,
+        is_causal,
+        attention_kwargs,
+    )
 
 
 @register_attention_function(AttentionBackendType.AITER_I8FP8_SPARGE)
@@ -1728,13 +1907,13 @@ def _aiter_f8f6_sparge_attn_call(query, key, value, dropout_p, is_causal, attent
 
 @register_attention_function(AttentionBackendType.AITER_MXFP4_SPARGE)
 def _aiter_mxfp4_sparge_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
-    """Run Sparge + the AITER MXFP4 Q/K and FP8 V MHA v4 row."""
+    """Run Sparge + the AITER MXFP4 Q/K/V MHA v4 row."""
     return _aiter_mha_v4_sparge_call(
         query,
         key,
         value,
         _AiterAttentionFormat.MXFP4,
-        _aiter_native_fp8_format(),
+        _AiterAttentionFormat.MXFP4,
         dropout_p,
         is_causal,
         attention_kwargs,
@@ -1786,6 +1965,97 @@ def _aiter_f6f4_sparge_attn_call(query, key, value, dropout_p, is_causal, attent
     )
 
 
+# AITER's varlen signature uses `X | None` annotations, which Dynamo cannot wrap sourcelessly
+# ("SourcelessBuilder.create does not know how to wrap types.UnionType"). Keep it opaque to compile.
+@torch.library.custom_op("xfuser::aiter_varlen_attention", mutates_args=())
+def _aiter_varlen_attention_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    dropout_p: float,
+    is_causal: bool,
+) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+    kwargs = {}
+    if AITER_HAS_ROUND_MODE:
+        kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+    output, softmax_lse = flash_attn_varlen_func_aiter(
+        query,
+        key,
+        value,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_lse=True,
+        return_attn_probs=False,
+        **kwargs,
+    )
+    return output, softmax_lse
+
+
+@_aiter_varlen_attention_kernel.register_fake
+def _aiter_varlen_attention_kernel_fake(
+    query,
+    key,
+    value,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    dropout_p,
+    is_causal,
+):
+    total_q, num_heads, _ = query.shape
+    return (
+        torch.empty_like(query),
+        query.new_empty((num_heads, total_q), dtype=torch.float32),
+    )
+
+
+# Same UnionType problem as the varlen entrypoint, reached through `_validate_cu` in
+# aiter/ops/mha.py::_flash_attn_forward.
+@torch.library.custom_op("xfuser::aiter_dense_attention", mutates_args=())
+def _aiter_dense_attention_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    dropout_p: float,
+    is_causal: bool,
+) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+    kwargs = {}
+    if AITER_HAS_ROUND_MODE:
+        kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
+    output, softmax_lse = flash_attn_func_aiter(
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_lse=True,
+        return_attn_probs=False,
+        **kwargs,
+    )
+    return output, softmax_lse
+
+
+@_aiter_dense_attention_kernel.register_fake
+def _aiter_dense_attention_kernel_fake(query, key, value, dropout_p, is_causal):
+    batch, seqlen, num_heads, _ = query.shape
+    return (
+        torch.empty_like(query),
+        query.new_empty((batch, num_heads, seqlen), dtype=torch.float32),
+    )
+
+
 @register_attention_function(AttentionBackendType.AITER)
 def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=None):
     """
@@ -1800,38 +2070,31 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
 
     if packed is not None:
         q_flat, k_packed, v_packed, cu_seqlens_q, cu_seqlens_k, max_seqlen_k, B, S, H, D = packed
-        varlen_kwargs = {
-            "softmax_scale": D ** -0.5,
-            "dropout_p": dropout_p,
-            "causal": is_causal,
-            "return_lse": True,
-            "return_attn_probs": False,
-        }
-        if AITER_HAS_ROUND_MODE:
-            varlen_kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-        output, softmax_lse = flash_attn_varlen_func_aiter(
-            q_flat, k_packed, v_packed,
-            cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q=S, max_seqlen_k=max_seqlen_k,
-            **varlen_kwargs,
+        output, softmax_lse = _aiter_varlen_attention_kernel(
+            q_flat,
+            k_packed,
+            v_packed,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            S,
+            max_seqlen_k,
+            D ** -0.5,
+            dropout_p,
+            is_causal,
         )
         output = output.reshape(B, S, H, D)
         output = torch.permute(output, [0, 2, 1, 3])
+        # The varlen kernel returns the LSE flat as [heads, B*S]; the dense branch and MHA v4 both
+        # return [B, heads, S], and the ring merge reads whichever this backend hands it.
+        softmax_lse = softmax_lse.view(H, B, S).permute(1, 0, 2).contiguous()
 
     else:
-        kwargs = {
-            "dropout_p": dropout_p,
-            "causal": is_causal,
-            "return_attn_probs": False,
-            "return_lse": True,
-        }
-        if AITER_HAS_ROUND_MODE:
-            kwargs["how_v3_bf16_cvt"] = HOW_V3_BF16_CVT
-        output, softmax_lse = flash_attn_func_aiter(
+        output, softmax_lse = _aiter_dense_attention_kernel(
             query,
             key,
             value,
-            **kwargs
+            dropout_p,
+            is_causal,
         )
         output = torch.permute(output, [0, 2, 1, 3])
 

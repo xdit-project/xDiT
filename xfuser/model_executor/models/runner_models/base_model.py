@@ -47,6 +47,7 @@ from xfuser.core.distributed import (
 )
 from xfuser.core.distributed.attention_backend import (
     AITER_MHA_V4_SPARGE_BACKEND_SET,
+    ATTENTION_BACKEND_HEAD_DIMS,
     AttentionBackendType,
 )
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
@@ -120,6 +121,46 @@ def _validate_cross_attention_for_sparge(config: xFuserArgs) -> None:
         raise ValueError(
             f"--cross_attention_backend cannot be {cross.name} when Sparge "
             f"Attention is used. Pick a non-Sparge cross attention backend."
+        )
+
+
+def _selected_attention_backends(config: xFuserArgs) -> list[AttentionBackendType]:
+    """Every backend the run would actually dispatch to, named as the user named them."""
+    if config.use_hybrid_attn_schedule:
+        specs = [
+            (config.hybrid_attn_high_precision_backend, "hybrid attention high precision backend"),
+            (config.hybrid_attn_low_precision_backend, "hybrid attention low precision backend"),
+        ]
+    else:
+        specs = [(config.attention_backend, "attention backend")]
+    specs.append((config.cross_attention_backend, "cross attention backend"))
+    return [
+        backend
+        for value, kind in specs
+        if (backend := _parse_attention_backend(value, kind)) is not None
+    ]
+
+
+def _validate_attention_head_dims(model: "xFuserModel", config: xFuserArgs) -> None:
+    """Refuse a backend that cannot serve any head dimension the model runs.
+
+    Disjoint rather than subset on purpose: LTX-2 pairs 128-wide video blocks with 64-wide
+    audio ones and the odd size falls back per call, so a model keeps a backend as long as
+    one of its dimensions is served.
+    """
+    required = getattr(model, "attention_head_dims", None)
+    if not required:
+        return
+    for backend in _selected_attention_backends(config):
+        supported = ATTENTION_BACKEND_HEAD_DIMS.get(backend)
+        if supported is None or not supported.isdisjoint(required):
+            continue
+        raise ValueError(
+            f"{model.settings.model_name} does not support --attention_backend "
+            f"{backend.name}: it runs head dimension "
+            f"{', '.join(str(d) for d in sorted(required))} and that backend serves only "
+            f"{', '.join(str(d) for d in sorted(supported))}, so every layer would fall "
+            "through to another kernel and the selection would have no effect."
         )
 
 
@@ -260,6 +301,10 @@ class xFuserModel(abc.ABC):
     # torch.compile modes that run the graph under CUDA Graphs, whose outputs live in a fixed
     # buffer pool and are therefore only valid until the next replay.
     CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
+
+    # Head dimensions this model's attention runs at, checked against what a backend serves.
+    # Left empty where the value is only known from the loaded checkpoint; empty means no claim.
+    attention_head_dims: frozenset[int] = frozenset()
 
     # Shared loading is opt-in; subclasses must declare verified routes explicitly.
     load_support: LoadSupport = LoadSupport(
@@ -509,6 +554,7 @@ class xFuserModel(abc.ABC):
     def _validate_config(self, config: xFuserArgs) -> None:
         """ Validate if the model supports requested config """
         config._validate_gemm_quantization_flags()
+        _validate_attention_head_dims(self, config)
         for key in ModelCapabilities.__annotations__.keys():
             config_value = getattr(config, key, None)  # Some config options might not be set in the CLI, such as support for specific attention backends.
             if isinstance(config_value, int) and not isinstance(config_value, bool):

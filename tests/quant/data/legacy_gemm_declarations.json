@@ -1,0 +1,966 @@
+{
+  "xFuserCausalWanModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": false,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserCosmos3NanoModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.layers"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.layers"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserCosmos3SuperModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.layers"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.layers"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "2.",
+      "3.",
+      "4.",
+      "5.",
+      "6.",
+      "7.",
+      "8.",
+      "9.",
+      "54.",
+      "55.",
+      "56.",
+      "57.",
+      "58.",
+      "59.",
+      "60.",
+      "61.",
+      "62.",
+      "63."
+    ],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserFastH3DenseModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [
+      "attn.to_qkv",
+      "ff.net.0.proj"
+    ],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [
+      "attn.to_out.0",
+      "ff.net.2",
+      "adaln_proj.linear"
+    ],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserFastH3Model": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [
+      "attn.to_qkv",
+      "ff.net.0.proj"
+    ],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [
+      "attn.to_out.0",
+      "ff.net.2",
+      "adaln_proj.linear"
+    ],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserFastH3V2Model": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [
+      "attn.to_qkv",
+      "ff.net.0.proj"
+    ],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [
+      "attn.to_out.0",
+      "ff.net.2",
+      "adaln_proj.linear"
+    ],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserFlux2Klein4BModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks",
+      "transformer.single_transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.model.layers"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserFlux2Klein9BModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks",
+      "transformer.single_transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.model.layers"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserFlux2Model": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": true,
+    "quantize_text_encoder": true
+  },
+  "xFuserFluxKontextModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks",
+      "transformer.single_transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder_2.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserFluxModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks",
+      "transformer.single_transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder_2.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserHunyuanvideo15DistilledModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserHunyuanvideo15Model": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserHunyuanvideo15SparseModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": false,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserHunyuanvideoModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks",
+      "transformer.single_transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.layers"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserIdeogram4Model": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.layers",
+      "unconditional_transformer.layers"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.layers",
+      "unconditional_transformer.layers"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserKrea2RawModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserKrea2TurboModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserLTX25DistilledVideoModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserLTX25FullVideoModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserLTX2VideoModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserLingBotVideoDenseModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserLingBotVideoMoEModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserMiniMaxH3Model": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [
+      "attn.to_qkv",
+      "ff.net.0.proj"
+    ],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [
+      "attn.to_out.0",
+      "ff.net.2",
+      "adaln_proj.linear"
+    ],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserMiniMaxH3Ref2VAModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer_ref.transformer_blocks"
+    ],
+    "fp8_gemm_include_suffixes": [
+      "attn.to_qkv",
+      "ff.net.0.proj"
+    ],
+    "fp8_gemm_module_list": [
+      "transformer_ref.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [
+      "attn.to_out.0",
+      "ff.net.2",
+      "adaln_proj.linear"
+    ],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserQwenImageEditModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.model.language_model.layers"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserQwenImageModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.model.language_model.layers"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserStableDiffusionModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.transformer_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder_3.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserWan21I2VModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": true,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "2.",
+      "3.",
+      "4.",
+      "5.",
+      "6.",
+      "7.",
+      "8.",
+      "9.",
+      "30.",
+      "31.",
+      "32.",
+      "33.",
+      "34.",
+      "35.",
+      "36.",
+      "37.",
+      "38.",
+      "39."
+    ],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserWan21T2VModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": true,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "2.",
+      "3.",
+      "4.",
+      "5.",
+      "6.",
+      "7.",
+      "8.",
+      "9.",
+      "30.",
+      "31.",
+      "32.",
+      "33.",
+      "34.",
+      "35.",
+      "36.",
+      "37.",
+      "38.",
+      "39."
+    ],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserWan21VACEModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks",
+      "transformer.vace_blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserWan22DistilledI2VModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": true,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "2.",
+      "3.",
+      "4.",
+      "5.",
+      "6.",
+      "7.",
+      "8.",
+      "9.",
+      "30.",
+      "31.",
+      "32.",
+      "33.",
+      "34.",
+      "35.",
+      "36.",
+      "37.",
+      "38.",
+      "39."
+    ],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserWan22I2VModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": true,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "2.",
+      "3.",
+      "4.",
+      "5.",
+      "6.",
+      "7.",
+      "8.",
+      "9.",
+      "30.",
+      "31.",
+      "32.",
+      "33.",
+      "34.",
+      "35.",
+      "36.",
+      "37.",
+      "38.",
+      "39."
+    ],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserWan22T2VModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": true,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "2.",
+      "3.",
+      "4.",
+      "5.",
+      "6.",
+      "7.",
+      "8.",
+      "9.",
+      "30.",
+      "31.",
+      "32.",
+      "33.",
+      "34.",
+      "35.",
+      "36.",
+      "37.",
+      "38.",
+      "39."
+    ],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": false
+  },
+  "xFuserWan22TI2VModel": {
+    "capabilities": {
+      "use_fp4_gemms": true,
+      "use_fp6_gemms": true,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": false
+    },
+    "fp4_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.blocks"
+    ],
+    "fp8_precision_override_suffixes": [
+      ".net.0.proj",
+      ".net.2"
+    ],
+    "fp8_precision_overrides": [
+      "0.",
+      "1.",
+      "28.",
+      "29."
+    ],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.encoder.block"
+    ],
+    "int8_gemm_module_list": [],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserZImageModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": true
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.layers",
+      "transformer.noise_refiner",
+      "transformer.context_refiner"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.layers"
+    ],
+    "int8_gemm_module_list": [
+      "transformer.layers",
+      "transformer.noise_refiner",
+      "transformer.context_refiner"
+    ],
+    "migrated": false,
+    "quantize_text_encoder": true
+  },
+  "xFuserZImageTurboModel": {
+    "capabilities": {
+      "use_fp4_gemms": false,
+      "use_fp6_gemms": false,
+      "use_fp8_gemms": true,
+      "use_int8_gemms": true
+    },
+    "fp4_gemm_module_list": [],
+    "fp8_gemm_include_suffixes": [],
+    "fp8_gemm_module_list": [
+      "transformer.layers",
+      "transformer.noise_refiner",
+      "transformer.context_refiner"
+    ],
+    "fp8_precision_override_suffixes": [],
+    "fp8_precision_overrides": [],
+    "fp8_text_encoder_module_list": [
+      "text_encoder.layers"
+    ],
+    "int8_gemm_module_list": [
+      "transformer.layers",
+      "transformer.noise_refiner",
+      "transformer.context_refiner"
+    ],
+    "migrated": false,
+    "quantize_text_encoder": true
+  }
+}

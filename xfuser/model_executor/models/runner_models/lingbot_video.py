@@ -19,6 +19,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -138,8 +139,9 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
         output_name="lingbot_video_moe",
         model_output_type="video",
         fps=24,
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp4_gemm_module_list=["transformer.blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+        ),
         fsdp_strategy=LINGBOT_FSDP_STRATEGY,
     )
 
@@ -472,7 +474,8 @@ class xFuserLingBotVideoDenseModel(xFuserLingBotVideoMoEModel):
         output_name="lingbot_video_dense",
         model_output_type="video",
         fps=24,
-        fp8_gemm_module_list=["transformer.blocks"],
-        fp4_gemm_module_list=["transformer.blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+        ),
         fsdp_strategy=LINGBOT_FSDP_STRATEGY,
     )

@@ -64,13 +64,13 @@ class xFuserFluxModel(xFuserModel):
         model_name="black-forest-labs/FLUX.1-dev",
         output_name="flux_1_dev",
         model_output_type="image",
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder_2.encoder.block",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.transformer_blocks",
+                "transformer.single_transformer_blocks",
+            )),
+            text_encoder=Select(modules=("text_encoder_2.encoder.block",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -177,13 +177,13 @@ class xFuserFluxKontextModel(xFuserModel):
         output_name="flux_1_kontext_dev",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder_2.encoder.block",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.transformer_blocks",
+                "transformer.single_transformer_blocks",
+            )),
+            text_encoder=Select(modules=("text_encoder_2.encoder.block",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -456,13 +456,13 @@ class xFuserFlux2Klein9BModel(xFuserModel):
         model_name="black-forest-labs/FLUX.2-klein-9B",
         output_name="flux_2_klein_9b",
         model_output_type="image",
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder.model.layers",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.transformer_blocks",
+                "transformer.single_transformer_blocks",
+            )),
+            text_encoder=Select(modules=("text_encoder.model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],
@@ -559,13 +559,13 @@ class xFuserFlux2Klein4BModel(xFuserFlux2Klein9BModel):
         model_name="black-forest-labs/FLUX.2-klein-4B",
         output_name="flux_2_klein_4b",
         model_output_type="image",
-        fp8_gemm_module_list=[
-            "transformer.transformer_blocks",
-            "transformer.single_transformer_blocks",
-        ],
-        fp8_text_encoder_module_list=[
-            "text_encoder.model.layers",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.transformer_blocks",
+                "transformer.single_transformer_blocks",
+            )),
+            text_encoder=Select(modules=("text_encoder.model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks", "single_transformer_blocks"],

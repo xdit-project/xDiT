@@ -13,6 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelSettings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser import xFuserArgs
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
@@ -65,7 +66,10 @@ class xFuserQwenImageEditModel(xFuserModel):
                 "wrap_attrs": ["model.language_model.layers"],
             },
         },
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+        ),
         step_cache_config={
             "dbcache": DBCacheSettings(
                 adapter=CacheDitAdapterConfig(
@@ -75,7 +79,6 @@ class xFuserQwenImageEditModel(xFuserModel):
                 preset=DBCachePreset(Fn_compute_blocks=6, residual_diff_threshold=0.12, scm_policy="ultra"),
             ),
         },
-        fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
     )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
@@ -164,8 +167,10 @@ class xFuserQwenImageModel(xFuserModel):
         model_name="Qwen/Qwen-Image",
         output_name="qwen_image",
         model_output_type="image",
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
-        fp8_text_encoder_module_list=["text_encoder.model.language_model.layers"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+            text_encoder=Select(modules=("text_encoder.model.language_model.layers",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],

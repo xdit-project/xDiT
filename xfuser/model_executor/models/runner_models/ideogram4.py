@@ -15,6 +15,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.checkpoint import (
     CheckpointManifest,
     DerivedTensor,
@@ -317,14 +318,12 @@ class xFuserIdeogram4Model(xFuserModel):
         model_output_type="image",
         mod_value=16,
         resolution_divisor=16,
-        fp8_gemm_module_list=[
-            "transformer.layers",
-            "unconditional_transformer.layers",
-        ],
-        fp4_gemm_module_list=[
-            "transformer.layers",
-            "unconditional_transformer.layers",
-        ],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.layers",
+                "unconditional_transformer.layers",
+            )),
+        ),
         fsdp_strategy={
             "transformer": {"wrap_attrs": ["layers"]},
             "unconditional_transformer": {"wrap_attrs": ["layers"]},

@@ -25,6 +25,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.core.distributed.runtime_state import get_runtime_state
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.utils.runner_utils import (
@@ -938,8 +939,13 @@ class xFuserWan21VACEModel(xFuserWanModel):
     settings = ModelSettings(
         fps=16,
         model_output_type="video",
-        fp8_gemm_module_list=["transformer.blocks", "transformer.vace_blocks"],
-        fp8_text_encoder_module_list=["text_encoder.encoder.block"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=(
+                "transformer.blocks",
+                "transformer.vace_blocks",
+            )),
+            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["blocks", "vace_blocks"],

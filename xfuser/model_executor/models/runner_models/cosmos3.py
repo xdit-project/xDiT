@@ -13,6 +13,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     _parse_attention_backend,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.core.distributed.attention_backend import AttentionBackendType
 from xfuser.core.utils.runner_utils import log, resize_and_crop_image
 from xfuser.model_executor.models.runner_models.loading.contracts import (
@@ -199,7 +200,8 @@ class xFuserCosmos3NanoModel(xFuserCosmos3SuperModel):
         model_output_type="video",
         fps=24,
         mod_value=16,
-        fp8_gemm_module_list=["transformer.layers"],
-        fp4_gemm_module_list=["transformer.layers"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.layers",)),
+        ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )

@@ -14,6 +14,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DefaultInputValues,
     DiffusionOutput,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.cache import (
     DBCachePreset,
     CacheDitAdapterConfig,
@@ -66,7 +67,9 @@ class xFuserCausalWanModel(xFuserModel):
         model_output_type="video",
         model_name="FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers",
         output_name="causal_wan_i2v",
-        fp8_gemm_module_list=["transformer.blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+        ),
         valid_tasks=["t2v", "i2v"],
         fsdp_strategy={
             "transformer": {

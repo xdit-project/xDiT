@@ -18,6 +18,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -288,7 +289,9 @@ class xFuserLTX2VideoModel(xFuserModel):
         model_name="Lightricks/LTX-2",
         output_name="ltx_2_video",
         model_output_type="video",
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+        ),
         fps=24,
         resolution_divisor=64,
         step_cache_config={
@@ -802,8 +805,9 @@ class xFuserLTX25DistilledVideoModel(_xFuserLTX25VideoModelBase):
         fps=24,
         resolution_divisor=64,
         valid_tasks=["t2v", "i2v"],
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
-        fp4_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+        ),
     )
 
 
@@ -853,6 +857,7 @@ class xFuserLTX25FullVideoModel(_xFuserLTX25VideoModelBase):
         fps=24,
         resolution_divisor=64,
         valid_tasks=["t2v", "i2v"],
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
-        fp4_gemm_module_list=["transformer.transformer_blocks"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.transformer_blocks",)),
+        ),
     )

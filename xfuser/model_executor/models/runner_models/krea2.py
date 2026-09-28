@@ -18,12 +18,13 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     STANDARD_LOAD_ROUTES,
 )
 
-_QUANT_GEMM_MODULES = ["transformer.transformer_blocks"]
+_QUANT_GEMM_MODULES = ("transformer.transformer_blocks",)
 
 # Backends that implement the _varlen_pack mask path and can correctly exclude
 # padding key positions.  SDPA_FLASH is excluded because
@@ -211,8 +212,9 @@ class xFuserKrea2RawModel(_Krea2BaseModel):
         output_name="krea2_raw",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=_QUANT_GEMM_MODULES,
-        fp4_gemm_module_list=_QUANT_GEMM_MODULES,
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=_QUANT_GEMM_MODULES),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],
@@ -257,8 +259,9 @@ class xFuserKrea2TurboModel(_Krea2BaseModel):
         output_name="krea2_turbo",
         model_output_type="image",
         mod_value=16,
-        fp8_gemm_module_list=_QUANT_GEMM_MODULES,
-        fp4_gemm_module_list=_QUANT_GEMM_MODULES,
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=_QUANT_GEMM_MODULES),
+        ),
         fsdp_strategy={
             "transformer": {
                 "wrap_attrs": ["transformer_blocks"],

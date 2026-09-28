@@ -11,11 +11,16 @@ the loop overhead is amortised across the group.
 
 Three other things fall out of writing the kernel directly:
 
-* every query tile keeps exactly ``P + K`` tiles, so the block count is a loop
-  bound rather than a per-row load and there is no full/partial block list;
+* every video query tile keeps exactly ``P + K`` tiles, so the block count is a
+  loop bound rather than a per-row load and there is no full/partial block
+  list;
 * the kernel reads packed rows through the tile map itself, so the padded tile
   buffers FlexAttention needs are never built -- no gather in, no un-tile out;
 * the compression branch and the learned gate fold into the epilogue.
+
+Prefix (text/audio) query tiles attend to every key tile, which is how FastVideo
+trains FastH3. Each such row is split over several programs that each walk
+about one sparse row's worth of tiles, and the launcher merges their partials.
 """
 
 from __future__ import annotations
@@ -143,6 +148,8 @@ if triton is not None:
         COMPRESSED,
         GATE,
         Out,
+        PARTIAL_OUT,
+        PARTIAL_STATS,
         stride_qz,
         stride_qh,
         stride_qm,
@@ -161,13 +168,28 @@ if triton is not None:
         num_kv_tiles,
         packed_seq_length,
         qk_scale,
+        num_tiles,
+        num_dense_tiles,
+        dense_splits,
+        dense_chunk,
         HEADS: tl.constexpr,
         TILE: tl.constexpr,
         HEAD_DIM: tl.constexpr,
         TILES_PER_ITER: tl.constexpr,
     ):
-        query_tile = tl.program_id(0)
+        # The first num_dense_tiles * dense_splits programs are the prefix
+        # query tiles, dense_splits per tile, each walking dense_chunk
+        # consecutive key tile ids. The rest are the video query tiles.
+        program = tl.program_id(0)
         batch_head = tl.program_id(1)
+        num_dense_programs = num_dense_tiles * dense_splits
+        is_dense = program < num_dense_programs
+        split = program % dense_splits
+        query_tile = tl.where(
+            is_dense,
+            program // dense_splits,
+            program - num_dense_programs + num_dense_tiles,
+        )
         batch = batch_head // HEADS
         head = batch_head % HEADS
 
@@ -214,8 +236,11 @@ if triton is not None:
         # The index list is padded to a multiple of TILES_PER_ITER with a
         # sentinel tile whose slots are all invalid, so the loop needs no tail
         # guard: a sentinel leaves the running max untouched and adds zero
-        # weight.
-        for start in range(0, num_kv_tiles, TILES_PER_ITER):
+        # weight. Dense ranges are aligned the same way and clamp to the
+        # sentinel past the last tile.
+        loop_start = tl.where(is_dense, split * dense_chunk, 0)
+        loop_end = tl.where(is_dense, loop_start + dense_chunk, num_kv_tiles)
+        for start in range(loop_start, loop_end, TILES_PER_ITER):
             for step in tl.static_range(TILES_PER_ITER):
                 # Scalar tile id, so the rows are a contiguous range and the
                 # key/value loads stay wide block loads rather than per-lane
@@ -223,7 +248,11 @@ if triton is not None:
                 # more independent loads to overlap; the softmax stays online
                 # per tile, which costs one rescale of the accumulator per
                 # tile against the tile's own 2 MFLOP of matrix work.
-                key_tile = tl.load(index_base + start + step)
+                key_tile = tl.where(
+                    is_dense,
+                    tl.minimum(start + step, num_tiles),
+                    tl.load(index_base + start + step, mask=not is_dense),
+                )
                 # Boundary tiles hold fewer than TILE real tokens; the tile map
                 # sends their slots past the end of the sequence, which both
                 # masks the load and keeps them out of the softmax.
@@ -259,38 +288,58 @@ if triton is not None:
                 )
                 running_max = tile_max
 
-        accumulator = accumulator / running_sum[:, None]
+        if is_dense:
+            # Unnormalised partial plus its running max and sum; the launcher
+            # merges a row's splits and adds the gated compression branch.
+            partial = (
+                batch_head * num_dense_tiles + query_tile
+            ) * dense_splits + split
+            partial64 = partial.to(tl.int64)
+            tl.store(
+                PARTIAL_OUT
+                + partial64 * (TILE * HEAD_DIM)
+                + offs_t[:, None] * HEAD_DIM
+                + offs_d[None, :],
+                accumulator,
+            )
+            stats = PARTIAL_STATS + partial64 * (2 * TILE) + offs_t
+            tl.store(stats, running_max)
+            tl.store(stats + TILE, running_sum)
+        else:
+            accumulator = accumulator / running_sum[:, None]
 
-        # Epilogue: add the gated compression branch and write straight to
-        # packed row order, so the caller needs no separate gather, multiply or
-        # un-tile pass over the full sequence.
-        packed_rows = query_rows
-        compressed = tl.load(
-            COMPRESSED
-            + batch64 * stride_cz
-            + head64 * stride_ch
-            + query_tile * stride_cm
-            + offs_d
-        )
-        gate = tl.load(
-            GATE
-            + batch64 * stride_gz
-            + head64 * stride_gh
-            + packed_rows[:, None] * stride_gm
-            + offs_d[None, :],
-            mask=keep[:, None],
-            other=0.0,
-        )
-        accumulator += compressed[None, :].to(tl.float32) * gate.to(tl.float32)
-        tl.store(
-            Out
-            + batch64 * stride_oz
-            + head64 * stride_oh
-            + packed_rows[:, None] * stride_om
-            + offs_d[None, :],
-            accumulator.to(Out.dtype.element_ty),
-            mask=keep[:, None],
-        )
+            # Epilogue: add the gated compression branch and write straight to
+            # packed row order, so the caller needs no separate gather,
+            # multiply or un-tile pass over the full sequence.
+            packed_rows = query_rows
+            compressed = tl.load(
+                COMPRESSED
+                + batch64 * stride_cz
+                + head64 * stride_ch
+                + query_tile * stride_cm
+                + offs_d
+            )
+            gate = tl.load(
+                GATE
+                + batch64 * stride_gz
+                + head64 * stride_gh
+                + packed_rows[:, None] * stride_gm
+                + offs_d[None, :],
+                mask=keep[:, None],
+                other=0.0,
+            )
+            accumulator += compressed[None, :].to(tl.float32) * gate.to(
+                tl.float32
+            )
+            tl.store(
+                Out
+                + batch64 * stride_oz
+                + head64 * stride_oh
+                + packed_rows[:, None] * stride_om
+                + offs_d[None, :],
+                accumulator.to(Out.dtype.element_ty),
+                mask=keep[:, None],
+            )
 
 
 def triton_pool_h3_vsa_tiles(
@@ -342,6 +391,8 @@ def triton_h3_vsa_attention(
 
     ``query``/``key``/``value``, ``gate`` and the ``[B, H, S, D]`` result are
     all packed; the kernel reaches tile order through the metadata's tile map.
+    Video query tiles attend to their ``kv_indices`` row; prefix query tiles
+    attend to every tile and ignore theirs.
     """
     if triton is None:
         raise RuntimeError("VSA-H3's Triton kernel needs Triton installed.")
@@ -395,8 +446,26 @@ def triton_h3_vsa_attention(
             "tensors."
         )
 
+    # A dense row is split into chunks as wide as a sparse row, so each of its
+    # programs costs about what a sparse one does.
+    num_tiles = metadata.num_tiles
+    num_dense_tiles = metadata.num_prefix_tiles
+    dense_chunk = kv_indices.shape[-1]
+    dense_splits = -(-num_tiles // dense_chunk)
+    num_partials = batch * heads * num_dense_tiles * dense_splits
+    partial_out = query.new_empty(
+        (num_partials, metadata.tile_elements, head_dim), dtype=torch.float32
+    )
+    partial_stats = query.new_empty(
+        (num_partials, 2, metadata.tile_elements), dtype=torch.float32
+    )
+
     output = query.new_empty((batch, heads, sequence_length, head_dim))
-    _vsa_h3_attention_kernel[(metadata.num_tiles, batch * heads)](
+    grid = (
+        num_dense_tiles * dense_splits + num_tiles - num_dense_tiles,
+        batch * heads,
+    )
+    _vsa_h3_attention_kernel[grid](
         query,
         key,
         value,
@@ -405,6 +474,8 @@ def triton_h3_vsa_attention(
         compressed,
         gate,
         output,
+        partial_out,
+        partial_stats,
         query.stride(0),
         query.stride(1),
         query.stride(2),
@@ -423,8 +494,48 @@ def triton_h3_vsa_attention(
         kv_indices.shape[-1],
         sequence_length,
         head_dim**-0.5 * _LOG2E,
+        num_tiles,
+        num_dense_tiles,
+        dense_splits,
+        dense_chunk,
         HEADS=heads,
         TILE=metadata.tile_elements,
         HEAD_DIM=head_dim,
     )
+    if num_dense_tiles:
+        _merge_dense_rows(
+            output, partial_out, partial_stats, compressed, gate, metadata
+        )
     return output
+
+
+def _merge_dense_rows(
+    output, partial_out, partial_stats, compressed, gate, metadata
+):
+    """Merge the prefix rows' split partials and write them to ``output``.
+
+    Prefix rows are packed first and tiled in order, so the prefix tiles' real
+    slots are ``packed_to_tiled_index[:num_prefix_tokens]``.
+    """
+    batch, heads, _, head_dim = output.shape
+    tile = metadata.tile_elements
+    partial_out = partial_out.view(
+        batch, heads, metadata.num_prefix_tiles, -1, tile, head_dim
+    )
+    partial_stats = partial_stats.view(
+        batch, heads, metadata.num_prefix_tiles, -1, 2, tile
+    )
+    running_max, running_sum = partial_stats.unbind(dim=-2)
+    # The kernel's scores are in log2 units.
+    weight = torch.exp2(running_max - running_max.amax(dim=3, keepdim=True))
+    merged = (partial_out * weight.unsqueeze(-1)).sum(dim=3) / (
+        (weight * running_sum).sum(dim=3).unsqueeze(-1)
+    )
+    rows = metadata.num_prefix_tokens
+    merged = merged.view(batch, heads, -1, head_dim).index_select(
+        2, metadata.packed_to_tiled_index[:rows]
+    )
+    merged += compressed.float().index_select(
+        2, metadata.packed_token_tile[:rows]
+    ) * gate[:, :, :rows].float()
+    output[:, :, :rows] = merged.to(output.dtype)

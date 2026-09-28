@@ -5,6 +5,8 @@ constraints, the registry and the layout helpers -- without needing a GPU or
 any vendor library.
 """
 
+from unittest import mock
+
 import pytest
 import torch
 
@@ -14,6 +16,7 @@ from xfuser.core.attention.requirements import (
     ALWAYS,
     ARCH,
     PARAM,
+    PLATFORM,
     SYMBOL,
     Requirement,
     _resolve_with_reason,
@@ -458,6 +461,21 @@ def test_run_does_not_re_resolve_per_call():
     for _ in range(3):
         spec.run(q, k, v, AttnCall())
     assert resolutions == ["pkg"]
+
+
+def test_platform_is_what_the_process_can_reach_not_what_it_was_built_for():
+    """torch.version.hip is None on a CPU-only build exactly as it is on an
+    NVIDIA one, so a build-only answer calls a GPU-less machine "cuda" and
+    every PLATFORM("cuda")-gated backend reports itself available there."""
+    from xfuser.core.attention import requirements
+
+    requirements._platform.cache_clear()
+    try:
+        with mock.patch.object(torch.cuda, "is_available", return_value=False):
+            assert requirements._platform() == "cpu"
+            assert "found cpu" in PLATFORM("cuda").unmet()
+    finally:
+        requirements._platform.cache_clear()
 
 
 def test_backends_without_an_lse_cannot_join_ring():

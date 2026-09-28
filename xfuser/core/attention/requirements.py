@@ -271,11 +271,22 @@ class PLATFORM(Requirement):
 
 @functools.lru_cache(maxsize=1)
 def _platform() -> str:
+    """The accelerator this process can actually reach, or "cpu".
+
+    Built-for and present-on are different questions, and this answers the
+    second: a backend whose only requirement is the platform -- CUDNN, say --
+    would otherwise report itself available on a machine with no GPU, because
+    torch.version.hip is None on a CPU-only build just as it is on an NVIDIA
+    one.
+    """
     try:
         if hasattr(torch, "npu") and torch.npu.is_available():
             return "npu"
     except ModuleNotFoundError:
         pass
+    # torch.cuda covers HIP devices too, so this one call answers for both.
+    if not torch.cuda.is_available():
+        return "cpu"
     return "rocm" if torch.version.hip is not None else "cuda"
 
 

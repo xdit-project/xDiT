@@ -147,7 +147,7 @@ def test_h3_vsa_packed_token_tile_maps_every_row_to_its_tile():
     torch.testing.assert_close(counts, metadata.variable_block_sizes)
 
 
-def test_h3_vsa_exempt_mask_keeps_prefix_and_top_video_keys():
+def test_h3_vsa_mask_has_dense_prefix_queries_and_sparse_video_queries():
     scores = torch.zeros(1, 1, 4, 4)
     scores[0, 0, :, 2] = torch.tensor([4.0, 1.0, 3.0, 0.0])
     scores[0, 0, :, 3] = torch.tensor([1.0, 5.0, 2.0, 6.0])
@@ -160,9 +160,9 @@ def test_h3_vsa_exempt_mask_keeps_prefix_and_top_video_keys():
     )
 
     assert mask[..., :2].all()
-    assert mask.sum(dim=-1).tolist() == [[[3, 3, 3, 3]]]
-    assert mask[0, 0, 0, 2]
-    assert mask[0, 0, 1, 3]
+    # Prefix queries are dense (FastVideo's training contract); video queries
+    # keep every prefix key plus their top-k video keys.
+    assert mask.sum(dim=-1).tolist() == [[[4, 4, 3, 3]]]
     assert mask[0, 0, 2, 2]
     assert mask[0, 0, 3, 3]
 
@@ -246,7 +246,11 @@ def test_h3_vsa_kv_blocks_select_the_reference_tile_set(
         )
     rebuilt = rebuilt[..., :num_tiles]
 
-    assert torch.equal(rebuilt, reference)
+    # Prefix query tiles are dense and do not read their rows.
+    video_queries = slice(metadata.num_prefix_tiles, None)
+    assert torch.equal(
+        rebuilt[..., video_queries, :], reference[..., video_queries, :]
+    )
     # Every block on the partial list is padded and every full one is not, so
     # FlexAttention only runs mask_mod where padding actually exists.
     for counts, indices, expect_partial in (
@@ -321,7 +325,9 @@ def test_flex_h3_vsa_attention_matches_the_dense_reference():
     )
 
     # Rows of padded slots are dropped by untiling, so only compare real tokens.
-    valid = metadata.tiled_slot_valid
+    # Prefix query rows are made dense by h3_vsa_attention, tested below.
+    valid = metadata.tiled_slot_valid.clone()
+    valid[: metadata.num_prefix_tiles * metadata.tile_elements] = False
     torch.testing.assert_close(
         sparse[:, :, valid].float(),
         sparse_ref[:, :, valid].float(),
@@ -404,6 +410,59 @@ def test_h3_vsa_attention_backends_agree_with_the_dense_reference(use_triton):
     assert actual.shape == expected.shape
     torch.testing.assert_close(
         actual.float(), expected.float(), rtol=2e-2, atol=2e-2
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("use_triton", [False, True])
+@pytest.mark.parametrize(
+    "prefix_segments,video_shape",
+    [((65, 3), (5, 6, 7)), ((11, 150), (9, 8, 11))],
+)
+def test_h3_vsa_attention_prefix_rows_are_dense(
+    use_triton, prefix_segments, video_shape
+):
+    """Prefix query rows must be full attention plus the gated compression.
+
+    FastVideo trains FastH3 with every non-video query attending to every key
+    (``mask[:, :, :num_prefix_tiles, :] = True`` in its ``_build_block_mask``).
+    The second geometry splits each dense row over several kernel programs.
+    """
+    from xfuser.core import vsa_h3_triton
+
+    if use_triton and not vsa_h3_triton.is_available():
+        pytest.skip("Triton is unavailable")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    metadata = build_h3_vsa_metadata(
+        prefix_segments=prefix_segments, video_shape=video_shape, device=device
+    )
+    shape = (1, 4, metadata.total_seq_length, 64)
+    query, key, value, gate = (
+        torch.randn(shape, device=device, dtype=torch.bfloat16) for _ in range(4)
+    )
+
+    actual = h3_vsa_attention(
+        query, key, value, gate, metadata, use_triton=use_triton
+    )
+
+    rows = metadata.num_prefix_tokens
+    assert rows == sum(prefix_segments)
+    dense = torch.nn.functional.scaled_dot_product_attention(
+        query[:, :, :rows].float(), key.float(), value.float()
+    )
+    pooled = [
+        pool_h3_vsa_tiles(tile_h3_vsa_bhsd(tensor.float(), metadata), metadata)
+        for tensor in (query, key, value)
+    ]
+    compressed = torch.nn.functional.scaled_dot_product_attention(*pooled)
+    expected = dense + (
+        compressed.index_select(2, metadata.packed_token_tile[:rows])
+        * gate[:, :, :rows].float()
+    )
+    torch.testing.assert_close(
+        actual[:, :, :rows].float(), expected, rtol=2e-2, atol=2e-2
     )
 
 

@@ -101,6 +101,7 @@ class MiniMaxH3VSAMetadata:
     num_video_tiles: int
     num_full_video_tiles: int
     num_prefix_partial_tiles: int
+    num_prefix_tokens: int
     variable_block_sizes: torch.Tensor
     packed_to_tiled_index: torch.Tensor
     tiled_to_packed_index: torch.Tensor
@@ -353,6 +354,7 @@ def build_h3_vsa_metadata(
         num_video_tiles=video_sizes.numel(),
         num_full_video_tiles=num_full_video_tiles,
         num_prefix_partial_tiles=int(prefix_is_partial.sum()),
+        num_prefix_tokens=prefix_length,
         variable_block_sizes=variable_block_sizes,
         packed_to_tiled_index=packed_to_tiled,
         tiled_to_packed_index=tiled_to_packed_gather,
@@ -453,6 +455,9 @@ def build_h3_vsa_block_mask(
 
     Every query retains every prefix key tile. The remaining budget is the
     top-k video key tiles selected independently for each query and head.
+    Prefix (text/audio) query tiles are dense: they retain every key tile,
+    as FastVideo trains FastH3 (``_build_block_mask`` in
+    ``fastvideo/attention/backends/video_sparse_attn_h3.py``).
 
     This is the readable reference for the selection policy. The attention path
     uses ``build_h3_vsa_kv_blocks``, which computes the same set without ever
@@ -478,6 +483,7 @@ def build_h3_vsa_block_mask(
     )
     mask.scatter_(-1, video_indices, True)
     mask[..., :num_prefix_tiles] = True
+    mask[..., :num_prefix_tiles, :] = True
     return mask
 
 
@@ -600,6 +606,9 @@ def build_h3_vsa_kv_blocks(
     ``(kv_num_blocks, kv_indices, full_kv_num_blocks, full_kv_indices)``, with
     the padded tiles in the first pair -- those are the only ones the padding
     ``mask_mod`` has to run on.
+
+    Prefix query tiles get a ``P + K`` row like every other tile, but they are
+    dense; ``h3_vsa_attention`` replaces their output rows.
     """
     batch, heads, num_tiles, head_dim = pooled_query.shape
     if num_tiles != metadata.num_tiles:
@@ -684,7 +693,8 @@ def build_h3_vsa_kv_list(
     sort per call.
 
     The list is padded out to ``FASTH3_VSA_KV_LIST_ALIGNMENT`` with the sentinel
-    tile id ``num_tiles``, whose slots read as invalid.
+    tile id ``num_tiles``, whose slots read as invalid. As there, the prefix
+    query tiles' rows go unused: the kernel runs those tiles dense.
     """
     batch, heads, num_tiles, head_dim = pooled_query.shape
     if num_tiles != metadata.num_tiles:
@@ -765,6 +775,9 @@ def flex_h3_vsa_attention(
     callers broadcast it over the tile's tokens and apply the checkpoint's
     learned gate before adding it to the sparse output. Expanding it here would
     cost a multi-GB materialisation at production video sizes.
+
+    Prefix query tiles come out ``P + K`` sparse here, like every other tile;
+    ``h3_vsa_attention`` replaces them with dense rows.
     """
     expected = (
         query.ndim == 4
@@ -850,6 +863,10 @@ def h3_vsa_attention(
     materialised. FlexAttention needs the padded tile buffers, so that path
     builds them. Both select the same key tiles.
 
+    Prefix (text/audio) query rows attend to every key, as FastVideo trains
+    FastH3; only video query rows are sparse. Both paths add the gated
+    compression branch to every row.
+
     ``use_triton`` has no default: the attention backend the caller selected is
     what decides, and callers that check ``h3_vsa_triton_is_usable`` first are
     the ones that may fall back.
@@ -884,6 +901,12 @@ def h3_vsa_attention(
         sparsity,
     )
     packed_output = untile_h3_vsa_bhsd(sparse_output, metadata)
+    # Packed rows need no padding mask, so the dense prefix rows are one plain
+    # attention call over the whole sequence.
+    rows = metadata.num_prefix_tokens
+    packed_output[:, :, :rows] = F.scaled_dot_product_attention(
+        query[:, :, :rows], key, value
+    )
     return packed_output + (
         compressed.to(packed_output.dtype).index_select(
             2, metadata.packed_token_tile

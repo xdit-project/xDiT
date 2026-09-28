@@ -30,6 +30,7 @@ from xfuser.model_executor.models.runner_models.base_model import (
     register_model,
     xFuserModel,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
@@ -336,13 +337,11 @@ class xFuserMiniMaxH3Model(xFuserModel):
         model_output_type="video",
         fps=24,
         resolution_divisor=32,
-        fp8_gemm_module_list=["transformer.transformer_blocks"],
-        fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
-        fp4_gemm_module_list=["transformer.transformer_blocks"],
-        fp8_precision_override_suffixes=(
-            "attn.to_out.0",
-            "ff.net.2",
-            "adaln_proj.linear",
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=("transformer.transformer_blocks",),
+                only=("attn.to_qkv", "ff.net.0.proj"),
+            ),
         ),
         fsdp_strategy={
             "transformer": {
@@ -859,13 +858,11 @@ class xFuserMiniMaxH3Ref2VAModel(xFuserMiniMaxH3Model):
         model_output_type="video",
         fps=24,
         resolution_divisor=32,
-        fp8_gemm_module_list=["transformer_ref.transformer_blocks"],
-        fp8_gemm_include_suffixes=("attn.to_qkv", "ff.net.0.proj"),
-        fp4_gemm_module_list=["transformer_ref.transformer_blocks"],
-        fp8_precision_override_suffixes=(
-            "attn.to_out.0",
-            "ff.net.2",
-            "adaln_proj.linear",
+        gemm_targets=GemmTargets(
+            transformer=Select(
+                modules=("transformer_ref.transformer_blocks",),
+                only=("attn.to_qkv", "ff.net.0.proj"),
+            ),
         ),
         fsdp_strategy={
             "transformer_ref": {

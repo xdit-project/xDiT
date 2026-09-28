@@ -384,3 +384,22 @@ def test_short_sequence_refuses_to_carve_inside_a_target():
             transformer=Select(modules=("transformer.layers",)),
             short_sequence=Select(suffixes=("attn.to_q",)),
         )
+
+
+@pytest.mark.parametrize("raw", ["fp8", "fp4", "fp6", "low=fp4,high=fp8"])
+def test_only_narrows_every_format_the_same_way(raw):
+    """A model names the leaves it wants quantized, not the leaves one format
+    quantizes. The legacy primary-format walk ignored the narrowing while every
+    other walk applied it; the plan has one answer for all of them."""
+    targets = GemmTargets(
+        transformer=Select(
+            modules=("transformer.transformer_blocks",),
+            only=("attn.to_qkv", "ff.net.0.proj"),
+        ),
+    )
+    plan = resolve(targets, GemmQuantizationSpec.parse(raw))
+    block = "transformer.transformer_blocks.7"
+    assert plan.format_for(f"{block}.attn.to_qkv") is not None
+    assert plan.format_for(f"{block}.ff.net.0.proj") is not None
+    for excluded in ("attn.to_out.0", "ff.net.2", "adaln_proj.linear"):
+        assert plan.format_for(f"{block}.{excluded}") is None

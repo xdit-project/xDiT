@@ -185,6 +185,111 @@ def _has_unowned_target(targets, owners):
     )
 
 
+def _plan_block_quantize_fn(
+    loader, component_name, wrap_attrs, local_rank, component, plan
+):
+    """Per-block quantize callable driven by the resolved GEMM plan.
+
+    One pass per format the run named, rather than a boolean per format the
+    loader knows about. Each converter's filter asks the plan what a leaf
+    becomes, so a block whose format is split -- the whole block low, one
+    submodule held high -- needs no target arithmetic to stay disjoint.
+    """
+
+    model = loader.model
+    settings = model.settings
+    device = f"cuda:{local_rank}"
+
+    by_format = {}
+    for format_name in (plan.low, plan.high):
+        if not format_name or format_name in by_format:
+            continue
+        roots = plan.roots(format_name)
+        if roots:
+            by_format[format_name] = roots
+
+    paths = [f"{component_name}.{attr}" for attr in wrap_attrs]
+    if not any(
+        module_paths_overlap(path, root)
+        for path in paths
+        for roots in by_format.values()
+        for root in roots
+    ):
+        return None
+
+    block_paths = (
+        _wrapped_block_paths(component, component_name, wrap_attrs)
+        if component is not None
+        else None
+    )
+    if block_paths is None and len(wrap_attrs) != 1:
+        raise ValueError(
+            "multiple wrap_attrs require the component to resolve flattened "
+            "block indices"
+        )
+
+    fp8_overrides = settings.fp8_precision_overrides or ()
+    fp8_suffix_overrides = settings.fp8_precision_override_suffixes
+
+    def quantize_fn(block, block_idx: int) -> None:
+        block_path = (
+            block_paths[block_idx]
+            if block_paths is not None
+            else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
+        )
+        present = {
+            format_name: targets
+            for format_name, roots in by_format.items()
+            if (targets := _block_local_targets(roots, block_path)) is not None
+        }
+        if not present:
+            return
+
+        block_prefix = f"{block_idx}."
+        # Strip the block-index prefix so the quantize functions see local FQN paths.
+        local_fp8 = (
+            tuple(
+                o[len(block_prefix) :]
+                for o in fp8_overrides
+                if o.startswith(block_prefix)
+            )
+            or None
+        )
+
+        for format_name in present:
+            adapter = loader.backends.adapter_for(format_name)
+            if adapter is None:
+                raise RuntimeError(
+                    f"{format_name.upper()} block conversion requested without "
+                    "a selected backend"
+                )
+            convert_kwargs = {}
+            if adapter is loader.backends.format:
+                convert_kwargs.update(
+                    fp8_layers=local_fp8,
+                    fp8_suffix_layers=fp8_suffix_overrides,
+                    hybrid=model.config.use_hybrid_gemm_schedule,
+                )
+            adapter.convert_block(
+                block,
+                device=device,
+                filter_fn=_plan_target_filter(plan, block_path, format_name),
+                **convert_kwargs,
+            )
+
+    return quantize_fn
+
+
+def _plan_target_filter(plan, block_path, format_name):
+    """Keep the leaves the plan gives to `format_name`, and no others."""
+
+    def filter_fn(_module, fqn):
+        path = f"{block_path}.{fqn}" if fqn else block_path
+        return plan.format_for(path) == format_name
+
+    return filter_fn
+
+
 def build_block_quantize_fn(
     loader,
     component_name: str,
@@ -204,6 +309,14 @@ def build_block_quantize_fn(
     Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed through unchanged on
     every block; only prefix patterns are stripped.
     """
+    plan = loader.quantization_plan.gemm_plan
+    if plan is not None:
+        if not plan.quantizes:
+            return None
+        return _plan_block_quantize_fn(
+            loader, component_name, wrap_attrs, local_rank, component, plan
+        )
+
     model = loader.model
     config, settings = model.config, model.settings
     use_fp6 = bool(getattr(config, "use_fp6_gemms", False))

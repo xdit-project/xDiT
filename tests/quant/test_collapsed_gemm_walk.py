@@ -186,3 +186,85 @@ def test_an_unquantized_run_walks_nothing():
     _run(loader, before_device_move=False)
     assert loader.backends.format.seen == []
     assert loader.backends.blockwise_fp8.seen == []
+
+
+# ---------------------------------------------------------------------------
+# the FSDP path: the same decision, per wrapped block
+# ---------------------------------------------------------------------------
+
+from xfuser.model_executor.models.runner_models.loading import shard  # noqa: E402
+
+
+class _BlockRecorder(_Recorder):
+    def convert_block(self, block, **kwargs):
+        self.seen.append((block, kwargs))
+
+
+def _shard_loader(raw, *, targets=TARGETS, text_encoder=True):
+    loader = _loader(raw, text_encoder=text_encoder, targets=targets)
+    loader.backends.format = _BlockRecorder("format")
+    loader.backends.blockwise_fp8 = _BlockRecorder("blockwise_fp8")
+    loader.backends.fp6 = _BlockRecorder("fp6")
+    return loader
+
+
+def _kept(recorder, block_path, leaves):
+    """The leaves this converter's filter would actually touch."""
+    if not recorder.seen:
+        return []
+    _, kwargs = recorder.seen[-1]
+    return [leaf for leaf in leaves if kwargs["filter_fn"](None, leaf)]
+
+
+def test_a_whole_block_goes_to_one_converter():
+    loader = _shard_loader("low=fp4,high=fp8")
+    fn = shard.build_block_quantize_fn(
+        loader, "transformer", ["transformer_blocks"], local_rank=0
+    )
+    fn(object(), 3)
+    assert len(loader.backends.format.seen) == 1
+    assert loader.backends.blockwise_fp8.seen == []
+    assert _kept(
+        loader.backends.format,
+        "transformer.transformer_blocks.3",
+        ["attn.to_qkv", "ff.net.0.proj"],
+    ) == ["attn.to_qkv", "ff.net.0.proj"]
+
+
+def test_a_block_split_by_keep_high_stays_disjoint():
+    """The case target arithmetic got wrong: block low, one submodule high."""
+    split = GemmTargets(
+        transformer=Select(modules=("transformer.transformer_blocks",)),
+        keep_high=Select(modules=("transformer.transformer_blocks.3.attn",)),
+    )
+    loader = _shard_loader("low=fp4,high=fp8", targets=split, text_encoder=False)
+    fn = shard.build_block_quantize_fn(
+        loader, "transformer", ["transformer_blocks"], local_rank=0
+    )
+    fn(object(), 3)
+
+    leaves = ["attn.to_qkv", "ff.net.0.proj"]
+    path = "transformer.transformer_blocks.3"
+    low = _kept(loader.backends.format, path, leaves)
+    high = _kept(loader.backends.blockwise_fp8, path, leaves)
+
+    assert high == ["attn.to_qkv"]
+    assert low == ["ff.net.0.proj"]
+    assert not set(low) & set(high)
+
+
+def test_an_untargeted_component_gets_no_callable():
+    loader = _shard_loader("fp4", text_encoder=False)
+    assert (
+        shard.build_block_quantize_fn(loader, "vae", ["decoder"], local_rank=0) is None
+    )
+
+
+def test_an_unquantized_run_gets_no_callable():
+    loader = _shard_loader("none")
+    assert (
+        shard.build_block_quantize_fn(
+            loader, "transformer", ["transformer_blocks"], local_rank=0
+        )
+        is None
+    )

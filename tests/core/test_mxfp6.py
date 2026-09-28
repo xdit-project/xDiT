@@ -117,18 +117,31 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
             transformer_2=SimpleNamespace(blocks=fp6_blocks),
         ),
     )
+    backends = SimpleNamespace(
+        format_entries=lambda: ("transformer.blocks",),
+        format=SimpleNamespace(
+            convert_module=lambda module, **kwargs: calls.append(("fp4", module))
+        ),
+        fp6=SimpleNamespace(
+            convert_module=lambda module, **kwargs: calls.append(("fp6", module))
+        ),
+        fp8=None,
+        blockwise_fp8=SimpleNamespace(
+            convert_module=lambda module, **kwargs: calls.append(("fp8", module))
+        ),
+    )
+    backends.adapter_for = lambda format_name: (
+        backends.fp6
+        if format_name == "fp6"
+        else (backends.fp8 or backends.blockwise_fp8) if format_name == "fp8"
+        else backends.format
+    )
     loader = SimpleNamespace(
         model=model,
-        backends=SimpleNamespace(
-            format_entries=lambda: ("transformer.blocks",),
-            format=SimpleNamespace(
-                convert_module=lambda module, **kwargs: calls.append(("fp4", module))
-            ),
-            fp6=SimpleNamespace(
-                convert_module=lambda module, **kwargs: calls.append(("fp6", module))
-            ),
-        ),
+        backends=backends,
         quantization_plan=SimpleNamespace(
+            # unmigrated model: consumers take the legacy list path
+            gemm_plan=None,
             module_list=lambda format_name="fp8": (
                 ["transformer.blocks"]
                 if format_name == "fp4"

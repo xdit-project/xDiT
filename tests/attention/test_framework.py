@@ -211,7 +211,8 @@ def test_combined_constraint_reports_first_failure():
 # --------------------------------------------------------------------------
 
 def _spec(backend, **kwargs):
-    defaults = dict(impl=lambda q, k, v, c: (q, None), returns_lse=True, requires=ALWAYS)
+    defaults = dict(impl=lambda q, k, v, c: (q, None), returns_lse=True,
+                    requires=ALWAYS, accepts=ANY_CALL)
     defaults.update(kwargs)
     return Spec(backend, **defaults)
 
@@ -274,13 +275,31 @@ def test_manifest_renders_from_specs(clean_registry):
 
 
 def test_spec_defaults_are_conservative():
-    """A spec needs only a type and an impl. returns_lse defaults False so a
-    backend must opt in to ring participation; requires defaults to ALWAYS."""
-    spec = Spec(AttentionBackendType.SDPA, impl=lambda q, k, v, c: (q, None))
+    """returns_lse defaults False, so a backend must opt in to ring
+    participation rather than out of it."""
+    spec = _spec(AttentionBackendType.SDPA, returns_lse=False)
     assert spec.returns_lse is False
-    assert spec.requires is ALWAYS
     assert spec.unavailable() is None
     assert spec.rejects(*_qkv(), AttnCall()) is None
+
+
+def test_a_spec_must_state_what_it_requires_and_accepts():
+    """Neither has a default, because the only values that could be one are
+    the permissive ones: an omitted ``accepts`` would read as "serves every
+    call", which is exactly the claim a new backend is least entitled to make
+    by accident. Saying ALWAYS or ANY_CALL is no more work than saying
+    nothing, and it distinguishes decided from forgotten."""
+    impl = lambda q, k, v, c: (q, None)
+
+    with pytest.raises(TypeError, match="requires"):
+        Spec(AttentionBackendType.SDPA, impl=impl, accepts=ANY_CALL)
+    with pytest.raises(TypeError, match="accepts"):
+        Spec(AttentionBackendType.SDPA, impl=impl, requires=ALWAYS)
+
+    spec = Spec(AttentionBackendType.SDPA, impl=impl,
+                requires=ALWAYS, accepts=ANY_CALL)
+    assert spec.requires is ALWAYS
+    assert spec.accepts is ANY_CALL
 
 
 def test_spec_unavailable_surfaces_the_requirement_reason():
@@ -415,6 +434,7 @@ def test_missing_module_is_reported_not_raised():
         impl=lambda q, k, v, c: None,
         returns_lse=False,
         requires=SYMBOL("aiter.ops.definitely_not_here:kernel"),
+        accepts=ANY_CALL,
     )
     assert "not installed" in spec.unavailable()
 
@@ -457,6 +477,7 @@ def test_run_enforces_accepts_before_dispatching():
         AttentionBackendType.SDPA,
         impl=impl,
         accepts=HEAD_DIM(128) & NON_CAUSAL,
+        requires=ALWAYS,
     )
     q, k, v = _qkv(head_dim=128)
 
@@ -481,6 +502,8 @@ def test_resolved_hands_out_the_same_callable_every_time():
         # partial, not the function.
         impl=Impl("layout:to_bshd", bound={"contiguous": True}),
         package="xfuser.core.attention.numerics",
+        requires=ALWAYS,
+        accepts=ANY_CALL,
     )
     assert spec.resolved() is spec.resolved()
 
@@ -502,6 +525,8 @@ def test_run_does_not_re_resolve_per_call():
         AttentionBackendType.SDPA,
         impl=CountingImpl("kernel:whatever"),
         package="pkg",
+        requires=ALWAYS,
+        accepts=ANY_CALL,
     )
     q, k, v = _qkv()
     for _ in range(3):

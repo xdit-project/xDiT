@@ -1,5 +1,6 @@
 """AITER's flash attention: the dense bf16 backend."""
 
+from xfuser.core.attention.constraints import ANY_CALL
 from xfuser.core.attention.requirements import ARCH, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
@@ -13,5 +14,6 @@ SPECS = [
         requires=SYMBOL("aiter:flash_attn_func")
                & SYMBOL("aiter:flash_attn_varlen_func")
                & AITER_ARCH,
+        accepts=ANY_CALL,
     ),
 ]

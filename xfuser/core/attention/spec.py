@@ -169,7 +169,11 @@ class Spec:
     a wrong True yields silently incorrect ring output while a wrong False only
     forgoes ring.
 
-    ``requires`` defaults to ALWAYS -- nothing to check.
+    ``requires`` and ``accepts`` have no default. Both are claims about what a
+    backend will tolerate, and the only values that could serve as defaults --
+    ALWAYS and ANY_CALL -- are the permissive ones, so an omission would read
+    as "runs anywhere, serves anything" rather than as an omission. Writing
+    ALWAYS is no more work than leaving it out and says it was decided.
     """
 
     # The enum member this spec answers to. The registry keys on it, and it is
@@ -188,7 +192,9 @@ class Spec:
 
     # What the machine must provide. Checked once, at backend selection, and a
     # failure names the missing piece rather than crashing mid-denoising.
-    requires: Requirement = ALWAYS
+    # Keyword-only and without a default, so a backend that runs anywhere says
+    # ALWAYS rather than saying nothing; see the class docstring.
+    requires: Requirement = field(kw_only=True)
 
     # Which sparsity strategy, if any. A kind rather than a flag because the
     # consumers distinguish them -- base_model gates SSTA and sparge
@@ -214,8 +220,10 @@ class Spec:
     # Which calls the kernel can serve -- head dim, causality, varlen packing,
     # dropout, self- vs cross-attention. Enforced by run() before dispatch, so
     # an unsupported call raises with a reason instead of computing something
-    # wrong. Anything not declared here is silently accepted.
-    accepts: CallConstraint = ANY_CALL
+    # wrong. Anything not declared here is silently accepted, which is why it
+    # is keyword-only and without a default: a backend that serves every call
+    # says ANY_CALL.
+    accepts: CallConstraint = field(kw_only=True)
 
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.

@@ -268,3 +268,41 @@ def test_an_unquantized_run_gets_no_callable():
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# phase 4, step 3: the FSDP predicates ask the plan
+# ---------------------------------------------------------------------------
+
+def _backends_for(raw, *, text_encoder=True, targets=TARGETS):
+    from xfuser.model_executor.models.runner_models.loading.backend_selection import (
+        QuantizationBackends,
+    )
+
+    loader = _loader(raw, text_encoder=text_encoder, targets=targets)
+    backends = QuantizationBackends(loader)
+    loader.backends = backends
+    return backends
+
+
+def test_the_high_tier_is_what_the_primary_format_leaves():
+    backends = _backends_for("low=fp4,high=fp8")
+    assert backends.high_tier_targets() == {TEXT_ENCODER}
+    assert backends.primary_targets() == set(BLOCKS)
+
+
+@pytest.mark.parametrize("raw", ["fp8", "fp4"])
+def test_a_pure_profile_leaves_no_high_tier(raw):
+    """Nothing is held back, so no second converter is required."""
+    backends = _backends_for(raw)
+    assert backends.high_tier_targets() == set()
+    assert backends.requires_blockwise_fp8() is False
+
+
+def test_a_tier_requires_the_second_converter():
+    assert _backends_for("low=fp4,high=fp8").requires_blockwise_fp8() is True
+
+
+def test_no_high_tier_without_the_component_enabled():
+    """FLUX.2 holds only its text encoder high; leave it out and nothing is."""
+    assert _backends_for("low=fp4,high=fp8", text_encoder=False).high_tier_targets() == set()

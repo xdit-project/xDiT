@@ -215,15 +215,7 @@ class QuantizationBackends:
             return False
 
         settings, config = self.model.settings, self.model.config
-        fp4_targets = set(settings.fp4_gemm_module_list or ())
-        fp8_only_targets = {
-            target
-            for target in self.loader.quantization_plan.module_list()
-            if not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
-        }
+        fp8_only_targets = self.high_tier_targets()
         is_torchao = assume_torchao_fp8 or (
             fp8_adapter is not None and fp8_adapter.backend.value == "torchao"
         )
@@ -246,7 +238,7 @@ class QuantizationBackends:
             and fp4_can_emit_fp8
             and any(
                 module_paths_overlap(target, fsdp_path)
-                for target in fp4_targets
+                for target in self.primary_targets()
                 for fsdp_path in fsdp_target_paths
             )
         )
@@ -272,40 +264,56 @@ class QuantizationBackends:
         if self._format_value() == "fp6":
             fp6_targets = set(self.loader.quantization_plan.module_list("fp6"))
         else:
-            fp4_targets = set(settings.fp4_gemm_module_list or ())
-            fp6_targets = {
-                target
-                for target in self.loader.quantization_plan.module_list()
-                if not any(
-                    module_path_is_covered(target, fp4_target)
-                    for fp4_target in fp4_targets
-                )
-            }
+            fp6_targets = self.high_tier_targets()
             if (
                 settings.fp8_precision_overrides
                 or settings.fp8_precision_override_suffixes
             ):
-                fp6_targets.update(fp4_targets)
+                # Overrides scatter the better format inside the low-tier
+                # blocks too, so those components count as well.
+                fp6_targets.update(self.primary_targets())
         return any(
             module_paths_overlap(target, fsdp_path)
             for target in fp6_targets
             for fsdp_path in fsdp_target_paths
         )
 
+    def primary_targets(self) -> set:
+        """The targets the run's primary format owns."""
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is not None:
+            return set(plan.roots(plan.low)) if plan.low else set()
+        return set(self.model.settings.fp4_gemm_module_list or ())
+
+    def high_tier_targets(self) -> set:
+        """The targets held at the better format, which the primary one skips.
+
+        Three FSDP predicates need this, and each used to rebuild it by
+        subtracting the fp4 list from the fp8 one. A declared model resolves
+        it once, so they can just ask.
+        """
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is not None:
+            return set(plan.roots(plan.high)) if plan.high else set()
+
+        fp4_targets = set(self.model.settings.fp4_gemm_module_list or ())
+        return {
+            target
+            for target in self.loader.quantization_plan.module_list()
+            if not any(
+                module_path_is_covered(target, fp4_target)
+                for fp4_target in fp4_targets
+            )
+        }
+
     def requires_blockwise_fp8(self) -> bool:
         """Whether FP4 mode declares whole components owned only by FP8."""
         if self._uses_mxfp6_contract():
             return False
-        if not self.model.config.use_fp4_gemms:
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is None and not self.model.config.use_fp4_gemms:
             return False
-        fp4_targets = set(self.model.settings.fp4_gemm_module_list or ())
-        return any(
-            not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
-            for target in self.loader.quantization_plan.module_list()
-        )
+        return bool(self.high_tier_targets())
 
     def uses_blockwise_fp8(self) -> bool:
         contract = self.loader.load_contract

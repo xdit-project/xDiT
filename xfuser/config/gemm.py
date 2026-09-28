@@ -8,12 +8,9 @@ import yaml
 
 
 _PURE_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "int8"})
-_TIERED_FORMATS = frozenset(
-    {
-        ("fp4", "fp8"),
-        ("fp4", "fp6"),
-    }
-)
+#: The formats a tier can name. Which of the two is the better one is the
+#: user's business: any distinct pair is allowed.
+_TIER_FORMATS = _PURE_FORMATS - {"none"}
 _CONFIG_SETTING_KEYS = frozenset(
     {
         "gemm_high_precision_targets",
@@ -48,13 +45,11 @@ class GemmQuantizationSpec:
 
         if low == high:
             raise ValueError("GEMM low and high quantization formats must differ")
-        if (low, high) not in _TIERED_FORMATS:
-            supported = ", ".join(
-                f"low={pair[0]},high={pair[1]}" for pair in sorted(_TIERED_FORMATS)
-            )
+        unknown = [name for name in (low, high) if name not in _TIER_FORMATS]
+        if unknown:
             raise ValueError(
-                f"unsupported GEMM quantization pair low={low},high={high}; "
-                f"supported pairs: {supported}"
+                f"unknown GEMM quantization format(s) {unknown}; a tier accepts "
+                f"{', '.join(sorted(_TIER_FORMATS))}"
             )
 
     @classmethod

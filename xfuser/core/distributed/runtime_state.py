@@ -61,6 +61,18 @@ def set_random_seed(seed: int):
     device_manual_seed_all(seed)
 
 
+def _summarise_schedule(backends) -> str:
+    """"10x AITER_FP8, 60x AITER_MXFP6, 10x AITER_FP8" -- a per-step list is
+    unreadable at 80 steps and hides the boundaries that matter."""
+    runs = []
+    for backend in backends:
+        if runs and runs[-1][0] is backend:
+            runs[-1][1] += 1
+        else:
+            runs.append([backend, 1])
+    return ", ".join(f"{count}x {backend.name}" for backend, count in runs)
+
+
 class RuntimeState(metaclass=ABCMeta):
     attention_backend: AttentionBackendType = AttentionBackendType.SDPA_FLASH
     cross_attention_backend: Optional[AttentionBackendType] = None
@@ -130,12 +142,25 @@ class RuntimeState(metaclass=ABCMeta):
 
         self._check_if_backend_compatible_with_current_configuration(attention_backend)
         self.attention_backend = attention_backend
+
+        # A per-step schedule replaces this field before the first attention
+        # call -- increment_step_counter() runs at the top of the forward -- so
+        # under a schedule this backend serves nothing and announcing it would
+        # name a backend that never runs. set_attention_schedule() reports what
+        # will actually be used. Still selected and checked: the value has to be
+        # valid either way, and the schedule may not be configured yet.
+        if self.runtime_config.use_hybrid_attn_schedule:
+            return
+
         logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
-        # Each backend declares whether it quantises, so this no longer needs a
-        # list. Note this is broader than the list it replaces: the Sage family
-        # quantises to int8/fp8 and now warns accordingly.
+        self._warn_if_low_precision(attention_backend)
+
+    def _warn_if_low_precision(self, *backends: AttentionBackendType) -> None:
+        """Each backend declares whether it quantises, so this needs no list.
+        Broader than the list it replaces: the Sage family quantises to
+        int8/fp8 and now warns accordingly."""
         low_precision = attention_registry.types_where(low_precision=True)
-        if attention_backend in low_precision:
+        if any(backend in low_precision for backend in backends):
             logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
@@ -420,7 +445,12 @@ class DiTRuntimeState(RuntimeState):
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        logger.warning("Per-step attention schedule enabled (total_steps=%d).", total_steps)
+        logger.warning(
+            "Per-step attention schedule over %d steps: %s.",
+            total_steps,
+            _summarise_schedule(attention_schedule.backends),
+        )
+        self._warn_if_low_precision(*set(attention_schedule.backends))
 
     def set_gemm_schedule(
         self,

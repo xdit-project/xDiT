@@ -1373,10 +1373,10 @@ class xFuserArgs:
     def _validate_gemm_quantization_flags(self) -> None:
         """Validate ownership of mutually exclusive generic GEMM quantizers."""
         spec = self.gemm_quantization_spec
-        if self.quantize_text_encoder and "fp8" not in spec.formats:
+        if self.quantize_text_encoder and spec.is_pure("none"):
             raise ValueError(
-                "--quantize_text_encoder requires a gemm_quantization profile "
-                "containing FP8."
+                "--quantize_text_encoder needs a gemm_quantization profile; it "
+                "says to include the text encoder, not which format to use."
             )
         has_advanced_targets = (
             self.gemm_high_precision_targets != "model"

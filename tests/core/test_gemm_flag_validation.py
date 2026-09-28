@@ -276,18 +276,21 @@ def test_runner_parser_accepts_explicit_gemm_profile(runtime):
     assert config.use_fp6_gemms is True
 
 
-def test_tiered_fp8_profile_supports_text_encoder_fp8(runtime):
-    config = _args(
-        runtime,
-        gemm_quantization="low=fp4,high=fp8",
-        quantize_text_encoder=True,
-    )
-    config._validate_gemm_quantization_flags()
-
-    with pytest.raises(ValueError, match="profile containing FP8"):
+def test_any_profile_can_include_the_text_encoder(runtime):
+    """The flag says to include the encoder, not which format to give it."""
+    for profile in ("fp8", "fp4", "low=fp4,high=fp8", "low=fp4,high=fp6"):
         _args(
             runtime,
-            gemm_quantization="low=fp4,high=fp6",
+            gemm_quantization=profile,
+            quantize_text_encoder=True,
+        )._validate_gemm_quantization_flags()
+
+
+def test_including_the_text_encoder_needs_a_profile(runtime):
+    with pytest.raises(ValueError, match="needs a gemm_quantization profile"):
+        _args(
+            runtime,
+            gemm_quantization="none",
             quantize_text_encoder=True,
         )._validate_gemm_quantization_flags()
 

@@ -2044,6 +2044,9 @@ def _aiter_attn_call(query, key, value, dropout_p, is_causal, attention_kwargs=N
         )
         output = output.reshape(B, S, H, D)
         output = torch.permute(output, [0, 2, 1, 3])
+        # The varlen kernel returns the LSE flat as [heads, B*S]; the dense branch and MHA v4 both
+        # return [B, heads, S], and the ring merge reads whichever this backend hands it.
+        softmax_lse = softmax_lse.view(H, B, S).permute(1, 0, 2).contiguous()
 
     else:
         output, softmax_lse = _aiter_dense_attention_kernel(

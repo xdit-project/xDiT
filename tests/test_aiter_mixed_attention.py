@@ -644,6 +644,68 @@ def test_aiter_mha_v4_falls_back_to_v3_off_head_dim_128(head_dim):
     assert softmax_lse.shape == shape[:3]
 
 
+def test_aiter_mha_v4_fallback_lse_keeps_batch_major_layout_under_padding():
+    """The v3 varlen kernel hands its LSE back flat as [heads, batch * padded].
+
+    Everything the ring merge otherwise sees -- the v3 dense branch and MHA v4 alike -- is
+    [batch, heads, sq], so the flat one has to be folded back before it leaves the backend.
+    LTX-2 is what reaches this: its 64-wide audio blocks take the fallback while the 128-wide
+    video blocks stay on v4, and the merge would receive two different layouts in one step.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+
+    torch.manual_seed(5)
+    batch, heads, head_dim = 2, 4, 64
+    padded, valid = 384, (300, 137)
+    query = torch.randn(
+        (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
+    )
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+
+    indices_k = torch.cat(
+        [torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)]
+    )
+    attention_kwargs = {
+        "indices_k": indices_k,
+        "cu_seqlens_k": torch.tensor(
+            [0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"
+        ),
+        "max_seqlen_k": max(valid),
+    }
+
+    attention = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16]
+    with torch.no_grad():
+        _, padded_lse = attention(
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )
+        _, dense_lse = attention(query, key, value, dropout_p=0.0, is_causal=False)
+
+    # A flat [heads, batch * padded] LSE happens to hold the same element count, so compare the
+    # layout against the unpadded call rather than the size alone.
+    assert padded_lse.shape == dense_lse.shape == (batch, heads, padded)
+
+    # Fold-and-transpose alone would satisfy the shape while scrambling which row belongs to
+    # which sequence, so pin the values to a per-sequence reference too.
+    for b, n in enumerate(valid):
+        scores = (
+            query[b].float() @ key[b, :, :n].float().transpose(-1, -2)
+        ) * head_dim**-0.5
+        torch.testing.assert_close(
+            padded_lse[b], torch.logsumexp(scores, dim=-1), rtol=1e-3, atol=1e-3
+        )
+
+
 def test_aiter_mha_v4_lse_capability_excludes_gfx942(monkeypatch):
     """The lse buffer exists in AITER's signature on gfx942 too, but AITER refuses to fill it.
 

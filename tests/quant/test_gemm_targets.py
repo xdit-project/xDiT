@@ -305,3 +305,82 @@ def test_only_composes_with_keep_high():
     # narrowed out of the target set entirely, in either tier
     assert plan.format_for("transformer.blocks.0.attn.to_out.0") is None
     assert plan.format_for("transformer.blocks.7.attn.to_out.0") is None
+
+
+# ---------------------------------------------------------------------------
+# short_sequence: a kernel's shape limit, declared rather than branched on
+# ---------------------------------------------------------------------------
+
+REFINERS = GemmTargets(
+    transformer=Select(
+        modules=(
+            "transformer.layers",
+            "transformer.noise_refiner",
+            "transformer.context_refiner",
+        )
+    ),
+    short_sequence=Select(modules=("transformer.context_refiner",)),
+)
+
+
+def _resolved(raw, *, sp_world_size, targets=REFINERS):
+    return resolve(
+        targets, GemmQuantizationSpec.parse(raw), sp_world_size=sp_world_size
+    )
+
+
+def test_a_short_module_keeps_its_format_without_sequence_parallelism():
+    """One rank sees the whole sequence, so M is whatever the caption is."""
+    plan = _resolved("int8", sp_world_size=1)
+    assert plan.format_for("transformer.context_refiner.0.attn.to_q") == "int8"
+
+
+def test_sequence_parallelism_drops_a_short_module_from_a_floored_format():
+    plan = _resolved("int8", sp_world_size=8)
+    assert plan.format_for("transformer.context_refiner.0.attn.to_q") is None
+    # its neighbours are untouched: the limit is about this module's M
+    assert plan.format_for("transformer.noise_refiner.0.attn.to_q") == "int8"
+    assert plan.format_for("transformer.layers.0.attn.to_q") == "int8"
+
+
+def test_a_format_without_a_floor_keeps_the_short_module_under_sp():
+    """FP8 has no minimum M, so the same module quantizes fine."""
+    plan = _resolved("fp8", sp_world_size=8)
+    assert plan.format_for("transformer.context_refiner.0.attn.to_q") == "fp8"
+
+
+def test_the_dropped_module_is_gone_from_every_consumer():
+    """Narrowed at resolve time, so roots and walks agree with format_for."""
+    plan = _resolved("int8", sp_world_size=8)
+    assert "transformer.context_refiner" not in plan.declared_roots()
+    assert "transformer.context_refiner" not in plan.roots("int8")
+
+
+def test_a_tiered_run_asks_the_format_the_module_would_have_taken():
+    """Held high at fp8, the floor never applies however low the run goes."""
+    targets = GemmTargets(
+        transformer=Select(
+            modules=("transformer.layers", "transformer.context_refiner")
+        ),
+        keep_high=Select(modules=("transformer.context_refiner",)),
+        short_sequence=Select(modules=("transformer.context_refiner",)),
+    )
+    plan = _resolved("low=int8,high=fp8", sp_world_size=8, targets=targets)
+    assert plan.format_for("transformer.context_refiner.0.attn.to_q") == "fp8"
+    assert plan.format_for("transformer.layers.0.attn.to_q") == "int8"
+
+
+def test_short_sequence_must_name_a_declared_target():
+    with pytest.raises(ValueError, match="not declared targets"):
+        GemmTargets(
+            transformer=Select(modules=("transformer.layers",)),
+            short_sequence=Select(modules=("transformer.context_refiner",)),
+        )
+
+
+def test_short_sequence_refuses_to_carve_inside_a_target():
+    with pytest.raises(ValueError, match="names whole targets"):
+        GemmTargets(
+            transformer=Select(modules=("transformer.layers",)),
+            short_sequence=Select(suffixes=("attn.to_q",)),
+        )

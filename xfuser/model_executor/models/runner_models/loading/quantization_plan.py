@@ -146,7 +146,16 @@ class QuantizationPlan:
         enable = ["transformer"]
         if getattr(self.model.config, "quantize_text_encoder", False):
             enable.append("text_encoder")
-        return resolve(targets, spec, enable=tuple(enable))
+        config = self.model.config
+        sp_world_size = (getattr(config, "ulysses_degree", 1) or 1) * (
+            getattr(config, "ring_degree", 1) or 1
+        )
+        return resolve(
+            targets,
+            spec,
+            enable=tuple(enable),
+            sp_world_size=sp_world_size,
+        )
 
     def _declared_targets(self, targets, format_name: str) -> list[str]:
         """The per-format list that one `gemm_targets` declaration stands in for.

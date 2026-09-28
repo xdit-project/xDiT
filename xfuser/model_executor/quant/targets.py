@@ -12,7 +12,7 @@ whether this machine is running fp8, mxfp6 or mxfp4.
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Tuple
 
-from xfuser.config.gemm import GemmQuantizationSpec
+from xfuser.config.gemm import MIN_M_FORMATS, GemmQuantizationSpec
 
 
 def _is_under(path: str, root: str) -> bool:
@@ -85,11 +85,19 @@ class GemmTargets:
     privileged. ``keep_high`` cuts across all of them, naming the subset to
     hold at the better precision when the run gives two formats, and is inert
     when it gives one.
+
+    ``short_sequence`` also cuts across them, and says something about the
+    module rather than about precision: its GEMMs take their M from a sequence
+    that sequence parallelism chunks, so M can fall to a handful of tokens. A
+    format whose kernel refuses a small M leaves those modules alone -- see
+    ``MIN_M_FORMATS``. It names targets exactly, because the resolver drops the
+    whole entry rather than carving inside it.
     """
 
     transformer: Select = Select()
     text_encoder: Select = Select()
     keep_high: Select = Select()
+    short_sequence: Select = Select()
 
     @property
     def components(self) -> Mapping[str, Select]:
@@ -112,6 +120,22 @@ class GemmTargets:
                 f"keep_high selects modules outside the target set: {stray}. "
                 "It carves a subset out of what is already targeted, so "
                 "anything it names must be quantizable in the first place."
+            )
+
+        if self.short_sequence.suffixes or self.short_sequence.only:
+            raise ValueError(
+                "short_sequence names whole targets, so it takes modules or "
+                "prefixes; a suffix or a leaf list would have to be carved "
+                "inside a target, which is not what it means."
+            )
+        outside = [
+            root for root in self.short_sequence.roots() if root not in targeted
+        ]
+        if outside:
+            raise ValueError(
+                f"short_sequence selects modules that are not declared "
+                f"targets: {outside}. The resolver drops the whole entry from "
+                "the target set, so it has to name one exactly."
             )
 
 
@@ -225,11 +249,32 @@ class GemmPlan:
         return tuple(dict.fromkeys(found))
 
 
+def _format_at(
+    path: str, keep_high: Select, low: Optional[str], high: Optional[str]
+) -> Optional[str]:
+    """The format a declared root takes, before any narrowing."""
+    if low is None:
+        return None
+    if high is not None and keep_high.matches(path):
+        return high
+    return low
+
+
+def _without(select: Select, dropped: Tuple[str, ...]) -> Select:
+    return Select(
+        modules=tuple(m for m in select.modules if m not in dropped),
+        prefixes=tuple(p for p in select.prefixes if p not in dropped),
+        suffixes=select.suffixes,
+        only=select.only,
+    )
+
+
 def resolve(
     targets: GemmTargets,
     spec: GemmQuantizationSpec,
     *,
     enable: Iterable[str] = ("transformer",),
+    sp_world_size: int = 1,
 ) -> GemmPlan:
     """Bind a model's targets to the formats and components this run asked for.
 
@@ -249,13 +294,33 @@ def resolve(
         )
 
     low = None if spec.low == "none" else spec.low
+    high = spec.high if low is not None else None
+
+    targeted = {
+        name: select
+        for name, select in targets.components.items()
+        if name in enable
+    }
+    if sp_world_size > 1 and targets.short_sequence:
+        # Sequence parallelism can chunk these modules below the M their
+        # format's kernel accepts, so that format leaves them in bf16. The
+        # model said which of its modules are short; the format said which
+        # kernels mind. Neither had to know about the other.
+        dropped = tuple(
+            root
+            for root in targets.short_sequence.roots()
+            if _format_at(root, targets.keep_high, low, high) in MIN_M_FORMATS
+        )
+        if dropped:
+            targeted = {
+                name: narrowed
+                for name, select in targeted.items()
+                if (narrowed := _without(select, dropped))
+            }
+
     return GemmPlan(
-        targeted={
-            name: select
-            for name, select in targets.components.items()
-            if name in enable
-        },
+        targeted=targeted,
         keep_high=targets.keep_high,
         low=low,
-        high=spec.high if low is not None else None,
+        high=high,
     )

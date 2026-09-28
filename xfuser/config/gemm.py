@@ -11,6 +11,13 @@ _PURE_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "int8"})
 #: The formats a tier can name. Which of the two is the better one is the
 #: user's business: any distinct pair is allowed.
 _TIER_FORMATS = _PURE_FORMATS - {"none"}
+#: Formats whose GEMM kernel refuses a small M. TorchAO's INT8 path lowers to
+#: ``torch._int_mm`` under ``torch.compile``, which needs M >= 16; the FP8 and
+#: MX kernels have no such floor. A module a model declares ``short_sequence``
+#: is left alone by these formats once sequence parallelism can chunk it below
+#: that -- see ``GemmTargets.short_sequence``.
+MIN_M_FORMATS = frozenset({"int8"})
+
 _CONFIG_SETTING_KEYS = frozenset(
     {
         "gemm_high_precision_targets",

@@ -757,6 +757,12 @@ AITER_MHA_V4_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_MXFP4_SPARGE,
     AttentionBackendType.AITER_F4F4_SPARGE,
 )
+# Backends served only by MHA v4, which is also the set runtime_state admits for ring. AITER_FP8
+# stays out because it is dual-path: it falls back to v3 for a padded or non-128 request.
+# Ring weights each K/V chunk by exp(lse), so a recipe is only safe to add once its exported LSE
+# carries a bias IDENTICAL across chunks. Output correctness says nothing about that, because O
+# never reads the LSE; both defects found this way passed every output test. Measure the per-chunk
+# bias spread on real tensors before adding one.
 AITER_MHA_V4_ONLY_BACKENDS = tuple(
     [
         AttentionBackendType.AITER_BF16,
@@ -769,10 +775,6 @@ AITER_MHA_V4_ONLY_BACKENDS = tuple(
     ]
 )
 AITER_MHA_V4_ONLY_BACKEND_SET = frozenset(AITER_MHA_V4_ONLY_BACKENDS)
-# Ring weights each K/V chunk by exp(lse), so a recipe is only safe here once its exported LSE
-# carries a bias IDENTICAL across chunks. Output correctness says nothing about that, because O
-# never reads the LSE; both defects found this way passed every output test. Measure the per-chunk
-# bias spread on real tensors before adding a recipe.
 AITER_MHA_V4_SPARGE_BACKEND_SET = frozenset(AITER_MHA_V4_SPARGE_BACKENDS)
 AITER_MHA_V4_GFX942_SPARGE_BACKENDS = (
     AttentionBackendType.AITER_I8FP8_SPARGE,
@@ -969,11 +971,9 @@ def _flash_attn_3_fp8_call(query, key, value, dropout_p, is_causal, attention_kw
     Performs the necessary tensor permutes and
     then calls attention through flash_attn V3
     """
-    # quantize
     query, scale_query = per_tensor_quant(query)
     key, scale_key = per_tensor_quant(key)
     value, scale_value = per_tensor_quant(value)
-    # run
     query = torch.permute(query, [0, 2, 1, 3]).contiguous()
     key = torch.permute(key, [0, 2, 1, 3]).contiguous()
     value = torch.permute(value, [0, 2, 1, 3]).contiguous()
@@ -1714,9 +1714,9 @@ def _validate_aiter_mha_v4_sparge_request(
     if query.shape[1] != key.shape[1] or query.shape[1] != value.shape[1]:
         raise NotImplementedError("MHA v4 Sparge currently supports MHA only")
     if (attention_kwargs or {}).get("indices_k") is not None:
-        # The dense rows serve a trailing pad by slicing K/V, but the sorted-sparse
-        # launch needs the key length padded to its KV tile, which is the very
-        # alignment such a slice removes.
+        # The dense rows shorten K/V instead, by a declared trailing slice or by gathering;
+        # the sorted-sparse launch needs the key length padded to its KV tile, which is the
+        # alignment either of those removes.
         raise NotImplementedError("MHA v4 Sparge does not support varlen packed keys")
 
 

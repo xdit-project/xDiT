@@ -75,6 +75,25 @@ def place_pipeline_components(loader) -> None:
     if loader.replicated_broadcast_load():
         loader.broadcast_fill_replicated(offload_requested)
 
+    if loader.quantization_plan.gemm_plan is not None:
+        # One walk per side of the device move; the plan says what each module
+        # becomes and the adapter says which side it belongs on.
+        setup_gemm_quantization(
+            loader,
+            local_rank,
+            offload_requested=offload_requested,
+            before_device_move=True,
+        )
+        if not offload_requested:
+            model.pipe = model.pipe.to(f"cuda:{local_rank}")
+        setup_gemm_quantization(
+            loader,
+            local_rank,
+            offload_requested=offload_requested,
+            before_device_move=False,
+        )
+        return
+
     adapter = loader.backends.fp8
     if adapter is not None and adapter.converts_before_device_move:
         _convert_fp8_on_host(loader, adapter, local_rank, offload_requested)
@@ -101,6 +120,96 @@ def place_pipeline_components(loader) -> None:
 
     if model.config.use_int8_gemms:
         _convert_int8_on_device(loader, local_rank)
+
+
+def setup_gemm_quantization(
+    loader, local_rank, *, offload_requested, before_device_move
+) -> None:
+    """Quantize every declared target to the format the plan gives it.
+
+    One walk over the plan. Which converter owns a module follows from its
+    format, and which side of the device move it runs on follows from the
+    converter, so neither is a branch here. Called once before the move and
+    once after; each call skips the adapters belonging to the other side.
+    """
+
+    plan = loader.quantization_plan.gemm_plan
+    if plan is None or not plan.quantizes:
+        return
+
+    model = loader.model
+    ledger = loader.quantization_ledger
+    by_format = {}
+    for format_name in (plan.low, plan.high):
+        if not format_name or format_name in by_format:
+            continue
+        roots = plan.roots(format_name)
+        if roots:
+            by_format[format_name] = roots
+
+    for format_name, roots in by_format.items():
+        adapter = loader.backends.adapter_for(format_name)
+        if adapter is None:
+            continue
+        converts_first = bool(getattr(adapter, "converts_before_device_move", False))
+        if converts_first != before_device_move:
+            continue
+
+        # Another format owns these, so this walk must not descend into them.
+        owned_elsewhere = {
+            root
+            for other, other_roots in by_format.items()
+            if other != format_name
+            for root in other_roots
+        }
+        is_primary = adapter is loader.backends.format
+
+        for module_name in roots:
+            excluded_paths = owned_elsewhere | ledger.already_quantized(
+                fp8=format_name == "fp8"
+            )
+            convert, filter_fn = conversion_filter(
+                module_name,
+                excluded_paths,
+                include_suffixes=model.settings.fp8_gemm_include_suffixes,
+            )
+            if not convert:
+                continue
+
+            convert_kwargs = {"device": f"cuda:{local_rank}"}
+            if filter_fn is not None:
+                convert_kwargs["filter_fn"] = filter_fn
+            if before_device_move and offload_requested:
+                convert_kwargs["offload_to_cpu"] = True
+            if is_primary:
+                # Only the primary-format converter builds per-block wrappers,
+                # so only it takes the within-block overrides and the hybrid
+                # schedule.
+                component_name = module_name.partition(".")[0]
+                if ledger.claim_description(component_name):
+                    descriptor = prepare_native_transformer_format_load(
+                        adapter,
+                        component_name=component_name,
+                        targets=loader.backends.format_targets_for(component_name),
+                        stream_quant=not _is_cuda(),
+                        precision_prefixes=(
+                            model.settings.fp8_precision_overrides or ()
+                        ),
+                        precision_suffixes=(
+                            model.settings.fp8_precision_override_suffixes or ()
+                        ),
+                        hybrid=model.config.use_hybrid_gemm_schedule,
+                    ).descriptor
+                    log(descriptor.log_message())
+                convert_kwargs["fp8_layers"] = model.settings.fp8_precision_overrides
+                convert_kwargs["fp8_suffix_layers"] = (
+                    model.settings.fp8_precision_override_suffixes
+                )
+                convert_kwargs["hybrid"] = model.config.use_hybrid_gemm_schedule
+
+            adapter.convert_module(
+                rgetattr(model.pipe, module_name), **convert_kwargs
+            )
 
 
 def setup_mxfp4_gemms(loader, local_rank) -> None:
@@ -181,38 +290,48 @@ def _setup_format_gemms(loader, local_rank, *, stream_quant) -> None:
             **convert_kwargs,
         )
     if not pure_fp6:
-        setup_fp8_only_gemm_modules(loader, local_rank)
+        setup_high_tier_gemms(loader, local_rank)
 
 
-def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
-    """Quantize any target named for FP8 but not owned by the FP4 target list.
+def setup_high_tier_gemms(loader, local_rank) -> None:
+    """Quantize the targets the model asked to hold at the better format.
 
     MoE models such as Wan2.2 rely on this: the low-noise transformer generates the fine detail and
-    needs more precision, while the rest of the model can take FP4. Mixed
-    FP4+FP6 mode gives these targets to MXFP6 rather than an FP8 backend.
+    needs more precision, while the rest of the model can take FP4. FLUX.2-dev
+    holds its text encoder here. Neither format is fixed -- the run names both,
+    and the converter follows whichever it named.
     """
 
     model = loader.model
     config = getattr(model, "config", None)
-    mixed_fp6 = bool(
-        getattr(config, "use_fp6_gemms", False)
-        and getattr(config, "use_fp4_gemms", False)
-    )
-    fp4_modules = set(loader.quantization_plan.module_list("fp4"))
-    fp8_only_modules = [
-        name
-        for name in loader.quantization_plan.module_list()
-        if not any(
-            module_path_is_covered(name, fp4_module)
-            for fp4_module in fp4_modules
-        )
-    ]
-    if not fp8_only_modules:
+    gemm_plan = loader.quantization_plan.gemm_plan
+    if gemm_plan is not None:
+        high_format = gemm_plan.high
+        low_modules = set(gemm_plan.roots(gemm_plan.low)) if gemm_plan.low else set()
+        high_modules = list(gemm_plan.roots(high_format)) if high_format else []
+    else:
+        # Unmigrated model: the high tier is what the fp8 list holds and the
+        # fp4 list does not.
+        high_format = "fp6" if (
+            getattr(config, "use_fp6_gemms", False)
+            and getattr(config, "use_fp4_gemms", False)
+        ) else "fp8"
+        low_modules = set(loader.quantization_plan.module_list("fp4"))
+        high_modules = [
+            name
+            for name in loader.quantization_plan.module_list()
+            if not any(
+                module_path_is_covered(name, low_module)
+                for low_module in low_modules
+            )
+        ]
+    if not high_modules:
         return
-    adapter = loader.backends.fp6 if mixed_fp6 else loader.backends.blockwise_fp8
-    for module_name in fp8_only_modules:
-        excluded_paths = fp4_modules | loader.quantization_ledger.already_quantized(
-            fp8=not mixed_fp6
+    adapter = loader.backends.adapter_for(high_format)
+    for module_name in high_modules:
+        # The ledger tracks one streaming pass per format; fp8's is separate.
+        excluded_paths = low_modules | loader.quantization_ledger.already_quantized(
+            fp8=high_format == "fp8"
         )
         convert, filter_fn = conversion_filter(
             module_name,

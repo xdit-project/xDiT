@@ -133,6 +133,20 @@ class QuantizationBackends:
         )
         return adapter
 
+    def adapter_for(self, format_name: str):
+        """The converter that owns one format.
+
+        A run can name any format at either tier, so callers ask for the one
+        they resolved rather than picking between named attributes. `fp8` is
+        the pure-FP8 implementation when the contract requested exactly FP8,
+        and the blockwise converter when FP8 is one tier of a hybrid load.
+        """
+        if format_name == "fp6":
+            return self.fp6
+        if format_name == "fp8":
+            return self.fp8 or self.blockwise_fp8
+        return self.format
+
     @functools.cached_property
     def blockwise_fp8(self):
         """FP8 converter for pure FP8 and FP8-only portions of hybrid loads."""

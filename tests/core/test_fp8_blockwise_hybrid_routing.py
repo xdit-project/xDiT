@@ -45,6 +45,10 @@ def backends(model):
 
 
 class _StubPlan:
+    # No gemm_targets: this stubs an unmigrated model, so consumers take the
+    # legacy list path.
+    gemm_plan = None
+
     def __init__(self, model):
         self.model = model
 
@@ -74,17 +78,24 @@ class _StubPlan:
 def runtime(model):
     """Wrap a legacy-shaped test fixture in the loader-owned runtime surface."""
     plan = _StubPlan(model)
+    backends = SimpleNamespace(
+        fp8=getattr(model, "fp8_backend", None),
+        format=getattr(model, "format_backend", None),
+        fp6=getattr(model, "fp6_backend", None),
+        blockwise_fp8=getattr(model, "blockwise_fp8_backend", None),
+        format_targets_for=lambda name: plan.targets_for(name, "fp4"),
+    )
+    backends.adapter_for = lambda format_name: (
+        backends.fp6
+        if format_name == "fp6"
+        else backends.blockwise_fp8 if format_name == "fp8" else backends.format
+    )
     return SimpleNamespace(
         model=model,
         load_contract=getattr(model, "load_contract", None),
         quantization_plan=plan,
         quantization_ledger=getattr(model, "quantization_ledger", QuantizationLedger()),
-        backends=SimpleNamespace(
-            fp8=getattr(model, "fp8_backend", None),
-            format=getattr(model, "format_backend", None),
-            blockwise_fp8=getattr(model, "blockwise_fp8_backend", None),
-            format_targets_for=lambda name: plan.targets_for(name, "fp4"),
-        ),
+        backends=backends,
         fill_eager_transformers=lambda: None,
         replicated_broadcast_load=getattr(
             model, "_replicated_broadcast_load", lambda: False
@@ -597,7 +608,7 @@ def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
     )
     monkeypatch.setattr(placement, "log", lambda *_args: None)
 
-    placement.setup_fp8_only_gemm_modules(runtime(model), local_rank=1)
+    placement.setup_high_tier_gemms(runtime(model), local_rank=1)
 
     module, kwargs = fp8_calls[0]
     filter_fn = kwargs.pop("filter_fn")

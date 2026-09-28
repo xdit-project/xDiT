@@ -115,3 +115,57 @@ def test_the_snapshot_still_describes_unmigrated_models():
         and not any(getattr(cls.settings, f, None) for f in LEGACY_FIELDS)
     ]
     assert not lost, f"declarations vanished without a gemm_targets migration: {lost}"
+
+
+# ---------------------------------------------------------------------------
+# what the oracle above cannot see: which block a pattern picks out
+# ---------------------------------------------------------------------------
+
+def _translated():
+    """Migrated models that held blocks back by block-relative prefix.
+
+    Keyed on the prefixes rather than on any pattern, because the suffix-only
+    models -- FastH3 and MiniMax -- had nothing to translate: their override
+    suffixes named leaves their own include-suffixes already excluded, and only
+    the legacy primary-format walk's failure to apply that narrowing ever let
+    them fire. `test_only_narrows_every_format_the_same_way` covers those.
+    """
+    for cls, entry in CHECKABLE:
+        if entry["fp8_precision_overrides"]:
+            yield cls, entry
+
+
+TRANSLATED = list(_translated())
+TRANSLATED_IDS = [cls.__name__ for cls, _ in TRANSLATED]
+
+
+@pytest.mark.skipif(not TRANSLATED, reason="no pattern models migrated yet")
+@pytest.mark.parametrize("cls, entry", TRANSLATED, ids=TRANSLATED_IDS)
+def test_a_translated_pattern_holds_back_exactly_what_it_used_to(cls, entry):
+    """The oracle compares root lists, which cannot tell block 3 from block 30.
+
+    The legacy patterns were block-relative ("3.", ".net.2") and the
+    declaration is absolute, so this replays both dialects over every block of
+    a generous depth and requires the same answer for every leaf.
+    """
+    from xfuser.core.utils.runner_utils import _layer_uses_fp8_override
+    from xfuser.model_executor.quant.targets import resolve
+
+    root = (entry["fp4_gemm_module_list"] or entry["fp8_gemm_module_list"])[0]
+    prefixes = tuple(entry["fp8_precision_overrides"] or ())
+    suffixes = tuple(entry["fp8_precision_override_suffixes"] or ())
+    plan = resolve(
+        cls.settings.gemm_targets, GemmQuantizationSpec.parse("low=fp4,high=fp8")
+    )
+
+    for index in range(100):
+        for leaf in ("attn.to_q", "ffn.net.0.proj", "ffn.net.2", "norm.linear"):
+            local = f"{index}.{leaf}"
+            expected = (
+                "fp8"
+                if _layer_uses_fp8_override(local, prefixes, suffixes)
+                else "fp4"
+            )
+            assert plan.format_for(f"{root}.{local}") == expected, (
+                f"{cls.__name__}: {root}.{local}"
+            )

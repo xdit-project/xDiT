@@ -38,6 +38,7 @@ def test_runtime_selects_aiter_mxfp6_formats(fp4, hybrid, expected):
 
 
 def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
+    from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
         QuantizationPlan,
     )
@@ -46,7 +47,13 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
     model = object.__new__(xFuserWan22T2VModel)
     model.settings = copy.deepcopy(xFuserWan22T2VModel.settings)
     model._customize_settings(SimpleNamespace())
-    model.config = SimpleNamespace(quantize_text_encoder=False, use_fp6_gemms=True)
+    # An MXFP6 run always carries a spec: args refuses --use_fp6_gemms on its
+    # own, so the mixed mode is only reachable as low=fp4,high=fp6.
+    model.config = SimpleNamespace(
+        quantize_text_encoder=False,
+        use_fp6_gemms=True,
+        gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
+    )
     plan = QuantizationPlan(model)
 
     assert plan.module_list("fp4") == ["transformer.blocks"]

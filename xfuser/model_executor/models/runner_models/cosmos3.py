@@ -82,10 +82,16 @@ class xFuserCosmos3SuperModel(xFuserModel):
         model_output_type="video",
         fps=24,
         mod_value=16,
-        fp8_gemm_module_list=["transformer.layers"],
-        fp4_gemm_module_list=["transformer.layers"],
-        fp8_precision_overrides=tuple(
-            f"{i}." for i in list(range(10)) + list(range(54, 64))
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.layers",)),
+            # The first and last ten layers carry more of the output quality
+            # than the middle ones, so a tiered run holds them at the better
+            # format. Absolute paths, matched on segment boundaries, so
+            # layers.5 cannot take layers.54 with it.
+            keep_high=Select(prefixes=tuple(
+                f"transformer.layers.{index}"
+                for index in (*range(10), *range(54, 64))
+            )),
         ),
         fsdp_strategy=COSMOS3_FSDP_STRATEGY,
     )

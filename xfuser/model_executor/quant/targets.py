@@ -32,25 +32,38 @@ def _ends_with(path: str, suffix: str) -> bool:
 class Select:
     """A set of module paths, named three ways.
 
-    All three match the module's full path on segment boundaries. ``prefixes``
-    is absolute like the others -- writing a bare block index would require
-    knowing what it is relative to, and a trailing dot to stop "3." matching
-    "30.", which is a trap rather than a feature.
+    ``modules``, ``prefixes`` and ``suffixes`` union: a path in any of them is
+    selected. They match the module's full path on segment boundaries, and
+    ``prefixes`` is absolute like the others -- writing a bare block index
+    would require knowing what it is relative to, and a trailing dot to stop
+    "3." matching "30.", which is a trap rather than a feature.
+
+    ``only`` narrows instead of widening. Models that quantize part of a block
+    -- the projections but not the output layer, say -- name the leaves they
+    want, and everything else in the selected subtree is left alone.
     """
 
     modules: Tuple[str, ...] = ()
     prefixes: Tuple[str, ...] = ()
     suffixes: Tuple[str, ...] = ()
+    only: Tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.modules or self.prefixes or self.suffixes)
 
-    def matches(self, path: str) -> bool:
+    def _selected(self, path: str) -> bool:
         return (
             any(_is_under(path, m) for m in self.modules)
             or any(_is_under(path, p) for p in self.prefixes)
             or any(_ends_with(path, s) for s in self.suffixes)
         )
+
+    def matches(self, path: str) -> bool:
+        if not self._selected(path):
+            return False
+        if not self.only:
+            return True
+        return any(_ends_with(path, leaf) for leaf in self.only)
 
     def roots(self) -> Tuple[str, ...]:
         """The paths that can be named up front, for consumers that walk a
@@ -119,6 +132,13 @@ class GemmPlan:
     @property
     def quantizes(self) -> bool:
         return self.low is not None and bool(self.targeted)
+
+    @property
+    def only_suffixes(self) -> Tuple[str, ...]:
+        """Leaf suffixes the declaration narrows to, for walks that convert a
+        whole subtree and need a filter to apply inside it."""
+        found = [leaf for select in self.targeted.values() for leaf in select.only]
+        return tuple(dict.fromkeys(found))
 
     def format_for(self, path: str) -> Optional[str]:
         """The format this module is quantized to, or None to leave it alone.

@@ -257,3 +257,51 @@ def test_any_sensible_pair_tiers(low, high):
 def test_a_nonsense_pair_is_still_refused(raw, message):
     with pytest.raises(ValueError, match=message):
         GemmQuantizationSpec.parse(raw)
+
+
+# ---------------------------------------------------------------------------
+# `only`: quantizing part of a block
+# ---------------------------------------------------------------------------
+
+PARTIAL = GemmTargets(
+    transformer=Select(
+        modules=("transformer.blocks",),
+        only=("attn.to_qkv", "ff.net.0.proj"),
+    ),
+)
+
+
+def test_only_narrows_the_selection_to_named_leaves():
+    plan = resolve(PARTIAL, GemmQuantizationSpec.parse("fp8"))
+    assert plan.format_for("transformer.blocks.3.attn.to_qkv") == "fp8"
+    assert plan.format_for("transformer.blocks.3.ff.net.0.proj") == "fp8"
+    assert plan.format_for("transformer.blocks.3.attn.to_out.0") is None
+    assert plan.format_for("transformer.blocks.3.ff.net.2") is None
+
+
+def test_only_still_requires_the_subtree():
+    """It narrows what is already selected; it does not select on its own."""
+    plan = resolve(PARTIAL, GemmQuantizationSpec.parse("fp8"))
+    assert plan.format_for("text_encoder.layers.0.attn.to_qkv") is None
+
+
+def test_only_leaves_the_declared_roots_intact():
+    """Consumers still walk the subtree; the narrowing applies inside it."""
+    plan = resolve(PARTIAL, GemmQuantizationSpec.parse("fp8"))
+    assert plan.roots("fp8") == ("transformer.blocks",)
+
+
+def test_only_composes_with_keep_high():
+    targets = GemmTargets(
+        transformer=Select(
+            modules=("transformer.blocks",),
+            only=("attn.to_qkv", "ff.net.0.proj"),
+        ),
+        keep_high=Select(modules=("transformer.blocks.0",)),
+    )
+    plan = resolve(targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
+    assert plan.format_for("transformer.blocks.0.attn.to_qkv") == "fp8"
+    assert plan.format_for("transformer.blocks.7.attn.to_qkv") == "fp4"
+    # narrowed out of the target set entirely, in either tier
+    assert plan.format_for("transformer.blocks.0.attn.to_out.0") is None
+    assert plan.format_for("transformer.blocks.7.attn.to_out.0") is None

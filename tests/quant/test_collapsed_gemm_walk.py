@@ -306,3 +306,22 @@ def test_a_tier_requires_the_second_converter():
 def test_no_high_tier_without_the_component_enabled():
     """FLUX.2 holds only its text encoder high; leave it out and nothing is."""
     assert _backends_for("low=fp4,high=fp8", text_encoder=False).high_tier_targets() == set()
+
+
+def test_a_narrowed_declaration_filters_inside_the_subtree():
+    """`only` reaches the converter, not just format_for."""
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
+
+    narrowed = GemmTargets(
+        transformer=Select(modules=BLOCKS, only=("attn.to_qkv",)),
+    )
+    # fp4 so the primary converter owns it; fp8 would route to blockwise.
+    loader = _loader("fp4", text_encoder=False, targets=narrowed)
+    _run(loader, before_device_move=True)
+    _run(loader, before_device_move=False)
+
+    assert sorted(p for p, _ in loader.backends.format.seen) == sorted(BLOCKS)
+    _, kwargs = loader.backends.format.seen[0]
+    keep = kwargs["filter_fn"]
+    assert keep(None, "3.attn.to_qkv") is True
+    assert keep(None, "3.attn.to_out.0") is False

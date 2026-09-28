@@ -139,6 +139,8 @@ def setup_gemm_quantization(
 
     model = loader.model
     ledger = loader.quantization_ledger
+    # A declaration that names its leaves supersedes the legacy setting.
+    include_suffixes = plan.only_suffixes or model.settings.fp8_gemm_include_suffixes
     by_format = {}
     for format_name in (plan.low, plan.high):
         if not format_name or format_name in by_format:
@@ -171,7 +173,7 @@ def setup_gemm_quantization(
             convert, filter_fn = conversion_filter(
                 module_name,
                 excluded_paths,
-                include_suffixes=model.settings.fp8_gemm_include_suffixes,
+                include_suffixes=include_suffixes,
             )
             if not convert:
                 continue

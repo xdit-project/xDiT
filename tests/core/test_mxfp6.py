@@ -6,14 +6,16 @@ import torch
 
 
 @pytest.mark.parametrize(
-    ("fp4", "hybrid", "expected"),
+    ("fp4", "fp6", "a6w4", "hybrid", "expected"),
     [
-        (False, False, "fp6"),
-        (True, False, "fp4_fp6"),
-        (True, True, "fp4_fp6"),
+        (False, True, False, False, "fp6"),
+        (True, True, False, False, "fp4_fp6"),
+        (True, True, False, True, "fp4_fp6"),
+        (False, False, True, False, "a6w4"),
+        (True, False, True, True, "fp4_a6w4"),
     ],
 )
-def test_runtime_selects_aiter_mxfp6_formats(fp4, hybrid, expected):
+def test_runtime_selects_aiter_mxfp_formats(fp4, fp6, a6w4, hybrid, expected):
     from xfuser.model_executor.models.runner_models.loading.contracts import (
         QuantizationBackend,
         select_runtime_quantization,
@@ -22,7 +24,8 @@ def test_runtime_selects_aiter_mxfp6_formats(fp4, hybrid, expected):
     config = SimpleNamespace(
         use_fp8_gemms=False,
         use_fp4_gemms=fp4,
-        use_fp6_gemms=True,
+        use_fp6_gemms=fp6,
+        use_a6w4_gemms=a6w4,
         use_int8_gemms=False,
         use_hybrid_gemm_schedule=hybrid,
     )
@@ -214,9 +217,14 @@ def test_aiter_mxfp6_probe_requires_gfx950(monkeypatch):
     assert "gfx950" in reason
 
 
-def test_fp4_hybrid_builds_an_mxfp6_high_branch(monkeypatch):
+@pytest.mark.parametrize("high_format", ["fp6", "a6w4"])
+def test_fp4_hybrid_builds_selected_high_branch(monkeypatch, high_format):
     from xfuser.core.utils import runner_utils
-    from xfuser.model_executor.layers import mxfp4_linear, mxfp6_linear
+    from xfuser.model_executor.layers import (
+        mixed_mxfp_linear,
+        mxfp4_linear,
+        mxfp6_linear,
+    )
 
     class StubLinear(torch.nn.Module):
         def __init__(self, in_features, out_features, **kwargs):
@@ -231,20 +239,26 @@ def test_fp4_hybrid_builds_an_mxfp6_high_branch(monkeypatch):
     class StubFP6(StubLinear):
         pass
 
+    class StubA6W4(StubLinear):
+        pass
+
     monkeypatch.setattr(mxfp4_linear, "xFuserMXFP4Linear", StubFP4)
     monkeypatch.setattr(mxfp6_linear, "xFuserMXFP6Linear", StubFP6)
+    monkeypatch.setattr(mixed_mxfp_linear, "xFuserA6W4Linear", StubA6W4)
     model = torch.nn.Sequential(torch.nn.Linear(4, 3, bias=False, dtype=torch.bfloat16))
 
     runner_utils.quantize_linear_layers_to_fp4(
         model,
         use_hybrid_schedule=True,
-        use_fp6_for_overrides=True,
+        use_fp6_for_overrides=high_format == "fp6",
+        use_a6w4_for_overrides=high_format == "a6w4",
         device="cpu",
     )
 
     assert isinstance(model[0], mxfp4_linear.xFuserHybridMXFP4Linear)
     assert isinstance(model[0].low_precision_linear, StubFP4)
-    assert isinstance(model[0].high_precision_linear, StubFP6)
+    expected = StubFP6 if high_format == "fp6" else StubA6W4
+    assert isinstance(model[0].high_precision_linear, expected)
 
 
 def test_mxfp6_linear_uses_aiter_pack_and_gemm(monkeypatch):

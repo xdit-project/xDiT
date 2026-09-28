@@ -144,7 +144,7 @@ def test_nvfp4_adapter_never_silently_ignores_hybrid(modules):
         adapter.convert_module(object(), device="cuda:0", hybrid=True)
 
 
-def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
+def test_rocm_aiter_mxfp4_hybrid_adapters_remain_supported(modules):
     b = modules.backends
     capabilities = b.probe_format_backend_capabilities(
         cuda_probe=lambda: False,
@@ -168,6 +168,17 @@ def test_rocm_aiter_mxfp4_hybrid_remains_supported(modules):
     )
 
     assert isinstance(adapter, b.AiterMxfp4BackendAdapter)
+
+    a6w4_adapter = b.select_format_backend(
+        _contract(modules, "FP4_A6W4", "AITER"),
+        capabilities=b.FormatBackendCapabilities(
+            aiter_mxfp4=True,
+            aiter_a6w4=True,
+        ),
+        hybrid=True,
+    )
+    assert isinstance(a6w4_adapter, b.AiterMxfp4BackendAdapter)
+    assert a6w4_adapter.use_a6w4_for_overrides
 
 
 @pytest.mark.parametrize(

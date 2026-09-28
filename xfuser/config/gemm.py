@@ -7,11 +7,12 @@ from typing import Any, Mapping
 import yaml
 
 
-_PURE_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "int8"})
+_PURE_FORMATS = frozenset({"none", "fp8", "fp4", "fp6", "a6w4", "int8"})
 _TIERED_FORMATS = frozenset(
     {
         ("fp4", "fp8"),
         ("fp4", "fp6"),
+        ("fp4", "a6w4"),
     }
 )
 _CONFIG_SETTING_KEYS = frozenset(
@@ -156,10 +157,10 @@ def _normalize_config_setting(key: str, value):
         if value is not None:
             tokens = tuple(token.strip().lower() for token in value.split(","))
             if not tokens or any(
-                token not in {"fp8", "fp6", "fp4"} for token in tokens
+                token not in {"fp8", "fp6", "fp4", "a6w4"} for token in tokens
             ):
                 raise ValueError(
-                    f"{key} entries must be fp8, fp6, or fp4, got {value!r}"
+                    f"{key} entries must be fp8, fp6, fp4, or a6w4, got {value!r}"
                 )
             return ",".join(tokens)
         return value

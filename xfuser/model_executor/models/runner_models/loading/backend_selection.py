@@ -37,6 +37,8 @@ class QuantizationBackends:
         _ = self.format
         if self._uses_mxfp6_contract():
             _ = self.fp6
+        if self._uses_a6w4_contract():
+            _ = self.mixed_mxfp
         if self.uses_blockwise_fp8():
             _ = self.blockwise_fp8
 
@@ -46,6 +48,9 @@ class QuantizationBackends:
 
     def _uses_mxfp6_contract(self) -> bool:
         return self._format_value() in {"fp6", "fp4_fp6"}
+
+    def _uses_a6w4_contract(self) -> bool:
+        return self._format_value() in {"a6w4", "fp4_a6w4"}
 
     @functools.cached_property
     def fp8(self):
@@ -70,7 +75,8 @@ class QuantizationBackends:
         from .format_backends import probe_format_backend_capabilities
 
         return probe_format_backend_capabilities(
-            require_mxfp6=self._uses_mxfp6_contract()
+            require_mxfp6=self._uses_mxfp6_contract(),
+            require_a6w4=self._uses_a6w4_contract(),
         )
 
     @functools.cached_property
@@ -82,6 +88,8 @@ class QuantizationBackends:
             "fp8_fp4",
             "fp6",
             "fp4_fp6",
+            "a6w4",
+            "fp4_a6w4",
             "int8",
         }:
             return None
@@ -100,6 +108,28 @@ class QuantizationBackends:
             contract,
             adapter,
             capabilities=capabilities,
+            required=self.places_format_backend_under_fsdp2(),
+        )
+        return adapter
+
+    @functools.cached_property
+    def mixed_mxfp(self):
+        if not self._uses_a6w4_contract():
+            return None
+        if self._format_value() == "a6w4":
+            return self.format
+        from .format_backends import (
+            select_mixed_mxfp_backend,
+            validate_format_fsdp_placement,
+        )
+        adapter = select_mixed_mxfp_backend(
+            self.loader.load_contract,
+            capabilities=self.format_capabilities,
+        )
+        validate_format_fsdp_placement(
+            self.loader.load_contract,
+            adapter,
+            capabilities=self.format_capabilities,
             required=self.places_format_backend_under_fsdp2(),
         )
         return adapter
@@ -197,7 +227,7 @@ class QuantizationBackends:
         fsdp_target_paths = self._fsdp_target_paths()
         if not fsdp_target_paths:
             return False
-        if self._uses_mxfp6_contract():
+        if self._uses_mxfp6_contract() or self._uses_a6w4_contract():
             return False
 
         settings, config = self.model.settings, self.model.config
@@ -280,7 +310,7 @@ class QuantizationBackends:
 
     def requires_blockwise_fp8(self) -> bool:
         """Whether FP4 mode declares whole components owned only by FP8."""
-        if self._uses_mxfp6_contract():
+        if self._uses_mxfp6_contract() or self._uses_a6w4_contract():
             return False
         if not self.model.config.use_fp4_gemms:
             return False
@@ -295,7 +325,7 @@ class QuantizationBackends:
 
     def uses_blockwise_fp8(self) -> bool:
         contract = self.loader.load_contract
-        if contract is None or self._uses_mxfp6_contract():
+        if contract is None or self._uses_mxfp6_contract() or self._uses_a6w4_contract():
             return False
         if self.requires_blockwise_fp8():
             return True
@@ -315,10 +345,12 @@ class QuantizationBackends:
     def _format_entries(self):
         """This run's primary-format targets."""
         format_value = self.loader.load_contract.requested_format.value
-        if format_value in {"fp4", "fp8_fp4", "fp4_fp6"}:
+        if format_value in {"fp4", "fp8_fp4", "fp4_fp6", "fp4_a6w4"}:
             return self.loader.quantization_plan.module_list("fp4")
         if format_value == "fp6":
             return self.loader.quantization_plan.module_list("fp6")
+        if format_value == "a6w4":
+            return self.loader.quantization_plan.module_list(format_value)
         if format_value == "int8":
             return self.loader.quantization_plan.module_list("int8")
         return ()
@@ -353,4 +385,6 @@ class QuantizationBackends:
             return None, ()
         if self._format_value() == "fp4_fp6":
             return self.fp6, fp8_targets
+        if self._format_value() == "fp4_a6w4":
+            return self.mixed_mxfp, fp8_targets
         return self.fp8_adapter_for_contract(), fp8_targets

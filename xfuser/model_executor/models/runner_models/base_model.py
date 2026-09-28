@@ -147,6 +147,7 @@ class ModelCapabilities:
     use_fp8_text_encoder: bool = False
     use_fp4_gemms: bool = False
     use_fp6_gemms: bool = False
+    use_a6w4_gemms: bool = False
     supports_step_caching: bool = False
     use_fp8_comms: bool = False
     use_hybrid_attn_schedule: bool = False
@@ -608,6 +609,19 @@ class xFuserModel(abc.ABC):
         ):
             raise ValueError(
                 "MXFP6 GEMMs on ROCm gfx950 require AITER with the A6W6 " "ASM backend."
+            )
+        if config.use_a6w4_gemms and _is_cuda():
+            raise ValueError(
+                "A6W4 requires the AITER mixed-MXFP ASM backend on "
+                "ROCm gfx950; CUDA is not supported."
+            )
+        if (
+            config.use_a6w4_gemms
+            and _is_hip()
+            and not packages_info.get("has_aiter", False)
+        ):
+            raise ValueError(
+                "A6W4 on ROCm gfx950 requires AITER mixed-MXFP ASM."
             )
 
         if config.use_fp4_gemms:

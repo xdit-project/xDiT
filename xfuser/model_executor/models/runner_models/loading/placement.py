@@ -89,6 +89,8 @@ def place_pipeline_components(loader) -> None:
             setup_mxfp4_gemms(loader, local_rank)
     elif getattr(model.config, "use_fp6_gemms", False):
         setup_mxfp6_gemms(loader, local_rank)
+    elif getattr(model.config, "use_a6w4_gemms", False):
+        setup_mixed_mxfp_gemms(loader, local_rank)
 
     # FP4 setup owns its own hybrid FP8 path and any declared FP8-only modules, so the generic walk
     # would re-quantize inside the hybrid wrappers it just built.
@@ -111,6 +113,24 @@ def setup_mxfp4_gemms(loader, local_rank) -> None:
 def setup_mxfp6_gemms(loader, local_rank) -> None:
     """Quantize the selected ROCm targets to MXFP6."""
     _setup_format_gemms(loader, local_rank, stream_quant=True)
+
+
+def setup_mixed_mxfp_gemms(loader, local_rank) -> None:
+    """Quantize pure A6W4 targets through the mixed adapter."""
+    model = loader.model
+    adapter = loader.backends.mixed_mxfp
+    for module_name in loader.quantization_plan.module_list("a6w4"):
+        convert, filter_fn = conversion_filter(
+            module_name, loader.quantization_ledger.streaming_targets
+        )
+        if not convert:
+            continue
+        kwargs = {"filter_fn": filter_fn} if filter_fn is not None else {}
+        adapter.convert_module(
+            rgetattr(model.pipe, module_name),
+            device=f"cuda:{local_rank}",
+            **kwargs,
+        )
 
 
 def setup_nvfp4_gemms(loader, local_rank) -> None:
@@ -198,6 +218,10 @@ def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
         getattr(config, "use_fp6_gemms", False)
         and getattr(config, "use_fp4_gemms", False)
     )
+    mixed_mxfp = bool(
+        getattr(config, "use_a6w4_gemms", False)
+        and getattr(config, "use_fp4_gemms", False)
+    )
     fp4_modules = set(loader.quantization_plan.module_list("fp4"))
     fp8_only_modules = [
         name
@@ -209,10 +233,18 @@ def setup_fp8_only_gemm_modules(loader, local_rank) -> None:
     ]
     if not fp8_only_modules:
         return
-    adapter = loader.backends.fp6 if mixed_fp6 else loader.backends.blockwise_fp8
+    adapter = (
+        loader.backends.fp6
+        if mixed_fp6
+        else (
+            loader.backends.mixed_mxfp
+            if mixed_mxfp
+            else loader.backends.blockwise_fp8
+        )
+    )
     for module_name in fp8_only_modules:
         excluded_paths = fp4_modules | loader.quantization_ledger.already_quantized(
-            fp8=not mixed_fp6
+            fp8=not (mixed_fp6 or mixed_mxfp)
         )
         convert, filter_fn = conversion_filter(
             module_name,

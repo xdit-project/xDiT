@@ -169,11 +169,11 @@ Individual model classes that inherit from `xFuserModel`:
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--use_torch_compile` | Enable torch.compile acceleration | False |
-| `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `int8`, `low=fp4,high=fp8`, or `low=fp4,high=fp6` | none |
+| `--gemm_quantization` | Transformer GEMM profile: `fp8`, `fp4`, `fp6`, `a6w4`, `int8`, or a supported `low=fp4,high=<format>` pair | none |
 | `--gemm_config` | Optional YAML file for advanced high-precision targets or an explicit FP8/FP4 schedule | None |
 | `--use_fp8_gemms`, `--use_fp4_gemms`, `--use_int8_gemms` | Deprecated format selectors retained for compatibility | False |
 | `--use_fp8_text_encoder` | Extend FP8 quantization to the text encoder as well; requires a profile containing FP8 | False |
-| `--use_hybrid_gemm_schedule` | Use the profile's FP8 or FP6 high format at the endpoints and FP4 in the middle | False |
+| `--use_hybrid_gemm_schedule` | Use the profile's high format at the endpoints and FP4 in the middle | False |
 | `--enable_tiling` | Enable VAE tiling | False |
 | `--enable_slicing` | Enable VAE slicing | False |
 | `--enable_model_cpu_offload` | Enable model CPU offload | False |
@@ -210,6 +210,10 @@ AITER's A6W6 ASM kernels. Pure `fp6` converts Wan's existing FP4/FP8 target
 union. `low=fp4,high=fp6` preserves the existing MXFP4 target policy and routes
 its quality overrides and Wan 2.2 second transformer to MXFP6. Hybrid scheduling
 can use either FP8 or FP6 as the profile's temporal high format.
+
+A6W4 is available for supported Wan runners on ROCm `gfx950` with AITER.
+Select `a6w4` or `low=fp4,high=a6w4`. These profiles currently require eager
+GPU-resident loading.
 
 Advanced YAML settings are documented in
 [`examples/gemm_config.yaml`](../../examples/gemm_config.yaml). The YAML does

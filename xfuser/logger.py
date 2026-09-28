@@ -106,6 +106,26 @@ def is_primary_rank() -> bool:
     return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
 
 
+def warn_once(logger, message, *args, primary_only: bool = True) -> None:
+    """Warn the first time this message is produced.
+
+    Keyed on the formatted text, so a message whose values change -- a newly
+    selected backend, a patch count adjusted for the layout -- is reported
+    again when it differs, while an unchanged repeat is dropped.
+
+    ``primary_only`` keeps a statement about the run from being multiplied by
+    the world size. Pass False for something one rank observes on its own.
+    """
+    if primary_only and not is_primary_rank():
+        return
+    text = message % args if args else message
+    seen = (logger.name, text)
+    if seen in _logged_once:
+        return
+    _logged_once.add(seen)
+    logger.warning(text)
+
+
 _logged_once = set()
 
 

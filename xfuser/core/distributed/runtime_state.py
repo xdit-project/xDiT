@@ -35,7 +35,7 @@ from xfuser.config.config import (
     InputConfig,
     EngineConfig,
 )
-from xfuser.logger import init_logger
+from xfuser.logger import init_logger, warn_once
 from .parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -105,7 +105,7 @@ class RuntimeState(metaclass=ABCMeta):
         parallel_config: ParallelConfig,
     ):
         if not model_parallel_is_initialized():
-            logger.warning("Model parallel is not initialized, initializing...")
+            warn_once(logger, "Model parallel is not initialized, initializing...")
             if not torch.distributed.is_initialized():
                 init_distributed_environment()
             initialize_model_parallel(
@@ -152,7 +152,7 @@ class RuntimeState(metaclass=ABCMeta):
         if self.runtime_config.use_hybrid_attn_schedule:
             return
 
-        logger.warning("Using {} as attention backend.".format(self.attention_backend.name))
+        warn_once(logger, "Using {} as attention backend.".format(self.attention_backend.name))
         self._warn_if_low_precision(attention_backend)
 
     def _warn_if_low_precision(self, *backends: AttentionBackendType) -> None:
@@ -161,7 +161,7 @@ class RuntimeState(metaclass=ABCMeta):
         int8/fp8 and now warns accordingly."""
         low_precision = attention_registry.types_where(low_precision=True)
         if any(backend in low_precision for backend in backends):
-            logger.warning("Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
+            warn_once(logger, "Low-precision attention backend is enabled. This may cause poor quality outputs, consider using hybrid attention if possible.")
 
 
     def set_cross_attention_backend(self, cross_attention_backend: Optional[str | AttentionBackendType]):
@@ -183,7 +183,7 @@ class RuntimeState(metaclass=ABCMeta):
 
         self._check_if_backend_compatible_with_current_configuration(cross_attention_backend)
         self.cross_attention_backend = cross_attention_backend
-        logger.warning("Using {} as cross-attention backend.".format(self.cross_attention_backend.name))
+        warn_once(logger, "Using {} as cross-attention backend.".format(self.cross_attention_backend.name))
 
     def get_cross_attention_backend(self) -> AttentionBackendType:
         """
@@ -445,7 +445,7 @@ class DiTRuntimeState(RuntimeState):
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        logger.warning(
+        warn_once(logger, 
             "Per-step attention schedule over %d steps: %s.",
             total_steps,
             _summarise_schedule(attention_schedule.backends),
@@ -464,7 +464,7 @@ class DiTRuntimeState(RuntimeState):
         self.gemm_schedule = gemm_schedule
         self.gemm_schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        logger.warning("Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
+        warn_once(logger, "Per-step GEMM schedule enabled (total_steps=%d).", total_steps)
 
     def set_input_parameters(
         self,
@@ -654,7 +654,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
+            warn_once(logger, 
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -763,7 +763,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
+            warn_once(logger, 
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -872,7 +872,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            logger.warning(
+            warn_once(logger, 
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -1012,7 +1012,7 @@ def get_runtime_state():
 def initialize_runtime_state(pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None):
     global _RUNTIME
     if _RUNTIME is not None:
-        logger.warning(
+        warn_once(logger, 
             "Runtime state is already initialized, reinitializing with pipeline..."
         )
     if hasattr(pipeline, "transformer"):

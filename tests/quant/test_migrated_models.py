@@ -105,6 +105,35 @@ def test_a_migrated_model_targets_what_it_used_to(cls, entry):
                 )
 
 
+def test_a_migrated_model_carries_no_legacy_fields():
+    """The two mechanisms must not both be live on one model.
+
+    The plan-driven walks read `only` and `keep_high` and nothing else, so a
+    model that declared gemm_targets while keeping, say, its include-suffixes
+    would quietly widen: the setting would be ignored where it used to narrow.
+    """
+    both = {
+        cls.__name__: [f for f in LEGACY_FIELDS if getattr(cls.settings, f, None)]
+        for cls in dict.fromkeys(MODEL_REGISTRY.values())
+        if cls.settings.gemm_targets is not None
+    }
+    both = {name: fields for name, fields in both.items() if fields}
+    assert not both, f"declared gemm_targets and kept legacy fields: {both}"
+
+
+def test_every_model_with_a_gemm_capability_declares_targets():
+    """A capability with nothing declared would enable a format that targets
+    nothing, which looks like a working run that quantizes no layer."""
+    formats = ("use_fp8_gemms", "use_fp4_gemms", "use_fp6_gemms", "use_int8_gemms")
+    undeclared = [
+        cls.__name__
+        for cls in dict.fromkeys(MODEL_REGISTRY.values())
+        if any(getattr(cls.capabilities, f, False) for f in formats)
+        and cls.settings.gemm_targets is None
+    ]
+    assert not undeclared
+
+
 def test_the_snapshot_still_describes_unmigrated_models():
     """Guards the oracle: a model must not lose its lists without migrating."""
     lost = [

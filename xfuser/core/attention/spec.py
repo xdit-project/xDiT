@@ -208,7 +208,12 @@ class Spec:
     package: str = ""
 
     # The resolved kernel, cached by resolved() so dispatch is not an import.
-    _resolved: Optional[AttnFn] = None
+    # Out of compare because the spec is a frozen dataclass and so hashable by
+    # its fields: caching would otherwise change an instance's hash after
+    # construction, and a resolved spec would not equal the same spec unresolved.
+    # Out of repr because a bound impl is a functools.partial, which prints the
+    # whole table row it was bound with.
+    _resolved: Optional[AttnFn] = field(default=None, compare=False, repr=False)
 
     @property
     def is_sparse(self) -> bool:
@@ -227,12 +232,19 @@ class Spec:
         """The callable, importing the kernel module if it has not been yet.
 
         Called when a backend is selected, never from the hot path -- see Impl.
+
+        Cached, and the cache is the point rather than an optimisation: an Impl
+        with ``bound`` resolves to a fresh functools.partial each time, so
+        resolving twice would hand out two callables that compare unequal and
+        make Dynamo treat the second as a different function. Plain callables
+        are cached too, so run() takes the same fast path for them.
         """
-        if isinstance(self.impl, Impl):
-            fn = self.impl.resolve(self.package)
-            object.__setattr__(self, "_resolved", fn)
+        fn = self._resolved
+        if fn is not None:
             return fn
-        return self.impl
+        fn = self.impl.resolve(self.package) if isinstance(self.impl, Impl) else self.impl
+        object.__setattr__(self, "_resolved", fn)
+        return fn
 
     def run(self, query, key, value, call: AttnCall):
         """Enforce ``accepts``, then dispatch. Callers use this rather than

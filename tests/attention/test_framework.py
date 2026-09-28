@@ -29,6 +29,7 @@ from xfuser.core.attention.constraints import (
 from xfuser.core.attention.spec import (
     AttentionBackendType,
     AttnCall,
+    Impl,
     Spec,
     VarlenPacking,
 )
@@ -418,6 +419,45 @@ def test_run_enforces_accepts_before_dispatching():
     with pytest.raises(NotImplementedError, match="head dimension"):
         spec.run(*_qkv(head_dim=64), AttnCall())
     assert called == [True], "impl must not be reached for a rejected call"
+
+
+def test_resolved_hands_out_the_same_callable_every_time():
+    """An Impl with bound arguments builds a functools.partial, and two
+    partials over the same function compare unequal. Resolving twice would
+    hand dispatch a callable Dynamo has not seen before, so resolve() caches
+    -- for a plain callable too, so run() takes one path for both."""
+    spec = Spec(
+        AttentionBackendType.SDPA,
+        # Any pure-python target with a keyword to bind; the point is the
+        # partial, not the function.
+        impl=Impl("layout:to_bshd", bound={"contiguous": True}),
+        package="xfuser.core.attention.numerics",
+    )
+    assert spec.resolved() is spec.resolved()
+
+    plain = _spec(AttentionBackendType.FLASH)
+    assert plain.resolved() is plain.impl
+    assert plain._resolved is plain.impl, "a plain callable must be cached too"
+
+
+def test_run_does_not_re_resolve_per_call():
+    """resolved() is a module import; run() is the hot path."""
+    resolutions = []
+
+    class CountingImpl(Impl):
+        def resolve(self, package):
+            resolutions.append(package)
+            return lambda q, k, v, c: (q, None)
+
+    spec = Spec(
+        AttentionBackendType.SDPA,
+        impl=CountingImpl("kernel:whatever"),
+        package="pkg",
+    )
+    q, k, v = _qkv()
+    for _ in range(3):
+        spec.run(q, k, v, AttnCall())
+    assert resolutions == ["pkg"]
 
 
 def test_backends_without_an_lse_cannot_join_ring():

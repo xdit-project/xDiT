@@ -433,7 +433,9 @@ def test_h3_vsa_attention_prefix_rows_are_dense(
     (``mask[:, :, :num_prefix_tiles, :] = True`` in its ``_build_block_mask``).
     The second geometry splits each dense row over several kernel programs.
     """
-    from xfuser.core import vsa_h3_triton
+    from xfuser.core.attention.backends.vsa_h3 import (
+        triton_kernel as vsa_h3_triton,
+    )
 
     if use_triton and not vsa_h3_triton.is_available():
         pytest.skip("Triton is unavailable")

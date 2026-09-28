@@ -12,11 +12,11 @@ from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.backends.aiter_mha_v4.spec import (
     DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKEND_SET,
 )
-from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 
 # Both VSA-H3 backends declare the same sparsity strategy, so the set follows
 # from the specs rather than being listed here.
-VSA_H3_BACKENDS = attention_registry.types_where(sparsity="h3")
+VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,

@@ -34,6 +34,7 @@ from xfuser.core.attention.spec import (
     AttentionBackendType,
     AttnCall,
     Impl,
+    Sparsity,
     Spec,
     VarlenPacking,
 )
@@ -243,7 +244,7 @@ def test_get_unregistered_names_the_backend(clean_registry):
 
 def test_queries_select_by_field(clean_registry):
     clean_registry.register([
-        _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity="sparge",
+        _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity=Sparsity.SPARGE,
               head_balanced=True, low_precision=True, returns_lse=False),
         _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, returns_lse=False),
         _spec(AttentionBackendType.SDPA),
@@ -681,14 +682,14 @@ def test_every_enum_member_has_a_spec():
 
 
 def test_sparsity_kinds_are_known():
-    """Consumers select by exact string -- base_model groups "ssta" apart from
-    "sparge" and "vsa". A typo here is not an error, it is a backend that
-    quietly belongs to no group and so is never gated."""
+    """Consumers select by exact match -- base_model groups SSTA apart from
+    SPARGE and VSA -- so a strategy outside the closed set is a backend that
+    quietly belongs to no group and is never gated. The enum is what enforces
+    this; the test only confirms nothing reaches the registry around it."""
     from xfuser.core.attention import registry
 
-    known = {None, "ssta", "sparge", "vsa", "h3"}
     for spec in registry.REGISTRY.values():
-        assert spec.sparsity in known, (
+        assert spec.sparsity is None or isinstance(spec.sparsity, Sparsity), (
             f"{spec.type.name}: unknown sparsity {spec.sparsity!r}"
         )
 

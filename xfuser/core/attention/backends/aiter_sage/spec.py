@@ -16,7 +16,7 @@ from xfuser.core.attention.constraints import (
     SELF_ATTENTION,
 )
 from xfuser.core.attention.requirements import PARAM, SYMBOL
-from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
+from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spec
 from xfuser.envs import environment_variables
 
 _SAGE_V1 = "aiter.ops.triton.attention.fav3_sage:fav3_sage_wrapper_func"
@@ -71,7 +71,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARSE_SAGE,
         impl=Impl("kernel:sparse_sage"),
-        sparsity="ssta",
+        sparsity=Sparsity.SSTA,
         low_precision=True,
         accepts=MASKED_CALLS,
         requires=V1 & LUT,
@@ -79,7 +79,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARGE,
         impl=Impl("kernel:sparge"),
-        sparsity="sparge",
+        sparsity=Sparsity.SPARGE,
         head_balanced=True,
         low_precision=True,
         accepts=MASKED_CALLS,
@@ -96,7 +96,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARSE_SAGE_V2,
         impl=Impl("kernel:sparse_sage_v2"),
-        sparsity="ssta",
+        sparsity=Sparsity.SSTA,
         low_precision=True,
         accepts=V2_CALLS & MASKED_CALLS,
         requires=V2 & LUT,
@@ -104,7 +104,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARGE_V2,
         impl=Impl("kernel:sparge_v2"),
-        sparsity="sparge",
+        sparsity=Sparsity.SPARGE,
         head_balanced=True,
         low_precision=True,
         accepts=V2_CALLS & MASKED_CALLS,

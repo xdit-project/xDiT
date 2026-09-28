@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from xfuser.core.attention import registry
-from xfuser.core.attention.spec import AttentionBackendType, AttnCall
+from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Sparsity
 
 _MHA_V4_SPARGE_BACKENDS = (
     "AITER_I8FP8_SPARGE",
@@ -46,7 +46,7 @@ def _run(name, query, key, value, **kwargs):
 def test_every_mha_v4_sparge_row_is_registered():
     for name in _MHA_V4_SPARGE_BACKENDS:
         spec = _spec(name)
-        assert spec.sparsity == "sparge"
+        assert spec.sparsity is Sparsity.SPARGE
         assert spec.head_balanced
         assert spec.impl.target == "kernel:mha_v4_sparge"
 
@@ -55,7 +55,7 @@ def test_triton_sparge_backends_are_separate_from_mha_v4():
     """AITER_SPARGE/_V2 are the Sage-kernel sparge path, not MHA v4."""
     for name in ("AITER_SPARGE", "AITER_SPARGE_V2"):
         spec = _spec(name)
-        assert spec.sparsity == "sparge"
+        assert spec.sparsity is Sparsity.SPARGE
         assert spec.impl.target.startswith("kernel:sparge")
         assert "aiter_sage" in spec.package
 

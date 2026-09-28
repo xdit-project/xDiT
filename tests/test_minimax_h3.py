@@ -268,9 +268,9 @@ def test_minimax_h3_runner_registration():
 
 def test_fasth3_defaults_match_inference_contract():
     from xfuser.core.attention import registry as attention_registry
-    from xfuser.core.attention.spec import AttentionBackendType
+    from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 
-    VSA_H3_BACKENDS = attention_registry.types_where(sparsity="h3")
+    VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DATAFREE_MODEL_ID,
         xFuserFastH3Model,
@@ -311,8 +311,9 @@ def test_fasth3_wrapper_defines_checkpoint_compression_gates(monkeypatch):
 
 def test_fasth3_dense_defaults_match_inference_contract():
     from xfuser.core.attention import registry as attention_registry
+    from xfuser.core.attention.spec import Sparsity
 
-    VSA_H3_BACKENDS = attention_registry.types_where(sparsity="h3")
+    VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         FASTH3_V1_DENSE_DATAFREE_MODEL_ID,
         xFuserFastH3DenseModel,
@@ -537,9 +538,10 @@ def test_minimax_h3_accepts_dense_mha_v4_backends(monkeypatch):
     from xfuser.core.attention.backends.aiter_mha_v4.spec import (
         DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKENDS,
     )
+    from xfuser.core.attention.spec import Sparsity
 
     AITER_MHA_V4_SPARGE_BACKEND_SET = attention_registry.types_where(
-        sparsity="sparge", head_balanced=True
+        sparsity=Sparsity.SPARGE, head_balanced=True
     )
     from xfuser.model_executor.models.runner_models.minimax_h3 import (
         xFuserFastH3DenseModel,

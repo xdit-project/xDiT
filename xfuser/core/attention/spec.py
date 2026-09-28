@@ -65,6 +65,21 @@ class AttentionBackendType(Enum):
     NPU = "NPU"
 
 
+class Sparsity(Enum):
+    """Which sparsity strategy a backend implements, for the consumers that
+    gate on it.
+
+    A closed set rather than a free string: consumers select by exact match --
+    base_model gates SSTA apart from sparge -- so a mistyped strategy is not an
+    error but a backend that quietly belongs to no group and is never gated.
+    """
+
+    SSTA = "ssta"
+    SPARGE = "sparge"
+    VSA = "vsa"
+    H3 = "h3"
+
+
 @dataclass(frozen=True)
 class VarlenPacking:
     """Per-call key packing supplied by the model.
@@ -175,11 +190,10 @@ class Spec:
     # failure names the missing piece rather than crashing mid-denoising.
     requires: Requirement = ALWAYS
 
-    # Which sparsity strategy, if any: "ssta", "sparge", "vsa", "h3".
-    # A kind rather than a flag because the consumers distinguish them --
-    # base_model gates SSTA and sparge separately, and they are not
-    # interchangeable for a given model.
-    sparsity: Optional[str] = None
+    # Which sparsity strategy, if any. A kind rather than a flag because the
+    # consumers distinguish them -- base_model gates SSTA and sparge
+    # separately, and they are not interchangeable for a given model.
+    sparsity: Optional[Sparsity] = None
 
     # The kernel writes per-head cost into the head-balance cost sink, so usp
     # can even out the Ulysses split. True only where the kernel actually does

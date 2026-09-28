@@ -24,7 +24,7 @@ from xfuser.core.attention.constraints import (
     SELF_ATTENTION,
     TRAILING_PAD_ONLY,
 )
-from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
+from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spec
 
 _MHA_V4 = "aiter.ops.mha_v4:mha_v4"
 
@@ -136,7 +136,7 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}_SPARGE"],
         impl=Impl("kernel:mha_v4_sparge", {"fmt": fmt}),
-        sparsity="sparge",
+        sparsity=Sparsity.SPARGE,
         head_balanced=True,
         low_precision=True,
         accepts=SPARGE_CALLS,

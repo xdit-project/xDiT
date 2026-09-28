@@ -46,7 +46,7 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
-from xfuser.core.attention.spec import AttentionBackendType
+from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
     AttentionSchedule,
@@ -81,12 +81,12 @@ def register_model(name: str) -> Callable:
 
 
 # Derived from the backend specs rather than listed here: each backend declares
-# its sparsity strategy, so adding one cannot miss these sets. "sparge" and
-# "vsa" are grouped because both need a separate, dense cross-attention backend.
-_SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity="ssta")
+# its sparsity strategy, so adding one cannot miss these sets. SPARGE and VSA
+# are grouped because both need a separate, dense cross-attention backend.
+_SPARSE_ATTENTION_BACKENDS = attention_registry.types_where(sparsity=Sparsity.SSTA)
 _SPARGE_ATTENTION_BACKENDS = (
-    attention_registry.types_where(sparsity="sparge")
-    | attention_registry.types_where(sparsity="vsa")
+    attention_registry.types_where(sparsity=Sparsity.SPARGE)
+    | attention_registry.types_where(sparsity=Sparsity.VSA)
 )
 
 

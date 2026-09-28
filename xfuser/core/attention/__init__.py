@@ -11,6 +11,7 @@ from xfuser.core.attention.spec import (
     AttentionBackendType,
     AttnCall,
     ParallelContext,
+    Sparsity,
     Spec,
 )
 from xfuser.core.attention import registry
@@ -23,6 +24,7 @@ __all__ = [
     "AttentionBackendType",
     "AttnCall",
     "ParallelContext",
+    "Sparsity",
     "Spec",
     "registry",
 ]

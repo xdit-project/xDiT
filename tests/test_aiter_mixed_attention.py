@@ -129,11 +129,12 @@ def _require_mha_v4_recipe(backend_name):
     ],
 )
 @pytest.mark.parametrize("sequence_length", [128, 257])
-def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length, request):
+def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
     _require_mha_v4_aiter(backend_name)
     _require_mha_v4_recipe(backend_name)
 
-    from xfuser.core.distributed.attention_backend import (        ATTENTION_FUNCTION_REGISTRY,
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
         AttentionBackendType,
     )
 

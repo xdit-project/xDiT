@@ -72,13 +72,26 @@ def _signature_params(target: str) -> Optional[frozenset]:
         return None
 
 
-@functools.lru_cache(maxsize=None)
 def device_arch() -> str:
-    """gcnArchName of device 0, or "" when there is no GPU."""
+    """gcnArchName of the device this process is using, or "" when there is none.
+
+    The current device rather than device 0: a rank calls set_device during
+    distributed init, and unless the launcher also pinned the visible devices
+    per rank, device 0 is then a different GPU than the one this process runs
+    on -- the wrong architecture to gate a backend on, on a mixed box.
+
+    The cache is keyed on the index because the probe is about an index, not
+    because ranks share one: each rank is its own process with its own cache.
+    """
     if not torch.cuda.is_available():
         return ""
+    return _arch_of(torch.cuda.current_device())
+
+
+@functools.lru_cache(maxsize=None)
+def _arch_of(index: int) -> str:
     try:
-        return torch.cuda.get_device_properties(0).gcnArchName
+        return torch.cuda.get_device_properties(index).gcnArchName
     except Exception:                       # noqa: BLE001 - reporting only
         return ""
 
@@ -292,14 +305,17 @@ def _platform() -> str:
 
 @dataclass(frozen=True)
 class CUDA_CAPABILITY(Requirement):
-    """Minimum NVIDIA compute capability, as (major, minor)."""
+    """Minimum NVIDIA compute capability, as (major, minor).
+
+    Read from the current device, for the reason device_arch gives.
+    """
 
     minimum: Tuple[int, int]
 
     def unmet(self) -> Optional[str]:
         if not torch.cuda.is_available():
             return f"requires compute capability >= {self.minimum}, no GPU detected"
-        found = torch.cuda.get_device_capability(0)
+        found = torch.cuda.get_device_capability(torch.cuda.current_device())
         if found < self.minimum:
             return f"requires compute capability >= {self.minimum}, found {found}"
         return None

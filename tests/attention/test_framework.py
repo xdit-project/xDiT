@@ -15,6 +15,7 @@ from xfuser.core.attention.numerics.layout import from_bshd, pack_kv, to_bshd
 from xfuser.core.attention.requirements import (
     ALWAYS,
     ARCH,
+    CUDA_CAPABILITY,
     PARAM,
     PLATFORM,
     SYMBOL,
@@ -107,6 +108,50 @@ def test_probes_are_memoised():
 def test_arch_reports_what_it_found():
     reason = ARCH("gfx_nonexistent").unmet()
     assert reason is not None and "gfx_nonexistent" in reason
+
+
+def test_device_arch_follows_the_current_device():
+    """A rank sets its device during distributed init, so reading device 0
+    reads a different GPU unless the launcher also pinned the visible devices.
+    On a mixed box that gates the backend on the wrong architecture, silently."""
+    from xfuser.core.attention import requirements
+
+    archs = {0: "gfx942", 1: "gfx950"}
+
+    class _Props:
+        def __init__(self, index):
+            self.gcnArchName = archs[index]
+
+    requirements._arch_of.cache_clear()
+    try:
+        with mock.patch.object(torch.cuda, "is_available", return_value=True), \
+             mock.patch.object(torch.cuda, "get_device_properties", _Props), \
+             mock.patch.object(torch.cuda, "current_device") as current:
+            current.return_value = 1
+            assert requirements.device_arch() == "gfx950"
+            current.return_value = 0
+            assert requirements.device_arch() == "gfx942", "cached across devices"
+            assert ARCH("gfx942").unmet() is None
+            assert "found gfx942" in ARCH("gfx950").unmet()
+    finally:
+        requirements._arch_of.cache_clear()
+
+
+def test_cuda_capability_reads_the_current_device():
+    with mock.patch.object(torch.cuda, "is_available", return_value=True), \
+         mock.patch.object(torch.cuda, "current_device", return_value=3), \
+         mock.patch.object(torch.cuda, "get_device_capability") as capability:
+        capability.return_value = (9, 0)
+        assert "found (9, 0)" in CUDA_CAPABILITY((10, 0)).unmet()
+        capability.assert_called_once_with(3)
+        capability.return_value = (10, 0)
+        assert CUDA_CAPABILITY((10, 0)).unmet() is None
+
+
+def test_capability_and_arch_report_the_absence_of_a_gpu():
+    with mock.patch.object(torch.cuda, "is_available", return_value=False):
+        assert "no GPU detected" in CUDA_CAPABILITY((10, 0)).unmet()
+        assert "no GPU detected" in ARCH("gfx950").unmet()
 
 
 # --------------------------------------------------------------------------

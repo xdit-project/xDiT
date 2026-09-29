@@ -1,4 +1,6 @@
+import itertools
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,9 +31,14 @@ def _impl(backend):
     spec.resolved()
 
     def call(query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=None):
+        kwargs = attention_kwargs or {}
         return spec.run(query, key, value, AttnCall(
             dropout_p=dropout_p, is_causal=is_causal,
-            attention_kwargs=attention_kwargs or {},
+            # Derived from the kwargs exactly as usp does. Without it a caller
+            # can pass indices_k and still take the dense path, which is a test
+            # that proves nothing about the packing it believes it sent.
+            varlen=VarlenPacking.from_kwargs(kwargs),
+            attention_kwargs=kwargs,
         ))
 
     return call
@@ -105,6 +112,15 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
 
 # AITER is mid-migration on the MXFP4 rows: dense moved to full MXFP4 Q/K/V while sparse kept
 # MXFP4 Q/K + FP8 V, so aiter_mxfp4 resolves to no dense row on builds in between.
+def _mha_v4_kernel():
+    """The MHA v4 kernel module, for the capability flags it reads at import."""
+    import importlib
+
+    return importlib.import_module(
+        "xfuser.core.attention.backends.aiter_mha_v4.kernel"
+    )
+
+
 def _require_mha_v4_recipe(backend_name):
     probe = torch.zeros((1, 1, 128, 128), device="cuda", dtype=torch.bfloat16)
     try:
@@ -550,3 +566,279 @@ def test_mha_v4_returns_an_lse_only_when_ring_asks_for_one():
     assert torch.isfinite(ring_lse).all()
     # Asking for the LSE must not change what O is.
     assert torch.equal(dense_out, ring_out)
+
+
+# ---------------------------------------------------------------------------
+# packed keys end to end
+#
+# Ported from the monolith's suite onto the spec API. The shapes, references
+# and tolerances are its work; only the dispatch changed.
+# ---------------------------------------------------------------------------
+
+def _packed_kwargs(valid, padded, device="cuda"):
+    """indices_k names the surviving rows of the flattened (batch * padded) K."""
+    indices_k = torch.cat([
+        torch.arange(b * padded, b * padded + n, device=device)
+        for b, n in enumerate(valid)
+    ])
+    return {
+        "indices_k": indices_k,
+        "cu_seqlens_k": torch.tensor(
+            [0, *itertools.accumulate(valid)], dtype=torch.int32, device=device
+        ),
+        "max_seqlen_k": max(valid),
+    }
+
+
+def test_mha_v4_serves_single_sequence_padding_by_gathering():
+    """One sequence needs no key-padding mask: its valid keys are a shorter
+    K/V, so attending over them is exact rather than approximate.
+
+    No valid_kv_len here, which is what separates this from the trailing-pad
+    test above -- the kernel gathers rather than slices, and that is the path
+    Krea-2 takes."""
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+
+    torch.manual_seed(1234)
+    valid, padded, heads = 300, 384, 4
+    shape = (1, heads, padded, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(
+            query, key[:, :, :valid], value[:, :, :valid]
+        )
+        output, _ = _impl("AITER_BF16")(
+            query, key, value,
+            attention_kwargs=_packed_kwargs((valid,), padded),
+        )
+
+    assert output.shape == reference.shape
+    cosine = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    )
+    assert cosine > 0.99, f"cosine {cosine.item()}"
+
+
+def test_mha_v4_serves_an_undeclared_mask_with_interior_gaps():
+    """Gathering carries no assumption that the pad is one trailing block, so
+    it stays correct for a mask with interior gaps -- which a slice would
+    silently mis-serve.
+
+    The rows between the gaps are poisoned, so anything that sliced to a
+    trailing length instead would attend over them and the cosine would fall
+    apart."""
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+
+    torch.manual_seed(11)
+    heads, padded = 4, 384
+    shape = (1, heads, padded, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    indices_k = torch.cat([
+        torch.arange(0, 100, device="cuda"),
+        torch.arange(200, 300, device="cuda"),
+    ])
+    for dead in (slice(100, 200), slice(300, None)):
+        key[:, :, dead] = 50.0
+        value[:, :, dead] = 50.0
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(
+            query, key[:, :, indices_k], value[:, :, indices_k]
+        )
+        output, _ = _impl("AITER_BF16")(
+            query, key, value,
+            attention_kwargs={
+                "indices_k": indices_k,
+                "cu_seqlens_k": torch.tensor(
+                    [0, indices_k.numel()], dtype=torch.int32, device="cuda"
+                ),
+                "max_seqlen_k": indices_k.numel(),
+            },
+        )
+
+    cosine = F.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    )
+    assert cosine > 0.99, f"cosine {cosine.item()}"
+
+
+def test_mha_v4_serves_several_packed_sequences_on_the_bf16_rows():
+    """Several ragged sequences ride as a padded batch with their true lengths
+    in seqlens_k, so the padding is never visited.
+
+    Compared per sequence rather than in aggregate: padding that did reach the
+    softmax denominator would pull every row of the shorter one."""
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+    if not _mha_v4_kernel().HAS_SEQLENS_K:
+        pytest.skip("this AITER cannot express per-batch key lengths")
+
+    torch.manual_seed(7)
+    batch, heads, head_dim = 2, 4, 128
+    padded, valid = 384, (300, 137)
+    query = torch.randn(
+        (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
+    )
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+
+    with torch.no_grad():
+        output, _ = _impl("AITER_BF16")(
+            query, key, value,
+            attention_kwargs=_packed_kwargs(valid, padded),
+        )
+
+    assert output.shape == query.shape
+    for b, n in enumerate(valid):
+        reference = F.scaled_dot_product_attention(
+            query[b:b + 1], key[b:b + 1, :, :n], value[b:b + 1, :, :n]
+        )
+        cosine = F.cosine_similarity(
+            output[b:b + 1].float().flatten(), reference.float().flatten(), dim=0
+        )
+        assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
+
+
+@pytest.mark.parametrize("head_dim", [64, 256])
+def test_mha_v4_falls_back_to_v3_off_head_dim_128(head_dim):
+    """LTX-2 pairs 128-wide video blocks with 64-wide audio ones under one
+    backend selection, so refusing the odd widths would make the family
+    unselectable for it.
+
+    The fallback is v3 rather than SDPA so it still returns an LSE: ring
+    merges on one, and a None would arrive from the odd-sized blocks only."""
+    _require_mha_v4_aiter("AITER_BF16")
+
+    torch.manual_seed(1234)
+    shape = (1, 4, 256, head_dim)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    spec = registry.get(AttentionBackendType.AITER_BF16)
+    assert spec.rejects(query, key, value, AttnCall()) is not None, (
+        "accepts must refuse this width -- that is what routes it to the fallback"
+    )
+
+    with torch.no_grad():
+        reference = F.scaled_dot_product_attention(query, key, value)
+        output, softmax_lse = _impl("AITER_BF16")(query, key, value)
+
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+    assert softmax_lse is not None, "the fallback must still produce an LSE"
+
+
+def test_mha_v4_fallback_lse_keeps_batch_major_layout_under_padding():
+    """The v3 varlen kernel hands its LSE back flat as [heads, batch*padded];
+    the v3 dense branch and MHA v4 both give [batch, heads, sq], so the flat
+    one is folded before it leaves the backend.
+
+    LTX-2 reaches this: its 64-wide audio blocks take the fallback while the
+    128-wide video ones stay on v4, and the ring merge would otherwise be
+    handed two layouts in a single step. The element count matches either way,
+    so the shape is what pins it -- a fold without the transpose would pass on
+    count alone."""
+    _require_mha_v4_aiter("AITER_BF16")
+
+    torch.manual_seed(5)
+    batch, heads, head_dim = 2, 4, 64
+    padded, valid = 384, (300, 137)
+    query = torch.randn(
+        (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
+    )
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+
+    attention = _impl("AITER_BF16")
+    with torch.no_grad():
+        _, padded_lse = attention(
+            query, key, value, attention_kwargs=_packed_kwargs(valid, padded)
+        )
+        _, dense_lse = attention(query, key, value)
+
+    assert dense_lse is not None and padded_lse is not None
+    assert padded_lse.shape == dense_lse.shape == (batch, heads, padded), (
+        f"packed {tuple(padded_lse.shape)} vs dense {tuple(dense_lse.shape)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# head dimension, checked at configuration rather than per call
+# ---------------------------------------------------------------------------
+
+class _HeadDimConfig:
+    use_hybrid_attn_schedule = False
+    cross_attention_backend = None
+
+    def __init__(self, backend):
+        self.attention_backend = backend
+
+
+class _HeadDimModel:
+    def __init__(self, dims):
+        self.attention_head_dims = dims
+        self.settings = SimpleNamespace(model_name="model")
+
+
+def test_a_model_is_refused_a_backend_that_serves_none_of_its_head_dims():
+    """Ideogram 4 runs head dimension 256, which MHA v4 does not serve.
+    Selecting one used to be accepted and then bypassed for every layer, so
+    the choice read as applied while nothing about the run changed.
+
+    The widths come from each backend's own `accepts`, so this needs no list:
+    a backend declaring no HEAD_DIM makes no claim and stays selectable."""
+    from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
+    from xfuser.model_executor.models.runner_models.base_model import (
+        _validate_attention_head_dims,
+    )
+    from xfuser.model_executor.models.runner_models.ideogram4 import (
+        xFuserIdeogram4Model,
+    )
+    from xfuser.model_executor.models.runner_models.ltx import (
+        _xFuserLTX25VideoModelBase,
+    )
+
+    ideogram4 = _HeadDimModel(xFuserIdeogram4Model.attention_head_dims)
+    for backend in DENSE_BACKENDS:
+        with pytest.raises(ValueError, match="head dimension"):
+            _validate_attention_head_dims(ideogram4, _HeadDimConfig(backend.name))
+
+    # v3 covers 256 and constrains nothing, so it stays selectable.
+    assert registry.get(AttentionBackendType.AITER).accepts.head_dims() is None
+    _validate_attention_head_dims(ideogram4, _HeadDimConfig("AITER"))
+    _validate_attention_head_dims(ideogram4, _HeadDimConfig("SDPA"))
+
+    # LTX-2.5 mixes 128-wide video with 64-wide audio; one served width keeps it.
+    ltx25 = _HeadDimModel(_xFuserLTX25VideoModelBase.attention_head_dims)
+    assert 64 in ltx25.attention_head_dims
+    _validate_attention_head_dims(ltx25, _HeadDimConfig("AITER_BF16"))
+
+    # A model that declares nothing is never refused on head dimension.
+    _validate_attention_head_dims(_HeadDimModel(frozenset()), _HeadDimConfig("AITER_BF16"))
+
+
+def test_the_head_dim_refusal_says_what_would_actually_happen():
+    """A dense row hands the call to its fallback, so the cost is a selection
+    that does nothing. A sparge row has no fallback and raises, so the cost is
+    a run that stops. Same refusal, different consequence, and the message has
+    to name the right one or it sends the reader looking for a silent bypass
+    that never happens."""
+    from xfuser.model_executor.models.runner_models.base_model import (
+        _validate_attention_head_dims,
+    )
+
+    model = _HeadDimModel(frozenset({256}))
+
+    with pytest.raises(ValueError, match="fall through to AITER"):
+        _validate_attention_head_dims(model, _HeadDimConfig("AITER_BF16"))
+
+    with pytest.raises(ValueError, match="would be refused"):
+        _validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))

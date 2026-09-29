@@ -212,11 +212,15 @@ def test_combined_constraint_reports_first_failure():
 # registry
 # --------------------------------------------------------------------------
 
-def _spec(backend, **kwargs):
+def _spec_kwargs(**kwargs):
     defaults = dict(impl=lambda q, k, v, c: (q, None), ring=ALWAYS,
                     requires=ALWAYS, accepts=ANY_CALL)
     defaults.update(kwargs)
-    return Spec(backend, **defaults)
+    return defaults
+
+
+def _spec(backend, **kwargs):
+    return Spec(backend, **_spec_kwargs(**kwargs))
 
 
 def _module(name, *specs):
@@ -343,6 +347,31 @@ def test_resolving_a_spec_resolves_its_fallback():
         )
         spec.resolved()
         assert spec._fallback._resolved is not None
+
+
+def test_a_warm_spec_does_not_rewalk_its_fallback_chain():
+    """The chain is walked after the cache check, so resolving twice costs one
+    attribute read. Safe because _resolved is set only after the fallback is,
+    making a warm spec proof that the chain behind it is warm too."""
+    walked = []
+
+    class CountingSpec(Spec):
+        def resolved(self):
+            walked.append(self.type.name)
+            return super().resolved()
+
+    fallback = CountingSpec(AttentionBackendType.SDPA, **_spec_kwargs())
+    primary = CountingSpec(
+        AttentionBackendType.AITER_BF16,
+        fallback=AttentionBackendType.SDPA,
+        **_spec_kwargs(),
+    )
+    with registry.using([primary, fallback]):
+        spec = registry.get(AttentionBackendType.AITER_BF16)
+        spec.resolved()
+        assert walked == ["AITER_BF16", "SDPA"]
+        spec.resolved()
+        assert walked == ["AITER_BF16", "SDPA", "AITER_BF16"]
 
 
 def test_a_fallback_must_name_a_registered_backend():

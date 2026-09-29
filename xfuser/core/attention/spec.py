@@ -283,16 +283,20 @@ class Spec:
         make Dynamo treat the second as a different function. Plain callables
         are cached too, so run() takes the same fast path for them.
 
-        Resolves the fallback chain too, through ``_fallback`` rather than the
-        registry: a fallback dispatch must not be the first thing to import a
-        kernel module, because by then we are inside the traced region and
-        Dynamo refuses importlib.
+        Resolves the fallback behind it too. run() reaches a fallback from
+        inside the traced region, too late to import anything, so resolving a
+        spec has to mean resolving everything the selection can dispatch to.
+
+        The chain is walked after the cache check, not before, so a warm spec
+        costs one attribute read. That is safe because ``_resolved`` is only
+        ever set below, after the fallback has been resolved: a spec being
+        warm therefore implies the whole chain behind it is.
         """
-        if self._fallback is not None:
-            self._fallback.resolved()
         fn = self._resolved
         if fn is not None:
             return fn
+        if self._fallback is not None:
+            self._fallback.resolved()
         fn = self.impl.resolve(self.package) if isinstance(self.impl, Impl) else self.impl
         object.__setattr__(self, "_resolved", fn)
         return fn

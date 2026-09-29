@@ -7,6 +7,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from xfuser.core.distributed import get_runtime_state
 from xfuser.core.utils.runner_utils import log
 from xfuser.envs import _is_hip
+from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.model_executor.models.runner_models.base_model import (
     DIFFUSERS_FROM_SOURCE,
@@ -37,6 +38,11 @@ KREA2_SUPPORTED_ATTN_BACKENDS = frozenset(
         AttentionBackendType.FLASH,
         AttentionBackendType.FLASH_3,
         AttentionBackendType.FLASH_4,
+        # Guidance runs the transformer twice rather than as one batched pair, so each
+        # call is a single sequence, which MHA v4 serves by gathering the valid keys
+        # into a shorter dense K/V. Krea-2 declares no valid_kv_len, so the gather is
+        # the path it takes rather than the trailing-pad slice.
+        *DENSE_BACKENDS,
     }
 )
 

@@ -46,6 +46,10 @@ def _run(name, query, key, value, **kwargs):
 # ---------------------------------------------------------------------------
 
 def test_every_mha_v4_sparge_row_is_registered():
+    # Ten rows: the eight that predate the BF16 pair, plus BF16 and BF16FP8.
+    # Counted so that a row lost from the FORMATS table is a failure here
+    # rather than a backend that quietly stops existing.
+    assert len(_MHA_V4_SPARGE_BACKENDS) == 10
     for name in _MHA_V4_SPARGE_BACKENDS:
         spec = _spec(name)
         assert spec.sparsity is Sparsity.SPARGE

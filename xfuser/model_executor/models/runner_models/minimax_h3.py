@@ -40,12 +40,10 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
 )
 
 
-# AITER's dense MXFP4 V rows require sequence length to be 128
-# MiniMax-H3 aligns its packed sequence to 64 and hands the kernels a K trimmed to
-# the token count, so neither length is ever reliably 128-aligned.
-_UNALIGNED_MHA_V4_BACKENDS = frozenset({
+# f4f4 is commented out of AITER's kernel manifest -- mxfp4 covers that row and claims the
+# same v_pack=1 FP6-P V order -- so selecting it lands on mxfp4 rather than a row of its own.
+_UNSERVED_MHA_V4_BACKENDS = frozenset({
     AttentionBackendType.AITER_F4F4,
-    AttentionBackendType.AITER_F6F4,
 })
 # The remaining dense MHA v4 rows are in: MiniMax-H3 pads its packed sequence to
 # 64 rows and declares the pad through valid_kv_len, which those kernels serve by
@@ -56,7 +54,7 @@ _SUPPORTED_ATTN_BACKENDS = frozenset({
     AttentionBackendType.CUDNN,
     AttentionBackendType.SDPA,
     AttentionBackendType.NVTE_FP8,
-}) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNALIGNED_MHA_V4_BACKENDS)
+}) | (AITER_MHA_V4_ONLY_BACKEND_SET - _UNSERVED_MHA_V4_BACKENDS)
 _FASTH3_ATTN_BACKENDS = VSA_H3_BACKENDS
 _SUPPORTED_ULYSSES_DEGREES = frozenset({1, 2, 4, 8})
 _SUPPORTED_TASKS = frozenset({"t2va", "i2va", "l2va", "fl2va", "ref2va"})

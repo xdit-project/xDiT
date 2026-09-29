@@ -468,6 +468,10 @@ class _xFuserLTX25VideoModelBase(xFuserModel):
 
     min_diffusers_version = DIFFUSERS_FROM_SOURCE
 
+    # Video blocks are 128 wide and audio blocks 64. A backend serving only 128 still applies to
+    # the video ones, and the audio blocks fall back per call, so both are declared.
+    attention_head_dims = frozenset({128, 64})
+
     capabilities = ModelCapabilities(
         ulysses_degree=True,
         ring_degree=True,

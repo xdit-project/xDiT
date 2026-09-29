@@ -516,3 +516,48 @@ def test_mha_v4_serves_a_declared_trailing_pad(backend_name, request):
     assert torch.isfinite(output).all()
     assert lse is None
     assert cosine_similarity > 0.95
+
+
+def test_mha_v4_returns_an_lse_only_when_ring_asks_for_one():
+    """Ring merges per-rank partials on the log-sumexp, so the dense rows
+    return one when the call carries a ring degree and not otherwise -- asking
+    for it buys a write the caller would discard.
+
+    Pins the layout too. The kernel writes [batch, heads, Sq], which is what
+    the merge expects, so mha_v4_dense permutes only O. That claim is a
+    comment everywhere else; here it is an assertion.
+
+    Single-rank on purpose: the degree is read off the call, so the plumbing
+    is exercised without an initialised process group. A wrong LSE is
+    invisible to output checks -- O never reads it -- so this pins shape and
+    finiteness rather than values, and the numbers are #802's business.
+    """
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+
+    spec = registry.get(AttentionBackendType.AITER_BF16)
+    no_ring = spec.ring.unmet()
+    if no_ring is not None:
+        pytest.skip(f"AITER_BF16 cannot ring here: {no_ring}")
+
+    batch, heads, seq_len, head_dim = 1, 5, 128, 128
+    shape = (batch, heads, seq_len, head_dim)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    spec.resolved()
+    with torch.no_grad():
+        dense_out, dense_lse = spec.run(query, key, value, AttnCall())
+        ring_out, ring_lse = spec.run(
+            query, key, value, AttnCall(ring_world_size=2)
+        )
+
+    assert dense_lse is None, "no ring degree, so no LSE is asked for"
+    assert ring_lse is not None, "ring degree, so the kernel must return one"
+    assert ring_lse.shape == (batch, heads, seq_len), (
+        "the ring merge reads [batch, heads, Sq]; only O is permuted"
+    )
+    assert torch.isfinite(ring_lse).all()
+    # Asking for the LSE must not change what O is.
+    assert torch.equal(dense_out, ring_out)

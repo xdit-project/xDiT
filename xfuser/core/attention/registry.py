@@ -60,10 +60,7 @@ def install(modules: Iterable) -> None:
     built = build_registry(modules)
     missing = [b.name for b in AttentionBackendType if b not in built]
     if missing:
-        raise ValueError(
-            "every AttentionBackendType needs a spec; no module declares one "
-            f"for: {', '.join(missing)}"
-        )
+        raise ValueError(f"every AttentionBackendType needs a spec; no module declares one for: {', '.join(missing)}")
     _REGISTRY.clear()
     _REGISTRY.update(built)
 
@@ -97,10 +94,7 @@ def _link_fallbacks(built: Dict[AttentionBackendType, Spec]) -> None:
             )
         target = built.get(spec.fallback)
         if target is None:
-            raise ValueError(
-                f"{spec.type.name} falls back to {spec.fallback.name}, which "
-                "no module registers"
-            )
+            raise ValueError(f"{spec.type.name} falls back to {spec.fallback.name}, which no module registers")
         object.__setattr__(spec, "_fallback", target)
 
     for spec in built.values():
@@ -113,9 +107,7 @@ def _refuse_fallback_cycle(start: Spec) -> None:
     spec = start._fallback
     while spec is not None:
         if spec.type.name in seen:
-            raise ValueError(
-                "fallback cycle: " + " -> ".join(seen + [spec.type.name])
-            )
+            raise ValueError("fallback cycle: " + " -> ".join(seen + [spec.type.name]))
         seen.append(spec.type.name)
         spec = spec._fallback
 
@@ -126,9 +118,7 @@ def _place(built: Dict[AttentionBackendType, Spec], spec: Spec, package: str) ->
     if not isinstance(spec.type, AttentionBackendType):
         raise TypeError(f"{spec.type!r} is not an AttentionBackendType")
     if spec.type in built:
-        raise ValueError(
-            f"{spec.type.name} is already registered, by {built[spec.type].package}"
-        )
+        raise ValueError(f"{spec.type.name} is already registered, by {built[spec.type].package}")
     built[spec.type] = spec
 
 
@@ -180,11 +170,7 @@ def find(backend: AttentionBackendType) -> Optional[Spec]:
 def where(**flags) -> List[Spec]:
     """Specs whose fields all match, e.g. where(sparsity=Sparsity.SPARGE).
     Derived properties work too, so where(is_sparse=True) is valid."""
-    return [
-        spec
-        for spec in _REGISTRY.values()
-        if all(getattr(spec, key) == value for key, value in flags.items())
-    ]
+    return [spec for spec in _REGISTRY.values() if all(getattr(spec, key) == value for key, value in flags.items())]
 
 
 def types_where(**flags) -> frozenset:
@@ -220,24 +206,25 @@ def manifest() -> str:
 
     width = max(len(s.type.name) for s in rows)
     fb_width = max([len(s.fallback.name) for s in rows if s.fallback] + [8])
-    header = (
-        "BACKEND".ljust(width)
-        + "  RING  SPARSE  HEADBAL  LOWPREC  "
-        + "FALLBACK".ljust(fb_width)
-        + "  REQUIRES"
-    )
+    header = "BACKEND".ljust(width) + "  RING  SPARSE  HEADBAL  LOWPREC  " + "FALLBACK".ljust(fb_width) + "  REQUIRES"
     lines = [header, "-" * len(header)]
     for spec in rows:
         lines.append(
             spec.type.name.ljust(width)
             # Resolved here rather than printed as a predicate: the manifest
             # describes this machine, and "can it ring here" is the useful fact.
-            + "  " + ("y" if spec.ring.satisfied() else "-").center(4)
-            + "  " + ("y" if spec.is_sparse else "-").center(6)
-            + "  " + ("y" if spec.head_balanced else "-").center(7)
-            + "  " + ("y" if spec.low_precision else "-").center(7)
-            + "  " + (spec.fallback.name if spec.fallback else "-").ljust(fb_width)
-            + "  " + _describe_requirement(spec)
+            + "  "
+            + ("y" if spec.ring.satisfied() else "-").center(4)
+            + "  "
+            + ("y" if spec.is_sparse else "-").center(6)
+            + "  "
+            + ("y" if spec.head_balanced else "-").center(7)
+            + "  "
+            + ("y" if spec.low_precision else "-").center(7)
+            + "  "
+            + (spec.fallback.name if spec.fallback else "-").ljust(fb_width)
+            + "  "
+            + _describe_requirement(spec)
         )
     return "\n".join(lines)
 

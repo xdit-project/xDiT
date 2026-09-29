@@ -59,23 +59,28 @@ def build_block_mask(
     """Reorder/pad q/k/v and compute the block mask. Returns the transformed
     tensors, the state needed to undo the transform, and the mask."""
     q, k, v, state, static_mask = setup_sparge(
-        query, key, value,
+        query,
+        key,
+        value,
         thw=config.thw,
         sp_size=ulysses_world_size,
         encoder_sequence_length=config.encoder_sequence_length,
         reorder_sequence=config.reorder_sequence,
         use_static_block_mask=config.use_static_block_mask,
-        block_m=block_m, block_n=block_n,
+        block_m=block_m,
+        block_n=block_n,
         pad_block_divisible=pad_block_divisible,
     )
     block_mask = compute_sparge_block_mask(
-        q, k,
+        q,
+        k,
         simthreshd1=config.simthreshold,
         cdfthreshd=config.cdfthreshold,
         is_causal=is_causal,
         static_block_mask=static_mask,
         text_len=state.text_len + state.tail_pad,
-        block_m=block_m, block_n=block_n,
+        block_m=block_m,
+        block_n=block_n,
     )
     block_mask = mask_padded_kv_blocks(block_mask, state, block_n)
 

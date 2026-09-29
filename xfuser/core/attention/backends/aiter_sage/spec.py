@@ -22,10 +22,7 @@ from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spe
 from xfuser.envs import environment_variables
 
 _SAGE_V1 = "aiter.ops.triton.attention.fav3_sage:fav3_sage_wrapper_func"
-_SAGE_V2 = (
-    "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper"
-    ":fav3_sage_mxfp4_wrapper"
-)
+_SAGE_V2 = "aiter.ops.triton.attention.fav3_sage_attention_mxfp4_wrapper:fav3_sage_mxfp4_wrapper"
 _RAGGED_LUT = "aiter.ops.triton.attention.utils:block_attn_mask_to_ragged_lut"
 
 # SSTA drives the Triton kernels at a fixed block size; a coarser model tile is

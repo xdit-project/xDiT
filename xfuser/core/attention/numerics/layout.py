@@ -77,9 +77,7 @@ def pack_kv(
         q=query.reshape(batch * seq_len, heads, head_dim),
         k=torch.index_select(key.reshape(kv_flat), 0, packing.indices_k),
         v=torch.index_select(value.reshape(kv_flat), 0, packing.indices_k),
-        cu_seqlens_q=torch.arange(
-            0, batch + 1, dtype=torch.int32, device=query.device
-        ) * seq_len,
+        cu_seqlens_q=torch.arange(0, batch + 1, dtype=torch.int32, device=query.device) * seq_len,
         cu_seqlens_k=packing.cu_seqlens_k,
         max_seqlen_q=seq_len,
         max_seqlen_k=packing.max_seqlen_k,

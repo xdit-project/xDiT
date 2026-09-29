@@ -15,8 +15,7 @@ from xfuser.core.attention.requirements import FIRST_OF
 # wild. FIRST_OF gates on either resolving and hands back whichever does, so
 # backends can require this without repeating the paths.
 CREATE_HADAMARD = FIRST_OF(
-    "aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4"
-    ":create_hadamard_matrix",
+    "aiter.ops.triton._triton_kernels.attention.fav3_sage_attention_mxfp4:create_hadamard_matrix",
     "aiter.ops.triton.quant.sage_attention_quant_wrappers:create_hadamard_matrix",
 )
 
@@ -57,7 +56,7 @@ def prepare(block_sizes=(128,), device=None) -> None:
 def matrix(block_r: int, device_key: str) -> torch.Tensor:
     """Orthonormal block_r x block_r matrix on the given device."""
     create = _create if _create is not None else CREATE_HADAMARD.resolve()
-    built = create(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
+    built = create(block_r, dtype=torch.bfloat16) / (block_r**0.5)
     return built.to(torch.device(device_key))
 
 

@@ -36,12 +36,8 @@ def nvte_fp8(query, key, value, call: AttnCall):
     batch, seq_len, num_heads, head_dim = q.shape
     attn_mask_type = "causal" if call.is_causal else "no_mask"
 
-    dpa = _dot_product_attention(
-        num_heads, head_dim, attn_mask_type, q.device.index or 0
-    )
+    dpa = _dot_product_attention(num_heads, head_dim, attn_mask_type, q.device.index or 0)
     with fp8_autocast(enabled=True, fp8_recipe=_fp8_recipe()):
         out = dpa(q, k, v, attn_mask_type=attn_mask_type)
 
     return from_bshd(out.view(batch, seq_len, num_heads, head_dim)), None
-
-

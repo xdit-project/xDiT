@@ -37,7 +37,9 @@ def vsa_attention(query, key, value, call: AttnCall):
 
     collect_density = bool(kwargs.get("vsa_collect_density", False))
     output, density = aiter_vsa_attention(
-        query, key, value,
+        query,
+        key,
+        value,
         thw=tuple(thw),
         sp_size=call.ulysses_world_size,
         block_size=int(kwargs.get("vsa_block_size", 128)),
@@ -53,5 +55,3 @@ def vsa_attention(query, key, value, call: AttnCall):
     if density is not None:
         kwargs["vsa_last_density"] = density.detach()
     return output, None
-
-

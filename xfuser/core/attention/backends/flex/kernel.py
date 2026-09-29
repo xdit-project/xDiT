@@ -53,9 +53,7 @@ def flex_block(query, key, value, call: AttnCall):
     q, k, v, mask_config, state = setup_ssta(query, key, value, kwargs)
     block_mask = get_sparse_mask(mask_config, sparse_type=kwargs["attn_sparse_type"])
     output = flex_block_attn(q, k, v, block_size, block_size, block_mask)
-    output = untile_ssta_output(
-        output, state, kwargs["encoder_sequence_length"], kwargs["sp_size"]
-    )
+    output = untile_ssta_output(output, state, kwargs["encoder_sequence_length"], kwargs["sp_size"])
     return output, None
 
 
@@ -63,15 +61,16 @@ def flex_sparge(query, key, value, call: AttnCall):
     """Sparge block mask through FlexAttention, at a fixed 256 tile."""
     block = 256
     q, k, v, state, block_mask = build_block_mask(
-        query, key, value,
+        query,
+        key,
+        value,
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
-        block_m=block, block_n=block,
+        block_m=block,
+        block_n=block,
         ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
         pad_block_divisible=True,
     )
-    output = flex_block_attn(
-        *make_contiguous(q, k, v), block, block, block_mask
-    )
+    output = flex_block_attn(*make_contiguous(q, k, v), block, block, block_mask)
     return restore_sparge_output(output, state), None

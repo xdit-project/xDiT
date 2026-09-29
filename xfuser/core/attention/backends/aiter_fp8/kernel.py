@@ -36,14 +36,13 @@ def _quantize(query, key, value):
     # passed; there is no no-descale branch.
     quant_dtype = aiter.dtypes.fp8
     static = _static_scale()
-    scale = (
-        None if static is None
-        else torch.tensor(static, dtype=torch.float32, device=query.device)
-    )
+    scale = None if static is None else torch.tensor(static, dtype=torch.float32, device=query.device)
     out = []
     for tensor in (query, key, value):
         quantized, descale = aiter.per_tensor_quant(
-            tensor, scale=scale, quant_dtype=quant_dtype,
+            tensor,
+            scale=scale,
+            quant_dtype=quant_dtype,
             dtypeMax=torch.finfo(quant_dtype).max,
         )
         out.append((quantized.to(quant_dtype), descale))
@@ -79,13 +78,7 @@ if _USE_MHA_V4:
 
 
 def _mha_v4_eligible(query, call: AttnCall) -> bool:
-    return (
-        _USE_MHA_V4
-        and call.varlen is None
-        and query.is_cuda
-        and query.shape[-1] == 128
-        and not call.is_causal
-    )
+    return _USE_MHA_V4 and call.varlen is None and query.is_cuda and query.shape[-1] == 128 and not call.is_causal
 
 
 def _pre_quantized(query, key, value, call: AttnCall):
@@ -105,15 +98,25 @@ def _pre_quantized(query, key, value, call: AttnCall):
         fp8 = native_fp8_format()
         per_tensor = AttentionScaleMode.F32_PER_TENSOR
         out = mha_v4_packed(
-            q, k, v,
-            kwargs["q_descale"], kwargs["k_descale"], kwargs["v_descale"],
-            fp8, fp8, fp8,
-            per_tensor, per_tensor, per_tensor,
+            q,
+            k,
+            v,
+            kwargs["q_descale"],
+            kwargs["k_descale"],
+            kwargs["v_descale"],
+            fp8,
+            fp8,
+            fp8,
+            per_tensor,
+            per_tensor,
+            per_tensor,
             softmax_scale=softmax_scale,
         )
     else:
         out = aiter.flash_attn_fp8_pertensor_func(
-            q, k, v,
+            q,
+            k,
+            v,
             causal=call.is_causal,
             softmax_scale=softmax_scale,
             q_descale=kwargs["q_descale"],
@@ -147,9 +150,14 @@ def _dense_op(
 ) -> torch.Tensor:
     (q, q_descale), (k, k_descale), (v, v_descale) = _quantize(query, key, value)
     return aiter.flash_attn_fp8_pertensor_func(
-        q, k, v,
-        causal=is_causal, softmax_scale=softmax_scale,
-        q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+        q,
+        k,
+        v,
+        causal=is_causal,
+        softmax_scale=softmax_scale,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
 
@@ -172,18 +180,32 @@ def _varlen_op(
 ) -> torch.Tensor:
     (q, q_descale), (k, k_descale), (v, v_descale) = _quantize(query, key, value)
     return aiter.flash_attn_varlen_fp8_pertensor_func(
-        q, k, v,
-        cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
-        softmax_scale=softmax_scale, causal=is_causal,
-        q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=is_causal,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
 
 @register_fake("xfuser::aiter_fp8_varlen")
 def _varlen_op_fake(
-    query, key, value, cu_seqlens_q, cu_seqlens_k,
-    max_seqlen_q, max_seqlen_k, softmax_scale, is_causal,
+    query,
+    key,
+    value,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale,
+    is_causal,
 ):
     return torch.empty_like(query)
 
@@ -198,10 +220,19 @@ def _rotate_and_quantize(query, key, value, call: AttnCall):
         out = _dense_op(q, k, v, q.shape[-1] ** -0.5, call.is_causal)
     else:
         p = pack_kv(q, k, v, call.varlen)
-        out = p.unflatten(_varlen_op(
-            p.q, p.k, p.v, p.cu_seqlens_q, p.cu_seqlens_k,
-            p.max_seqlen_q, p.max_seqlen_k, p.head_dim ** -0.5, call.is_causal,
-        ))
+        out = p.unflatten(
+            _varlen_op(
+                p.q,
+                p.k,
+                p.v,
+                p.cu_seqlens_q,
+                p.cu_seqlens_k,
+                p.max_seqlen_q,
+                p.max_seqlen_k,
+                p.head_dim**-0.5,
+                call.is_causal,
+            )
+        )
     return from_bshd(out), None
 
 
@@ -211,5 +242,3 @@ def aiter_fp8(query, key, value, call: AttnCall):
     if _mha_v4_eligible(query, call):
         return _mha_v4(query, key, value, call)
     return _rotate_and_quantize(query, key, value, call)
-
-

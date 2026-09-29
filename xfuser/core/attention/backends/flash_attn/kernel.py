@@ -58,15 +58,25 @@ def flash_2(query, key, value, call: AttnCall):
 
     if call.varlen is None:
         out, softmax_lse, _ = FA2(
-            q, k, v, dropout_p=call.dropout_p, causal=call.is_causal,
+            q,
+            k,
+            v,
+            dropout_p=call.dropout_p,
+            causal=call.is_causal,
             return_attn_probs=True,
         )
     else:
         p = pack_kv(q, k, v, call.varlen)
         out = FA2_VARLEN(
-            p.q, p.k, p.v, p.cu_seqlens_q, p.cu_seqlens_k,
-            max_seqlen_q=p.max_seqlen_q, max_seqlen_k=p.max_seqlen_k,
-            dropout_p=call.dropout_p, softmax_scale=p.head_dim ** -0.5,
+            p.q,
+            p.k,
+            p.v,
+            p.cu_seqlens_q,
+            p.cu_seqlens_k,
+            max_seqlen_q=p.max_seqlen_q,
+            max_seqlen_k=p.max_seqlen_k,
+            dropout_p=call.dropout_p,
+            softmax_scale=p.head_dim**-0.5,
             causal=call.is_causal,
         )
         out, softmax_lse = p.unflatten(out), None
@@ -78,15 +88,19 @@ def flash_3(query, key, value, call: AttnCall):
     q, k, v = to_bshd(query, key, value, contiguous=True)
 
     if call.varlen is None:
-        out, softmax_lse = FA3(
-            q, k, v, causal=call.is_causal, return_attn_probs=True
-        )
+        out, softmax_lse = FA3(q, k, v, causal=call.is_causal, return_attn_probs=True)
     else:
         p = pack_kv(q, k, v, call.varlen)
         out, softmax_lse = FA3_VARLEN(
-            p.q, p.k, p.v, p.cu_seqlens_q, p.cu_seqlens_k,
-            max_seqlen_q=p.max_seqlen_q, max_seqlen_k=p.max_seqlen_k,
-            causal=call.is_causal, return_attn_probs=True,
+            p.q,
+            p.k,
+            p.v,
+            p.cu_seqlens_q,
+            p.cu_seqlens_k,
+            max_seqlen_q=p.max_seqlen_q,
+            max_seqlen_k=p.max_seqlen_k,
+            causal=call.is_causal,
+            return_attn_probs=True,
         )
         out = p.unflatten(out)
 
@@ -100,8 +114,14 @@ def flash_3_fp8(query, key, value, call: AttnCall):
 
     q, k, v = to_bshd(query, key, value, contiguous=True)
     out, softmax_lse = FA3(
-        q, k, v, causal=call.is_causal, return_attn_probs=True,
-        q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+        q,
+        k,
+        v,
+        causal=call.is_causal,
+        return_attn_probs=True,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
     return from_bshd(out), softmax_lse
 
@@ -115,9 +135,13 @@ def flash_4(query, key, value, call: AttnCall):
     else:
         p = pack_kv(q, k, v, call.varlen)
         out, softmax_lse = FA4_VARLEN(
-            p.q, p.k, p.v,
-            cu_seqlens_q=p.cu_seqlens_q, cu_seqlens_k=p.cu_seqlens_k,
-            max_seqlen_q=p.max_seqlen_q, max_seqlen_k=p.max_seqlen_k,
+            p.q,
+            p.k,
+            p.v,
+            cu_seqlens_q=p.cu_seqlens_q,
+            cu_seqlens_k=p.cu_seqlens_k,
+            max_seqlen_q=p.max_seqlen_q,
+            max_seqlen_k=p.max_seqlen_k,
             causal=call.is_causal,
         )
         out = p.unflatten(out)
@@ -132,9 +156,5 @@ def flash_4_fp4(query, key, value, call: AttnCall):
     q_fp4, q_scale = QUANTIZE_QK_TO_FP4(q)
     k_fp4, k_scale = QUANTIZE_QK_TO_FP4(k)
 
-    out, softmax_lse = FA4(
-        q_fp4, k_fp4, v, causal=call.is_causal, mSFQ=q_scale, mSFK=k_scale
-    )
+    out, softmax_lse = FA4(q_fp4, k_fp4, v, causal=call.is_causal, mSFQ=q_scale, mSFK=k_scale)
     return from_bshd(out), softmax_lse
-
-

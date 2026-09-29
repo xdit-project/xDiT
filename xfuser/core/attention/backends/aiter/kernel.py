@@ -31,6 +31,7 @@ _BF16_ROUNDING_MODE = 2
 # every compiled region -- the same reason Impl resolves there.
 # ---------------------------------------------------------------------------
 
+
 @custom_op("xfuser::aiter_attn", mutates_args=())
 def _dense(
     query: torch.Tensor,
@@ -40,9 +41,13 @@ def _dense(
     is_causal: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     return flash_attn_func(
-        query, key, value,
-        dropout_p=dropout_p, causal=is_causal,
-        return_lse=True, return_attn_probs=False,
+        query,
+        key,
+        value,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_lse=True,
+        return_attn_probs=False,
         how_v3_bf16_cvt=_BF16_ROUNDING_MODE,
     )
 
@@ -70,18 +75,24 @@ def _varlen(
     is_causal: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     return flash_attn_varlen_func(
-        query, key, value, cu_seqlens_q, cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+        query,
+        key,
+        value,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
-        dropout_p=dropout_p, causal=is_causal,
-        return_lse=True, return_attn_probs=False,
+        dropout_p=dropout_p,
+        causal=is_causal,
+        return_lse=True,
+        return_attn_probs=False,
         how_v3_bf16_cvt=_BF16_ROUNDING_MODE,
     )
 
 
 @_varlen.register_fake
-def _(query, key, value, cu_seqlens_q, cu_seqlens_k, max_seqlen_q,
-      max_seqlen_k, softmax_scale, dropout_p, is_causal):
+def _(query, key, value, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale, dropout_p, is_causal):
     total_q, heads, _ = query.shape
     return (
         torch.empty_like(query),
@@ -98,9 +109,16 @@ def aiter_attention(query, key, value, call: AttnCall):
     else:
         p = pack_kv(q, k, v, call.varlen)
         out, lse = _varlen(
-            p.q, p.k, p.v, p.cu_seqlens_q, p.cu_seqlens_k,
-            p.max_seqlen_q, p.max_seqlen_k, p.head_dim ** -0.5,
-            call.dropout_p, call.is_causal,
+            p.q,
+            p.k,
+            p.v,
+            p.cu_seqlens_q,
+            p.cu_seqlens_k,
+            p.max_seqlen_q,
+            p.max_seqlen_k,
+            p.head_dim**-0.5,
+            call.dropout_p,
+            call.is_causal,
         )
         out = p.unflatten(out)
         lse = lse.view(p.heads, p.batch, p.seq_len).permute(1, 0, 2).contiguous()

@@ -15,7 +15,6 @@ from xfuser.core.attention.spec import AttnCall
 logger = init_logger(__name__)
 
 
-
 # ---------------------------------------------------------------------------
 # custom ops
 #
@@ -24,6 +23,7 @@ logger = init_logger(__name__)
 # e2e) so it holds fp8 Q/K/V alongside the live bf16 Q/K/V -> higher peak VRAM;
 # pick AITER_FLYDSL when tight.
 # ---------------------------------------------------------------------------
+
 
 def _fp8_min_seq(head_dim: int, num_heads: int) -> int:
     """fp8 wins only above a sequence crossover (quant pre-pass cost vs K/V HBM
@@ -39,16 +39,20 @@ def _fp8_attn(query, key, value, is_causal):
     # flydsl_fp8_quant returns fp8 q/k/v + descales (real = fp8 * descale).
     qq, kk, vv, sq, sk, sv = flydsl_fp8_quant(query, key, value, rotation=True)
     return flydsl_flash_attn_func(
-        qq, kk, vv, causal=is_causal,
-        q_descale=sq, k_descale=sk, v_descale=sv,
-        waves_per_eu=2, daz=True,
+        qq,
+        kk,
+        vv,
+        causal=is_causal,
+        q_descale=sq,
+        k_descale=sk,
+        v_descale=sv,
+        waves_per_eu=2,
+        daz=True,
     )
 
 
 @custom_op("xfuser::flydsl_attn", mutates_args=())
-def _flydsl_attn(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool
-) -> torch.Tensor:
+def _flydsl_attn(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool) -> torch.Tensor:
     B, S_real, H, D = query.shape
     is_cross = key.shape[1] != S_real
     # Attn shape is constant across denoise steps, so this logs once per shape.
@@ -61,9 +65,7 @@ def _flydsl_attn(
 
 
 @register_fake("xfuser::flydsl_attn")
-def _flydsl_attn_fake(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool
-) -> torch.Tensor:
+def _flydsl_attn_fake(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool) -> torch.Tensor:
     return torch.empty_like(query)
 
 
@@ -85,8 +87,7 @@ def _flydsl_attn_fp8_kernel(
         msg = f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 (S<{min_seq})"
     else:
         msg = (
-            f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 "
-            f"(not fp8-eligible: dtype={query.dtype}, cross={is_cross})"
+            f"flydsl attn [B{B} S{S_real} H{H} D{D}] -> bf16 (not fp8-eligible: dtype={query.dtype}, cross={is_cross})"
         )
     log_once(logger, (B, S_real, H, D, is_cross, query.dtype), msg)
     if use_fp8:
@@ -95,29 +96,41 @@ def _flydsl_attn_fp8_kernel(
 
 
 @register_fake("xfuser::flydsl_attn_fp8")
-def _flydsl_attn_fp8_fake(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool
-) -> torch.Tensor:
+def _flydsl_attn_fp8_fake(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, is_causal: bool) -> torch.Tensor:
     return torch.empty_like(query)
 
 
 @custom_op("xfuser::flydsl_attn_fp8_prequant", mutates_args=())
 def _flydsl_attn_fp8_prequant_kernel(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-    q_descale: torch.Tensor, k_descale: torch.Tensor, v_descale: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
     is_causal: bool,
 ) -> torch.Tensor:
     return flydsl_flash_attn_func(
-        query, key, value, causal=is_causal,
-        q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
-        waves_per_eu=2, daz=True,
+        query,
+        key,
+        value,
+        causal=is_causal,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        waves_per_eu=2,
+        daz=True,
     )
 
 
 @register_fake("xfuser::flydsl_attn_fp8_prequant")
 def _flydsl_attn_fp8_prequant_fake(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-    q_descale: torch.Tensor, k_descale: torch.Tensor, v_descale: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
     is_causal: bool,
 ) -> torch.Tensor:
     return torch.empty_like(query, dtype=torch.bfloat16)
@@ -161,12 +174,14 @@ def flydsl_fp8(query, key, value, call: AttnCall):
             )
         q, k, v = to_bshd(query, key, value, contiguous=True)
         out = torch.ops.xfuser.flydsl_attn_fp8_prequant(
-            q, k, v,
-            kwargs["q_descale"], kwargs["k_descale"], kwargs["v_descale"],
+            q,
+            k,
+            v,
+            kwargs["q_descale"],
+            kwargs["k_descale"],
+            kwargs["v_descale"],
             call.is_causal,
         )
         return from_bshd(out), None
 
     return _dispatch(query, key, value, call, torch.ops.xfuser.flydsl_attn_fp8)
-
-

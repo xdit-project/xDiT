@@ -15,23 +15,41 @@ _FA4_VARLEN = "flash_attn.cute.interface:flash_attn_varlen_func"
 _FP4_QUANT = "xfuser.core.distributed.fp4_quantize:quantize_qk_to_fp4"
 
 SPECS = [
-    Spec(AttentionBackendType.FLASH, impl=Impl("kernel:flash_2"), ring=ALWAYS,
-         requires=SYMBOL(_FA2) & SYMBOL(_FA2_VARLEN), accepts=ANY_CALL),
-
-    Spec(AttentionBackendType.FLASH_3, impl=Impl("kernel:flash_3"), ring=ALWAYS,
-         requires=PLATFORM("cuda") & SYMBOL(_FA3) & SYMBOL(_FA3_VARLEN),
-         accepts=ANY_CALL),
-
-    Spec(AttentionBackendType.FLASH_3_FP8, impl=Impl("kernel:flash_3_fp8"),
-         ring=ALWAYS, low_precision=True, accepts=NO_VARLEN,
-         requires=PLATFORM("cuda") & SYMBOL(_FA3)),
-
-    Spec(AttentionBackendType.FLASH_4, impl=Impl("kernel:flash_4"), ring=NEVER,
-         requires=PLATFORM("cuda") & SYMBOL(_FA4) & SYMBOL(_FA4_VARLEN),
-         accepts=ANY_CALL),
-
-    Spec(AttentionBackendType.FLASH_4_FP4, impl=Impl("kernel:flash_4_fp4"), ring=NEVER,
-         low_precision=True, accepts=NO_VARLEN,
-         requires=PLATFORM("cuda") & CUDA_CAPABILITY((10, 0))
-                & SYMBOL(_FA4) & SYMBOL(_FP4_QUANT)),
+    Spec(
+        AttentionBackendType.FLASH,
+        impl=Impl("kernel:flash_2"),
+        ring=ALWAYS,
+        requires=SYMBOL(_FA2) & SYMBOL(_FA2_VARLEN),
+        accepts=ANY_CALL,
+    ),
+    Spec(
+        AttentionBackendType.FLASH_3,
+        impl=Impl("kernel:flash_3"),
+        ring=ALWAYS,
+        requires=PLATFORM("cuda") & SYMBOL(_FA3) & SYMBOL(_FA3_VARLEN),
+        accepts=ANY_CALL,
+    ),
+    Spec(
+        AttentionBackendType.FLASH_3_FP8,
+        impl=Impl("kernel:flash_3_fp8"),
+        ring=ALWAYS,
+        low_precision=True,
+        accepts=NO_VARLEN,
+        requires=PLATFORM("cuda") & SYMBOL(_FA3),
+    ),
+    Spec(
+        AttentionBackendType.FLASH_4,
+        impl=Impl("kernel:flash_4"),
+        ring=NEVER,
+        requires=PLATFORM("cuda") & SYMBOL(_FA4) & SYMBOL(_FA4_VARLEN),
+        accepts=ANY_CALL,
+    ),
+    Spec(
+        AttentionBackendType.FLASH_4_FP4,
+        impl=Impl("kernel:flash_4_fp4"),
+        ring=NEVER,
+        low_precision=True,
+        accepts=NO_VARLEN,
+        requires=PLATFORM("cuda") & CUDA_CAPABILITY((10, 0)) & SYMBOL(_FA4) & SYMBOL(_FP4_QUANT),
+    ),
 ]

@@ -35,7 +35,8 @@ def _vsa_h3(query, key, value, call: AttnCall, *, use_triton: bool):
 
     if use_triton and not h3.h3_vsa_triton_is_usable(query.device):
         log_once(
-            logger, ("vsa_h3_triton", str(query.device)),
+            logger,
+            ("vsa_h3_triton", str(query.device)),
             f"TRITON_VSA_H3 cannot run its kernel on {query.device}, falling "
             f"back to the FlexAttention path. Select FLEX_VSA_H3 to ask for "
             f"it directly.",
@@ -45,18 +46,12 @@ def _vsa_h3(query, key, value, call: AttnCall, *, use_triton: bool):
 
     sequence_length = metadata.total_seq_length
     gathered_length = query.shape[2]
-    query, key, value, gate = (
-        t[:, :, :sequence_length] for t in (query, key, value, gate)
-    )
+    query, key, value, gate = (t[:, :, :sequence_length] for t in (query, key, value, gate))
 
-    packed = h3.h3_vsa_attention(
-        query, key, value, gate, metadata, use_triton=use_triton
-    )
+    packed = h3.h3_vsa_attention(query, key, value, gate, metadata, use_triton=use_triton)
 
     if gathered_length > sequence_length:
-        padded = packed.new_zeros(
-            packed.shape[0], packed.shape[1], gathered_length, packed.shape[3]
-        )
+        padded = packed.new_zeros(packed.shape[0], packed.shape[1], gathered_length, packed.shape[3])
         padded[:, :, :sequence_length] = packed
         packed = padded
 

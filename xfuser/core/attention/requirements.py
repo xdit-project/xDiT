@@ -22,6 +22,7 @@ import torch
 # probes (memoised)
 # ---------------------------------------------------------------------------
 
+
 def resolve(target: str):
     """Import "module:name" and return the object, or None when absent.
 
@@ -47,7 +48,7 @@ def _resolve_with_reason(target: str):
             # The module is present; something it imports is not.
             return None, f"{module_name} needs {exc.name}, which is not installed"
         return None, f"{module_name} is not installed"
-    except Exception as exc:                # noqa: BLE001 - absence is the answer
+    except Exception as exc:  # noqa: BLE001 - absence is the answer
         return None, f"{module_name} failed to import: {type(exc).__name__}: {exc}"
 
     if not symbol:
@@ -92,13 +93,14 @@ def device_arch() -> str:
 def _arch_of(index: int) -> str:
     try:
         return torch.cuda.get_device_properties(index).gcnArchName
-    except Exception:                       # noqa: BLE001 - reporting only
+    except Exception:  # noqa: BLE001 - reporting only
         return ""
 
 
 # ---------------------------------------------------------------------------
 # predicates
 # ---------------------------------------------------------------------------
+
 
 class Requirement:
     """Base predicate. ``unmet()`` returns a reason, or None when satisfied.
@@ -200,7 +202,7 @@ NEVER = _Never()
 
 @dataclass(frozen=True)
 class SYMBOL(Requirement):
-    """"module:name" must be importable."""
+    """ "module:name" must be importable."""
 
     target: str
 
@@ -213,7 +215,7 @@ class SYMBOL(Requirement):
 
 @dataclass(frozen=True)
 class PARAM(Requirement):
-    """"module:name" must accept a given keyword parameter."""
+    """ "module:name" must accept a given keyword parameter."""
 
     target: str
     parameter: str
@@ -227,8 +229,10 @@ class PARAM(Requirement):
         if params is None:
             # Refusing is the safe answer under a hard-fail policy, but say why:
             # silently treating this as "absent" would disable a working backend.
-            return (f"{name} is unavailable -- its signature cannot be read, so "
-                    f"the {self.parameter!r} parameter cannot be confirmed")
+            return (
+                f"{name} is unavailable -- its signature cannot be read, so "
+                f"the {self.parameter!r} parameter cannot be confirmed"
+            )
         if self.parameter not in params:
             # The function is here; this build's version of it differs. Say so,
             # because "not importable" would send people to the install.
@@ -256,9 +260,7 @@ class FIRST_OF(Requirement):
     def unmet(self) -> Optional[str]:
         if any(resolve(t) is not None for t in self.targets):
             return None
-        why = "; ".join(
-            f"{t.replace(':', '.')}: {_resolve_with_reason(t)[1]}" for t in self.targets
-        )
+        why = "; ".join(f"{t.replace(':', '.')}: {_resolve_with_reason(t)[1]}" for t in self.targets)
         return f"none of these is available -- {why}"
 
     def resolve(self):
@@ -289,7 +291,7 @@ class ARCH(Requirement):
 
 @dataclass(frozen=True)
 class PLATFORM(Requirement):
-    """"cuda" for an NVIDIA build, "rocm" for a HIP build, "npu" for Ascend."""
+    """ "cuda" for an NVIDIA build, "rocm" for a HIP build, "npu" for Ascend."""
 
     name: str
 
@@ -337,5 +339,3 @@ class CUDA_CAPABILITY(Requirement):
         if found < self.minimum:
             return f"requires compute capability >= {self.minimum}, found {found}"
         return None
-
-

@@ -50,8 +50,7 @@ KV_TILE = _read_kv_tile()
 HAS_SEQLENS_K = PARAM("aiter.ops.mha_v4:mha_v4", "seqlens_k").satisfied()
 
 
-def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None,
-            return_lse=False):
+def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None, return_lse=False):
     """One MHA v4 launch. Tensors are BSHD. Returns (output, lse-or-None)."""
     kwargs = {}
     if fmt.qk_scale is not None:
@@ -65,8 +64,7 @@ def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None,
     if return_lse:
         kwargs["return_lse"] = True
     qk = FORMAT[fmt.qk]
-    result = mha_v4(q, k, v, qk, qk, FORMAT[fmt.v],
-                    block_mask=block_mask, **kwargs)
+    result = mha_v4(q, k, v, qk, qk, FORMAT[fmt.v], block_mask=block_mask, **kwargs)
     return result if return_lse else (result, None)
 
 
@@ -162,7 +160,10 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
     # caller discards. The degree comes off the call rather than the process
     # group, so this stays traceable and testable without one.
     output, softmax_lse = _launch(
-        q, k, v, fmt,
+        q,
+        k,
+        v,
+        fmt,
         seqlens_k=seqlens_k,
         return_lse=call.ring_world_size > 1,
     )
@@ -173,10 +174,13 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
 
 def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
     q, k, v, state, block_mask = build_block_mask(
-        query, key, value,
+        query,
+        key,
+        value,
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
-        block_m=256, block_n=KV_TILE,
+        block_m=256,
+        block_n=KV_TILE,
         ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
         pad_block_divisible=True,
@@ -184,5 +188,3 @@ def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
     q, k, v = to_bshd(q, k, v, contiguous=True)
     output, _ = _launch(q, k, v, fmt, block_mask=block_mask)
     return restore_sparge_output(from_bshd(output), state), None
-
-

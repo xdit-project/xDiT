@@ -23,7 +23,7 @@ class AttentionBackendType(Enum):
     SDPA_EFFICIENT = "SDPA with memory-efficient backend"
     SDPA_FLASH = "SDPA with FLASH backend"
     FLASH = "Flash Attention V2"
-    CUDNN =  "cuDNN"
+    CUDNN = "cuDNN"
     FLASH_3 = "Flash Attention V3"
     FLASH_3_FP8 = "Flash Attention v3 FP8"
     NVTE_FP8 = "NVTE FP8"

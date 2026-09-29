@@ -11,9 +11,7 @@ SPECS = [
         AttentionBackendType.AITER,
         impl=Impl("kernel:aiter_attention"),
         ring=ALWAYS,
-        requires=SYMBOL("aiter:flash_attn_func")
-               & SYMBOL("aiter:flash_attn_varlen_func")
-               & AITER_ARCH,
+        requires=SYMBOL("aiter:flash_attn_func") & SYMBOL("aiter:flash_attn_varlen_func") & AITER_ARCH,
         accepts=ANY_CALL,
     ),
 ]

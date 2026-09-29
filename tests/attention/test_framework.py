@@ -45,6 +45,7 @@ from xfuser.core.attention.spec import (
 # requirements
 # --------------------------------------------------------------------------
 
+
 def test_always_is_satisfied():
     assert ALWAYS.unmet() is None
 
@@ -126,9 +127,11 @@ def test_device_arch_follows_the_current_device():
 
     requirements._arch_of.cache_clear()
     try:
-        with mock.patch.object(torch.cuda, "is_available", return_value=True), \
-             mock.patch.object(torch.cuda, "get_device_properties", _Props), \
-             mock.patch.object(torch.cuda, "current_device") as current:
+        with (
+            mock.patch.object(torch.cuda, "is_available", return_value=True),
+            mock.patch.object(torch.cuda, "get_device_properties", _Props),
+            mock.patch.object(torch.cuda, "current_device") as current,
+        ):
             current.return_value = 1
             assert requirements.device_arch() == "gfx950"
             current.return_value = 0
@@ -140,9 +143,11 @@ def test_device_arch_follows_the_current_device():
 
 
 def test_cuda_capability_reads_the_current_device():
-    with mock.patch.object(torch.cuda, "is_available", return_value=True), \
-         mock.patch.object(torch.cuda, "current_device", return_value=3), \
-         mock.patch.object(torch.cuda, "get_device_capability") as capability:
+    with (
+        mock.patch.object(torch.cuda, "is_available", return_value=True),
+        mock.patch.object(torch.cuda, "current_device", return_value=3),
+        mock.patch.object(torch.cuda, "get_device_capability") as capability,
+    ):
         capability.return_value = (9, 0)
         assert "found (9, 0)" in CUDA_CAPABILITY((10, 0)).unmet()
         capability.assert_called_once_with(3)
@@ -159,6 +164,7 @@ def test_capability_and_arch_report_the_absence_of_a_gpu():
 # --------------------------------------------------------------------------
 # call constraints
 # --------------------------------------------------------------------------
+
 
 def _qkv(batch=1, heads=4, q_len=16, kv_len=16, head_dim=128):
     return (
@@ -179,6 +185,7 @@ def test_an_attn_call_built_inside_a_graph_can_have_its_degrees_read():
     object has no attribute 'name'". Two AttnCalls comparing equal would then
     compile differently depending only on whether the caller spelled out a
     value identical to the default."""
+
     def read_degrees(x):
         call = AttnCall(dropout_p=0.0, is_causal=False, attention_kwargs={})
         if call.ring_world_size > 1 or call.ulysses_world_size > 1:
@@ -232,9 +239,9 @@ def test_combined_constraint_reports_first_failure():
 # registry
 # --------------------------------------------------------------------------
 
+
 def _spec_kwargs(**kwargs):
-    defaults = dict(impl=lambda q, k, v, c: (q, None), ring=ALWAYS,
-                    requires=ALWAYS, accepts=ANY_CALL)
+    defaults = dict(impl=lambda q, k, v, c: (q, None), ring=ALWAYS, requires=ALWAYS, accepts=ANY_CALL)
     defaults.update(kwargs)
     return defaults
 
@@ -286,10 +293,12 @@ def test_duplicate_registration_is_rejected():
     silently, and which that is depends on the order of the MODULES list."""
     duplicate = _module("pkg.b", _spec(AttentionBackendType.SDPA))
     with pytest.raises(ValueError, match="already registered"):
-        registry.build_registry([
-            _module("pkg.a", _spec(AttentionBackendType.SDPA)),
-            duplicate,
-        ])
+        registry.build_registry(
+            [
+                _module("pkg.a", _spec(AttentionBackendType.SDPA)),
+                duplicate,
+            ]
+        )
 
 
 def test_build_registry_stamps_each_spec_with_its_package():
@@ -317,6 +326,7 @@ def test_install_refuses_a_registry_missing_a_backend():
 # --------------------------------------------------------------------------
 # fallback
 # --------------------------------------------------------------------------
+
 
 def _pair(**kwargs):
     """A spec that falls back to SDPA, and the SDPA spec it falls back to."""
@@ -420,22 +430,19 @@ def test_a_fallback_must_ring_wherever_the_backend_it_serves_does():
     If that one returns no LSE the merge gets a partial from the blocks the
     selection served and nothing from the rest -- and no output check can see
     it, because O never reads the LSE."""
-    primary = _spec(AttentionBackendType.AITER_BF16, ring=ALWAYS,
-                    accepts=HEAD_DIM(128),
-                    fallback=AttentionBackendType.SDPA)
+    primary = _spec(
+        AttentionBackendType.AITER_BF16, ring=ALWAYS, accepts=HEAD_DIM(128), fallback=AttentionBackendType.SDPA
+    )
     fallback = _spec(AttentionBackendType.SDPA, ring=NEVER)
 
     with registry.using([primary, fallback]):
         spec = registry.get(AttentionBackendType.AITER_BF16)
         assert spec.ring.unmet() is None, "the selection itself can ring"
-        assert spec._fallback.ring.unmet() is not None, (
-            "but the fallback cannot, which runtime_state must refuse"
-        )
+        assert spec._fallback.ring.unmet() is not None, "but the fallback cannot, which runtime_state must refuse"
 
 
 def test_a_fallback_must_name_a_registered_backend():
-    spec = _spec(AttentionBackendType.AITER_BF16,
-                 fallback=AttentionBackendType.AITER_F4F4)
+    spec = _spec(AttentionBackendType.AITER_BF16, fallback=AttentionBackendType.AITER_F4F4)
     with pytest.raises(ValueError, match="AITER_F4F4"):
         registry.build_registry([_module("pkg.a", spec)])
 
@@ -451,8 +458,7 @@ def test_a_fallback_cycle_is_refused():
 
 @pytest.mark.parametrize(
     "field,value",
-    [("sparsity", Sparsity.SPARGE), ("head_balanced", True),
-     ("accepts_prequantized", True)],
+    [("sparsity", Sparsity.SPARGE), ("head_balanced", True), ("accepts_prequantized", True)],
 )
 def test_a_fallback_cannot_sit_beside_a_fact_it_would_route_around(field, value):
     """These are read from the *selected* spec elsewhere -- base_model gates on
@@ -483,22 +489,27 @@ def test_find_returns_none_rather_than_raising():
 
 
 def test_queries_select_by_field():
-    with registry.using([
-        _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity=Sparsity.SPARGE,
-              head_balanced=True, low_precision=True, ring=NEVER),
-        _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, ring=NEVER),
-        _spec(AttentionBackendType.SDPA),
-    ]):
-        assert registry.types_where(is_sparse=True) == frozenset(
-            {AttentionBackendType.AITER_MXFP4_SPARGE}
+    with registry.using(
+        [
+            _spec(
+                AttentionBackendType.AITER_MXFP4_SPARGE,
+                sparsity=Sparsity.SPARGE,
+                head_balanced=True,
+                low_precision=True,
+                ring=NEVER,
+            ),
+            _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, ring=NEVER),
+            _spec(AttentionBackendType.SDPA),
+        ]
+    ):
+        assert registry.types_where(is_sparse=True) == frozenset({AttentionBackendType.AITER_MXFP4_SPARGE})
+        assert registry.types_where(low_precision=True) == frozenset(
+            {
+                AttentionBackendType.AITER_MXFP4_SPARGE,
+                AttentionBackendType.AITER_MXFP4,
+            }
         )
-        assert registry.types_where(low_precision=True) == frozenset({
-            AttentionBackendType.AITER_MXFP4_SPARGE,
-            AttentionBackendType.AITER_MXFP4,
-        })
-        assert registry.types_where(ring=ALWAYS) == frozenset(
-            {AttentionBackendType.SDPA}
-        )
+        assert registry.types_where(ring=ALWAYS) == frozenset({AttentionBackendType.SDPA})
 
 
 def test_missing_specs_lists_members_without_a_spec():
@@ -530,6 +541,7 @@ def test_a_spec_must_state_what_it_requires_accepts_and_rings():
     accident, and an omitted ``ring`` would claim an LSE the kernel may not
     produce. Saying ALWAYS, ANY_CALL or NEVER is no more work than saying
     nothing, and it distinguishes decided from forgotten."""
+
     def impl(query, key, value, call):
         return query, None
 
@@ -537,8 +549,7 @@ def test_a_spec_must_state_what_it_requires_accepts_and_rings():
 
     for omitted in stated:
         with pytest.raises(TypeError, match=omitted):
-            Spec(AttentionBackendType.SDPA, impl=impl,
-                 **{k: v for k, v in stated.items() if k != omitted})
+            Spec(AttentionBackendType.SDPA, impl=impl, **{k: v for k, v in stated.items() if k != omitted})
 
     spec = Spec(AttentionBackendType.SDPA, impl=impl, **stated)
     assert spec.requires is ALWAYS
@@ -561,6 +572,7 @@ def test_spec_rejects_unacceptable_calls():
 # --------------------------------------------------------------------------
 # layout
 # --------------------------------------------------------------------------
+
 
 def test_bshd_roundtrip():
     x = torch.randn(2, 4, 16, 64)
@@ -603,9 +615,7 @@ def test_pack_kv_keeps_every_query_and_gathers_kv():
     assert packed.q.shape == (batch * seq_len, heads, head_dim)
     assert packed.k.shape == (len(indices), heads, head_dim)
     assert torch.equal(packed.k, k.reshape(-1, heads, head_dim)[indices])
-    assert torch.equal(
-        packed.cu_seqlens_q, torch.tensor([0, 4, 8], dtype=torch.int32)
-    )
+    assert torch.equal(packed.cu_seqlens_q, torch.tensor([0, 4, 8], dtype=torch.int32))
     assert packed.max_seqlen_q == seq_len
 
     out = torch.randn(batch * seq_len, heads, head_dim)
@@ -628,11 +638,16 @@ def test_pack_kv_flattens_keys_against_their_own_length():
 
     # Two sequences of 4 and 2 valid keys out of 5 padded rows each.
     indices = torch.tensor([0, 1, 2, 3, 5, 6], dtype=torch.long)
-    packed = pack_kv(q, k, v, VarlenPacking(
-        indices_k=indices,
-        cu_seqlens_k=torch.tensor([0, 4, 6], dtype=torch.int32),
-        max_seqlen_k=4,
-    ))
+    packed = pack_kv(
+        q,
+        k,
+        v,
+        VarlenPacking(
+            indices_k=indices,
+            cu_seqlens_k=torch.tensor([0, 4, 6], dtype=torch.int32),
+            max_seqlen_k=4,
+        ),
+    )
 
     assert packed.q.shape == (batch * q_len, heads, head_dim)
     assert packed.k.shape == (len(indices), heads, head_dim)
@@ -640,9 +655,7 @@ def test_pack_kv_flattens_keys_against_their_own_length():
     assert torch.equal(packed.v, v.reshape(-1, heads, head_dim)[indices])
     # Q side still describes the query, which is what the kernel is asked for.
     assert packed.max_seqlen_q == q_len
-    assert torch.equal(
-        packed.cu_seqlens_q, torch.tensor([0, 3, 6], dtype=torch.int32)
-    )
+    assert torch.equal(packed.cu_seqlens_q, torch.tensor([0, 3, 6], dtype=torch.int32))
     out = torch.randn(batch * q_len, heads, head_dim)
     assert packed.unflatten(out).shape == (batch, q_len, heads, head_dim)
 
@@ -650,6 +663,7 @@ def test_pack_kv_flattens_keys_against_their_own_length():
 # --------------------------------------------------------------------------
 # the enum move
 # --------------------------------------------------------------------------
+
 
 def test_enum_still_has_every_member():
     """Guards the refactor against dropping one. 45 came over from the
@@ -664,16 +678,23 @@ def test_enum_still_has_every_member():
 # --------------------------------------------------------------------------
 
 VENDOR_MODULES = {
-    "aiter", "flash_attn", "flash_attn_interface", "sageattention",
-    "transformer_engine", "torch_npu", "flex_block_attn", "yunchang", "distvae",
+    "aiter",
+    "flash_attn",
+    "flash_attn_interface",
+    "sageattention",
+    "transformer_engine",
+    "torch_npu",
+    "flex_block_attn",
+    "yunchang",
+    "distvae",
 }
 
-FRAMEWORK_MODULES = ["spec", "requirements", "constraints", "registry",
-                     "numerics/layout", "numerics/hadamard"]
+FRAMEWORK_MODULES = ["spec", "requirements", "constraints", "registry", "numerics/layout", "numerics/hadamard"]
 
 
 def _imported_top_level_modules(path):
     import ast
+
     names = set()
     for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Import):
@@ -701,9 +722,21 @@ def test_framework_only_depends_on_torch_stdlib_and_itself():
     from pathlib import Path
     import xfuser.core.attention as package
 
-    allowed = {"torch", "xfuser", "__future__", "dataclasses", "enum", "typing",
-               "functools", "importlib", "inspect", "ast", "pathlib",
-               "contextlib", "types"}
+    allowed = {
+        "torch",
+        "xfuser",
+        "__future__",
+        "dataclasses",
+        "enum",
+        "typing",
+        "functools",
+        "importlib",
+        "inspect",
+        "ast",
+        "pathlib",
+        "contextlib",
+        "types",
+    }
     root = Path(package.__file__).parent
     for name in FRAMEWORK_MODULES:
         unexpected = _imported_top_level_modules(root / f"{name}.py") - allowed
@@ -844,9 +877,7 @@ def test_backends_without_an_lse_cannot_join_ring():
     from xfuser.core.attention import registry
 
     for spec in registry.REGISTRY.values():
-        assert isinstance(spec.ring, Requirement), (
-            f"{spec.type.name}: ring must be a Requirement, got {spec.ring!r}"
-        )
+        assert isinstance(spec.ring, Requirement), f"{spec.type.name}: ring must be a Requirement, got {spec.ring!r}"
         # Callable without a GPU or a vendor library: that is the point of
         # requirements being lazy and reporting rather than raising.
         reason = spec.ring.unmet()
@@ -856,6 +887,7 @@ def test_backends_without_an_lse_cannot_join_ring():
 # --------------------------------------------------------------------------
 # satisfied() and FIRST_OF
 # --------------------------------------------------------------------------
+
 
 def test_satisfied_is_the_boolean_view_of_unmet():
     """unmet() carries the reason, which gating and messages need; satisfied()
@@ -921,15 +953,11 @@ def test_every_backend_that_can_reach_hadamard_declares_an_initializer():
 
     checked = 0
     for spec in registry.REGISTRY.values():
-        rotates = (
-            spec.prequant_rotate is hadamard.rotate_qk
-            or names_hadamard(spec.requires)
-        )
+        rotates = spec.prequant_rotate is hadamard.rotate_qk or names_hadamard(spec.requires)
         if not rotates:
             continue
         assert spec.initializers, (
-            f"{spec.type.name} rotates with hadamard but declares no "
-            "initializer to resolve it at selection"
+            f"{spec.type.name} rotates with hadamard but declares no initializer to resolve it at selection"
         )
         checked += 1
     assert checked >= 5, f"expected at least 5 rotating backends, found {checked}"
@@ -966,12 +994,23 @@ def test_hadamard_declares_its_symbol_once():
 # registry with itself; the point is that adding a name here is a claim someone
 # makes deliberately, having checked the kernel.
 VARLEN_CAPABLE = {
-    "AITER", "AITER_FP8", "FLASH", "FLASH_3", "FLASH_4",
+    "AITER",
+    "AITER_FP8",
+    "FLASH",
+    "FLASH_3",
+    "FLASH_4",
     # The MHA v4 dense rows. Its sparge rows are absent and must stay so: the
     # sorted-sparse launch needs the key length padded to its KV tile, which is
     # the alignment all three of those routes remove.
-    "AITER_BF16", "AITER_BF16FP8", "AITER_I8FP8", "AITER_F8F6", "AITER_MXFP6",
-    "AITER_F6F4", "AITER_MXFP4", "AITER_F4F4", "AITER_MXFP8",
+    "AITER_BF16",
+    "AITER_BF16FP8",
+    "AITER_I8FP8",
+    "AITER_F8F6",
+    "AITER_MXFP6",
+    "AITER_F6F4",
+    "AITER_MXFP4",
+    "AITER_F4F4",
+    "AITER_MXFP8",
 }
 
 
@@ -989,11 +1028,7 @@ def test_only_varlen_capable_backends_accept_packed_keys():
             max_seqlen_k=1,
         )
     )
-    accepting = {
-        backend.name
-        for backend, spec in registry.REGISTRY.items()
-        if spec.rejects(q, q, q, packed) is None
-    }
+    accepting = {backend.name for backend, spec in registry.REGISTRY.items() if spec.rejects(q, q, q, packed) is None}
     assert accepting == VARLEN_CAPABLE, (
         "varlen support disagrees with what the kernels implement; "
         f"unexpected: {sorted(accepting - VARLEN_CAPABLE)}, "
@@ -1004,6 +1039,7 @@ def test_only_varlen_capable_backends_accept_packed_keys():
 # --------------------------------------------------------------------------
 # every spec points at code that exists
 # --------------------------------------------------------------------------
+
 
 def _impl_source(spec):
     """The file and function name an Impl target names, without importing it."""
@@ -1081,7 +1117,8 @@ def test_impl_bound_arguments_are_accepted_by_the_target():
             continue
         path, symbol = _impl_source(spec)
         fn = next(
-            node for node in ast.parse(path.read_text()).body
+            node
+            for node in ast.parse(path.read_text()).body
             if isinstance(node, ast.FunctionDef) and node.name == symbol
         )
         accepted = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
@@ -1092,6 +1129,7 @@ def test_impl_bound_arguments_are_accepted_by_the_target():
 # --------------------------------------------------------------------------
 # trailing-pad packing
 # --------------------------------------------------------------------------
+
 
 def _packed(max_seqlen_k, **kwargs):
     from xfuser.core.attention.spec import VarlenPacking

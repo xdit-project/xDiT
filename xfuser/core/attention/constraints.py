@@ -83,10 +83,7 @@ class _NonCausal(CallConstraint):
 class _MhaOnly(CallConstraint):
     def unmet(self, query, key, value, call) -> Optional[str]:
         if query.shape[1] != key.shape[1] or query.shape[1] != value.shape[1]:
-            return (
-                "supports MHA only (equal query and key/value head counts), got "
-                f"{query.shape[1]} and {key.shape[1]}"
-            )
+            return f"supports MHA only (equal query and key/value head counts), got {query.shape[1]} and {key.shape[1]}"
         return None
 
 
@@ -124,9 +121,7 @@ class _PackedKeys(CallConstraint):
         if valid_kv_len is None:
             return None
         if not 0 < valid_kv_len <= key.shape[2]:
-            return (
-                f"needs valid_kv_len in [1, {key.shape[2]}], got {valid_kv_len}"
-            )
+            return f"needs valid_kv_len in [1, {key.shape[2]}], got {valid_kv_len}"
         if call.varlen.max_seqlen_k != valid_kv_len:
             return (
                 "needs a trailing pad, whose longest segment is its valid key "

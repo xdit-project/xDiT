@@ -53,6 +53,7 @@ DENSE_RING = PARAM(_MHA_V4_PACKED, "lse") & GFX950
 # once availability has been established.
 # ---------------------------------------------------------------------------
 
+
 class Fmt(Enum):
     """Names are resolved against AITER's AttentionFormat by name, so a member
     here must match one of its members or aliases. Note MXFP6 and MXFP4 are
@@ -82,15 +83,16 @@ class Scale(Enum):
 # the table
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class MhaV4Format:
     name: str
     qk: Fmt
     v: Fmt
-    sparge_on: Optional[Requirement] = None   # None = no sparge variant
+    sparge_on: Optional[Requirement] = None  # None = no sparge variant
     qk_scale: Optional[Scale] = None
     v_scale: Optional[Scale] = None
-    dense: bool = True                        # False = sparge variant only
+    dense: bool = True  # False = sparge variant only
 
     @property
     def is_mxfp8(self) -> bool:
@@ -99,6 +101,10 @@ class MhaV4Format:
         return self.qk_scale is Scale.E8M0_PER_1X32
 
 
+# fmt: off
+# Hand-aligned: the point of this table is that a row reads across and a
+# format reads down, against the header comment. ruff-format would collapse
+# the columns and the header would index nothing.
 FORMATS = [
     #            name        Q/K              V                sparge on
     MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942),
@@ -119,20 +125,20 @@ FORMATS = [
     MhaV4Format("FP8",       Fmt.NATIVE_FP8,  Fmt.NATIVE_FP8,  GFX950_OR_GFX942,
                 dense=False),
 ]
+# fmt: on
 
 
 # Dense serves packed keys by shortening K/V -- slicing a declared trailing pad
 # or gathering the valid rows. Sparge cannot do either: its sorted-sparse launch
 # needs the key length padded to its KV tile, which is the alignment both remove.
 DENSE_CALLS = NO_DROPOUT & NON_CAUSAL & PACKED_KEYS & HEAD_DIM(128)
-SPARGE_CALLS = (
-    NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128) & MHA_ONLY & SELF_ATTENTION
-)
+SPARGE_CALLS = NO_DROPOUT & NON_CAUSAL & NO_VARLEN & HEAD_DIM(128) & MHA_ONLY & SELF_ATTENTION
 
 
 # ---------------------------------------------------------------------------
 # specs
 # ---------------------------------------------------------------------------
+
 
 def _scale_modes(fmt: MhaV4Format) -> Requirement:
     if fmt.qk_scale is None:
@@ -170,19 +176,13 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
         # variant before BF16 gained one, which is why it used to be a literal.
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=SPARGE_CALLS,
-        requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask")
-               & _scale_modes(fmt) & fmt.sparge_on,
+        requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask") & _scale_modes(fmt) & fmt.sparge_on,
     )
 
 
-SPECS = (
-    [_dense_spec(f) for f in FORMATS if f.dense]
-    + [_sparge_spec(f) for f in FORMATS if f.sparge_on is not None]
-)
+SPECS = [_dense_spec(f) for f in FORMATS if f.dense] + [_sparge_spec(f) for f in FORMATS if f.sparge_on is not None]
 
 # Named for consumers that mean "the dense MHA v4 rows" rather than a set of
 # call constraints -- MiniMax-H3 checks it before relying on the trailing-pad
 # path. Derived from the table, so a new row joins by being added there.
-DENSE_BACKENDS = frozenset(
-    AttentionBackendType[f"AITER_{fmt.name}"] for fmt in FORMATS if fmt.dense
-)
+DENSE_BACKENDS = frozenset(AttentionBackendType[f"AITER_{fmt.name}"] for fmt in FORMATS if fmt.dense)

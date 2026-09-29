@@ -29,8 +29,8 @@ SPECS = [
         # with only the dense one would report itself available and then raise
         # on the first model that packs.
         requires=SYMBOL("aiter:flash_attn_fp8_pertensor_func")
-               & SYMBOL("aiter:flash_attn_varlen_fp8_pertensor_func")
-               & SYMBOL("aiter:per_tensor_quant")
-               & hadamard.CREATE_HADAMARD,
+        & SYMBOL("aiter:flash_attn_varlen_fp8_pertensor_func")
+        & SYMBOL("aiter:per_tensor_quant")
+        & hadamard.CREATE_HADAMARD,
     ),
 ]

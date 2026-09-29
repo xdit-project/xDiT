@@ -44,6 +44,7 @@ from .spec import BLOCK_R, TRITON_SSTA_BLOCK
 # shared by both versions
 # ---------------------------------------------------------------------------
 
+
 def _ssta_mask(query, key, value, call: AttnCall):
     """Tile Q/K/V against the model's static sparse config and build the LUT."""
     kwargs = call.attention_kwargs
@@ -68,18 +69,19 @@ def _ssta_config(config_fn) -> dict:
 
 def _untile(output, state, call: AttnCall):
     kwargs = call.attention_kwargs
-    return untile_ssta_output(
-        output, state, kwargs["encoder_sequence_length"], kwargs["sp_size"]
-    )
+    return untile_ssta_output(output, state, kwargs["encoder_sequence_length"], kwargs["sp_size"])
 
 
 def _sparge_mask(query, key, value, call: AttnCall, config: dict):
     """Reorder Q/K/V by a mask computed from Q/K, at the config's tile size."""
     q, k, v, state, block_mask = build_block_mask(
-        query, key, value,
+        query,
+        key,
+        value,
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
-        block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
+        block_m=config["BLOCK_M"],
+        block_n=config["BLOCK_N"],
         ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
     )
@@ -94,6 +96,7 @@ def _rotation(query) -> dict:
 # ---------------------------------------------------------------------------
 # v1
 # ---------------------------------------------------------------------------
+
 
 def sage(query, key, value, call: AttnCall):
     """No mask. The only cell that can join a ring, and only then is there an
@@ -123,14 +126,14 @@ def sparge(query, key, value, call: AttnCall):
 # v2
 # ---------------------------------------------------------------------------
 
+
 def sage_v2(query, key, value, call: AttnCall):
     """No mask. The only cell that can join a ring, and only then is there an
     LSE to merge."""
     q, k, v = make_contiguous(query, key, value)
     rotation = _rotation(q)
     if call.ring_world_size > 1:
-        return SAGE_V2(q, k, v, layout="bhsd", **rotation,
-                       return_lse=True, causal=call.is_causal)
+        return SAGE_V2(q, k, v, layout="bhsd", **rotation, return_lse=True, causal=call.is_causal)
     return SAGE_V2(q, k, v, layout="bhsd", **rotation, causal=call.is_causal), None
 
 
@@ -142,8 +145,14 @@ def sparse_sage_v2(query, key, value, call: AttnCall):
     config = _ssta_config(CONFIG_V2)
     q, k, v, block_lut, state = _ssta_mask(query, key, value, call)
     output = SAGE_V2(
-        q, k, v, layout="bhsd", config=config, **_rotation(q),
-        block_lut=block_lut, causal=call.is_causal,
+        q,
+        k,
+        v,
+        layout="bhsd",
+        config=config,
+        **_rotation(q),
+        block_lut=block_lut,
+        causal=call.is_causal,
     )
     return _untile(output, state, call), None
 
@@ -154,7 +163,13 @@ def sparge_v2(query, key, value, call: AttnCall):
     config = CONFIG_V2()
     q, k, v, block_lut, state = _sparge_mask(query, key, value, call, config)
     output = SAGE_V2(
-        q, k, v, layout="bhsd", config=config, **_rotation(q),
-        block_lut=block_lut, causal=call.is_causal,
+        q,
+        k,
+        v,
+        layout="bhsd",
+        config=config,
+        **_rotation(q),
+        block_lut=block_lut,
+        causal=call.is_causal,
     )
     return restore_sparge_output(output, state), None

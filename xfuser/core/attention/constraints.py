@@ -104,15 +104,23 @@ class _NoVarlen(CallConstraint):
         return "does not support varlen packed keys" if call.varlen else None
 
 
-class _TrailingPadOnly(CallConstraint):
-    """Packed keys are acceptable only as a declared uniform trailing pad.
+class _PackedKeys(CallConstraint):
+    """Packed keys are acceptable, however the kernel chooses to serve them.
 
-    A kernel with no key-padding mask can still serve a padded request when the
-    pad is one trailing block: keeping every query row and shortening K/V is
-    the same computation. Only the producer knows the pad is trailing --
-    cu_seqlens_k having one segment does not imply it, and interior gaps would
-    be silently mis-served -- so the declaration is what makes it safe, and a
-    packed call without one is refused.
+    A kernel with no key-padding mask can still honour one: the valid keys are
+    a shorter K/V, and gathering them attends over exactly those rows. What
+    this checks is only that a pad the producer *declares* is described
+    truthfully, because ``valid_kv_len`` licenses the cheaper route -- slicing
+    a trailing block rather than gathering -- and a wrong length there would
+    silently drop or invent keys.
+
+    An undeclared pack is accepted and gathered, which stays correct for a
+    mask with interior gaps that a slice would mis-serve. Limits beyond this
+    belong to the kernel: MHA v4 carries per-batch key lengths only on its
+    BF16 Q/K rows and only on an AITER that has the kernarg, and both raise
+    there, naming the backends that do work. Declaring those here would turn
+    them into a fallback to another kernel, and a half-applied backend
+    selection is worse than a refusal that says what to pick instead.
     """
 
     def unmet(self, query, key, value, call) -> Optional[str]:
@@ -121,7 +129,7 @@ class _TrailingPadOnly(CallConstraint):
 
         valid_kv_len = call.attention_kwargs.get("valid_kv_len")
         if valid_kv_len is None:
-            return "does not support varlen packed keys"
+            return None
         if not 0 < valid_kv_len <= key.shape[2]:
             return (
                 f"needs valid_kv_len in [1, {key.shape[2]}], got {valid_kv_len}"
@@ -147,5 +155,5 @@ NON_CAUSAL = _NonCausal()
 MHA_ONLY = _MhaOnly()
 SELF_ATTENTION = _SelfAttention()
 NO_VARLEN = _NoVarlen()
-TRAILING_PAD_ONLY = _TrailingPadOnly()
+PACKED_KEYS = _PackedKeys()
 NO_DROPOUT = _NoDropout()

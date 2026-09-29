@@ -464,23 +464,25 @@ def test_spec_defaults_are_conservative():
     assert spec.rejects(*_qkv(), AttnCall()) is None
 
 
-def test_a_spec_must_state_what_it_requires_and_accepts():
-    """Neither has a default, because the only values that could be one are
-    the permissive ones: an omitted ``accepts`` would read as "serves every
-    call", which is exactly the claim a new backend is least entitled to make
-    by accident. Saying ALWAYS or ANY_CALL is no more work than saying
+def test_a_spec_must_state_what_it_requires_accepts_and_rings():
+    """None has a default, because the only values that could be one are the
+    permissive ones: an omitted ``accepts`` would read as "serves every call",
+    which is exactly the claim a new backend is least entitled to make by
+    accident, and an omitted ``ring`` would claim an LSE the kernel may not
+    produce. Saying ALWAYS, ANY_CALL or NEVER is no more work than saying
     nothing, and it distinguishes decided from forgotten."""
     impl = lambda q, k, v, c: (q, None)
+    stated = dict(requires=ALWAYS, accepts=ANY_CALL, ring=NEVER)
 
-    with pytest.raises(TypeError, match="requires"):
-        Spec(AttentionBackendType.SDPA, impl=impl, accepts=ANY_CALL)
-    with pytest.raises(TypeError, match="accepts"):
-        Spec(AttentionBackendType.SDPA, impl=impl, requires=ALWAYS)
+    for omitted in stated:
+        with pytest.raises(TypeError, match=omitted):
+            Spec(AttentionBackendType.SDPA, impl=impl,
+                 **{k: v for k, v in stated.items() if k != omitted})
 
-    spec = Spec(AttentionBackendType.SDPA, impl=impl,
-                requires=ALWAYS, accepts=ANY_CALL)
+    spec = Spec(AttentionBackendType.SDPA, impl=impl, **stated)
     assert spec.requires is ALWAYS
     assert spec.accepts is ANY_CALL
+    assert spec.ring is NEVER
 
 
 def test_spec_unavailable_surfaces_the_requirement_reason():
@@ -660,6 +662,7 @@ def test_run_enforces_accepts_before_dispatching():
         impl=impl,
         accepts=HEAD_DIM(128) & NON_CAUSAL,
         requires=ALWAYS,
+        ring=NEVER,
     )
     q, k, v = _qkv(head_dim=128)
 
@@ -686,6 +689,7 @@ def test_resolved_hands_out_the_same_callable_every_time():
         package="xfuser.core.attention.numerics",
         requires=ALWAYS,
         accepts=ANY_CALL,
+        ring=NEVER,
     )
     assert spec.resolved() is spec.resolved()
 
@@ -709,6 +713,7 @@ def test_run_does_not_re_resolve_per_call():
         package="pkg",
         requires=ALWAYS,
         accepts=ANY_CALL,
+        ring=NEVER,
     )
     q, k, v = _qkv()
     for _ in range(3):
@@ -804,12 +809,30 @@ def test_hadamard_declares_its_symbol_once():
 # varlen packing
 # --------------------------------------------------------------------------
 
-# Backends whose kernel branches on call.varlen and calls a varlen entry point.
+# Backends whose kernel branches on call.varlen and honours the packing, by
+# either of the two routes that exist:
+#
+#   - a varlen entry point, which takes the packed K/V and cu_seqlens as they
+#     are (AITER v3, FlashAttention);
+#   - shortening K/V so that the padding is not there to be attended over,
+#     which is what MHA v4's dense rows do -- slicing a declared trailing pad,
+#     gathering the valid rows, or scattering several sequences into a padded
+#     batch whose true lengths travel in seqlens_k.
+#
 # Everything else must declare NO_VARLEN: accepting a packed call without
 # honouring it runs dense attention over padded keys and returns wrong numbers
 # rather than failing.
+#
+# Maintained by hand on purpose. Deriving it from the specs would compare the
+# registry with itself; the point is that adding a name here is a claim someone
+# makes deliberately, having checked the kernel.
 VARLEN_CAPABLE = {
     "AITER", "AITER_FP8", "FLASH", "FLASH_3", "FLASH_4",
+    # The MHA v4 dense rows. Its sparge rows are absent and must stay so: the
+    # sorted-sparse launch needs the key length padded to its KV tile, which is
+    # the alignment all three of those routes remove.
+    "AITER_BF16", "AITER_BF16FP8", "AITER_I8FP8", "AITER_F8F6", "AITER_MXFP6",
+    "AITER_F6F4", "AITER_MXFP4", "AITER_F4F4", "AITER_MXFP8",
 }
 
 
@@ -944,52 +967,54 @@ def _packed(max_seqlen_k, **kwargs):
     )
 
 
-def test_trailing_pad_only_accepts_a_dense_call():
-    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+def test_packed_keys_accepts_a_dense_call():
+    from xfuser.core.attention.constraints import PACKED_KEYS
 
     t = torch.empty((1, 2, 8, 128))
-    assert TRAILING_PAD_ONLY.unmet(t, t, t, AttnCall()) is None
+    assert PACKED_KEYS.unmet(t, t, t, AttnCall()) is None
 
 
-def test_trailing_pad_only_refuses_packing_that_is_not_declared():
-    """cu_seqlens_k having one segment does not make the pad trailing; only the
-    producer knows, so an undeclared packed call is refused rather than served
-    with interior gaps silently ignored."""
-    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
-
-    t = torch.empty((1, 2, 8, 128))
-    reason = TRAILING_PAD_ONLY.unmet(t, t, t, _packed(4))
-    assert reason is not None and "varlen packed keys" in reason
-
-
-def test_trailing_pad_only_accepts_a_declared_pad():
-    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+def test_packed_keys_accepts_an_undeclared_pack():
+    """Gathering the valid rows attends over exactly those keys, so a pack
+    needs no trailing-pad declaration to be served. Krea-2 passes a key
+    padding mask and no valid_kv_len, and this is what lets it through."""
+    from xfuser.core.attention.constraints import PACKED_KEYS
 
     t = torch.empty((1, 2, 8, 128))
-    assert TRAILING_PAD_ONLY.unmet(t, t, t, _packed(4, valid_kv_len=4)) is None
+    assert PACKED_KEYS.unmet(t, t, t, _packed(4)) is None
 
 
-def test_trailing_pad_only_checks_the_declared_length():
-    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+def test_packed_keys_accepts_a_declared_pad():
+    from xfuser.core.attention.constraints import PACKED_KEYS
 
     t = torch.empty((1, 2, 8, 128))
-    assert "valid_kv_len" in TRAILING_PAD_ONLY.unmet(t, t, t, _packed(9, valid_kv_len=9))
-    assert "valid_kv_len" in TRAILING_PAD_ONLY.unmet(t, t, t, _packed(4, valid_kv_len=0))
+    assert PACKED_KEYS.unmet(t, t, t, _packed(4, valid_kv_len=4)) is None
 
 
-def test_trailing_pad_only_requires_the_longest_segment_to_be_the_valid_count():
+def test_packed_keys_checks_a_declared_length():
+    """valid_kv_len licenses the cheaper route -- slice a trailing block
+    rather than gather -- so a wrong one drops or invents keys."""
+    from xfuser.core.attention.constraints import PACKED_KEYS
+
+    t = torch.empty((1, 2, 8, 128))
+    assert "valid_kv_len" in PACKED_KEYS.unmet(t, t, t, _packed(9, valid_kv_len=9))
+    assert "valid_kv_len" in PACKED_KEYS.unmet(t, t, t, _packed(4, valid_kv_len=0))
+
+
+def test_packed_keys_requires_the_longest_segment_to_be_the_valid_count():
     """A trailing pad has one run of real keys, so its longest segment is the
-    valid count. A disagreement means the pad is not trailing."""
-    from xfuser.core.attention.constraints import TRAILING_PAD_ONLY
+    valid count. A disagreement means the pad is not trailing, and slicing it
+    would be wrong -- caught here rather than gathered as if declared."""
+    from xfuser.core.attention.constraints import PACKED_KEYS
 
     t = torch.empty((1, 2, 8, 128))
-    reason = TRAILING_PAD_ONLY.unmet(t, t, t, _packed(6, valid_kv_len=4))
+    reason = PACKED_KEYS.unmet(t, t, t, _packed(6, valid_kv_len=4))
     assert reason is not None and "max_seqlen_k" in reason
 
 
-def test_dense_mha_v4_serves_a_declared_pad_but_sparge_does_not():
+def test_dense_mha_v4_serves_packed_keys_but_sparge_does_not():
     """Sparge needs the key length padded to its KV tile, which is exactly the
-    alignment a trailing-pad slice removes."""
+    alignment both a trailing-pad slice and a gather remove."""
     from xfuser.core.attention import registry
 
     t = torch.empty((1, 2, 8, 128))

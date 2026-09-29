@@ -13,10 +13,6 @@ from xfuser.core.attention.backends.aiter_mha_v4.spec import (
     DENSE_BACKENDS as AITER_MHA_V4_ONLY_BACKEND_SET,
 )
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
-
-# Both VSA-H3 backends declare the same sparsity strategy, so the set follows
-# from the specs rather than being listed here.
-VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 from xfuser.core.distributed import (
     get_runtime_state,
     get_vae_parallel_group,
@@ -39,6 +35,10 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadRoute,
 )
 
+
+# Both VSA-H3 backends declare the same sparsity strategy, so the set follows
+# from the specs rather than being listed here.
+VSA_H3_BACKENDS = attention_registry.types_where(sparsity=Sparsity.H3)
 
 # f4f4 is commented out of AITER's kernel manifest -- mxfp4 covers that row and claims the
 # same v_pack=1 FP6-P V order -- so selecting it lands on mxfp4 rather than a row of its own.

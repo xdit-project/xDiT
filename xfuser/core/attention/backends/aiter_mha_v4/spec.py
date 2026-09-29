@@ -9,10 +9,9 @@ Hadamard-rotation and varlen fallback, so it lives with those helpers. Its
 sparge variant is pure table and is generated below.
 """
 
-import functools
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Optional
 
 from xfuser.core.attention.requirements import ALWAYS, ARCH, NEVER, PARAM, Requirement, SYMBOL
 from xfuser.core.attention.constraints import (

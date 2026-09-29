@@ -9,12 +9,12 @@ import functools
 import importlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 
-from xfuser.core.attention.requirements import ALWAYS, Requirement
-from xfuser.core.attention.constraints import ANY_CALL, CallConstraint
+from xfuser.core.attention.requirements import Requirement
+from xfuser.core.attention.constraints import CallConstraint
 
 
 class AttentionBackendType(Enum):

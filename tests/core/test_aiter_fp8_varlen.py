@@ -5,7 +5,6 @@ The Hadamard matrix is replaced by a feature reversal, which is orthonormal
 and its own inverse, so "was Q/K rotated" is a flip rather than a tolerance.
 """
 
-from types import SimpleNamespace
 
 import pytest
 import torch

@@ -15,7 +15,6 @@ from xfuser.model_executor.models.runner_models.base_model import (
     DiffusionOutput,
     ModelCapabilities,
     ModelSettings,
-    _parse_attention_backend,
     register_model,
     xFuserModel,
 )

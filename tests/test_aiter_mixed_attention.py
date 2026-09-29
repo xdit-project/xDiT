@@ -125,7 +125,7 @@ def _require_mha_v4_recipe(backend_name):
     probe = torch.zeros((1, 1, 128, 128), device="cuda", dtype=torch.bfloat16)
     try:
         with torch.no_grad():
-            _run(backend_name, 
+            _run(backend_name,
                 probe, probe, probe, dropout_p=0.0, is_causal=False
             )
     except NotImplementedError as exc:
@@ -180,7 +180,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length, reque
 
     with torch.no_grad():
         reference = F.scaled_dot_product_attention(query, key, value)
-        output, lse = _run(backend_name, 
+        output, lse = _run(backend_name,
             query, key, value, dropout_p=0.0, is_causal=False
         )
 
@@ -302,7 +302,7 @@ def test_aiter_mixed_attention_unequal_sequence_lengths(backend_name):
     query = torch.randn((2, 5, 128, 128), device="cuda", dtype=torch.bfloat16)
     key = torch.randn((2, 5, 257, 128), device="cuda", dtype=torch.bfloat16)
     value = torch.randn_like(key)
-    output, _ = _run(backend_name, 
+    output, _ = _run(backend_name,
         query, key, value, dropout_p=0.0, is_causal=False
     )
 

@@ -23,7 +23,6 @@ from xfuser.core.attention.requirements import (
     SYMBOL,
     Requirement,
     _resolve_with_reason,
-    resolve,
 )
 from xfuser.core.attention.constraints import (
     ANY_CALL,
@@ -531,7 +530,9 @@ def test_a_spec_must_state_what_it_requires_accepts_and_rings():
     accident, and an omitted ``ring`` would claim an LSE the kernel may not
     produce. Saying ALWAYS, ANY_CALL or NEVER is no more work than saying
     nothing, and it distinguishes decided from forgotten."""
-    impl = lambda q, k, v, c: (q, None)
+    def impl(query, key, value, call):
+        return query, None
+
     stated = dict(requires=ALWAYS, accepts=ANY_CALL, ring=NEVER)
 
     for omitted in stated:

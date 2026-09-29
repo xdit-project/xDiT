@@ -29,7 +29,6 @@ from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall
-from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,

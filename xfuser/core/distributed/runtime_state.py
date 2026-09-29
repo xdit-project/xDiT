@@ -1,6 +1,4 @@
 from abc import ABCMeta
-import importlib
-import inspect
 import random
 from typing import List, Optional, Tuple
 
@@ -478,7 +476,7 @@ class DiTRuntimeState(RuntimeState):
         self.attention_schedule = attention_schedule
         self.schedule_total_steps = torch.tensor(total_steps, dtype=torch.int)
         self.step_counter = torch.tensor(0, dtype=torch.int)
-        warn_once(logger, 
+        warn_once(logger,
             "Per-step attention schedule over %d steps: %s.",
             total_steps,
             _summarise_schedule(attention_schedule.backends),
@@ -687,7 +685,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            warn_once(logger, 
+            warn_once(logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -796,7 +794,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            warn_once(logger, 
+            warn_once(logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -905,7 +903,7 @@ class DiTRuntimeState(RuntimeState):
             latents_height + pipeline_patches_height - 1
         ) // pipeline_patches_height
         if num_pipeline_patch != self.num_pipeline_patch:
-            warn_once(logger, 
+            warn_once(logger,
                 f"Pipeline patches num changed from "
                 f"{self.num_pipeline_patch} to {num_pipeline_patch} due "
                 f"to input size and parallelisation requirements"
@@ -1045,7 +1043,7 @@ def get_runtime_state():
 def initialize_runtime_state(pipeline: Optional[DiffusionPipeline] = None, engine_config: Optional[EngineConfig] = None):
     global _RUNTIME
     if _RUNTIME is not None:
-        warn_once(logger, 
+        warn_once(logger,
             "Runtime state is already initialized, reinitializing with pipeline..."
         )
     if hasattr(pipeline, "transformer"):

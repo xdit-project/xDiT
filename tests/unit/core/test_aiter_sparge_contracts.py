@@ -28,15 +28,16 @@ _MHA_V4_GFX942_SPARGE_BACKENDS = (
 )
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def aiter_format_api(monkeypatch):
+    """Stand-in format enums for mocked launches."""
     from xfuser.core.distributed import attention_backend as ab
 
     monkeypatch.setattr(ab, "_aiter_native_fp8_format", lambda: 4, raising=False)
     monkeypatch.setattr(
         ab,
         "_AiterAttentionFormat",
-        SimpleNamespace(INT8=1, MXFP4=2, MXFP6=3),
+        SimpleNamespace(BF16=0, INT8=1, MXFP4=2, MXFP6=3),
         raising=False,
     )
     monkeypatch.setattr(
@@ -108,7 +109,7 @@ def test_triton_sparge_backends_remain_registered():
     assert ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_SPARGE_V2] is _aiter_sparge_v2_attn_call
 
 
-def test_fp8_sparge_passes_block_mask_to_mha_v4(monkeypatch):
+def test_fp8_sparge_passes_block_mask_to_mha_v4(monkeypatch, aiter_format_api):
     from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.distributed.attention_backend import AttentionBackendType
 
@@ -146,7 +147,7 @@ def test_fp8_sparge_passes_block_mask_to_mha_v4(monkeypatch):
     assert captured["used_packed"] is False
 
 
-def test_fp8_sparge_uses_gfx942_kv_tile(monkeypatch):
+def test_fp8_sparge_uses_gfx942_kv_tile(monkeypatch, aiter_format_api):
     from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.distributed.attention_backend import AttentionBackendType
 
@@ -176,7 +177,7 @@ def test_fp8_sparge_uses_gfx942_kv_tile(monkeypatch):
     assert tuple(captured["block_mask"].shape) == (1, 2, 2, 8)
 
 
-def test_mxfp8_sparge_rejected_on_gfx942(monkeypatch):
+def test_mxfp8_sparge_rejected_on_gfx942(monkeypatch, aiter_format_api):
     from xfuser.core.distributed import attention_backend as ab
     from xfuser.core.distributed.attention_backend import AttentionBackendType
 
@@ -195,7 +196,7 @@ def test_mxfp8_sparge_rejected_on_gfx942(monkeypatch):
 
 
 @pytest.mark.parametrize("scale_modes", [True, False])
-def test_mxfp8_sparge_passes_block_mask_to_selected_launch(monkeypatch, scale_modes):
+def test_mxfp8_sparge_passes_block_mask_to_selected_launch(monkeypatch, scale_modes, aiter_format_api):
     """The block mask must reach whichever MXFP8 entrypoint the build selects.
 
     Newer AITER deprecates mha_v4_mxfp8 (its DeprecationWarning breaks Dynamo
@@ -264,7 +265,7 @@ def test_mxfp8_sparge_passes_block_mask_to_selected_launch(monkeypatch, scale_mo
 
 
 @pytest.mark.parametrize("backend_name", _MHA_V4_SPARGE_BACKENDS)
-def test_mha_v4_sparge_rejects_causal_and_dropout(backend_name):
+def test_mha_v4_sparge_rejects_causal_and_dropout(backend_name, aiter_format_api):
     from xfuser.core.distributed.attention_backend import (
         ATTENTION_FUNCTION_REGISTRY,
         AttentionBackendType,

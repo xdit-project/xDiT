@@ -1,58 +1,45 @@
-import os
-import torch
-import unittest
 import pytest
-from diffusers.models.attention import FeedForward
-from xfuser.model_executor.layers.feedforward import xFuserFeedForwardWrapper
-from xfuser.core.distributed import (
-    init_distributed_environment,
-    initialize_model_parallel,
-)
-from torch import distributed as dist
 
-from xfuser.core.distributed.parallel_state import (
-    destroy_distributed_environment,
-    destroy_model_parallel,
-)
+pytestmark = pytest.mark.multi_gpu
 
-pytestmark = [pytest.mark.accelerator, pytest.mark.multi_gpu]
+_WORLD_SIZE = 2
 
 
-class TestFeedForward(unittest.TestCase):
-    def setUp(self):
-        if not torch.cuda.is_available() or "RANK" not in os.environ:
-            self.skipTest("run with torchrun on an accelerator host")
-        init_distributed_environment()
+def _feedforward_worker(rank, world_size, init_method):
+    import torch
+    import torch.distributed as dist
+    from diffusers.models.attention import FeedForward
 
-        self.world_size = dist.get_world_size()
-        self.local_rank = dist.get_rank()
+    from xfuser.core.distributed import init_distributed_environment, initialize_model_parallel
+    from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from xfuser.model_executor.layers.feedforward import xFuserFeedForwardWrapper
 
-        initialize_model_parallel(tensor_parallel_degree=self.world_size)
+    torch.cuda.set_device(rank)
+    init_distributed_environment(
+        rank=rank,
+        world_size=world_size,
+        local_rank=rank,
+        distributed_init_method=init_method,
+    )
+    initialize_model_parallel(tensor_parallel_degree=world_size)
+    try:
+        torch.manual_seed(0)
+        inputs = torch.ones(1, 20, device=rank)
+        dist.broadcast(inputs, src=0)
 
-    def tearDown(self):
+        torch.manual_seed(0)
+        reference = FeedForward(20, 5, bias=True, activation_fn="geglu").to(rank)
+        for param in reference.parameters():
+            dist.broadcast(param.data, src=0)
+
+        expected = reference(inputs)
+        wrapped = xFuserFeedForwardWrapper(reference)
+        actual = wrapped(inputs)
+        assert torch.allclose(expected, actual, atol=1e-2)
+    finally:
         destroy_model_parallel()
         destroy_distributed_environment()
 
-    def test_feedforward(self):
-        torch.manual_seed(0)
-        self.input_data = torch.ones(1, 20).cuda(self.local_rank)
-        dist.broadcast(self.input_data, src=0)
 
-        torch.manual_seed(0)
-        self.model1 = FeedForward(20, 5, bias=True, activation_fn="geglu").cuda(self.local_rank)
-
-        # Broadcast the parameters
-        for param in self.model1.parameters():
-            dist.broadcast(param.data, src=0)
-
-        output1 = self.model1(self.input_data)
-
-        self.model2 = xFuserFeedForwardWrapper(self.model1)
-        output2 = self.model2(self.input_data)
-
-        self.assertTrue(torch.allclose(output1, output2, atol=1e-2))
-
-
-# torchrun --nproc_per_node=2 tests/integration/accelerator/model_executor/layers/test_feedforward.py
-if __name__ == "__main__":
-    unittest.main()
+def test_feedforward_matches_diffusers(accelerator_ranks):
+    accelerator_ranks(_feedforward_worker, world_size=_WORLD_SIZE)

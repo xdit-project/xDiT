@@ -1,7 +1,5 @@
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
-import os
 import pytest
 
 
@@ -15,28 +13,37 @@ from xfuser.model_executor.layers.attention_processor import (
 
 from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.core.distributed import (
+    get_runtime_state,
     init_distributed_environment,
     initialize_model_parallel,
+    initialize_runtime_state,
 )
+from xfuser.core.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+from xfuser.config.args import xFuserArgs
 
 
-def init_process(rank, world_size, init_method, fn, run_attn_test):
-    """Initialize the distributed environment."""
-
-    os.environ["LOCAL_RANK"] = str(rank)
-
+def _attention_worker(rank, world_size, init_method, attn_type):
+    """Initialize sequence parallelism, then compare one attention processor."""
+    torch.cuda.set_device(rank)
+    init_distributed_environment(
+        rank=rank,
+        world_size=world_size,
+        local_rank=rank,
+        distributed_init_method=init_method,
+    )
+    initialize_model_parallel(ring_degree=1, ulysses_degree=world_size)
     try:
-        init_distributed_environment(
-            rank=rank,
-            world_size=world_size,
-            local_rank=rank,
-            distributed_init_method=init_method,
-        )
-        initialize_model_parallel(ring_degree=1, ulysses_degree=world_size)
-        fn(rank, world_size, run_attn_test)
+        args = xFuserArgs()
+        args.ulysses_degree = world_size
+        args.ring_degree = 1
+        engine_config, _ = args.create_config()
+        initialize_runtime_state(engine_config=engine_config)
+        # Match the diffusers processor, which uses PyTorch SDPA.
+        get_runtime_state().set_attention_backend("SDPA")
+        run_attn_test(rank, world_size, attn_type)
     finally:
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        destroy_model_parallel()
+        destroy_distributed_environment()
 
 
 def run_attn_test(rank, world_size, attn_type: str):
@@ -130,32 +137,10 @@ def run_attn_test(rank, world_size, attn_type: str):
 
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize("attn_type", ["HunyuanDiT"])
-def test_multi_process(attn_type, tmp_path):
-    world_size = 4  # Number of processes
-    if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
-        pytest.skip(f"requires {world_size} accelerator devices")
-
-    init_method = f"file://{tmp_path / 'attention-processor-init'}"
-    processes = []
-
-    mp.set_start_method("spawn", force=True)
-
-    for rank in range(world_size):
-        p = mp.Process(
-            target=init_process,
-            args=(rank, world_size, init_method, run_attn_test, attn_type),
-        )
-        p.start()
-        processes.append(p)
-
-    for p in processes:
-        p.join(timeout=120)
-    for p in processes:
-        if p.is_alive():
-            p.terminate()
-            p.join(timeout=5)
-        assert p.exitcode == 0, "One or more processes failed"
-
-
-if __name__ == "__main__":
-    test_multi_process("HunyuanDiT")
+def test_multi_process(attn_type, accelerator_ranks):
+    accelerator_ranks(
+        _attention_worker,
+        world_size=4,
+        init_filename="attention-processor-init",
+        args=(attn_type,),
+    )

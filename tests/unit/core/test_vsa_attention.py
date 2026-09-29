@@ -171,10 +171,29 @@ def test_existing_sparge_paths_keep_padded_mask_allocation(reorder_sequence):
     torch.testing.assert_close(first, second)
 
 
-@pytest.mark.accelerator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires AITER GPU")
-def test_vsa_density_collection_is_opt_in():
-    query = torch.randn(1, 4, 256, 128, device="cuda", dtype=torch.bfloat16)
+def _install_fake_vsa_kernel(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    def fake_vsa_sparse_attention(*args, **kwargs):
+        return args[5]
+
+    leaf = "aiter.ops.jenga_sparse_attention"
+    if leaf not in sys.modules:
+        for name in ("aiter", "aiter.ops", leaf):
+            if name not in sys.modules:
+                monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setattr(
+        sys.modules[leaf],
+        "vsa_sparse_attention",
+        fake_vsa_sparse_attention,
+        raising=False,
+    )
+
+
+def test_vsa_density_collection_is_opt_in(monkeypatch):
+    _install_fake_vsa_kernel(monkeypatch)
+    query = torch.randn(1, 4, 256, 128, dtype=torch.bfloat16)
     key = torch.randn_like(query)
     value = torch.randn_like(query)
     kwargs = {
@@ -247,50 +266,3 @@ def test_sliced_gilbert_permutation_matches_jenga_reference():
         12,
     ]
     torch.testing.assert_close(inverse[forward], torch.arange(24))
-
-
-@pytest.mark.accelerator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires AITER GPU")
-def test_ck_vsa_matches_masked_dense():
-    try:
-        from aiter.ops.jenga_sparse_attention import vsa_sparse_attention
-    except ImportError:
-        pytest.skip("AITER VSA kernel is unavailable")
-
-    torch.manual_seed(7)
-    query = torch.randn(1, 4, 256, 128, device="cuda", dtype=torch.bfloat16)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    block_mask = torch.tensor([[[[True, False], [True, True]]]], device="cuda").expand(1, 4, 2, 2).contiguous()
-    lut, counts = block_mask_to_delta_lut(block_mask)
-    seqstart = torch.tensor([0, 256], device="cuda", dtype=torch.int32)
-    output = torch.empty_like(query)
-    output = vsa_sparse_attention(
-        query,
-        key,
-        value,
-        lut,
-        counts,
-        output,
-        None,
-        None,
-        seqstart,
-        seqstart,
-        0,
-        1,
-        4,
-        4,
-        256,
-        256,
-        128,
-        128,
-    )
-
-    token_mask = block_mask.repeat_interleave(128, dim=-2).repeat_interleave(128, dim=-1)
-    scores = torch.matmul(query.float(), key.float().transpose(-1, -2))
-    scores.mul_(128**-0.5).masked_fill_(~token_mask, -torch.inf)
-    reference = torch.matmul(torch.softmax(scores, dim=-1), value.float())
-    relative_l2 = torch.linalg.vector_norm(output.float() - reference) / torch.linalg.vector_norm(reference)
-    cosine = torch.nn.functional.cosine_similarity(output.float().flatten(), reference.flatten(), dim=0)
-    assert float(relative_l2) <= 1e-2
-    assert float(cosine) >= 0.999

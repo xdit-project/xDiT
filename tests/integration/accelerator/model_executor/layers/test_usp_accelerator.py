@@ -30,22 +30,38 @@ def _init_environment():
     initialize_model_parallel(ring_degree=1, ulysses_degree=1)
 
 
+def _shutdown_distributed():
+    if torch.distributed.is_initialized():
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+def _pytorch_sdpa_attn_type():
+    """PyTorch SDPA backend that matches USP's ``sdpa_flash`` comparison.
+
+    Current yunchang builds have no ``AttnType.TORCH``. ``TORCH_FLASH`` is the
+    SDPA flash kernel; older builds exposed a single ``TORCH`` member instead.
+    """
+    for name in ("TORCH_FLASH", "TORCH"):
+        attn_type = getattr(AttnType, name, None)
+        if attn_type is not None:
+            return attn_type
+    return None
+
+
 class TestUSP(unittest.TestCase):
     def setUp(self):
         if not torch.cuda.is_available():
             self.skipTest("requires an accelerator")
         _init_environment()
+        # setUp failures skip tearDown, and initialize_model_parallel refuses a second call.
+        self.addCleanup(_shutdown_distributed)
         self.env_info = PACKAGES_CHECKER.get_packages_info()
         self.runtime_state = get_runtime_state()
         self.default_comparison_backend = "sdpa_flash"
         self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
         self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
-
-    def tearDown(self):
-        if torch.distributed.is_initialized():
-            destroy_model_parallel()
-            destroy_distributed_environment()
 
     def _run_usp_comparison(self, attention_backend):
         self.runtime_state.set_attention_backend(self.default_comparison_backend)
@@ -73,6 +89,7 @@ class TestUSP(unittest.TestCase):
         result_diff = (fsdpa_results - comparison_results).abs().max()
         return result_diff
 
+    @pytest.mark.nvidia
     def test_usp_flash_attn(self):
         """
         Verifies USP results with flash_attn are close to F.SDPA results
@@ -85,6 +102,7 @@ class TestUSP(unittest.TestCase):
         self.assertNotEqual(result_diff, 0)  # Different implementations won't produce same output
         self.assertAlmostEqual(result_diff.item(), 0, places=1)  # Difference can be 0.15ish
 
+    @pytest.mark.nvidia
     def test_ring_attn_flash_attn(self):
         """
         Verifies ring_attn results with flash_attn are close to F.SDPA results
@@ -210,19 +228,19 @@ class TestUSPHybridParallel(unittest.TestCase):
     def setUp(self):
         if not torch.cuda.is_available():
             self.skipTest("requires an accelerator")
+        attn_type = _pytorch_sdpa_attn_type()
+        if attn_type is None:
+            self.skipTest("yunchang has no PyTorch SDPA attention type")
         _init_environment()
+        self.addCleanup(_shutdown_distributed)
         self.runtime_state = get_runtime_state()
         self.runtime_state.set_attention_backend("sdpa_flash")
-        self.query = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
-        self.key = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
-        self.value = torch.randn(1, 24, 14867, 128, device="cuda", dtype=torch.bfloat16)
+        # One rank does not need a full-frame sequence. Head dim 128 keeps SDPA flash eligible.
+        self.query = torch.randn(1, 8, 128, 128, device="cuda", dtype=torch.bfloat16)
+        self.key = torch.randn(1, 8, 128, 128, device="cuda", dtype=torch.bfloat16)
+        self.value = torch.randn(1, 8, 128, 128, device="cuda", dtype=torch.bfloat16)
 
-        self.hybrid_seq_parallel_attn = xFuserLongContextAttention(attn_type=AttnType.TORCH)
-
-    def tearDown(self):
-        if torch.distributed.is_initialized():
-            destroy_model_parallel()
-            destroy_distributed_environment()
+        self.hybrid_seq_parallel_attn = xFuserLongContextAttention(attn_type=attn_type)
 
     def test_usp_hybrid_equivalence(self):
         """
@@ -247,7 +265,7 @@ class TestUSPHybridParallel(unittest.TestCase):
         Tests the output from USP with joint tensors added is equivalent to hybrid seq
         parallel attn.
         """
-        joint_shape = (1, 24, 64, 128)
+        joint_shape = (1, 8, 32, 128)
 
         joint_query = torch.randn(joint_shape, device="cuda", dtype=torch.bfloat16)
         joint_key = torch.randn(joint_shape, device="cuda", dtype=torch.bfloat16)
@@ -279,112 +297,3 @@ class TestUSPHybridParallel(unittest.TestCase):
 
         result_diff = (usp_results - hybrid_results).abs().max().float().cpu().numpy()
         self.assertAlmostEqual(result_diff, 0, places=3)
-
-
-class TestUSPCombinedQKV(unittest.TestCase):
-    # These CPU contracts live in tests/unit/model_executor/layers/test_usp.py.
-    __test__ = False
-
-    @unittest.mock.patch("xfuser.model_executor.layers.usp.get_ulysses_parallel_world_size")
-    @unittest.mock.patch("xfuser.model_executor.layers.usp._sdpa_all_to_all_single")
-    def test_combined_qkv_all_to_all(self, mock_all_to_all, mock_world_size):
-        """
-        Verifies that _combined_qkv_all_to_all produces identical results to
-        calling _ft_c_input_all_to_all separately for Q, K, and V.
-        """
-        # 1. Mock the world size to be > 1 to trigger the distributed logic
-        world_size = 2
-        mock_world_size.return_value = world_size
-
-        # 2. Mock the collective communication to be an identity function.
-        #    This isolates the test to verify that the reshaping, stacking,
-        #    and permuting logic is mathematically consistent between the two approaches.
-        mock_all_to_all.side_effect = lambda x: x
-
-        # 3. Setup input tensors
-        b, h, s, d = 2, 4, 128, 64
-        # Ensure heads are divisible by world_size as required by the implementation
-        self.assertTrue(h % world_size == 0)
-
-        q = torch.randn(b, h, s, d)
-        k = torch.randn(b, h, s, d)
-        v = torch.randn(b, h, s, d)
-        extra = torch.randn(b, h, s, d)
-
-        # 4. Run separate calls (Baseline)
-        q_out_sep = usp._ft_c_input_all_to_all(q)
-        k_out_sep = usp._ft_c_input_all_to_all(k)
-        v_out_sep = usp._ft_c_input_all_to_all(v)
-
-        # 5. Run combined call (Target)
-        q_out_comb, k_out_comb, v_out_comb = usp._combined_qkv_all_to_all(q, k, v)
-        torch.testing.assert_close(q_out_sep, q_out_comb, msg="Q tensors mismatch")
-        torch.testing.assert_close(k_out_sep, k_out_comb, msg="K tensors mismatch")
-        torch.testing.assert_close(v_out_sep, v_out_comb, msg="V tensors mismatch")
-
-        q_out_comb, k_out_comb, v_out_comb, extra_out = usp._combined_qkv_all_to_all(q, k, v, extra)
-        torch.testing.assert_close(q_out_sep, q_out_comb, msg="Q tensors mismatch with extra")
-        torch.testing.assert_close(k_out_sep, k_out_comb, msg="K tensors mismatch with extra")
-        torch.testing.assert_close(v_out_sep, v_out_comb, msg="V tensors mismatch with extra")
-        torch.testing.assert_close(extra_out, usp._ft_c_input_all_to_all(extra), msg="extra tensor mismatch")
-
-    @unittest.mock.patch("xfuser.model_executor.layers.usp.get_ulysses_parallel_world_size")
-    @unittest.mock.patch("xfuser.model_executor.layers.usp._sdpa_all_to_all_single")
-    def test_combined_gqa_qkv_all_to_all(self, mock_all_to_all, mock_world_size):
-        """Compact GQA exchange matches separate Q/K/V all-to-all calls."""
-        world_size = 2
-        mock_world_size.return_value = world_size
-        mock_all_to_all.side_effect = lambda x: x
-
-        batch, query_heads, kv_heads, sequence, head_dim = 2, 6, 2, 8, 4
-        query = torch.randn(batch, query_heads, sequence, head_dim)
-        key = torch.randn(batch, kv_heads, sequence, head_dim)
-        value = torch.randn(batch, kv_heads, sequence, head_dim)
-        extra = torch.randn_like(query)
-
-        expected = (
-            usp._ft_c_input_all_to_all(query),
-            usp._ft_c_input_all_to_all(key),
-            usp._ft_c_input_all_to_all(value),
-            usp._ft_c_input_all_to_all(extra),
-        )
-        actual = usp._combined_gqa_qkv_all_to_all(query, key, value, extra)
-
-        self.assertEqual(mock_all_to_all.call_count, 5)
-        for expected_tensor, actual_tensor in zip(expected, actual):
-            torch.testing.assert_close(actual_tensor, expected_tensor)
-
-    def test_repeat_kv_heads_preserves_gqa_order(self):
-        key = torch.tensor([[[[0.0]], [[1.0]]]])
-        value = key + 10
-
-        repeated_key, repeated_value = usp._repeat_kv_heads(key, value, repeats=3)
-
-        torch.testing.assert_close(repeated_key.flatten(), torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]))
-        torch.testing.assert_close(
-            repeated_value.flatten(),
-            torch.tensor([10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
-        )
-
-    def test_ulysses_extra_inputs_are_named_by_the_caller(self):
-        """USP exchanges whatever keys a backend lists, without knowing their meaning."""
-        query = torch.randn(1, 2, 8, 4)
-        gate = torch.randn_like(query)
-        attention_kwargs = {
-            usp.ULYSSES_EXTRA_INPUTS_KEY: ("some_backend_tensor",),
-            "some_backend_tensor": gate,
-        }
-
-        self.assertEqual(
-            usp._ulysses_extra_inputs(attention_kwargs, query),
-            [("some_backend_tensor", gate)],
-        )
-        self.assertEqual(usp._ulysses_extra_inputs({}, query), [])
-        self.assertEqual(
-            usp._ulysses_extra_inputs({usp.ULYSSES_EXTRA_INPUTS_KEY: ("missing",)}, query),
-            [],
-        )
-
-        attention_kwargs["some_backend_tensor"] = torch.randn(1, 2, 8, 5)
-        with self.assertRaisesRegex(ValueError, "some_backend_tensor"):
-            usp._ulysses_extra_inputs(attention_kwargs, query)

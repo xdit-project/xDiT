@@ -233,9 +233,7 @@ def test_h3_vsa_kv_blocks_select_the_reference_tile_set(prefix_segments, video_s
 
     # Prefix query tiles are dense and do not read their rows.
     video_queries = slice(metadata.num_prefix_tiles, None)
-    assert torch.equal(
-        rebuilt[..., video_queries, :], reference[..., video_queries, :]
-    )
+    assert torch.equal(rebuilt[..., video_queries, :], reference[..., video_queries, :])
     # Every block on the partial list is padded and every full one is not, so
     # FlexAttention only runs mask_mod where padding actually exists.
     for counts, indices, expect_partial in (
@@ -366,9 +364,7 @@ def test_h3_vsa_attention_backends_agree_with_the_dense_reference(use_triton):
     "prefix_segments,video_shape",
     [((65, 3), (5, 6, 7)), ((11, 150), (9, 8, 11))],
 )
-def test_h3_vsa_attention_prefix_rows_are_dense(
-    use_triton, prefix_segments, video_shape
-):
+def test_h3_vsa_attention_prefix_rows_are_dense(use_triton, prefix_segments, video_shape):
     """Prefix query rows must be full attention plus the gated compression.
 
     FastVideo trains FastH3 with every non-video query attending to every key
@@ -382,35 +378,19 @@ def test_h3_vsa_attention_prefix_rows_are_dense(
 
     torch.manual_seed(0)
     device = torch.device("cuda")
-    metadata = build_h3_vsa_metadata(
-        prefix_segments=prefix_segments, video_shape=video_shape, device=device
-    )
+    metadata = build_h3_vsa_metadata(prefix_segments=prefix_segments, video_shape=video_shape, device=device)
     shape = (1, 4, metadata.total_seq_length, 64)
-    query, key, value, gate = (
-        torch.randn(shape, device=device, dtype=torch.bfloat16) for _ in range(4)
-    )
+    query, key, value, gate = (torch.randn(shape, device=device, dtype=torch.bfloat16) for _ in range(4))
 
-    actual = h3_vsa_attention(
-        query, key, value, gate, metadata, use_triton=use_triton
-    )
+    actual = h3_vsa_attention(query, key, value, gate, metadata, use_triton=use_triton)
 
     rows = metadata.num_prefix_tokens
     assert rows == sum(prefix_segments)
-    dense = torch.nn.functional.scaled_dot_product_attention(
-        query[:, :, :rows].float(), key.float(), value.float()
-    )
-    pooled = [
-        pool_h3_vsa_tiles(tile_h3_vsa_bhsd(tensor.float(), metadata), metadata)
-        for tensor in (query, key, value)
-    ]
+    dense = torch.nn.functional.scaled_dot_product_attention(query[:, :, :rows].float(), key.float(), value.float())
+    pooled = [pool_h3_vsa_tiles(tile_h3_vsa_bhsd(tensor.float(), metadata), metadata) for tensor in (query, key, value)]
     compressed = torch.nn.functional.scaled_dot_product_attention(*pooled)
-    expected = dense + (
-        compressed.index_select(2, metadata.packed_token_tile[:rows])
-        * gate[:, :, :rows].float()
-    )
-    torch.testing.assert_close(
-        actual[:, :, :rows].float(), expected, rtol=2e-2, atol=2e-2
-    )
+    expected = dense + (compressed.index_select(2, metadata.packed_token_tile[:rows]) * gate[:, :, :rows].float())
+    torch.testing.assert_close(actual[:, :, :rows].float(), expected, rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize(

@@ -65,9 +65,7 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
     arch_name = getattr(torch.cuda.get_device_properties(0), "gcnArchName", "")
     arch = next((name for name in supported_arches if name in arch_name), None)
     if arch is None:
-        pytest.skip(
-            f"AITER {backend_name} attention requires {supported_arches}, got {arch_name}."
-        )
+        pytest.skip(f"AITER {backend_name} attention requires {supported_arches}, got {arch_name}.")
 
     try:
         import aiter
@@ -87,9 +85,7 @@ def _require_mha_v4_aiter(backend_name, supported_arches=("gfx950",)):
             del mha_v4_mxfp8
 
     del mha_v4
-    kernel_dir = (
-        Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
-    )
+    kernel_dir = Path(aiter.__file__).resolve().parent.parent / "hsa" / arch / "fmha_v4_fwd"
     kernel_name = backend_name.removeprefix("AITER_").lower()
     candidates = [kernel_dir / f"fwd_hd128_{kernel_name}.co"]
     if arch == "gfx942":
@@ -154,9 +150,7 @@ def test_aiter_mixed_attention_matches_sdpa(backend_name, sequence_length):
 
     output_float = output.float()
     reference_float = reference.float()
-    cosine_similarity = F.cosine_similarity(
-        output_float.flatten(), reference_float.flatten(), dim=0
-    ).item()
+    cosine_similarity = F.cosine_similarity(output_float.flatten(), reference_float.flatten(), dim=0).item()
 
     assert output.shape == reference.shape
     assert torch.isfinite(output).all()
@@ -221,12 +215,7 @@ def test_aiter_mxfp8_gqa_compiles_and_matches_sdpa():
 
     assert output.shape == query.shape
     assert torch.isfinite(output).all()
-    assert (
-        F.cosine_similarity(
-            output.float().flatten(), reference.float().flatten(), dim=0
-        ).item()
-        > 0.95
-    )
+    assert F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item() > 0.95
 
 
 @pytest.mark.parametrize(
@@ -308,9 +297,7 @@ def test_aiter_i8fp8_attention_compiles_fullgraph():
     attention_function = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_I8FP8]
 
     def attention(query, key, value):
-        return attention_function(
-            query, key, value, dropout_p=0.0, is_causal=False
-        )[0]
+        return attention_function(query, key, value, dropout_p=0.0, is_causal=False)[0]
 
     output = torch.compile(attention, fullgraph=True)(query, key, value)
     assert output.shape == query.shape
@@ -332,16 +319,12 @@ def test_aiter_fp8_attention_compiles_fullgraph_with_mha_v4():
     attention_function = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_FP8]
 
     def attention(query, key, value):
-        return attention_function(
-            query, key, value, dropout_p=0.0, is_causal=False
-        )[0]
+        return attention_function(query, key, value, dropout_p=0.0, is_causal=False)[0]
 
     output = torch.compile(attention, fullgraph=True)(query, key, value)
     assert output.shape == query.shape
     assert torch.isfinite(output).all()
-    assert F.cosine_similarity(
-        output.float().flatten(), reference.float().flatten(), dim=0
-    ).item() > 0.995
+    assert F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item() > 0.995
 
 
 def test_aiter_mha_v4_rejects_causal_attention():
@@ -357,9 +340,7 @@ def test_aiter_mha_v4_rejects_causal_attention():
             NotImplementedError,
             match="does not support causal masking",
         ):
-            ATTENTION_FUNCTION_REGISTRY[backend](
-                tensor, tensor, tensor, dropout_p=0.0, is_causal=True
-            )
+            ATTENTION_FUNCTION_REGISTRY[backend](tensor, tensor, tensor, dropout_p=0.0, is_causal=True)
 
 
 def test_aiter_low_precision_attention_rejects_dropout():
@@ -372,9 +353,7 @@ def test_aiter_low_precision_attention_rejects_dropout():
     for backend in AITER_LOW_PRECISION_BACKENDS:
         _require_mha_v4_aiter(backend.name)
         with pytest.raises(NotImplementedError, match="does not support dropout"):
-            ATTENTION_FUNCTION_REGISTRY[backend](
-                tensor, tensor, tensor, dropout_p=0.1, is_causal=False
-            )
+            ATTENTION_FUNCTION_REGISTRY[backend](tensor, tensor, tensor, dropout_p=0.1, is_causal=False)
 
 
 def test_krea2_can_select_the_mha_v4_backends():
@@ -388,8 +367,7 @@ def test_krea2_can_select_the_mha_v4_backends():
         _KREA2_SUPPORTED_ATTN_BACKENDS,
     )
 
-    unsupported = [b.name for b in AITER_MHA_V4_ONLY_BACKENDS
-                   if b not in _KREA2_SUPPORTED_ATTN_BACKENDS]
+    unsupported = [b.name for b in AITER_MHA_V4_ONLY_BACKENDS if b not in _KREA2_SUPPORTED_ATTN_BACKENDS]
     assert not unsupported, unsupported
 
 
@@ -461,21 +439,15 @@ def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
     torch.manual_seed(7)
     batch, heads, head_dim = 2, 4, 128
     padded, valid = 384, (300, 137)
-    query = torch.randn(
-        (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
-    )
+    query = torch.randn((batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16)
     key = torch.randn_like(query)
     value = torch.randn_like(query)
 
     # indices_k names the surviving rows of the flattened (batch * padded) key tensor.
-    indices_k = torch.cat(
-        [torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)]
-    )
+    indices_k = torch.cat([torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)])
     attention_kwargs = {
         "indices_k": indices_k,
-        "cu_seqlens_k": torch.tensor(
-            [0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"
-        ),
+        "cu_seqlens_k": torch.tensor([0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"),
         "max_seqlen_k": max(valid),
     }
 
@@ -491,12 +463,8 @@ def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
 
     assert output.shape == query.shape
     for b, n in enumerate(valid):
-        reference = F.scaled_dot_product_attention(
-            query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n]
-        )
-        cosine = F.cosine_similarity(
-            output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0
-        )
+        reference = F.scaled_dot_product_attention(query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n])
+        cosine = F.cosine_similarity(output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0)
         assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
 
 
@@ -526,14 +494,10 @@ def test_aiter_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len(
         key[b, :, n:] = 50.0
         value[b, :, n:] = 50.0
 
-    indices_k = torch.cat(
-        [torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)]
-    )
+    indices_k = torch.cat([torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)])
     attention_kwargs = {
         "indices_k": indices_k,
-        "cu_seqlens_k": torch.tensor(
-            [0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"
-        ),
+        "cu_seqlens_k": torch.tensor([0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"),
         "max_seqlen_k": max(valid),
         "valid_kv_len": max(valid),
     }
@@ -549,18 +513,12 @@ def test_aiter_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len(
         )
 
     for b, n in enumerate(valid):
-        reference = F.scaled_dot_product_attention(
-            query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n]
-        )
-        cosine = F.cosine_similarity(
-            output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0
-        ).item()
+        reference = F.scaled_dot_product_attention(query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n])
+        cosine = F.cosine_similarity(output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0).item()
         assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
 
 
-@pytest.mark.parametrize(
-    "backend_name", ["AITER_I8FP8", "AITER_MXFP8", "AITER_MXFP6", "AITER_F8F6"]
-)
+@pytest.mark.parametrize("backend_name", ["AITER_I8FP8", "AITER_MXFP8", "AITER_MXFP6", "AITER_F8F6"])
 def test_aiter_mha_v4_rejects_multi_sequence_padding_off_the_bf16_rows(backend_name):
     """Only the BF16 Q/K objects read seqlens_k, so the rest must say so rather than attend padding.
 
@@ -577,15 +535,8 @@ def test_aiter_mha_v4_rejects_multi_sequence_padding_off_the_bf16_rows(backend_n
     heads, head_dim, padded = 4, 128, 384
 
     def run(batch, valid):
-        query = torch.randn(
-            (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
-        )
-        indices_k = torch.cat(
-            [
-                torch.arange(b * padded, b * padded + n, device="cuda")
-                for b, n in enumerate(valid)
-            ]
-        )
+        query = torch.randn((batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16)
+        indices_k = torch.cat([torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)])
         cumulative = torch.tensor(valid, device="cuda").cumsum(0)
         with torch.no_grad():
             return ATTENTION_FUNCTION_REGISTRY[backend](
@@ -596,9 +547,7 @@ def test_aiter_mha_v4_rejects_multi_sequence_padding_off_the_bf16_rows(backend_n
                 is_causal=False,
                 attention_kwargs={
                     "indices_k": indices_k,
-                    "cu_seqlens_k": torch.cat(
-                        [torch.zeros(1, device="cuda"), cumulative]
-                    ).to(torch.int32),
+                    "cu_seqlens_k": torch.cat([torch.zeros(1, device="cuda"), cumulative]).to(torch.int32),
                     "max_seqlen_k": max(valid),
                 },
             )
@@ -633,9 +582,7 @@ def test_aiter_mha_v4_serves_single_sequence_padding():
     }
 
     with torch.no_grad():
-        reference = F.scaled_dot_product_attention(
-            query, key[:, :, :valid], value[:, :, :valid]
-        )
+        reference = F.scaled_dot_product_attention(query, key[:, :, :valid], value[:, :, :valid])
         output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
             query,
             key,
@@ -646,9 +593,7 @@ def test_aiter_mha_v4_serves_single_sequence_padding():
         )
 
     assert output.shape == reference.shape
-    cosine = F.cosine_similarity(
-        output.float().flatten(), reference.float().flatten(), dim=0
-    )
+    cosine = F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0)
     assert cosine > 0.99, f"cosine {cosine.item()}"
 
 
@@ -674,9 +619,9 @@ def test_aiter_mha_v4_falls_back_to_v3_off_head_dim_128(head_dim):
 
     with torch.no_grad():
         reference = F.scaled_dot_product_attention(query, key, value)
-        output, softmax_lse = ATTENTION_FUNCTION_REGISTRY[
-            AttentionBackendType.AITER_BF16
-        ](query, key, value, dropout_p=0.0, is_causal=False)
+        output, softmax_lse = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
+            query, key, value, dropout_p=0.0, is_causal=False
+        )
 
     assert output.shape == reference.shape
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
@@ -702,20 +647,14 @@ def test_aiter_mha_v4_fallback_lse_keeps_batch_major_layout_under_padding():
     torch.manual_seed(5)
     batch, heads, head_dim = 2, 4, 64
     padded, valid = 384, (300, 137)
-    query = torch.randn(
-        (batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16
-    )
+    query = torch.randn((batch, heads, padded, head_dim), device="cuda", dtype=torch.bfloat16)
     key = torch.randn_like(query)
     value = torch.randn_like(query)
 
-    indices_k = torch.cat(
-        [torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)]
-    )
+    indices_k = torch.cat([torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)])
     attention_kwargs = {
         "indices_k": indices_k,
-        "cu_seqlens_k": torch.tensor(
-            [0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"
-        ),
+        "cu_seqlens_k": torch.tensor([0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"),
         "max_seqlen_k": max(valid),
     }
 
@@ -738,12 +677,8 @@ def test_aiter_mha_v4_fallback_lse_keeps_batch_major_layout_under_padding():
     # Fold-and-transpose alone would satisfy the shape while scrambling which row belongs to
     # which sequence, so pin the values to a per-sequence reference too.
     for b, n in enumerate(valid):
-        scores = (
-            query[b].float() @ key[b, :, :n].float().transpose(-1, -2)
-        ) * head_dim**-0.5
-        torch.testing.assert_close(
-            padded_lse[b], torch.logsumexp(scores, dim=-1), rtol=1e-3, atol=1e-3
-        )
+        scores = (query[b].float() @ key[b, :, :n].float().transpose(-1, -2)) * head_dim**-0.5
+        torch.testing.assert_close(padded_lse[b], torch.logsumexp(scores, dim=-1), rtol=1e-3, atol=1e-3)
 
 
 def test_aiter_mha_v4_lse_capability_excludes_gfx942(monkeypatch):
@@ -758,9 +693,7 @@ def test_aiter_mha_v4_lse_capability_excludes_gfx942(monkeypatch):
     class _Props:
         gcnArchName = "gfx942:sramecc+:xnack-"
 
-    monkeypatch.setattr(
-        attention_backend.torch.cuda, "get_device_properties", lambda _=0: _Props()
-    )
+    monkeypatch.setattr(attention_backend.torch.cuda, "get_device_properties", lambda _=0: _Props())
 
     def _mha_v4(query, key, value, block_mask=None, seqlens_k=None, q_scale_mode=None):
         raise AssertionError("probe must not call the kernel")
@@ -809,9 +742,7 @@ def test_aiter_mixed_attention_compiles_fullgraph_with_a_trailing_pad():
     attention_function = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16]
     attention_kwargs = {
         "indices_k": torch.arange(valid_length, device="cuda"),
-        "cu_seqlens_k": torch.tensor(
-            [0, valid_length], dtype=torch.int32, device="cuda"
-        ),
+        "cu_seqlens_k": torch.tensor([0, valid_length], dtype=torch.int32, device="cuda"),
         "max_seqlen_k": valid_length,
         "valid_kv_len": valid_length,
     }
@@ -872,17 +803,13 @@ def test_aiter_mixed_attention_serves_a_declared_trailing_pad(backend_name, requ
 
     attention_kwargs = {
         "indices_k": torch.arange(valid_length, device="cuda"),
-        "cu_seqlens_k": torch.tensor(
-            [0, valid_length], dtype=torch.int32, device="cuda"
-        ),
+        "cu_seqlens_k": torch.tensor([0, valid_length], dtype=torch.int32, device="cuda"),
         "max_seqlen_k": valid_length,
         "valid_kv_len": valid_length,
     }
 
     with torch.no_grad():
-        reference = F.scaled_dot_product_attention(
-            query, key[:, :, :valid_length], value[:, :, :valid_length]
-        )
+        reference = F.scaled_dot_product_attention(query, key[:, :, :valid_length], value[:, :, :valid_length])
         output, lse = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType[backend_name]](
             query,
             key,
@@ -892,9 +819,7 @@ def test_aiter_mixed_attention_serves_a_declared_trailing_pad(backend_name, requ
             attention_kwargs=attention_kwargs,
         )
 
-    cosine_similarity = F.cosine_similarity(
-        output.float().flatten(), reference.float().flatten(), dim=0
-    ).item()
+    cosine_similarity = F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item()
 
     assert output.shape == query.shape
     assert torch.isfinite(output).all()
@@ -934,9 +859,7 @@ def test_aiter_mha_v4_gather_padded_keys_contract():
     torch.testing.assert_close(trimmed_key, key[:, :13])
 
     with pytest.raises(ValueError, match="valid_kv_len must be in"):
-        _aiter_mha_v4_gather_padded_keys(
-            query, key, value, {"indices_k": indices_k, "valid_kv_len": 15}
-        )
+        _aiter_mha_v4_gather_padded_keys(query, key, value, {"indices_k": indices_k, "valid_kv_len": 15})
     with pytest.raises(ValueError, match="as many valid keys"):
         _aiter_mha_v4_gather_padded_keys(
             query,
@@ -981,16 +904,12 @@ def test_aiter_mha_v4_serves_an_undeclared_mask_with_interior_gaps():
 
     attention_kwargs = {
         "indices_k": indices_k,
-        "cu_seqlens_k": torch.tensor(
-            [0, indices_k.numel()], dtype=torch.int32, device="cuda"
-        ),
+        "cu_seqlens_k": torch.tensor([0, indices_k.numel()], dtype=torch.int32, device="cuda"),
         "max_seqlen_k": indices_k.numel(),
     }
 
     with torch.no_grad():
-        reference = F.scaled_dot_product_attention(
-            query, key[:, :, indices_k], value[:, :, indices_k]
-        )
+        reference = F.scaled_dot_product_attention(query, key[:, :, indices_k], value[:, :, indices_k])
         output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
             query,
             key,
@@ -1001,7 +920,5 @@ def test_aiter_mha_v4_serves_an_undeclared_mask_with_interior_gaps():
         )
 
     assert output.shape == query.shape
-    cosine = F.cosine_similarity(
-        output.float().flatten(), reference.float().flatten(), dim=0
-    ).item()
+    cosine = F.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0).item()
     assert cosine > 0.99, cosine

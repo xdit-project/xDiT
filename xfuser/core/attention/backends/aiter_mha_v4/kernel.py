@@ -182,8 +182,6 @@ def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
         pad_block_divisible=True,
     )
     q, k, v = to_bshd(q, k, v, contiguous=True)
-    # No LSE: the sorted-sparse launch exports none, which is why the sparge
-    # rows declare ring=NEVER.
     output, _ = _launch(q, k, v, fmt, block_mask=block_mask)
     return restore_sparge_output(from_bshd(output), state), None
 

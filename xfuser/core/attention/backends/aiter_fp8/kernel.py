@@ -22,10 +22,7 @@ from xfuser.core.attention.spec import AttnCall
 from xfuser.envs import environment_variables
 
 # Resolve the Hadamard symbol and build its matrix now, while we are outside
-# every compiled region. _rotate_and_quantize reaches it per call, and a cold
-# cache there walks importlib, which Dynamo refuses to trace. rotate_qk blocks
-# by 128 for every head dimension that is a multiple of it, which is all of
-# them on this path -- Ideogram 4's 256 included.
+# every compiled region.
 hadamard.prepare()
 
 

@@ -114,13 +114,6 @@ class _PackedKeys(CallConstraint):
     a trailing block rather than gathering -- and a wrong length there would
     silently drop or invent keys.
 
-    An undeclared pack is accepted and gathered, which stays correct for a
-    mask with interior gaps that a slice would mis-serve. Limits beyond this
-    belong to the kernel: MHA v4 carries per-batch key lengths only on its
-    BF16 Q/K rows and only on an AITER that has the kernarg, and both raise
-    there, naming the backends that do work. Declaring those here would turn
-    them into a fallback to another kernel, and a half-applied backend
-    selection is worse than a refusal that says what to pick instead.
     """
 
     def unmet(self, query, key, value, call) -> Optional[str]:

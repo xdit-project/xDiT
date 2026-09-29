@@ -103,11 +103,6 @@ def aiter_attention(query, key, value, call: AttnCall):
             call.dropout_p, call.is_causal,
         )
         out = p.unflatten(out)
-        # The varlen kernel writes LSE flat as [heads, B*S], where the dense
-        # branch and MHA v4 both give [B, heads, S]. The ring merge reads
-        # whichever this backend hands it, and the MHA v4 fallback can put both
-        # in one step, so fold it here rather than leaving the layout to depend
-        # on whether packing was present.
         lse = lse.view(p.heads, p.batch, p.seq_len).permute(1, 0, 2).contiguous()
 
     return from_bshd(out), lse

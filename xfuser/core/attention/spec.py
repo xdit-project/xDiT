@@ -118,22 +118,9 @@ class AttnCall:
     # Sequence-parallel degrees, passed in rather than read from globals: a
     # backend calling get_ulysses_parallel_world_size() directly could not be
     # exercised without an initialised process group.
-    #
-    # Flat integers rather than a ParallelContext holding them, because Dynamo
-    # cannot trace a read of a user-defined object that a default_factory
-    # produced. It has no source for one it did not watch being built, and its
-    # sourceless builder fails on it -- with "AttributeError: 'NoneType'
-    # object has no attribute 'name'", which says nothing about the cause.
-    # Two AttnCalls that compare equal would then compile differently,
-    # depending only on whether the caller spelled the default out.
     ulysses_world_size: int = 1
     ring_world_size: int = 1
 
-    # The untyped dict the model passes through. Each sparsity strategy digs
-    # out its own keys; a typed config per strategy would be better.
-    #
-    # A default_factory is safe here where it is not above: dict is a builtin
-    # Dynamo constructs natively, so there is no user-defined class to wrap.
     attention_kwargs: dict = field(default_factory=dict)
 
 
@@ -144,13 +131,6 @@ AttnFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, AttnCall], tuple]
 @dataclass(frozen=True)
 class Impl:
     """A reference to a kernel function, resolved when the backend is selected.
-
-    A kernel module imports its vendor library at module level, so it can only
-    be imported once that library is known present. Resolving here rather than
-    on first dispatch keeps the import out of any compiled region: Dynamo
-    refuses to trace importlib, which makes a lazy import a hard failure under
-    fullgraph=True. Pinned by the compile cases in tests/test_aiter_mixed_
-    attention.py and tests/test_minimax_h3.py, both -k compiles_fullgraph.
 
     ``target`` is "module:function" relative to the backend package. ``bound``
     is applied with functools.partial, which is how the generated families bind
@@ -189,12 +169,8 @@ class Spec:
 
     # When this backend may take part in ring attention, which merges per-rank
     # partials on a softmax log-sumexp. NEVER for a kernel that returns none at
-    # all; a predicate where the LSE depends on the build or the device, as on
-    # MHA v4. runtime_state reports the unmet reason, so a refusal explains
+    # all. Runtime_state reports the unmet reason, so a refusal explains
     # itself rather than saying only that ring is unavailable.
-    #
-    # Be conservative: a backend whose LSE is wrong yields silently incorrect
-    # ring output, and O never reads the LSE, so no output check can see it.
     ring: Requirement = field(kw_only=True)
 
     # What the machine must provide. Checked once, at backend selection, and a
@@ -234,8 +210,7 @@ class Spec:
 
     # Where a call this backend cannot serve goes instead of raising. For a
     # kernel that covers part of a model's shapes and wants the rest served
-    # rather than refused: MHA v4 runs head dim 128, and LTX-2 pairs 128-wide
-    # video blocks with 64-wide audio ones under one backend choice.
+    # rather than refused.
     #
     # The fallback is a whole backend, so it answers with its own accepts and
     # its own kernel -- but the *selected* spec is still what base_model, usp

@@ -611,6 +611,41 @@ def test_pack_kv_keeps_every_query_and_gathers_kv():
     assert packed.unflatten(out).shape == (batch, seq_len, heads, head_dim)
 
 
+def test_pack_kv_flattens_keys_against_their_own_length():
+    """Cross attention: K is longer than Q, and indices_k indexes the key side.
+
+    Flattening K against the query's length either raises -- LTX-2.5 hit
+    "shape '[768, 32, 128]' is invalid for input of size 4194304" on its
+    cross-attention blocks -- or, where the counts happen to agree, silently
+    gathers the wrong rows. The output still unflattens to the query's shape,
+    because that is what attention returns.
+    """
+    batch, q_len, kv_len, heads, head_dim = 2, 3, 5, 3, 8
+    q = torch.randn(batch, q_len, heads, head_dim)
+    k = torch.randn(batch, kv_len, heads, head_dim)
+    v = torch.randn(batch, kv_len, heads, head_dim)
+
+    # Two sequences of 4 and 2 valid keys out of 5 padded rows each.
+    indices = torch.tensor([0, 1, 2, 3, 5, 6], dtype=torch.long)
+    packed = pack_kv(q, k, v, VarlenPacking(
+        indices_k=indices,
+        cu_seqlens_k=torch.tensor([0, 4, 6], dtype=torch.int32),
+        max_seqlen_k=4,
+    ))
+
+    assert packed.q.shape == (batch * q_len, heads, head_dim)
+    assert packed.k.shape == (len(indices), heads, head_dim)
+    assert torch.equal(packed.k, k.reshape(-1, heads, head_dim)[indices])
+    assert torch.equal(packed.v, v.reshape(-1, heads, head_dim)[indices])
+    # Q side still describes the query, which is what the kernel is asked for.
+    assert packed.max_seqlen_q == q_len
+    assert torch.equal(
+        packed.cu_seqlens_q, torch.tensor([0, 3, 6], dtype=torch.int32)
+    )
+    out = torch.randn(batch * q_len, heads, head_dim)
+    assert packed.unflatten(out).shape == (batch, q_len, heads, head_dim)
+
+
 # --------------------------------------------------------------------------
 # the enum move
 # --------------------------------------------------------------------------

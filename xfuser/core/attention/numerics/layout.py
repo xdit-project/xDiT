@@ -64,13 +64,19 @@ def pack_kv(
     packing: VarlenPacking,
 ) -> PackedQKV:
     """Pack K/V for a varlen kernel. Tensors are BSHD. Q is never filtered:
-    all B*S query positions are kept."""
+    all B*S query positions are kept.
+
+    K/V are flattened against their *own* length, not the query's. The two
+    differ under cross attention, and indices_k indexes the key side, so
+    reusing the query's shape here both mis-sizes the reshape and would select
+    the wrong rows if the sizes happened to agree.
+    """
     batch, seq_len, heads, head_dim = query.shape
-    flat = (batch * seq_len, heads, head_dim)
+    kv_flat = (key.shape[0] * key.shape[1], *key.shape[2:])
     return PackedQKV(
-        q=query.reshape(flat),
-        k=torch.index_select(key.reshape(flat), 0, packing.indices_k),
-        v=torch.index_select(value.reshape(flat), 0, packing.indices_k),
+        q=query.reshape(batch * seq_len, heads, head_dim),
+        k=torch.index_select(key.reshape(kv_flat), 0, packing.indices_k),
+        v=torch.index_select(value.reshape(kv_flat), 0, packing.indices_k),
         cu_seqlens_q=torch.arange(
             0, batch + 1, dtype=torch.int32, device=query.device
         ) * seq_len,

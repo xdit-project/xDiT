@@ -253,18 +253,27 @@ class QuantizationPlan:
             return
 
         high_roots = plan.roots(plan.high) if plan.high else ()
-        if high_roots:
-            log(
-                f"GEMM high-precision tier: format={plan.high}, "
-                f"modules={tuple(high_roots)}"
-            )
+        # A carve-out named by suffix has no module path to report, so naming
+        # only the roots would leave those layers held at the better format
+        # with nothing in the log to say so.
+        high_leaves = plan.keep_high.suffixes if plan.high else ()
+        if high_roots or high_leaves:
+            detail = f"GEMM high-precision tier: format={plan.high}"
+            if high_roots:
+                detail += f", modules={tuple(high_roots)}"
+            if high_leaves:
+                detail += f", leaves={tuple(high_leaves)} (suffix match)"
+            log(detail)
 
         hybrid = getattr(self.model.config, "use_hybrid_gemm_schedule", False)
         low_detail = plan.low.upper()
         if hybrid and plan.high:
             low_detail = f"{plan.high.upper()} endpoints / {plan.low.upper()} middle"
         for root in plan.roots(plan.low):
-            log(f"GEMM quantization: {root} -> {low_detail}")
+            detail = low_detail
+            if high_leaves:
+                detail += f"; selected layers -> {plan.high.upper()}"
+            log(f"GEMM quantization: {root} -> {detail}")
         for root in high_roots:
             log(f"GEMM quantization: {root} -> {plan.high.upper()}")
 

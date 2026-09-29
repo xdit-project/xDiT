@@ -403,3 +403,37 @@ def test_only_narrows_every_format_the_same_way(raw):
     assert plan.format_for(f"{block}.ff.net.0.proj") is not None
     for excluded in ("attn.to_out.0", "ff.net.2", "adaln_proj.linear"):
         assert plan.format_for(f"{block}.{excluded}") is None
+
+
+def test_the_log_names_a_suffix_carve_out():
+    """Wan2.2-TI2V holds two feed-forward leaves in every block at the better
+    format. They have no module path, so a roots-only log leaves the one place
+    a run says what it did silently wrong about them."""
+    from types import SimpleNamespace
+    from xfuser.model_executor.models.runner_models.loading import quantization_plan
+
+    targets = GemmTargets(
+        transformer=Select(modules=("transformer.blocks",)),
+        keep_high=Select(
+            prefixes=("transformer.blocks.0",), suffixes=("net.0.proj", "net.2")
+        ),
+    )
+    plan = resolve(targets, GemmQuantizationSpec.parse("low=fp4,high=fp8"))
+
+    lines = []
+    original = quantization_plan.log
+    quantization_plan.log = lines.append
+    try:
+        model = SimpleNamespace(
+            settings=SimpleNamespace(gemm_targets=targets),
+            config=SimpleNamespace(use_hybrid_gemm_schedule=False),
+        )
+        quantization_plan.QuantizationPlan(model)._log_resolved_plan(plan)
+    finally:
+        quantization_plan.log = original
+
+    header = [l for l in lines if l.startswith("GEMM high-precision tier:")]
+    assert len(header) == 1
+    assert "transformer.blocks.0" in header[0]
+    assert "net.0.proj" in header[0] and "net.2" in header[0]
+    assert "GEMM quantization: transformer.blocks -> FP4; selected layers -> FP8" in lines

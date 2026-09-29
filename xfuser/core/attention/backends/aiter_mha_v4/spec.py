@@ -88,13 +88,18 @@ class MhaV4Format:
 
 FORMATS = [
     #            name        Q/K              V                sparge on
-    MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16),
-    MhaV4Format("BF16FP8",   Fmt.BF16,        Fmt.NATIVE_FP8),
+    MhaV4Format("BF16",      Fmt.BF16,        Fmt.BF16,        GFX950_OR_GFX942),
+    MhaV4Format("BF16FP8",   Fmt.BF16,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("I8FP8",     Fmt.INT8,        Fmt.NATIVE_FP8,  GFX950_OR_GFX942),
     MhaV4Format("F8F6",      Fmt.NATIVE_FP8,  Fmt.MXFP6,       GFX950),
     MhaV4Format("MXFP6",     Fmt.MXFP6,       Fmt.NATIVE_FP8,  GFX950),
     MhaV4Format("F6F4",      Fmt.MXFP6,       Fmt.MXFP4,       GFX950),
-    MhaV4Format("MXFP4",     Fmt.MXFP4,       Fmt.NATIVE_FP8,  GFX950),
+    # MXFP4 Q/K with FP8 V is not a row AITER has; it rejects the combination.
+    MhaV4Format("MXFP4",     Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
+    # The same launch as MXFP4 above, deliberately. AITER commented its
+    # separate f4f4 row out -- mxfp4 covers it and claims the same v_pack=1
+    # FP6-P V order -- so this resolves there until the row is reinstated.
+    # Kept rather than removed because existing configurations name it.
     MhaV4Format("F4F4",      Fmt.MXFP4,       Fmt.MXFP4,       GFX950),
     MhaV4Format("MXFP8",     Fmt.NATIVE_FP8,  Fmt.NATIVE_FP8,  GFX950,
                 qk_scale=Scale.E8M0_PER_1X32, v_scale=Scale.F32_PER_TENSOR),
@@ -129,6 +134,13 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
         ring=NEVER,
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=DENSE_CALLS,
+        # Every row here is head dim 128, which makes the family unselectable
+        # for a model that mixes widths: LTX-2 runs 128-wide video blocks
+        # beside 64-wide audio ones under one backend choice. The odd widths
+        # go to AITER v3, which covers all of them. Not SDPA, which returns no
+        # LSE -- on a ring run that would hand the merge a partial from the
+        # 128-wide blocks and nothing from the rest.
+        fallback=AttentionBackendType.AITER,
         requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942 & _scale_modes(fmt),
     )
 
@@ -140,7 +152,10 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
         ring=NEVER,
         sparsity=Sparsity.SPARGE,
         head_balanced=True,
-        low_precision=True,
+        # The same rule as the dense rows: this says the kernel quantises Q/K,
+        # not that sparge approximates. True for every row that had a sparge
+        # variant before BF16 gained one, which is why it used to be a literal.
+        low_precision=fmt.qk is not Fmt.BF16,
         accepts=SPARGE_CALLS,
         requires=SYMBOL(_MHA_V4) & PARAM(_MHA_V4, "block_mask")
                & _scale_modes(fmt) & fmt.sparge_on,

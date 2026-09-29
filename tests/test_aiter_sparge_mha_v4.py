@@ -9,6 +9,8 @@ from xfuser.core.attention import registry
 from xfuser.core.attention.spec import AttentionBackendType, AttnCall, Sparsity
 
 _MHA_V4_SPARGE_BACKENDS = (
+    "AITER_BF16_SPARGE",
+    "AITER_BF16FP8_SPARGE",
     "AITER_I8FP8_SPARGE",
     "AITER_FP8_SPARGE",
     "AITER_MXFP8_SPARGE",

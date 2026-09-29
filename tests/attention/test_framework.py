@@ -556,7 +556,11 @@ def test_pack_kv_keeps_every_query_and_gathers_kv():
 # --------------------------------------------------------------------------
 
 def test_enum_still_has_every_member():
-    assert len(list(AttentionBackendType)) == 45
+    """Guards the refactor against dropping one. 45 came over from the
+    monolith; AITER_BF16_SPARGE and AITER_BF16FP8_SPARGE joined with the MHA
+    v4 Sparge rows that serve them, so a further change to this number should
+    be a deliberate new backend rather than a casualty."""
+    assert len(list(AttentionBackendType)) == 47
 
 
 # --------------------------------------------------------------------------

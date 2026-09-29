@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Tuple
 
-from xfuser.core.attention.requirements import ALWAYS, ARCH, PARAM, SYMBOL, Requirement
+from xfuser.core.attention.requirements import ALWAYS, ARCH, NEVER, PARAM, Requirement, SYMBOL
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
     MHA_ONLY,
@@ -126,6 +126,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}"],
         impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
+        ring=NEVER,
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=DENSE_CALLS,
         requires=SYMBOL(_MHA_V4) & GFX950_OR_GFX942 & _scale_modes(fmt),
@@ -136,6 +137,7 @@ def _sparge_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}_SPARGE"],
         impl=Impl("kernel:mha_v4_sparge", {"fmt": fmt}),
+        ring=NEVER,
         sparsity=Sparsity.SPARGE,
         head_balanced=True,
         low_precision=True,

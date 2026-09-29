@@ -164,16 +164,11 @@ class Impl:
 class Spec:
     """One named backend.
 
-    ``returns_lse`` defaults to False: a backend that produces a softmax
-    log-sumexp ring attention can merge on must say so. Conservative, because
-    a wrong True yields silently incorrect ring output while a wrong False only
-    forgoes ring.
-
-    ``requires`` and ``accepts`` have no default. Both are claims about what a
-    backend will tolerate, and the only values that could serve as defaults --
-    ALWAYS and ANY_CALL -- are the permissive ones, so an omission would read
-    as "runs anywhere, serves anything" rather than as an omission. Writing
-    ALWAYS is no more work than leaving it out and says it was decided.
+    ``requires``, ``accepts`` and ``ring`` have no default. Each is a claim
+    about what a backend will tolerate, and the values that could serve as
+    defaults -- ALWAYS and ANY_CALL -- are the permissive ones, so an omission
+    would read as "runs anywhere, serves anything" rather than as an omission.
+    Writing ALWAYS is no more work than leaving it out and says it was decided.
     """
 
     # The enum member this spec answers to. The registry keys on it, and it is
@@ -185,10 +180,15 @@ class Spec:
     # selected.
     impl: AttnFn
 
-    # Whether the second return value is a softmax log-sumexp that ring
-    # attention can merge across ranks. runtime_state refuses the backend when
-    # ring_degree > 1 and this is False.
-    returns_lse: bool = False
+    # When this backend may take part in ring attention, which merges per-rank
+    # partials on a softmax log-sumexp. NEVER for a kernel that returns none at
+    # all; a predicate where the LSE depends on the build or the device, as on
+    # MHA v4. runtime_state reports the unmet reason, so a refusal explains
+    # itself rather than saying only that ring is unavailable.
+    #
+    # Be conservative: a backend whose LSE is wrong yields silently incorrect
+    # ring output, and O never reads the LSE, so no output check can see it.
+    ring: Requirement = field(kw_only=True)
 
     # What the machine must provide. Checked once, at backend selection, and a
     # failure names the missing piece rather than crashing mid-denoising.

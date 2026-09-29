@@ -17,6 +17,7 @@ from xfuser.core.attention.requirements import (
     ALWAYS,
     ARCH,
     CUDA_CAPABILITY,
+    NEVER,
     PARAM,
     PLATFORM,
     SYMBOL,
@@ -212,7 +213,7 @@ def test_combined_constraint_reports_first_failure():
 # --------------------------------------------------------------------------
 
 def _spec(backend, **kwargs):
-    defaults = dict(impl=lambda q, k, v, c: (q, None), returns_lse=True,
+    defaults = dict(impl=lambda q, k, v, c: (q, None), ring=ALWAYS,
                     requires=ALWAYS, accepts=ANY_CALL)
     defaults.update(kwargs)
     return Spec(backend, **defaults)
@@ -310,8 +311,8 @@ def test_find_returns_none_rather_than_raising():
 def test_queries_select_by_field():
     with registry.using([
         _spec(AttentionBackendType.AITER_MXFP4_SPARGE, sparsity=Sparsity.SPARGE,
-              head_balanced=True, low_precision=True, returns_lse=False),
-        _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, returns_lse=False),
+              head_balanced=True, low_precision=True, ring=NEVER),
+        _spec(AttentionBackendType.AITER_MXFP4, low_precision=True, ring=NEVER),
         _spec(AttentionBackendType.SDPA),
     ]):
         assert registry.types_where(is_sparse=True) == frozenset(
@@ -321,7 +322,7 @@ def test_queries_select_by_field():
             AttentionBackendType.AITER_MXFP4_SPARGE,
             AttentionBackendType.AITER_MXFP4,
         })
-        assert registry.types_where(returns_lse=True) == frozenset(
+        assert registry.types_where(ring=ALWAYS) == frozenset(
             {AttentionBackendType.SDPA}
         )
 
@@ -340,10 +341,10 @@ def test_manifest_renders_from_specs():
 
 
 def test_spec_defaults_are_conservative():
-    """returns_lse defaults False, so a backend must opt in to ring
-    participation rather than out of it."""
-    spec = _spec(AttentionBackendType.SDPA, returns_lse=False)
-    assert spec.returns_lse is False
+    """A spec that names no sparsity strategy carries none, and one whose
+    requirement is met is available."""
+    spec = _spec(AttentionBackendType.SDPA, ring=NEVER)
+    assert spec.sparsity is None and spec.is_sparse is False
     assert spec.unavailable() is None
     assert spec.rejects(*_qkv(), AttnCall()) is None
 
@@ -498,7 +499,7 @@ def test_missing_module_is_reported_not_raised():
     spec = Spec(
         AttentionBackendType.AITER_F4F4,
         impl=lambda q, k, v, c: None,
-        returns_lse=False,
+        ring=NEVER,
         requires=SYMBOL("aiter.ops.definitely_not_here:kernel"),
         accepts=ANY_CALL,
     )
@@ -617,14 +618,19 @@ def test_platform_is_what_the_process_can_reach_not_what_it_was_built_for():
 
 def test_backends_without_an_lse_cannot_join_ring():
     """Ring attention merges a softmax log-sumexp across ranks, so a backend
-    that produces none cannot join. Every spec must answer that question."""
+    that produces none cannot join. Every spec must answer that question, and
+    the answer is a predicate because on MHA v4 it depends on the AITER build
+    and the device."""
     from xfuser.core.attention import registry
 
-    for spec in registry.where(returns_lse=False):
-        assert spec.returns_lse is False   # trivially true; the value is the point
-    # The value matters less than every spec having one: an unanswered
-    # backend would otherwise be assumed ring-capable by default.
-    assert all(isinstance(s.returns_lse, bool) for s in registry.REGISTRY.values())
+    for spec in registry.REGISTRY.values():
+        assert isinstance(spec.ring, Requirement), (
+            f"{spec.type.name}: ring must be a Requirement, got {spec.ring!r}"
+        )
+        # Callable without a GPU or a vendor library: that is the point of
+        # requirements being lazy and reporting rather than raising.
+        reason = spec.ring.unmet()
+        assert reason is None or isinstance(reason, str)
 
 
 # --------------------------------------------------------------------------

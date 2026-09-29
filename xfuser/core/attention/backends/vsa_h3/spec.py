@@ -6,7 +6,7 @@ the tile map; FlexAttention needs the padded tile buffers built for it.
 """
 
 from xfuser.core.attention.constraints import NO_DROPOUT, NON_CAUSAL, NO_VARLEN
-from xfuser.core.attention.requirements import SYMBOL
+from xfuser.core.attention.requirements import NEVER, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spec
 
 _H3 = "xfuser.core.attention.backends.vsa_h3.attention"
@@ -16,13 +16,13 @@ _CALLS = NON_CAUSAL & NO_DROPOUT & NO_VARLEN
 
 SPECS = [
     Spec(AttentionBackendType.FLEX_VSA_H3, impl=Impl("kernel:flex_vsa_h3"),
-         sparsity=Sparsity.H3, accepts=_CALLS,
+         ring=NEVER, sparsity=Sparsity.H3, accepts=_CALLS,
          requires=SYMBOL(f"{_H3}:h3_vsa_attention")),
 
     # Triton is not in `requires`: where the kernel cannot run this falls back
     # to FlexAttention rather than refusing, so the backend stays selectable
     # and says so once at the first call.
     Spec(AttentionBackendType.TRITON_VSA_H3, impl=Impl("kernel:triton_vsa_h3"),
-         sparsity=Sparsity.H3, accepts=_CALLS,
+         ring=NEVER, sparsity=Sparsity.H3, accepts=_CALLS,
          requires=SYMBOL(f"{_H3}:h3_vsa_attention")),
 ]

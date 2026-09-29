@@ -10,7 +10,7 @@ Three paths, picked by what the call carries:
 
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import NO_DROPOUT
-from xfuser.core.attention.requirements import SYMBOL
+from xfuser.core.attention.requirements import NEVER, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Spec
 
 SPECS = [
@@ -19,6 +19,9 @@ SPECS = [
         impl=Impl("kernel:aiter_fp8"),
         low_precision=True,
         accepts=NO_DROPOUT,
+        # Dual-path: MHA v4 for some shapes and v3 otherwise, so it would yield
+        # no LSE for the rest.
+        ring=NEVER,
         accepts_prequantized=True,
         prequant_rotate=hadamard.rotate_qk,
         requires=SYMBOL("aiter:flash_attn_fp8_pertensor_func")

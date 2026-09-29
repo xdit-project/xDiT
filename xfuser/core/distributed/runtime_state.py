@@ -239,9 +239,9 @@ class RuntimeState(metaclass=ABCMeta):
         """Refuse a backend the current machine or configuration cannot serve.
 
         Backend-specific knowledge lives on the spec: `requires` says what the
-        machine must provide, `returns_lse` says whether ring attention can
-        merge its output. This method therefore stays the same size as backends
-        are added.
+        machine must provide, `ring` whether ring attention can merge its
+        output here. This method therefore stays the same size as backends are
+        added.
         """
         if (
             attention_backend == AttentionBackendType.AITER_VSA
@@ -259,11 +259,16 @@ class RuntimeState(metaclass=ABCMeta):
                 f"{attention_backend.value} attention is unavailable: {unavailable}"
             )
 
-        if self.parallel_config.ring_degree > 1 and not spec.returns_lse:
-            raise RuntimeError(
-                f"{attention_backend.value} does not support ring parallelism: "
-                "it produces no softmax log-sumexp for the per-rank merge."
-            )
+        if self.parallel_config.ring_degree > 1:
+            # Ring merges per-rank partials on a softmax log-sumexp. Whether a
+            # backend has one can depend on the build and the device, so the
+            # spec answers with a predicate and its reason is the message.
+            no_ring = spec.ring.unmet()
+            if no_ring is not None:
+                raise RuntimeError(
+                    f"{attention_backend.value} cannot be used with ring "
+                    f"parallelism: {no_ring}"
+                )
 
         # Import the kernel module now, while we are outside any compiled
         # region. This is the single choke point: it runs for the attention

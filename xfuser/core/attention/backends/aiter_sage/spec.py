@@ -15,7 +15,7 @@ from xfuser.core.attention.constraints import (
     NO_VARLEN,
     SELF_ATTENTION,
 )
-from xfuser.core.attention.requirements import PARAM, SYMBOL
+from xfuser.core.attention.requirements import ALWAYS, NEVER, PARAM, SYMBOL
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spec
 from xfuser.envs import environment_variables
 
@@ -63,7 +63,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SAGE,
         impl=Impl("kernel:sage"),
-        returns_lse=True,
+        ring=ALWAYS,
         low_precision=True,
         accepts=NO_VARLEN,
         requires=V1,
@@ -71,6 +71,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARSE_SAGE,
         impl=Impl("kernel:sparse_sage"),
+        ring=NEVER,
         sparsity=Sparsity.SSTA,
         low_precision=True,
         accepts=MASKED_CALLS,
@@ -79,6 +80,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARGE,
         impl=Impl("kernel:sparge"),
+        ring=NEVER,
         sparsity=Sparsity.SPARGE,
         head_balanced=True,
         low_precision=True,
@@ -88,7 +90,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SAGE_V2,
         impl=Impl("kernel:sage_v2"),
-        returns_lse=True,
+        ring=ALWAYS,
         low_precision=True,
         accepts=V2_CALLS & NO_VARLEN,
         requires=V2,
@@ -96,6 +98,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARSE_SAGE_V2,
         impl=Impl("kernel:sparse_sage_v2"),
+        ring=NEVER,
         sparsity=Sparsity.SSTA,
         low_precision=True,
         accepts=V2_CALLS & MASKED_CALLS,
@@ -104,6 +107,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARGE_V2,
         impl=Impl("kernel:sparge_v2"),
+        ring=NEVER,
         sparsity=Sparsity.SPARGE,
         head_balanced=True,
         low_precision=True,

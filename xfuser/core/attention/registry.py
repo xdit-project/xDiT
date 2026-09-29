@@ -167,13 +167,15 @@ def manifest() -> str:
     width = max(len(s.type.name) for s in rows)
     header = (
         "BACKEND".ljust(width)
-        + "  LSE  SPARSE  HEADBAL  LOWPREC  REQUIRES"
+        + "  RING  SPARSE  HEADBAL  LOWPREC  REQUIRES"
     )
     lines = [header, "-" * len(header)]
     for spec in rows:
         lines.append(
             spec.type.name.ljust(width)
-            + "  " + ("y" if spec.returns_lse else "-").center(3)
+            # Resolved here rather than printed as a predicate: the manifest
+            # describes this machine, and "can it ring here" is the useful fact.
+            + "  " + ("y" if spec.ring.satisfied() else "-").center(4)
             + "  " + ("y" if spec.is_sparse else "-").center(6)
             + "  " + ("y" if spec.head_balanced else "-").center(7)
             + "  " + ("y" if spec.low_precision else "-").center(7)

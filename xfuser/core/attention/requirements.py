@@ -181,6 +181,22 @@ ALWAYS = _Always()
 
 
 @dataclass(frozen=True)
+class _Never(Requirement):
+    """Unsatisfiable, whatever the machine.
+
+    For a capability a backend simply does not have, as against one it might:
+    ``ring=NEVER`` says this kernel produces no log-sumexp anywhere, which is a
+    different statement from a predicate that happens to be unmet here.
+    """
+
+    def unmet(self) -> Optional[str]:
+        return "is not supported by this backend"
+
+
+NEVER = _Never()
+
+
+@dataclass(frozen=True)
 class SYMBOL(Requirement):
     """"module:name" must be importable."""
 

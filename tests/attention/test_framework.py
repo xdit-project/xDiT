@@ -860,6 +860,45 @@ def test_first_of_composes_with_and():
     assert combined.satisfied()
 
 
+def test_every_kernel_using_hadamard_prepares_it_at_import():
+    """hadamard.matrix() walks importlib on a cold cache, and Dynamo refuses
+    to trace that -- so a kernel reaching it per call must warm it at import,
+    which is backend selection and outside every compiled region.
+
+    lru_cache is what makes this worth pinning: a warm cache hides the import,
+    so whether a model compiles otherwise depends on what ran before it. That
+    is how it stayed latent until Ideogram 4's head dim 256 was the first to
+    reach the rotation under fullgraph."""
+    import ast
+    from pathlib import Path
+    import xfuser.core.attention as package
+
+    root = Path(package.__file__).parent / "backends"
+    for path in sorted(root.glob("*/kernel.py")):
+        source = path.read_text()
+        tree = ast.parse(source)
+        reaches = any(
+            isinstance(n, ast.Attribute)
+            and n.attr in {"matrix", "rotate_qk"}
+            and getattr(n.value, "id", "") == "hadamard"
+            for n in ast.walk(tree)
+        )
+        if not reaches:
+            continue
+        prepares = any(
+            isinstance(n, ast.Call)
+            and getattr(n.func, "attr", "") == "prepare"
+            and getattr(n.func.value, "id", "") == "hadamard"
+            for n in tree.body            # module level only
+            if isinstance(n, ast.Expr)
+            for n in ast.walk(n)
+        )
+        assert prepares, (
+            f"{path.parent.name}/kernel.py reaches hadamard per call but does "
+            "not call hadamard.prepare() at import"
+        )
+
+
 def test_hadamard_declares_its_symbol_once():
     """hadamard.matrix() resolves through the same object backends gate on."""
     from xfuser.core.attention.numerics import hadamard

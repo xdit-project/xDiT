@@ -20,11 +20,44 @@ CREATE_HADAMARD = FIRST_OF(
     "aiter.ops.triton.quant.sage_attention_quant_wrappers:create_hadamard_matrix",
 )
 
+# Resolved by prepare(). Not at import: this module is reached from the spec
+# modules, which load on any machine, and resolving would import a vendor
+# library that may not be there.
+_create = None
+
+
+def prepare(block_sizes=(128,), device=None) -> None:
+    """Resolve the vendor symbol and build the matrices a kernel will need.
+
+    Called from kernel modules at import -- which is backend selection, and so
+    outside every compiled region. It has to happen there because resolution
+    goes through importlib, which Dynamo refuses to trace: reaching it from
+    inside a graph is a hard failure under fullgraph=True.
+
+    matrix() being lru_cached is what makes that dangerous rather than
+    obvious. A warm cache hides the import entirely, so whether a model
+    compiles depends on what ran before it and warmed the entry it needs. Warm
+    it deliberately instead.
+
+    ``block_sizes`` are the block widths the caller's rotation can ask for;
+    rotate_qk uses 128 for every head dimension that is a multiple of it.
+    """
+    global _create
+    if _create is None:
+        _create = CREATE_HADAMARD.resolve()
+    if device is None:
+        if not torch.cuda.is_available():
+            return
+        device = f"cuda:{torch.cuda.current_device()}"
+    for block_r in block_sizes:
+        matrix(block_r, device)
+
 
 @functools.lru_cache(maxsize=None)
 def matrix(block_r: int, device_key: str) -> torch.Tensor:
     """Orthonormal block_r x block_r matrix on the given device."""
-    built = CREATE_HADAMARD.resolve()(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
+    create = _create if _create is not None else CREATE_HADAMARD.resolve()
+    built = create(block_r, dtype=torch.bfloat16) / (block_r ** 0.5)
     return built.to(torch.device(device_key))
 
 

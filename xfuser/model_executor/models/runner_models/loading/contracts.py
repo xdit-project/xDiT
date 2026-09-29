@@ -12,6 +12,8 @@ class QuantizationFormat(str, Enum):
     FP8_FP4 = "fp8_fp4"
     FP6 = "fp6"
     FP4_FP6 = "fp4_fp6"
+    A6W4 = "a6w4"
+    FP4_A6W4 = "fp4_a6w4"
     INT8 = "int8"
 
 
@@ -138,7 +140,12 @@ class LoadDeclaration:
             if (format_ is QuantizationFormat.NONE)
             == (backend is QuantizationBackend.NONE)
             and (
-                format_ not in (QuantizationFormat.FP6, QuantizationFormat.FP4_FP6)
+                format_ not in (
+                    QuantizationFormat.FP6,
+                    QuantizationFormat.FP4_FP6,
+                    QuantizationFormat.A6W4,
+                    QuantizationFormat.FP4_A6W4,
+                )
                 or backend is QuantizationBackend.AITER
             )
         }
@@ -199,6 +206,11 @@ class LoadDeclaration:
             contracts.add((QuantizationFormat.FP6, QuantizationBackend.AITER))
         if supports_fp4 and supports_fp6:
             contracts.add((QuantizationFormat.FP4_FP6, QuantizationBackend.AITER))
+        supports_a6w4 = getattr(model_capabilities, "use_a6w4_gemms", False)
+        if supports_a6w4:
+            contracts.add((QuantizationFormat.A6W4, QuantizationBackend.AITER))
+        if supports_fp4 and supports_a6w4:
+            contracts.add((QuantizationFormat.FP4_A6W4, QuantizationBackend.AITER))
         if getattr(model_capabilities, "use_int8_gemms", False):
             contracts.add((QuantizationFormat.INT8, QuantizationBackend.TORCHAO))
 
@@ -346,7 +358,11 @@ def assert_offload_is_compatible_with_format(
 
     if selected_backend is not QuantizationBackend.AITER:
         return
-    if requested_format is QuantizationFormat.FP4_FP6:
+    if requested_format in {
+        QuantizationFormat.FP4_FP6,
+        QuantizationFormat.A6W4,
+        QuantizationFormat.FP4_A6W4,
+    }:
         offload_flags = tuple(
             flag
             for flag in (
@@ -359,10 +375,9 @@ def assert_offload_is_compatible_with_format(
         if offload_flags:
             named_flags = ", ".join(f"--{flag}" for flag in offload_flags)
             raise UnsupportedLoadContract(
-                f"{named_flags} cannot be combined with FP4_FP6 on the AITER backend: "
-                "the primary MXFP4 packing path is unsupported when CPU offload keeps "
-                "its source weights on the host. Use pure FP6, or run FP4_FP6 without "
-                "CPU offload."
+                f"{named_flags} cannot be combined with {requested_format.value} "
+                "on the AITER backend: mixed-MXFP packing requires GPU-resident "
+                "source weights."
             )
     if requested_format not in (QuantizationFormat.FP4, QuantizationFormat.FP8_FP4):
         return
@@ -487,6 +502,13 @@ def select_load_contract(
             f"{runner_name} cannot pair {requested_format.name} with "
             f"{selected_backend.name}"
         )
+    if requested_format in {
+        QuantizationFormat.A6W4,
+        QuantizationFormat.FP4_A6W4,
+    } and materialization_mode is not MaterializationMode.EAGER:
+        raise UnsupportedLoadContract(
+            f"{requested_format.value} currently requires eager materialization"
+        )
     validate_materialization_contract(
         declaration,
         materialization_mode,
@@ -512,6 +534,15 @@ def select_runtime_quantization(
     use_fp4 = bool(getattr(config, "use_fp4_gemms", False))
     use_int8 = bool(getattr(config, "use_int8_gemms", False))
     use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
+    use_a6w4 = bool(getattr(config, "use_a6w4_gemms", False))
+    if use_a6w4 and (use_fp6 or use_fp8 or use_int8):
+        raise UnsupportedLoadContract(
+            "A6W4 cannot be combined with FP6, FP8, or INT8 modes"
+        )
+    if use_a6w4 and cuda_active:
+        raise UnsupportedLoadContract(
+            "AITER A6W4 requires ROCm gfx950; CUDA is not supported"
+        )
 
     if use_fp6 and use_fp8:
         raise UnsupportedLoadContract(
@@ -534,6 +565,9 @@ def select_runtime_quantization(
         raise UnsupportedLoadContract(f"INT8 cannot be combined with {others}")
     if use_fp6:
         format_ = QuantizationFormat.FP4_FP6 if use_fp4 else QuantizationFormat.FP6
+        return format_, QuantizationBackend.AITER
+    if use_a6w4:
+        format_ = QuantizationFormat.FP4_A6W4 if use_fp4 else QuantizationFormat.A6W4
         return format_, QuantizationBackend.AITER
     if use_fp8 and use_fp4:
         format_ = QuantizationFormat.FP8_FP4

@@ -96,7 +96,7 @@ class QuantizationPlan:
             return targets
         if format_name == "fp4":
             return list(settings.fp4_gemm_module_list or ())
-        if format_name == "fp6":
+        if format_name in {"fp6", "a6w4"}:
             return list(
                 dict.fromkeys(
                     list(getattr(settings, "fp4_gemm_module_list", None) or ())
@@ -151,8 +151,8 @@ class QuantizationPlan:
         settings = self.model.settings
         if not spec.is_tiered:
             targets = (
-                self.module_list("fp6")
-                if spec.is_pure("fp6")
+                self.module_list(spec.low)
+                if spec.low in {"fp6", "a6w4"}
                 else list(
                     getattr(
                         settings,

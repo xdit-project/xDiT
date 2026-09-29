@@ -148,8 +148,8 @@ def _add_gemm_profile_args(parser) -> None:
         type=parse_gemm_quantization,
         default=None,
         help=(
-            "Transformer GEMM precision: none, fp8, fp4, fp6, int8, "
-            "low=fp4,high=fp8, or low=fp4,high=fp6."
+            "Transformer GEMM precision: none, fp8, fp4, fp6, a6w4, "
+            "int8, or a supported low=fp4,high=<format> pair."
         ),
     )
     parser.add_argument(
@@ -245,6 +245,7 @@ class xFuserArgs:
     use_fp4_gemms: bool = False
     # Internal compatibility bridge derived from gemm_quantization.
     use_fp6_gemms: bool = False
+    use_a6w4_gemms: bool = False
     fp8_precision_override_prefix_patterns: Optional[str] = None
     fp8_precision_override_suffix_patterns: Optional[str] = None
     use_fp8_comms: bool = False
@@ -378,9 +379,13 @@ class xFuserArgs:
             if getattr(self, name) is not None
         )
 
-        if not explicit_spec and self.use_fp6_gemms:
+        if not explicit_spec and (
+            self.use_fp6_gemms
+            or self.use_a6w4_gemms
+        ):
             raise ValueError(
-                "MXFP6 must be selected through gemm_quantization."
+                "MXFP6 and mixed-MXFP formats must be selected through "
+                "gemm_quantization."
             )
 
         if explicit_spec:
@@ -388,6 +393,7 @@ class xFuserArgs:
             self.use_fp8_gemms = False
             self.use_fp4_gemms = False
             self.use_fp6_gemms = False
+            self.use_a6w4_gemms = False
             self.use_int8_gemms = False
             if spec.is_pure("fp8"):
                 self.use_fp8_gemms = True
@@ -395,11 +401,14 @@ class xFuserArgs:
                 self.use_fp4_gemms = True
             elif spec.is_pure("fp6"):
                 self.use_fp6_gemms = True
+            elif spec.is_pure("a6w4"):
+                self.use_a6w4_gemms = True
             elif spec.is_pure("int8"):
                 self.use_int8_gemms = True
             elif spec.is_tiered:
                 self.use_fp4_gemms = True
                 self.use_fp6_gemms = spec.high == "fp6"
+                self.use_a6w4_gemms = spec.high == "a6w4"
         else:
             if self.use_fp4_gemms:
                 spec = GemmQuantizationSpec("fp4", "fp8")
@@ -1372,6 +1381,21 @@ class xFuserArgs:
     def _validate_gemm_quantization_flags(self) -> None:
         """Validate ownership of mutually exclusive generic GEMM quantizers."""
         spec = self.gemm_quantization_spec
+        uses_mixed_mxfp = self.use_a6w4_gemms
+        if uses_mixed_mxfp and (
+            self.enable_model_cpu_offload
+            or self.enable_sequential_cpu_offload
+            or self.enable_group_cpu_offload
+        ):
+            raise ValueError("A6W4 GEMMs do not support CPU offload.")
+        if uses_mixed_mxfp and (
+            self.fully_shard_degree > 1
+            or self.memory_efficient_sharding
+            or self.memory_efficient_replicated_load
+        ):
+            raise ValueError(
+                "A6W4 GEMMs currently support eager loading only."
+            )
         if self.use_fp8_text_encoder and "fp8" not in spec.formats:
             raise ValueError(
                 "--use_fp8_text_encoder requires a gemm_quantization profile "

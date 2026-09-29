@@ -567,6 +567,48 @@ def quantize_linear_layers_to_fp6(
     return replaced
 
 
+def quantize_linear_layers_to_mixed_mxfp(
+    model: torch.nn.Module,
+    *,
+    parent_name: str = "",
+    filter_fn: Callable[[torch.nn.Module, str], bool] | None = None,
+    device: torch.device | str | None = None,
+) -> int:
+    """Replace selected ``nn.Linear`` leaves with A6W4 linears."""
+
+    from xfuser.model_executor.layers.mixed_mxfp_linear import xFuserA6W4Linear
+
+    replaced = 0
+    for name, module in list(model.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+        if isinstance(module, torch.nn.Linear):
+            if _weight_is_torchao_quantized(module):
+                continue
+            if filter_fn is not None and not filter_fn(module, full_name):
+                continue
+            weight = module.weight.detach()
+            bias = module.bias.detach() if module.bias is not None else None
+            mixed_layer = xFuserA6W4Linear(
+                module.in_features,
+                module.out_features,
+                bias=module.bias is not None,
+                device="meta",
+                dtype=weight.dtype,
+            )
+            mixed_layer.train(module.training)
+            mixed_layer.load_and_quantize_weights(weight, bias, device=device)
+            setattr(model, name, mixed_layer)
+            replaced += 1
+        elif next(module.children(), None) is not None:
+            replaced += quantize_linear_layers_to_mixed_mxfp(
+                module,
+                parent_name=full_name,
+                filter_fn=filter_fn,
+                device=device,
+            )
+    return replaced
+
+
 def quantize_linear_layers_to_fp4(
     model,
     parent_name='',
@@ -576,10 +618,13 @@ def quantize_linear_layers_to_fp4(
     device: Optional[torch.device] = None,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
     use_fp6_for_overrides: bool = False,
+    use_a6w4_for_overrides: bool = False,
 ):
     from xfuser.model_executor.layers.mxfp4_linear import xFuserMXFP4Linear, xFuserHybridMXFP4Linear
 
-    if not use_fp6_for_overrides:
+    if use_fp6_for_overrides and use_a6w4_for_overrides:
+        raise ValueError("FP4 precision overrides can select only one high format")
+    if not use_fp6_for_overrides and not use_a6w4_for_overrides:
         from torchao.quantization.granularity import PerTensor
         from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_
 
@@ -589,10 +634,30 @@ def quantize_linear_layers_to_fp4(
 
         fp6_linear_cls = xFuserMXFP6Linear
 
+    mixed_linear_cls = None
+    if use_a6w4_for_overrides:
+        from xfuser.model_executor.layers.mixed_mxfp_linear import xFuserA6W4Linear
+
+        mixed_linear_cls = xFuserA6W4Linear
+
     def make_fp6_layer(module):
         weight = module.weight.detach()
         bias = module.bias.detach() if module.bias is not None else None
         layer = fp6_linear_cls(
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            device="meta",
+            dtype=weight.dtype,
+        )
+        layer.train(module.training)
+        layer.load_and_quantize_weights(weight, bias, device=device)
+        return layer
+
+    def make_mixed_layer(module):
+        weight = module.weight.detach()
+        bias = module.bias.detach() if module.bias is not None else None
+        layer = mixed_linear_cls(
             module.in_features,
             module.out_features,
             bias=module.bias is not None,
@@ -614,6 +679,8 @@ def quantize_linear_layers_to_fp4(
             if _layer_uses_fp8_override(full_name, fp8_layers, fp8_suffix_layers):
                 if fp6_linear_cls is not None:
                     setattr(model, name, make_fp6_layer(module))
+                elif mixed_linear_cls is not None:
+                    setattr(model, name, make_mixed_layer(module))
                 else:
                     quantize_(
                           module,
@@ -640,6 +707,8 @@ def quantize_linear_layers_to_fp4(
                 if use_hybrid_schedule:
                     if fp6_linear_cls is not None:
                         high_precision_layer = make_fp6_layer(module)
+                    elif mixed_linear_cls is not None:
+                        high_precision_layer = make_mixed_layer(module)
                     else:
                         high_precision_layer = torch.nn.Linear(
                             module.in_features,
@@ -681,6 +750,7 @@ def quantize_linear_layers_to_fp4(
                 device=device,
                 filter_fn=filter_fn,
                 use_fp6_for_overrides=use_fp6_for_overrides,
+                use_a6w4_for_overrides=use_a6w4_for_overrides,
             )
 
 

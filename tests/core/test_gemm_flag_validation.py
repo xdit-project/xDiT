@@ -228,11 +228,13 @@ def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
 @pytest.mark.parametrize(
     ("value", "expected_flags"),
     [
-        ("fp8", (True, False, False, False)),
-        ("fp6", (False, False, True, False)),
-        ("int8", (False, False, False, True)),
-        ("low=fp4,high=fp8", (False, True, False, False)),
-        ("low=fp4,high=fp6", (False, True, True, False)),
+        ("fp8", (True, False, False, False, False)),
+        ("fp6", (False, False, True, False, False)),
+        ("a6w4", (False, False, False, True, False)),
+        ("int8", (False, False, False, False, True)),
+        ("low=fp4,high=fp8", (False, True, False, False, False)),
+        ("low=fp4,high=fp6", (False, True, True, False, False)),
+        ("low=fp4,high=a6w4", (False, True, False, True, False)),
     ],
 )
 def test_explicit_gemm_profiles_map_to_existing_flags(
@@ -245,6 +247,7 @@ def test_explicit_gemm_profiles_map_to_existing_flags(
         config.use_fp8_gemms,
         config.use_fp4_gemms,
         config.use_fp6_gemms,
+        config.use_a6w4_gemms,
         config.use_int8_gemms,
     ) == expected_flags
 
@@ -274,6 +277,40 @@ def test_runner_parser_accepts_explicit_gemm_profile(runtime):
 
     assert config.use_fp4_gemms is True
     assert config.use_fp6_gemms is True
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["a6w4", "low=fp4,high=a6w4"],
+)
+def test_a6w4_profiles_reject_cpu_offload(runtime, profile):
+    config = _args(runtime, gemm_quantization=profile, enable_model_cpu_offload=True)
+    with pytest.raises(ValueError, match="CPU offload"):
+        config._validate_gemm_quantization_flags()
+
+
+def test_a6w4_schedule_requires_tiered_profile(runtime):
+    pure = _args(
+        runtime,
+        gemm_quantization="a6w4",
+        use_hybrid_gemm_schedule=True,
+    )
+    with pytest.raises(ValueError, match="requires a low/high"):
+        pure._validate_gemm_quantization_flags()
+
+
+def test_a6w4_yaml_schedule_is_accepted(runtime, tmp_path):
+    path = tmp_path / "gemm.yaml"
+    path.write_text("hybrid_gemm_schedule: [a6w4, fp4]\n")
+    config = _args(
+        runtime,
+        gemm_quantization="low=fp4,high=a6w4",
+        gemm_config=str(path),
+    )
+
+    config._validate_gemm_quantization_flags()
+    assert config.hybrid_gemm_schedule == "a6w4,fp4"
+    assert config.use_hybrid_gemm_schedule
 
 
 def test_tiered_fp8_profile_supports_text_encoder_fp8(runtime):
@@ -358,7 +395,10 @@ def test_yaml_schedule_conflicts_with_simple_schedule_flags(runtime, tmp_path):
         )
 
 
-def test_yaml_schedule_expands_over_wan_cfg_calls(runtime, monkeypatch):
+@pytest.mark.parametrize("high_format", ["fp6", "a6w4"])
+def test_yaml_schedule_expands_over_wan_cfg_calls(
+    runtime, monkeypatch, high_format
+):
     captured = {}
     state = SimpleNamespace(
         set_gemm_schedule=lambda schedule, total_steps: captured.update(
@@ -368,8 +408,8 @@ def test_yaml_schedule_expands_over_wan_cfg_calls(runtime, monkeypatch):
     )
     model = object.__new__(runtime.model_cls)
     model.config = SimpleNamespace(
-        hybrid_gemm_schedule="fp6,fp4",
-        gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
+        hybrid_gemm_schedule=f"{high_format},fp4",
+        gemm_quantization_spec=GemmQuantizationSpec("fp4", high_format),
     )
     model._calculate_hybrid_attention_step_multiplier = lambda input_args: 2
     monkeypatch.setattr(runtime.base, "get_runtime_state", lambda: state)
@@ -388,10 +428,11 @@ def test_yaml_schedule_expands_over_wan_cfg_calls(runtime, monkeypatch):
     }
 
 
-def test_fp6_profile_supports_simple_hybrid_schedule(runtime):
+@pytest.mark.parametrize("high_format", ["fp6", "a6w4"])
+def test_profile_supports_simple_hybrid_schedule(runtime, high_format):
     config = _args(
         runtime,
-        gemm_quantization="low=fp4,high=fp6",
+        gemm_quantization=f"low=fp4,high={high_format}",
         use_hybrid_gemm_schedule=True,
         num_hybrid_gemm_high_precision_steps=1,
     )

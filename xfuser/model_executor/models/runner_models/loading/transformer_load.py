@@ -107,7 +107,9 @@ def _prepare_native_load(
         )
     from .format_backends import prepare_native_transformer_format_load
 
-    is_fp4 = adapter.format.value in {"fp4", "fp8_fp4", "fp4_fp6"}
+    is_fp4 = adapter.format.value in {
+        "fp4", "fp8_fp4", "fp4_fp6", "fp4_a6w4",
+    }
     return prepare_native_transformer_format_load(
         adapter,
         component_name=component_name,
@@ -133,7 +135,10 @@ def _fp4_remainder(loader, component_name):
         return {}
     remainder_key = (
         "mxfp6_targets"
-        if getattr(loader.model.config, "use_fp6_gemms", False)
+        if (
+            getattr(loader.model.config, "use_fp6_gemms", False)
+            or getattr(loader.model.config, "use_a6w4_gemms", False)
+        )
         else "fp8_targets"
     )
     return {

@@ -842,3 +842,47 @@ def test_the_head_dim_refusal_says_what_would_actually_happen():
 
     with pytest.raises(ValueError, match="would be refused"):
         _validate_attention_head_dims(model, _HeadDimConfig("AITER_FP8_SPARGE"))
+
+
+def test_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len():
+    """valid_kv_len is one length for the whole call, so it cannot describe a
+    batch. Declaring it alongside several ragged sequences used to take the
+    trailing-pad slice, which cut every row to the longest segment and left the
+    shorter rows attending over their own pad.
+
+    Nothing rejects the declaration: it is within the padded length, and it
+    does equal max_seqlen_k, because the longest segment genuinely is the valid
+    count -- for one of the rows. Only the output shows it, which is why the
+    pad is poisoned here and the comparison is per sequence. Upstream measured
+    cosine [1.0, 0.0126] before the fix: the long row fine, the short one
+    destroyed.
+    """
+    _require_mha_v4_aiter("AITER_BF16")
+    _require_mha_v4_recipe("AITER_BF16")
+    if not _mha_v4_kernel().HAS_SEQLENS_K:
+        pytest.skip("this AITER cannot express per-batch key lengths")
+
+    torch.manual_seed(7)
+    heads, padded, valid = 4, 384, (300, 137)
+    shape = (len(valid), heads, padded, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    for b, n in enumerate(valid):
+        key[b, :, n:] = 50.0
+        value[b, :, n:] = 50.0
+
+    kwargs = _packed_kwargs(valid, padded)
+    kwargs["valid_kv_len"] = max(valid)      # the declaration that misleads
+
+    with torch.no_grad():
+        output, _ = _impl("AITER_BF16")(query, key, value, attention_kwargs=kwargs)
+
+    for b, n in enumerate(valid):
+        reference = F.scaled_dot_product_attention(
+            query[b:b + 1], key[b:b + 1, :, :n], value[b:b + 1, :, :n]
+        )
+        cosine = F.cosine_similarity(
+            output[b:b + 1].float().flatten(), reference.float().flatten(), dim=0
+        ).item()
+        assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"

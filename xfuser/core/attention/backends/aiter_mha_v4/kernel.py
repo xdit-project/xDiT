@@ -79,13 +79,21 @@ def _shorten_keys(key, value, call: AttnCall, fmt: MhaV4Format):
     travel in seqlens_k, which the kernels read per batch, so the padding is
     never visited.
 
+    ``valid_kv_len`` is one length for the whole call, so it can only describe a
+    single sequence. A batch of several is gathered even when it declares one,
+    because slicing would cut every row to the longest row's length and leave
+    the shorter ones attending over their own pad. Nothing rejects that: the
+    declaration passes both checks, since the longest segment genuinely is the
+    valid count for one of the rows.
+
     Q is left alone either way: it is never packed, and a key-side length would
     be wrong for cross attention, where the two sequences differ.
     """
     valid = call.attention_kwargs.get("valid_kv_len")
-    if valid is not None:
-        # A declared trailing pad, which accepts has already checked describes
-        # the pack truthfully. Slicing costs no copy where gathering costs two.
+    if valid is not None and key.shape[0] == 1:
+        # A declared trailing pad on one sequence, which accepts has already
+        # checked describes the pack truthfully. One copy, where gathering
+        # costs two.
         return key[:, :valid].contiguous(), value[:, :valid].contiguous(), None
 
     # Gathered over K's own shape rather than through layout.pack_kv, which

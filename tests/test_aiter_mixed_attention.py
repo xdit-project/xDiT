@@ -452,19 +452,8 @@ def test_mha_v4_refuses_several_packed_sequences():
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_F6F4",
-        # MXFP4 and F4F4 are the same launch: AITER commented its separate
-        # f4f4 row out, so both resolve to fwd_hd128_f4f4, and the fault below
-        # reaches either name.
-        *[
-            pytest.param(
-                name,
-                marks=pytest.mark.skip(
-                    reason="faults the GPU once allocations accumulate; "
-                           "fixed in newer AITER"
-                ),
-            )
-            for name in ("AITER_MXFP4", "AITER_F4F4")
-        ],
+        "AITER_MXFP4",
+        "AITER_F4F4",
     ],
 )
 def test_mha_v4_serves_a_declared_trailing_pad(backend_name, request):

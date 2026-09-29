@@ -385,6 +385,64 @@ def _available(backends):
             yield backend
 
 
+def test_aiter_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len():
+    """valid_kv_len is one length for the whole call, so it cannot describe a batch.
+
+    Declaring it alongside several ragged sequences used to take the trailing-pad slice, which
+    cut every row to the longest segment and let the shorter rows attend over their own pad.
+    The declaration passes both of the slice's checks in that case -- valid_kv_len is within
+    the padded length, and it does equal max_seqlen_k -- so only the output shows it.
+    """
+    from xfuser.core.distributed.attention_backend import (
+        ATTENTION_FUNCTION_REGISTRY,
+        AttentionBackendType,
+    )
+
+    _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+    _require_mha_v4_recipe(AttentionBackendType.AITER_BF16.name)
+
+    torch.manual_seed(7)
+    heads, padded, valid = 4, 384, (300, 137)
+    shape = (len(valid), heads, padded, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    for b, n in enumerate(valid):
+        key[b, :, n:] = 50.0
+        value[b, :, n:] = 50.0
+
+    indices_k = torch.cat(
+        [torch.arange(b * padded, b * padded + n, device="cuda") for b, n in enumerate(valid)]
+    )
+    attention_kwargs = {
+        "indices_k": indices_k,
+        "cu_seqlens_k": torch.tensor(
+            [0, valid[0], valid[0] + valid[1]], dtype=torch.int32, device="cuda"
+        ),
+        "max_seqlen_k": max(valid),
+        "valid_kv_len": max(valid),
+    }
+
+    with torch.no_grad():
+        output, _ = ATTENTION_FUNCTION_REGISTRY[AttentionBackendType.AITER_BF16](
+            query,
+            key,
+            value,
+            dropout_p=0.0,
+            is_causal=False,
+            attention_kwargs=attention_kwargs,
+        )
+
+    for b, n in enumerate(valid):
+        reference = F.scaled_dot_product_attention(
+            query[b : b + 1], key[b : b + 1, :, :n], value[b : b + 1, :, :n]
+        )
+        cosine = F.cosine_similarity(
+            output[b : b + 1].float().flatten(), reference.float().flatten(), dim=0
+        ).item()
+        assert cosine > 0.99, f"sequence {b} of {valid}: {cosine}"
+
+
 @pytest.mark.parametrize(
     "case, call",
     [

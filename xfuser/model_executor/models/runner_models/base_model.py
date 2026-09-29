@@ -61,9 +61,6 @@ from xfuser.model_executor.models.runner_models.loading.contracts import (
     LoadSupport,
     LoadRoute,
 )
-from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
-    apply_fp8_override_cli_to_settings,
-)
 
 packages_info = PACKAGES_CHECKER.get_packages_info()
 
@@ -312,10 +309,6 @@ class xFuserModel(abc.ABC):
 
     def _update_model_settings(self, config: xFuserArgs) -> None:
         targets = self.settings.gemm_targets
-        if targets is None and config.use_fp4_gemms:
-            # Reshuffles the legacy per-format lists so the subtraction their
-            # consumers do comes out right; a declared model needs none of it.
-            apply_fp8_override_cli_to_settings(config, self.settings)
 
         te_targets = (
             targets.text_encoder.roots()

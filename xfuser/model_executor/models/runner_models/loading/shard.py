@@ -18,7 +18,7 @@ from xfuser.core.utils.runner_utils import (
     log,
     rgetattr,
 )
-from .format_backends import module_path_is_covered, module_paths_overlap
+from .format_backends import module_paths_overlap
 
 
 def shard_pipeline_components(loader) -> None:
@@ -167,28 +167,20 @@ def _block_local_targets(targets, block_path):
     return tuple(dict.fromkeys(local)) or None
 
 
-def _target_filter(targets, excluded_targets=(), include_suffixes=None):
-    return lambda _module, fqn: any(
-        not target or fqn == target or fqn.startswith(f"{target}.")
-        for target in targets
-    ) and not any(
-        module_path_is_covered(fqn, target) for target in excluded_targets
-    ) and (
-        not include_suffixes or fqn.endswith(tuple(include_suffixes))
-    )
-
-
-def _has_unowned_target(targets, owners):
-    return any(
-        not any(module_path_is_covered(target, owner) for owner in owners)
-        for target in targets
-    )
-
-
-def _plan_block_quantize_fn(
-    loader, component_name, wrap_attrs, local_rank, component, plan
+def build_block_quantize_fn(
+    loader,
+    component_name: str,
+    wrap_attrs: list,
+    local_rank: int,
+    *,
+    component=None,
 ):
-    """Per-block quantize callable driven by the resolved GEMM plan.
+    """Per-block quantize callable (block, block_idx) -> None, or None when
+    this component is not quantized.
+
+    Targets resolve against each block's actual ``component.wrap_attr.index``
+    path; the callback index stays flattened across wrap attributes, which is
+    what the checkpoint fill counts in.
 
     One pass per format the run named, rather than a boolean per format the
     loader knows about. Each converter's filter asks the plan what a leaf
@@ -197,22 +189,31 @@ def _plan_block_quantize_fn(
     pass whose format owns nothing in a block simply converts nothing.
     """
 
+    plan = loader.quantization_plan.gemm_plan
+    if plan is None or not plan.quantizes:
+        return None
+
     model = loader.model
     device = f"cuda:{local_rank}"
 
-    roots = plan.declared_roots()
     formats = tuple(dict.fromkeys(name for name in (plan.low, plan.high) if name))
+    by_format = {name: plan.walk_roots(name) for name in formats}
 
     paths = [f"{component_name}.{attr}" for attr in wrap_attrs]
     if not any(
-        module_paths_overlap(path, root) for path in paths for root in roots
+        module_paths_overlap(path, root)
+        for path in paths
+        for roots in by_format.values()
+        for root in roots
     ):
         return None
 
     # Resolved once rather than per block: a format this run named needs a
     # converter whether or not this particular block has leaves for it.
     adapters = {}
-    for format_name in formats:
+    for format_name, roots in by_format.items():
+        if not roots:
+            continue
         adapter = loader.backends.adapter_for(format_name)
         if adapter is None:
             raise RuntimeError(
@@ -238,10 +239,14 @@ def _plan_block_quantize_fn(
             if block_paths is not None
             else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
         )
-        if _block_local_targets(roots, block_path) is None:
-            return
+        present = [
+            format_name
+            for format_name, adapter in adapters.items()
+            if _block_local_targets(by_format[format_name], block_path) is not None
+        ]
 
-        for format_name, adapter in adapters.items():
+        for format_name in present:
+            adapter = adapters[format_name]
             convert_kwargs = {}
             if adapter is loader.backends.format:
                 convert_kwargs.update(hybrid=model.config.use_hybrid_gemm_schedule)
@@ -265,200 +270,3 @@ def _plan_target_filter(plan, block_path, format_name):
     return filter_fn
 
 
-def build_block_quantize_fn(
-    loader,
-    component_name: str,
-    wrap_attrs: list,
-    local_rank: int,
-    *,
-    component=None,
-):
-    """Return a per-block quantize callable (block, block_idx) -> None for this component, or None
-    if no quantization is configured for it.
-
-    Quantization targets are resolved against each block's actual
-    ``component.wrap_attr.local_index`` path. The callback index remains flattened
-    across wrap attributes for checkpoint loading and existing FP8 precision
-    overrides; entries like "5." still apply to flattened block index 5.
-
-    Suffix patterns (e.g. .net.0.proj) are block-local FQNs and are passed through unchanged on
-    every block; only prefix patterns are stripped.
-    """
-    plan = loader.quantization_plan.gemm_plan
-    if plan is not None:
-        if not plan.quantizes:
-            return None
-        return _plan_block_quantize_fn(
-            loader, component_name, wrap_attrs, local_rank, component, plan
-        )
-
-    model = loader.model
-    config, settings = model.config, model.settings
-    use_fp6 = bool(getattr(config, "use_fp6_gemms", False))
-    use_fp6_mixed = use_fp6 and config.use_fp4_gemms
-    pure_fp6 = use_fp6 and not config.use_fp4_gemms
-    if not (
-        config.use_fp4_gemms
-        or config.use_fp8_gemms
-        or config.use_int8_gemms
-        or use_fp6
-    ):
-        return None
-
-    device = f"cuda:{local_rank}"
-    fp4_list = set(loader.quantization_plan.module_list("fp4"))
-    fp8_list = set(loader.quantization_plan.module_list())
-    fp6_list = (
-        set(loader.quantization_plan.module_list("fp6")) if pure_fp6 else set()
-    )
-    fp8_overrides = settings.fp8_precision_overrides or ()
-    fp8_suffix_overrides = settings.fp8_precision_override_suffixes
-    int8_list = set(loader.quantization_plan.module_list("int8"))
-
-    paths = [f"{component_name}.{a}" for a in wrap_attrs]
-
-    def overlaps_any(targets):
-        return any(
-            module_paths_overlap(path, target) for path in paths for target in targets
-        )
-
-    use_fp4_here = config.use_fp4_gemms and overlaps_any(fp4_list)
-    use_fp6_here = (pure_fp6 and overlaps_any(fp6_list)) or (
-        use_fp6_mixed and overlaps_any(fp8_list)
-    )
-    # fp8-only: in fp8 list but not fp4 list (e.g. transformer_2 in Wan2.2 FP4 mode)
-    use_fp8_here = not use_fp6 and (
-        (config.use_fp8_gemms and overlaps_any(fp8_list))
-        or (
-            config.use_fp4_gemms
-            and overlaps_any(fp8_list)
-            and not overlaps_any(fp4_list)
-        )
-    )
-    use_int8_here = config.use_int8_gemms and overlaps_any(int8_list)
-
-    if not use_fp4_here and not use_fp6_here and not use_fp8_here and not use_int8_here:
-        return None
-
-    block_paths = (
-        _wrapped_block_paths(component, component_name, wrap_attrs)
-        if component is not None
-        else None
-    )
-    if block_paths is None and len(wrap_attrs) != 1:
-        raise ValueError(
-            "multiple wrap_attrs require the component to resolve flattened "
-            "block indices"
-        )
-
-    def quantize_fn(block, block_idx: int) -> None:
-        block_path = (
-            block_paths[block_idx]
-            if block_paths is not None
-            else f"{component_name}.{wrap_attrs[0]}.{block_idx}"
-        )
-        local_fp4_targets = _block_local_targets(fp4_list, block_path)
-        local_fp8_targets = _block_local_targets(fp8_list, block_path)
-        local_fp6_targets = _block_local_targets(fp6_list, block_path)
-        local_int8_targets = _block_local_targets(int8_list, block_path)
-        use_fp4_block = config.use_fp4_gemms and local_fp4_targets is not None
-        use_fp6_block = (pure_fp6 and local_fp6_targets is not None) or (
-            use_fp6_mixed
-            and local_fp8_targets is not None
-            and (
-                local_fp4_targets is None
-                or _has_unowned_target(local_fp8_targets, local_fp4_targets)
-            )
-        )
-        use_fp8_block = not use_fp6 and (
-            (config.use_fp8_gemms and local_fp8_targets is not None)
-            or (
-                config.use_fp4_gemms
-                and local_fp8_targets is not None
-                and (
-                    local_fp4_targets is None
-                    or _has_unowned_target(local_fp8_targets, local_fp4_targets)
-                )
-            )
-        )
-        use_int8_block = config.use_int8_gemms and local_int8_targets is not None
-        if (
-            not use_fp4_block
-            and not use_fp6_block
-            and not use_fp8_block
-            and not use_int8_block
-        ):
-            return
-
-        block_prefix = f"{block_idx}."
-        # Strip the block-index prefix so the quantize functions see local FQN paths.
-        local_fp8 = (
-            tuple(
-                o[len(block_prefix) :]
-                for o in fp8_overrides
-                if o.startswith(block_prefix)
-            )
-            or None
-        )
-        if use_fp4_block:
-            adapter = loader.backends.format
-            if adapter is None:
-                raise RuntimeError(
-                    "FP4 block conversion requested without a selected backend"
-                )
-            adapter.convert_block(
-                block,
-                fp8_layers=local_fp8,
-                fp8_suffix_layers=fp8_suffix_overrides,
-                hybrid=config.use_hybrid_gemm_schedule,
-                device=device,
-                filter_fn=_target_filter(local_fp4_targets),
-            )
-        if use_fp6_block:
-            adapter = loader.backends.format if pure_fp6 else loader.backends.fp6
-            if adapter is None:
-                raise RuntimeError(
-                    "MXFP6 block conversion requested without a selected backend"
-                )
-            targets = local_fp6_targets if pure_fp6 else local_fp8_targets
-            adapter.convert_block(
-                block,
-                device=device,
-                filter_fn=_target_filter(
-                    targets,
-                    (local_fp4_targets if use_fp6_mixed and use_fp4_block else ()),
-                    (
-                        getattr(settings, "fp8_gemm_include_suffixes", None)
-                        if use_fp6_mixed
-                        else None
-                    ),
-                ),
-            )
-        if use_fp8_block:
-            adapter = loader.backends.blockwise_fp8
-            if adapter is None:
-                raise RuntimeError(
-                    "FP8 block conversion requested without a selected backend"
-                )
-            adapter.convert_block(
-                block,
-                device=device,
-                filter_fn=_target_filter(
-                    local_fp8_targets,
-                    (local_fp4_targets if use_fp4_block else ()),
-                    getattr(settings, "fp8_gemm_include_suffixes", None),
-                ),
-            )
-        elif use_int8_block:
-            adapter = loader.backends.format
-            if adapter is None:
-                raise RuntimeError(
-                    "INT8 block conversion requested without a selected backend"
-                )
-            adapter.convert_block(
-                block,
-                device=device,
-                filter_fn=_target_filter(local_int8_targets),
-            )
-
-    return quantize_fn

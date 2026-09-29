@@ -42,6 +42,13 @@ def _leaves_under(root):
     )
 
 
+ALL_LEAVES = tuple(
+    leaf
+    for root in BLOCKS + (TEXT_ENCODER,)
+    for leaf in _leaves_under(root)
+)
+
+
 class _Recorder:
     """An adapter that records what it converted, and what its filter kept.
 
@@ -60,11 +67,17 @@ class _Recorder:
 
     @property
     def kept(self):
+        # A walk may start at a whole block list or at one block inside it, so
+        # the leaves are matched against the pipeline rather than generated
+        # from whatever path this converter happened to be handed.
         found = []
         for path, kwargs in self.seen:
             filter_fn = kwargs.get("filter_fn")
-            for leaf in _leaves_under(path):
-                if filter_fn is None or filter_fn(None, leaf[len(path) + 1 :]):
+            for leaf in ALL_LEAVES:
+                if not (leaf == path or leaf.startswith(f"{path}.")):
+                    continue
+                fqn = "" if leaf == path else leaf[len(path) + 1 :]
+                if filter_fn is None or filter_fn(None, fqn):
                     found.append(leaf)
         return sorted(found)
 
@@ -95,7 +108,17 @@ def _loader(raw, *, text_encoder=True, fp8_before_move=True, targets=TARGETS):
         use_hybrid_gemm_schedule=False,
     )
     model = SimpleNamespace(
-        settings=settings, config=config, pipe=_pipe(BLOCKS + (TEXT_ENCODER,))
+        settings=settings,
+        config=config,
+        # Blocks as well as block lists: a carve-out named by prefix makes the
+        # walk start at one block, so it has to be reachable on the pipe.
+        pipe=_pipe(
+            tuple(
+                f"{root}.{index}"
+                for root in BLOCKS + (TEXT_ENCODER,)
+                for index in range(BLOCK_COUNT)
+            )
+        ),
     )
     primary = _Recorder("format")
     blockwise = _Recorder("blockwise_fp8", before_device_move=fp8_before_move)

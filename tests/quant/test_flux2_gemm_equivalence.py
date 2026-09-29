@@ -1,9 +1,9 @@
-"""FLUX.2-dev: the resolver must decide what the legacy fields decide today.
+"""FLUX.2-dev: the resolver must decide what the legacy fields decided.
 
-This is the oracle that makes deleting the legacy fields safe. It drives the
-real settings object from the real model class through the real
-`apply_fp8_override_cli_to_settings` / `QuantizationPlan` path, and compares
-the answer to `resolve(settings.gemm_targets, spec)`.
+The oracle that made deleting the legacy fields safe. Those fields and the
+code that read them are gone, so the comparison is now against the recorded
+declaration and the rule the old code applied to it, both written out below --
+a specification cannot drift with the code it checks.
 """
 
 import copy
@@ -15,7 +15,6 @@ from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.model_executor.models.runner_models.flux import xFuserFlux2Model
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     QuantizationPlan,
-    apply_fp8_override_cli_to_settings,
 )
 from xfuser.model_executor.quant.targets import resolve
 
@@ -25,13 +24,8 @@ TRANSFORMER = (
 )
 TEXT_ENCODER = "text_encoder.model.language_model.layers"
 
-# FLUX.2-dev declares neither, so the tiering inside a block is a no-op and the
-# module lists carry the whole decision. A model that declares them needs the
-# pattern consumers migrated too; see phase 3.
-assert not xFuserFlux2Model.settings.fp8_precision_overrides
-assert not xFuserFlux2Model.settings.fp8_precision_override_suffixes
-
-
+# FLUX.2-dev declared no precision patterns, so tiering inside a block was a
+# no-op for it and the module lists carried the whole decision.
 #: What FLUX.2-dev declared before it was migrated, recorded here so the
 #: comparison outlives the fields themselves. Every test below that says
 #: "the legacy path" means these values through the unchanged legacy code.
@@ -41,38 +35,39 @@ LEGACY_TEXT_ENCODER = ["text_encoder.model.language_model.layers"]
 assert LEGACY_FP8_GEMM == LEGACY_FP4_GEMM  # the split was never by format
 
 
-def _legacy_settings():
-    """FLUX.2-dev's settings as they were before `gemm_targets` replaced them."""
-    settings = copy.deepcopy(xFuserFlux2Model.settings)
-    settings.gemm_targets = None
-    settings.fp8_gemm_module_list = list(LEGACY_FP8_GEMM)
-    settings.fp4_gemm_module_list = list(LEGACY_FP4_GEMM)
-    settings.fp8_text_encoder_module_list = list(LEGACY_TEXT_ENCODER)
-    return settings
+def _legacy_listed(spec, format_name, *, text_encoder):
+    """The list the legacy fields gave one format, before any subtraction.
+
+    The rule, stated: a pure fp4 run folded the fp8 targets into the fp4 list
+    and emptied the fp8 one; the text encoder rode on the fp8 list, and only
+    when the run asked for it.
+    """
+    fp8 = list(LEGACY_FP8_GEMM)
+    fp4 = list(LEGACY_FP4_GEMM)
+    if spec.is_pure("fp4"):
+        fp4 = list(dict.fromkeys(fp4 + fp8))
+        fp8 = []
+
+    if format_name == "fp8":
+        return fp8 + (list(LEGACY_TEXT_ENCODER) if text_encoder else [])
+    if format_name == "fp4":
+        return fp4
+    if format_name == "fp6":
+        return list(dict.fromkeys(fp4 + fp8))
+    raise ValueError(format_name)
 
 
 def _legacy(spec: GemmQuantizationSpec, *, text_encoder: bool) -> dict:
-    """What today's code targets per format, via today's code."""
-    settings = _legacy_settings()
-    config = SimpleNamespace(
-        gemm_quantization_spec=spec,
-        _gemm_config_loaded=False,
-        fp8_precision_override_prefix_patterns=None,
-        fp8_precision_override_suffix_patterns=None,
-        quantize_text_encoder=text_encoder,
-        use_fp4_gemms=spec.low == "fp4",
-        use_hybrid_gemm_schedule=False,
-        gemm_high_precision_targets="model",
-    )
-    apply_fp8_override_cli_to_settings(config, settings)
-    plan = QuantizationPlan(SimpleNamespace(settings=settings, config=config))
-
-    targets = {fmt: plan.module_list(fmt) for fmt in spec.formats if fmt != "none"}
+    """What the legacy fields targeted per format, by the rule they followed."""
+    targets = {
+        fmt: _legacy_listed(spec, fmt, text_encoder=text_encoder)
+        for fmt in spec.formats
+        if fmt != "none"
+    }
     if spec.is_tiered:
-        # A tiered run lists every eligible module under *both* formats; only
-        # the modules that appear under the high format alone are actually held
-        # there. That is log_gemm_plan's `high_only_targets`, and it is the
-        # decision a consumer ends up acting on.
+        # A tiered run listed every eligible module under *both* formats; only
+        # the modules appearing under the high format alone were actually held
+        # there. That is the subtraction its consumers performed.
         low = targets[spec.low]
         targets[spec.high] = [
             t
@@ -159,26 +154,21 @@ def test_the_text_encoder_is_untouched_unless_the_run_asks():
 FORMATS = ("fp8", "fp4", "fp6")
 
 
-def _plan_for(raw: str, *, text_encoder: bool, legacy: bool) -> QuantizationPlan:
-    """A QuantizationPlan reading either the legacy lists or gemm_targets."""
+def _plan_for(raw: str, *, text_encoder: bool) -> QuantizationPlan:
+    """A QuantizationPlan over FLUX.2-dev's declaration."""
     spec = GemmQuantizationSpec.parse(raw)
-    settings = _legacy_settings() if legacy else copy.deepcopy(
-        xFuserFlux2Model.settings
-    )
     config = SimpleNamespace(
         gemm_quantization_spec=spec,
         _gemm_config_loaded=False,
-        fp8_precision_override_prefix_patterns=None,
-        fp8_precision_override_suffix_patterns=None,
         quantize_text_encoder=text_encoder,
-        use_fp4_gemms=spec.low == "fp4",
         use_hybrid_gemm_schedule=False,
         gemm_high_precision_targets="model",
+        ulysses_degree=1,
+        ring_degree=1,
     )
-    apply_fp8_override_cli_to_settings(config, settings)
     return QuantizationPlan(
         SimpleNamespace(
-            settings=settings,
+            settings=copy.deepcopy(xFuserFlux2Model.settings),
             config=config,
             capabilities=xFuserFlux2Model.capabilities,
         )
@@ -188,23 +178,31 @@ def _plan_for(raw: str, *, text_encoder: bool, legacy: bool) -> QuantizationPlan
 @pytest.mark.parametrize("raw, text_encoder", CASES)
 @pytest.mark.parametrize("format_name", FORMATS)
 def test_the_shim_hands_consumers_the_legacy_lists(raw, text_encoder, format_name):
-    """Byte-identical lists, so no consumer can tell which path produced them."""
-    old = _plan_for(raw, text_encoder=text_encoder, legacy=True)
-    new = _plan_for(raw, text_encoder=text_encoder, legacy=False)
-    assert new.module_list(format_name) == old.module_list(format_name)
+    """The lists a consumer receives are the ones the legacy fields gave it."""
+    spec = GemmQuantizationSpec.parse(raw)
+    plan = _plan_for(raw, text_encoder=text_encoder)
+    expected = _legacy_listed(spec, format_name, text_encoder=text_encoder)
+    assert sorted(plan.module_list(format_name)) == sorted(expected)
 
 
 @pytest.mark.parametrize("raw, text_encoder", CASES)
 @pytest.mark.parametrize("component", ["transformer", "text_encoder"])
 def test_targets_for_follows(raw, text_encoder, component):
-    old = _plan_for(raw, text_encoder=text_encoder, legacy=True)
-    new = _plan_for(raw, text_encoder=text_encoder, legacy=False)
-    assert new.targets_for(component) == old.targets_for(component)
+    """The same lists, with the component's own prefix stripped."""
+    spec = GemmQuantizationSpec.parse(raw)
+    plan = _plan_for(raw, text_encoder=text_encoder)
+    prefix = f"{component}."
+    expected = [
+        target[len(prefix) :]
+        for target in _legacy_listed(spec, "fp8", text_encoder=text_encoder)
+        if target.startswith(prefix)
+    ]
+    assert sorted(plan.targets_for(component)) == sorted(expected)
 
 
 def test_the_high_tier_is_what_consumers_recover_by_subtracting():
     """`setup_high_tier_gemms` and `shard` both do fp8_list - fp4_list."""
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False)
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=True)
     fp4 = set(plan.module_list("fp4"))
     fp8_only = [m for m in plan.module_list("fp8") if m not in fp4]
     assert fp8_only == [TEXT_ENCODER]
@@ -215,7 +213,7 @@ def test_keep_high_on_a_transformer_module_survives_the_subtraction():
     """FLUX.2 holds only its text encoder high; a DiT carve-out must work too."""
     from xfuser.model_executor.quant.targets import GemmTargets, Select
 
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=False, legacy=False)
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=False)
     plan.model.settings.gemm_targets = GemmTargets(
         transformer=Select(modules=TRANSFORMER),
         keep_high=Select(modules=(TRANSFORMER[1],)),
@@ -256,37 +254,27 @@ def test_an_unsupported_format_is_refused_before_any_list_is_read():
 # phase 3: consumers rewritten onto GemmPlan
 # ---------------------------------------------------------------------------
 
-def _high_tier_by_subtraction(plan: QuantizationPlan) -> list:
-    """What `setup_high_tier_gemms` computed before the rewrite."""
-    low = set(plan.module_list("fp4"))
-    return [
-        name
-        for name in plan.module_list("fp8")
-        if not any(name == m or name.startswith(f"{m}.") for m in low)
-    ]
-
-
-#: `setup_high_tier_gemms` runs only from `_setup_format_gemms`, i.e.
-#: under the fp4/fp6 backends. A pure fp8 run converts through
-#: `_convert_fp8_on_device` and never reaches it, so the subtraction it would
-#: have computed there is dead and not an oracle for anything.
+#: The high tier was placed only under the fp4/fp6 backends. A pure fp8 run
+#: converted through a different walk and never computed a subtraction, so
+#: those profiles are not an oracle for anything here.
 FORMAT_PATH_CASES = [c for c in CASES if GemmQuantizationSpec.parse(c[0]).low == "fp4"]
 
 
 @pytest.mark.parametrize("raw, text_encoder", FORMAT_PATH_CASES)
 def test_the_high_tier_survives_the_rewrite(raw, text_encoder):
     """`roots(high)` must name what the subtraction named, profile by profile."""
-    old = _plan_for(raw, text_encoder=text_encoder, legacy=True)
-    new = _plan_for(raw, text_encoder=text_encoder, legacy=False)
-
-    gemm_plan = new.gemm_plan
+    spec = GemmQuantizationSpec.parse(raw)
+    gemm_plan = _plan_for(raw, text_encoder=text_encoder).gemm_plan
     rewritten = list(gemm_plan.roots(gemm_plan.high)) if gemm_plan.high else []
-    assert sorted(rewritten) == sorted(_high_tier_by_subtraction(old))
+    expected = (
+        _legacy(spec, text_encoder=text_encoder)[spec.high] if spec.high else []
+    )
+    assert sorted(rewritten) == expected
 
 
 def test_the_high_tier_is_the_text_encoder_under_a_tier():
     """The one profile where FLUX.2 actually has a high tier to place."""
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False).gemm_plan
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=True).gemm_plan
     assert plan.roots(plan.high) == (TEXT_ENCODER,)
     assert sorted(plan.roots(plan.low)) == sorted(TRANSFORMER)
 
@@ -294,13 +282,13 @@ def test_the_high_tier_is_the_text_encoder_under_a_tier():
 @pytest.mark.parametrize("raw", ["fp8", "fp4"])
 def test_a_pure_profile_places_no_high_tier(raw):
     """`setup_high_tier_gemms` must stay a no-op, as it is today."""
-    plan = _plan_for(raw, text_encoder=False, legacy=False).gemm_plan
+    plan = _plan_for(raw, text_encoder=False).gemm_plan
     assert plan.high is None
 
 
 def test_the_high_format_drives_the_adapter_choice():
     """It was `use_fp6_gemms and use_fp4_gemms`; now any tier names its own."""
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False).gemm_plan
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=True).gemm_plan
     assert plan.high == "fp8"
 
 
@@ -325,14 +313,6 @@ def _mapping(lines, *, component="transformer"):
     )
 
 
-@pytest.mark.parametrize("raw, text_encoder", CASES)
-def test_the_log_reports_what_it_did_before(raw, text_encoder, monkeypatch):
-    """Transformer lines only: the legacy logger never mentioned the encoder."""
-    old = _logged(_plan_for(raw, text_encoder=text_encoder, legacy=True), monkeypatch)
-    new = _logged(_plan_for(raw, text_encoder=text_encoder, legacy=False), monkeypatch)
-    assert _mapping(new) == _mapping(old)
-
-
 def test_the_log_now_mentions_the_text_encoder(monkeypatch):
     """A deliberate addition: it is quantized, so the log should say so.
 
@@ -340,19 +320,16 @@ def test_the_log_now_mentions_the_text_encoder(monkeypatch):
     mapping" and stopped there, leaving the encoder's format invisible in the
     one place a run tells you what it did.
     """
-    args = dict(text_encoder=True)
-    old = _logged(_plan_for("fp8", legacy=True, **args), monkeypatch)
-    new = _logged(_plan_for("fp8", legacy=False, **args), monkeypatch)
+    lines = _logged(_plan_for("fp8", text_encoder=True), monkeypatch)
 
-    assert _mapping(old, component="text_encoder") == []
-    assert _mapping(new, component="text_encoder") == [
+    assert _mapping(lines, component="text_encoder") == [
         f"GEMM quantization: {TEXT_ENCODER} -> FP8"
     ]
 
 
 def test_the_tier_log_names_the_high_modules(monkeypatch):
     lines = _logged(
-        _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False), monkeypatch
+        _plan_for("low=fp4,high=fp8", text_encoder=True), monkeypatch
     )
     header = [l for l in lines if l.startswith("GEMM high-precision tier:")]
     assert len(header) == 1
@@ -362,7 +339,7 @@ def test_the_tier_log_names_the_high_modules(monkeypatch):
 
 
 def test_an_unquantized_run_logs_nothing(monkeypatch):
-    assert _logged(_plan_for("none", text_encoder=False, legacy=False), monkeypatch) == []
+    assert _logged(_plan_for("none", text_encoder=False), monkeypatch) == []
 
 
 # ---------------------------------------------------------------------------
@@ -378,9 +355,6 @@ def test_declared_components_reads_the_declaration_not_the_run():
     declared = SimpleNamespace(settings=xFuserFlux2Model.settings)
 
     assert _declared_components(declared) == ("text_encoder",)
-    assert _declared_components(declared) == _declared_components(
-        SimpleNamespace(settings=_legacy_settings())
-    )
 
 
 def test_declared_components_is_empty_without_text_encoder_targets():
@@ -401,7 +375,7 @@ def test_declared_components_is_empty_without_text_encoder_targets():
 
 def _configured(raw, **yaml):
     """A plan with an advanced GEMM config file applied."""
-    plan = _plan_for(raw, text_encoder=True, legacy=False)
+    plan = _plan_for(raw, text_encoder=True)
     plan.model.config._gemm_config_loaded = True
     plan.model.config.gemm_high_precision_targets = yaml.get("targets", "model")
     plan.model.config.gemm_high_precision_module_patterns = yaml.get("modules")
@@ -437,6 +411,6 @@ def test_a_pattern_outside_the_targets_is_refused_not_ignored():
 
 
 def test_no_config_file_leaves_the_declaration_alone():
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=True, legacy=False).gemm_plan
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=True).gemm_plan
     assert plan.format_for(f"{TRANSFORMER[0]}.0.attn.to_qkv") == "fp4"
     assert plan.format_for(f"{TEXT_ENCODER}.3.mlp") == "fp8"

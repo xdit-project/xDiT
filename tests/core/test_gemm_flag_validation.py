@@ -161,69 +161,8 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(
     assert "text-encoder target(s) stay bf16" in messages[0]
 
 
-def test_explicit_hybrid_fp4_owns_conversion_without_generic_fp8_walk(
-    runtime, monkeypatch
-):
-    calls = []
-    model = object.__new__(runtime.model_cls)
-    model.config = SimpleNamespace(
-        fully_shard_degree=1,
-        enable_model_cpu_offload=False,
-        enable_sequential_cpu_offload=False,
-        enable_group_cpu_offload=False,
-        use_fp4_gemms=True,
-        use_fp8_gemms=True,
-        use_int8_gemms=False,
-        use_hybrid_attn_schedule=False,
-        use_hybrid_gemm_schedule=True,
-        use_vae_channels_last_format=False,
-        use_torch_compile=False,
-    )
-    model.settings = SimpleNamespace(
-        fp8_precision_overrides=None,
-        fp8_precision_override_suffixes=None,
-        int8_gemm_module_list=None,
-    )
-    model.pipe = SimpleNamespace(to=lambda device: model.pipe)
-    model._setup_hybrid_gemm_schedule = lambda input_args: calls.append(
-        ("schedule", input_args)
-    )
-
-    fp8_backend = SimpleNamespace(
-        converts_before_device_move=False,
-        backend=SimpleNamespace(value="torchao"),
-        storage_semantics="torchao_fp8",
-        convert_module=lambda module, **kwargs: calls.append(("generic-fp8", kwargs)),
-    )
-
-    model.loader = SimpleNamespace(
-        model=model,
-        fill_eager_transformers=lambda: None,
-        replicated_broadcast_load=lambda: False,
-        backends=SimpleNamespace(fp8=fp8_backend),
-        quantization_plan=runtime.plan_cls(model),
-    )
-    model.loader.materialize_pipeline = MethodType(
-        runtime.loader_cls.materialize_pipeline, model.loader
-    )
-
-    monkeypatch.setattr(
-        runtime.placement,
-        "setup_mxfp4_gemms",
-        lambda _model, local_rank: calls.append(("fp4", local_rank)),
-    )
-
-    for module in (runtime.base, runtime.placement):
-        monkeypatch.setattr(
-            module, "get_world_group", lambda: SimpleNamespace(local_rank=0)
-        )
-        monkeypatch.setattr(module, "_is_cuda", lambda: False)
-    model._post_load_and_state_initialization({"num_inference_steps": 4})
-
-    assert calls == [
-        ("fp4", 0),
-        ("schedule", {"num_inference_steps": 4}),
-    ]
+# There is one walk now, so no generic FP8 pass can follow the FP4 one
+# and re-quantize inside its wrappers; the premise this guarded is gone.
 
 
 @pytest.mark.parametrize(
@@ -296,57 +235,14 @@ def test_including_the_text_encoder_needs_a_profile(runtime):
         )._validate_gemm_quantization_flags()
 
 
-def test_advanced_yaml_maps_to_existing_wan_target_settings(runtime, tmp_path):
-    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
-        apply_fp8_override_cli_to_settings,
-    )
-
-    path = tmp_path / "gemm.yaml"
-    path.write_text(
-        "gemm_high_precision_targets: none\n"
-        "gemm_high_precision_module_patterns: [transformer_2.blocks]\n"
-        "gemm_high_precision_prefix_patterns: ['0.', '1.']\n"
-    )
-    config = _args(
-        runtime,
-        gemm_quantization="low=fp4,high=fp6",
-        gemm_config=str(path),
-    )
-    settings = SimpleNamespace(
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"],
-        fp8_precision_overrides=("old.",),
-        fp8_precision_override_suffixes=("old",),
-    )
-
-    apply_fp8_override_cli_to_settings(config, settings)
-
-    assert settings.fp8_gemm_module_list == ["transformer_2.blocks"]
-    assert settings.fp8_precision_overrides == ("0.", "1.")
-    assert settings.fp8_precision_override_suffixes is None
+# The advanced YAML no longer rewrites per-format lists; it overrides
+# `keep_high` directly, which test_flux2_gemm_equivalence covers under
+# "a config file can hold extra modules high".
 
 
-def test_pure_fp4_uses_the_full_declared_transformer_union(runtime):
-    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
-        apply_fp8_override_cli_to_settings,
-    )
-
-    config = _args(runtime, gemm_quantization="fp4")
-    settings = SimpleNamespace(
-        fp4_gemm_module_list=["transformer.blocks"],
-        fp8_gemm_module_list=["transformer.blocks", "transformer_2.blocks"],
-        fp8_precision_overrides=("0.",),
-        fp8_precision_override_suffixes=None,
-    )
-
-    apply_fp8_override_cli_to_settings(config, settings)
-
-    assert settings.fp4_gemm_module_list == [
-        "transformer.blocks",
-        "transformer_2.blocks",
-    ]
-    assert settings.fp8_gemm_module_list == []
-    assert settings.fp8_precision_overrides is None
+# A pure low-format run quantizing every declared target is now the
+# resolver's own rule, checked for every model by
+# tests/quant/test_migrated_models.py against the recorded lists.
 
 
 def test_yaml_schedule_conflicts_with_simple_schedule_flags(runtime, tmp_path):

@@ -69,6 +69,7 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
 def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
     from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading import quantization_plan
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
 
     messages = []
     model = SimpleNamespace(
@@ -78,15 +79,17 @@ def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
             use_hybrid_gemm_schedule=False,
         ),
         settings=SimpleNamespace(
-            fp4_gemm_module_list=["transformer.blocks"],
-            fp8_gemm_module_list=[
-                "transformer.blocks",
-                "transformer_2.blocks",
-            ],
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
+            gemm_targets=GemmTargets(
+                transformer=Select(
+                    modules=("transformer.blocks", "transformer_2.blocks")
+                ),
+                keep_high=Select(modules=("transformer_2.blocks",)),
+            ),
         ),
     )
+    model.config.quantize_text_encoder = False
+    model.config.ulysses_degree = 1
+    model.config.ring_degree = 1
     monkeypatch.setattr(quantization_plan, "log", messages.append)
 
     quantization_plan.QuantizationPlan(model).log_gemm_plan()
@@ -100,24 +103,43 @@ def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):
 def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
     monkeypatch,
 ):
+    """The low-noise refiner is held at MXFP6 while the rest takes MXFP4."""
+    from xfuser.config.gemm import GemmQuantizationSpec
     from xfuser.model_executor.models.runner_models.loading import placement
+    from xfuser.model_executor.models.runner_models.loading.quantization_ledger import (
+        QuantizationLedger,
+    )
+    from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
+        QuantizationPlan,
+    )
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
 
     calls = []
     monkeypatch.setattr(placement, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(placement, "_is_cuda", lambda: False)
+    monkeypatch.setattr(
+        placement,
+        "prepare_native_transformer_format_load",
+        lambda *a, **k: SimpleNamespace(
+            descriptor=SimpleNamespace(log_message=lambda: "")
+        ),
+    )
     fp4_blocks, fp6_blocks = object(), object()
     model = SimpleNamespace(
         config=SimpleNamespace(
-            use_fp4_gemms=True,
-            use_fp6_gemms=True,
+            gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
+            quantize_text_encoder=False,
             use_hybrid_gemm_schedule=False,
-            enable_model_cpu_offload=False,
-            enable_sequential_cpu_offload=False,
-            enable_group_cpu_offload=False,
+            ulysses_degree=1,
+            ring_degree=1,
         ),
         settings=SimpleNamespace(
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
-            fp8_gemm_include_suffixes=None,
+            gemm_targets=GemmTargets(
+                transformer=Select(
+                    modules=("transformer.blocks", "transformer_2.blocks")
+                ),
+                keep_high=Select(modules=("transformer_2.blocks",)),
+            ),
         ),
         pipe=SimpleNamespace(
             transformer=SimpleNamespace(blocks=fp4_blocks),
@@ -125,7 +147,6 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
         ),
     )
     backends = SimpleNamespace(
-        format_entries=lambda: ("transformer.blocks",),
         format=SimpleNamespace(
             convert_module=lambda module, **kwargs: calls.append(("fp4", module))
         ),
@@ -133,36 +154,23 @@ def test_wan22_mixed_mode_routes_primary_to_fp4_and_second_transformer_to_fp6(
             convert_module=lambda module, **kwargs: calls.append(("fp6", module))
         ),
         fp8=None,
-        blockwise_fp8=SimpleNamespace(
-            convert_module=lambda module, **kwargs: calls.append(("fp8", module))
-        ),
+        blockwise_fp8=None,
+        format_targets_for=lambda name: (),
     )
     backends.adapter_for = lambda format_name: (
-        backends.fp6
-        if format_name == "fp6"
-        else (backends.fp8 or backends.blockwise_fp8) if format_name == "fp8"
-        else backends.format
+        backends.fp6 if format_name == "fp6" else backends.format
     )
     loader = SimpleNamespace(
         model=model,
         backends=backends,
-        quantization_plan=SimpleNamespace(
-            # unmigrated model: consumers take the legacy list path
-            gemm_plan=None,
-            module_list=lambda format_name="fp8": (
-                ["transformer.blocks"]
-                if format_name == "fp4"
-                else ["transformer.blocks", "transformer_2.blocks"]
-            )
-        ),
-        quantization_ledger=SimpleNamespace(
-            streaming_targets=set(),
-            claim_description=lambda component: None,
-            already_quantized=lambda **kwargs: set(),
-        ),
+        quantization_plan=QuantizationPlan(model),
+        quantization_ledger=QuantizationLedger(),
     )
 
-    placement.setup_mxfp4_gemms(loader, local_rank=0)
+    for before in (True, False):
+        placement.setup_gemm_quantization(
+            loader, local_rank=0, offload_requested=False, before_device_move=before
+        )
 
     assert calls == [("fp4", fp4_blocks), ("fp6", fp6_blocks)]
 

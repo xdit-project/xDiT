@@ -11,10 +11,11 @@ Run with:
 
 from types import SimpleNamespace
 
+from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     QuantizationPlan,
-    apply_fp8_override_cli_to_settings,
 )
+from xfuser.model_executor.quant.targets import GemmTargets, Select
 
 
 def make_plan(
@@ -22,20 +23,22 @@ def make_plan(
     *,
     transformer_targets=None,
     te_targets=None,
-    use_fp8_gemms=True,
+    raw="fp8",
     quantize_text_encoder=False,
 ):
     """A QuantizationPlan over a stand-in runner."""
     model = SimpleNamespace(
         settings=SimpleNamespace(
-            fp8_gemm_module_list=transformer_targets,
-            fp8_text_encoder_module_list=te_targets,
-            fp4_gemm_module_list=["transformer.fp4_blocks"],
-            int8_gemm_module_list=["transformer.int8_blocks"],
+            gemm_targets=GemmTargets(
+                transformer=Select(modules=tuple(transformer_targets or ())),
+                text_encoder=Select(modules=tuple(te_targets or ())),
+            ),
         ),
         config=SimpleNamespace(
-            use_fp8_gemms=use_fp8_gemms,
+            gemm_quantization_spec=GemmQuantizationSpec.parse(raw),
             quantize_text_encoder=quantize_text_encoder,
+            ulysses_degree=1,
+            ring_degree=1,
         ),
     )
     return QuantizationPlan(model)
@@ -80,69 +83,19 @@ def test_module_list_empty_when_model_declares_nothing(monkeypatch):
     assert make_plan(monkeypatch).module_list() == []
 
 
-def test_module_list_does_not_alias_settings(monkeypatch):
-    """Consumers mutating the returned list must not edit the model's declared targets."""
-    targets = ["transformer.blocks"]
-    plan = make_plan(monkeypatch, transformer_targets=targets)
+def test_module_list_does_not_alias_the_declaration(monkeypatch):
+    """Consumers mutating the returned list must not edit the declared targets."""
+    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
     plan.module_list().append("transformer.extra")
-    assert targets == ["transformer.blocks"]
+    assert plan.module_list() == ["transformer.blocks"]
 
 
-def test_backend_neutral_targets_cover_fp4_and_int8(monkeypatch):
-    plan = make_plan(monkeypatch)
+def test_every_format_sees_the_same_declared_targets(monkeypatch):
+    """A model declares which modules, never which modules per format."""
+    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
 
-    assert plan.targets_for("transformer", "fp4") == ["fp4_blocks"]
-    assert plan.targets_for("transformer", "int8") == ["int8_blocks"]
-
-
-def test_fp8_override_cli_patterns_update_settings_per_slot():
-    settings = SimpleNamespace(
-        fp8_precision_overrides=("declared-prefix",),
-        fp8_precision_override_suffixes=("declared-suffix",),
-    )
-    config = SimpleNamespace(
-        fp8_precision_override_prefix_patterns=" blocks.0, ,blocks.2 ",
-        fp8_precision_override_suffix_patterns=None,
-    )
-
-    apply_fp8_override_cli_to_settings(config, settings)
-
-    assert settings.fp8_precision_overrides == ("blocks.0", "blocks.2")
-    assert settings.fp8_precision_override_suffixes == ("declared-suffix",)
-
-
-def test_model_loader_materialization_logs_fp4_overrides_and_places(monkeypatch):
-    from xfuser.model_executor.models.runner_models.loading import (
-        placement,
-        quantization_plan,
-    )
-    from xfuser.model_executor.models.runner_models.loading.meta_load import ModelLoader
-
-    messages = []
-    placed = []
-    model = SimpleNamespace(
-        config=SimpleNamespace(use_fp4_gemms=True, fully_shard_degree=1),
-        settings=SimpleNamespace(
-            fp8_precision_overrides=("blocks.0",),
-            fp8_precision_override_suffixes=(".proj",),
-        ),
-    )
-    loader = SimpleNamespace(
-        model=model,
-        quantization_plan=QuantizationPlan(model),
-    )
-    monkeypatch.setattr(quantization_plan, "log", messages.append)
-    monkeypatch.setattr(placement, "place_pipeline_components", placed.append)
-
-    ModelLoader.materialize_pipeline(loader)
-
-    assert placed == [loader]
-    assert messages == [
-        "The following layers will be quantized to FP8, to maintain output quality: "
-        "('blocks.0',) (prefix match)",
-        "The following layers will be quantized to FP8, to maintain output quality: "
-        "('.proj',) (suffix match)",
-    ]
+    for format_name in ("fp8", "fp4", "fp6", "int8"):
+        assert plan.targets_for("transformer", format_name) == ["blocks"]
 
 
 def test_model_loader_materialization_uses_current_shard_degree(monkeypatch):

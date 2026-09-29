@@ -182,6 +182,19 @@ class GemmPlan:
             selects = [self.targeted[component]] if component in self.targeted else []
         return tuple(dict.fromkeys(r for select in selects for r in select.roots()))
 
+    def walk_roots(self, format_name: str) -> Tuple[str, ...]:
+        """Where a converter for `format_name` should start walking.
+
+        `roots` names the subtrees this format owns whole, which is enough
+        except for a carve-out with no subtree of its own: a leaf suffix occurs
+        inside targets the other format owns, so reaching it means walking
+        those too and letting `format_for` reject the rest.
+        """
+        found = list(self.roots(format_name))
+        if format_name == self.high and self.keep_high.suffixes:
+            found += [r for r in self.declared_roots() if r not in found]
+        return tuple(found)
+
     @property
     def splits_a_target(self) -> bool:
         """Whether the high format lands inside a target rather than at it.

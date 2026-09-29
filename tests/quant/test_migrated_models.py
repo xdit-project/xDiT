@@ -21,7 +21,6 @@ from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 from xfuser.model_executor.models.runner_models.loading.quantization_plan import (
     QuantizationPlan,
-    apply_fp8_override_cli_to_settings,
 )
 
 SNAPSHOT = json.loads(
@@ -62,28 +61,50 @@ def _profiles(entry):
     return profiles
 
 
-def _plan(cls, entry, raw, *, text_encoder, legacy):
+def _legacy_module_list(entry, spec, format_name, *, text_encoder):
+    """What `module_list` returned before the migration, spelled out.
+
+    The old implementation has been deleted, so the oracle states its rule
+    rather than calling it. That is what an oracle is for: a specification
+    written down once cannot drift with the code it checks.
+    """
+    fp8 = list(entry["fp8_gemm_module_list"] or ())
+    fp4 = list(entry["fp4_gemm_module_list"] or ())
+    if spec.is_pure("fp4"):
+        # apply_fp8_override_cli_to_settings folded the fp8 targets into the
+        # fp4 list and emptied the fp8 one.
+        fp4 = list(dict.fromkeys(fp4 + fp8))
+        fp8 = []
+
+    if format_name == "fp8":
+        encoder = list(entry["fp8_text_encoder_module_list"] or ())
+        return fp8 + (encoder if text_encoder else [])
+    if format_name == "fp4":
+        return fp4
+    if format_name == "fp6":
+        return list(dict.fromkeys(fp4 + fp8))
+    if format_name == "int8":
+        return list(entry["int8_gemm_module_list"] or ())
+    raise ValueError(format_name)
+
+
+def _plan(cls, raw, *, text_encoder):
     spec = GemmQuantizationSpec.parse(raw)
-    settings = copy.deepcopy(cls.settings)
-    if legacy:
-        settings.gemm_targets = None
-        for field in LEGACY_FIELDS:
-            value = entry.get(field) or None
-            setattr(settings, field, list(value) if value else None)
     config = SimpleNamespace(
         gemm_quantization_spec=spec,
         _gemm_config_loaded=False,
-        fp8_precision_override_prefix_patterns=None,
-        fp8_precision_override_suffix_patterns=None,
         quantize_text_encoder=text_encoder,
-        use_fp4_gemms=spec.low == "fp4",
         use_hybrid_gemm_schedule=False,
         gemm_high_precision_targets="model",
+        ulysses_degree=1,
+        ring_degree=1,
     )
-    if legacy:
-        apply_fp8_override_cli_to_settings(config, settings)
     return QuantizationPlan(
-        SimpleNamespace(settings=settings, config=config, capabilities=cls.capabilities)
+        SimpleNamespace(
+            settings=copy.deepcopy(cls.settings),
+            config=config,
+            capabilities=cls.capabilities,
+        )
     )
 
 
@@ -94,13 +115,15 @@ def test_a_migrated_model_targets_what_it_used_to(cls, entry):
         for text_encoder in (False, True):
             if text_encoder and not entry["quantize_text_encoder"]:
                 continue
-            old = _plan(cls, entry, raw, text_encoder=text_encoder, legacy=True)
-            new = _plan(cls, entry, raw, text_encoder=text_encoder, legacy=False)
+            new = _plan(cls, raw, text_encoder=text_encoder)
             spec = GemmQuantizationSpec.parse(raw)
             for fmt in spec.formats:
                 if fmt == "none":
                     continue
-                assert sorted(new.module_list(fmt)) == sorted(old.module_list(fmt)), (
+                expected = _legacy_module_list(
+                    entry, spec, fmt, text_encoder=text_encoder
+                )
+                assert sorted(new.module_list(fmt)) == sorted(expected), (
                     f"{cls.__name__} {raw} te={text_encoder} {fmt}"
                 )
 

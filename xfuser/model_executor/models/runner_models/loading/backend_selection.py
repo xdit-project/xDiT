@@ -16,7 +16,7 @@ the run and no longer.
 
 import functools
 
-from .format_backends import module_path_is_covered, module_paths_overlap
+from .format_backends import module_paths_overlap
 
 
 class QuantizationBackends:
@@ -215,13 +215,18 @@ class QuantizationBackends:
             return False
 
         config = self.model.config
-        fp8_only_targets = self.high_tier_targets()
+        # Everything the run gives to FP8, which is the whole target set in a
+        # pure FP8 run and only the held-back modules in a tiered one. Asking
+        # `high_tier_targets` instead would answer "none" for a pure run, which
+        # has no tier but does put Float8Tensor inside every wrapped block.
+        plan = self.loader.quantization_plan.gemm_plan
+        fp8_targets = set(plan.roots("fp8"))
         is_torchao = assume_torchao_fp8 or (
             fp8_adapter is not None and fp8_adapter.backend.value == "torchao"
         )
         if is_torchao and any(
             module_paths_overlap(target, fsdp_path)
-            for target in fp8_only_targets
+            for target in fp8_targets
             for fsdp_path in fsdp_target_paths
         ):
             return True
@@ -280,42 +285,22 @@ class QuantizationBackends:
         not, and a predicate reading only that set would answer "no high tier
         here" about a block that holds one.
         """
-        plan = self.loader.quantization_plan.gemm_plan
-        if plan is not None:
-            return plan.splits_a_target
-        settings = self.model.settings
-        return bool(
-            settings.fp8_precision_overrides
-            or settings.fp8_precision_override_suffixes
-        )
+        return self.loader.quantization_plan.gemm_plan.splits_a_target
 
     def primary_targets(self) -> set:
         """The targets the run's primary format owns."""
         plan = self.loader.quantization_plan.gemm_plan
-        if plan is not None:
-            return set(plan.roots(plan.low)) if plan.low else set()
-        return set(self.model.settings.fp4_gemm_module_list or ())
+        return set(plan.roots(plan.low)) if plan.low else set()
 
     def high_tier_targets(self) -> set:
         """The targets held at the better format, which the primary one skips.
 
         Three FSDP predicates need this, and each used to rebuild it by
-        subtracting the fp4 list from the fp8 one. A declared model resolves
-        it once, so they can just ask.
+        subtracting the fp4 list from the fp8 one. The plan resolves it once,
+        so they can just ask.
         """
         plan = self.loader.quantization_plan.gemm_plan
-        if plan is not None:
-            return set(plan.roots(plan.high)) if plan.high else set()
-
-        fp4_targets = set(self.model.settings.fp4_gemm_module_list or ())
-        return {
-            target
-            for target in self.loader.quantization_plan.module_list()
-            if not any(
-                module_path_is_covered(target, fp4_target)
-                for fp4_target in fp4_targets
-            )
-        }
+        return set(plan.roots(plan.high)) if plan.high else set()
 
     def requires_blockwise_fp8(self) -> bool:
         """Whether FP4 mode declares whole components owned only by FP8."""

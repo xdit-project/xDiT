@@ -15,47 +15,8 @@ from xfuser.core.utils.runner_utils import log, rgetattr
 from xfuser.envs import _is_cuda
 from .format_backends import (
     module_path_is_covered,
-    module_paths_overlap,
     prepare_native_transformer_format_load,
 )
-
-
-def conversion_filter(module_path, excluded_paths, include_suffixes=None):
-    """Decide whether to convert ``module_path``, and how to filter inside it.
-
-    Returns ``(False, None)`` when an excluded path already covers the module, ``(True, None)`` when
-    the whole module converts, and ``(True, filter_fn)`` when only part of it does because an
-    excluded path sits below it or the run pins conversion to certain suffixes.
-    """
-
-    overlapping = tuple(
-        path
-        for path in excluded_paths
-        if module_paths_overlap(module_path, path)
-    )
-    if any(
-        module_path_is_covered(module_path, path)
-        for path in overlapping
-    ):
-        return False, None
-    descendants = tuple(
-        path
-        for path in overlapping
-        if module_path_is_covered(path, module_path)
-    )
-    if not descendants and not include_suffixes:
-        return True, None
-
-    def filter_fn(_module, fqn):
-        full_path = module_path if not fqn else f"{module_path}.{fqn}"
-        if include_suffixes and not full_path.endswith(tuple(include_suffixes)):
-            return False
-        return not any(
-            module_path_is_covered(full_path, path)
-            for path in descendants
-        )
-
-    return True, filter_fn
 
 
 def place_pipeline_components(loader) -> None:
@@ -75,51 +36,22 @@ def place_pipeline_components(loader) -> None:
     if loader.replicated_broadcast_load():
         loader.broadcast_fill_replicated(offload_requested)
 
-    if loader.quantization_plan.gemm_plan is not None:
-        # One walk per side of the device move; the plan says what each module
-        # becomes and the adapter says which side it belongs on.
-        setup_gemm_quantization(
-            loader,
-            local_rank,
-            offload_requested=offload_requested,
-            before_device_move=True,
-        )
-        if not offload_requested:
-            model.pipe = model.pipe.to(f"cuda:{local_rank}")
-        setup_gemm_quantization(
-            loader,
-            local_rank,
-            offload_requested=offload_requested,
-            before_device_move=False,
-        )
-        return
-
-    adapter = loader.backends.fp8
-    if adapter is not None and adapter.converts_before_device_move:
-        _convert_fp8_on_host(loader, adapter, local_rank, offload_requested)
-
+    # One walk per side of the device move; the plan says what each module
+    # becomes and the adapter says which side it belongs on.
+    setup_gemm_quantization(
+        loader,
+        local_rank,
+        offload_requested=offload_requested,
+        before_device_move=True,
+    )
     if not offload_requested:
         model.pipe = model.pipe.to(f"cuda:{local_rank}")
-
-    if model.config.use_fp4_gemms:
-        if _is_cuda():
-            setup_nvfp4_gemms(loader, local_rank)
-        else:
-            setup_mxfp4_gemms(loader, local_rank)
-    elif getattr(model.config, "use_fp6_gemms", False):
-        setup_mxfp6_gemms(loader, local_rank)
-
-    # FP4 setup owns its own hybrid FP8 path and any declared FP8-only modules, so the generic walk
-    # would re-quantize inside the hybrid wrappers it just built.
-    if (
-        adapter is not None
-        and not adapter.converts_before_device_move
-        and not model.config.use_fp4_gemms
-    ):
-        _convert_fp8_on_device(loader, adapter, local_rank)
-
-    if model.config.use_int8_gemms:
-        _convert_int8_on_device(loader, local_rank)
+    setup_gemm_quantization(
+        loader,
+        local_rank,
+        offload_requested=offload_requested,
+        before_device_move=False,
+    )
 
 
 def _plan_conversion_filter(plan, module_path, format_name, already_quantized):
@@ -150,12 +82,10 @@ def setup_gemm_quantization(
     the move and once after; each call skips the adapters belonging to the other
     side.
 
-    The walks start from the declared roots rather than from the subtrees one
-    format owns, because a carve-out need not have a subtree to start from:
-    ``keep_high`` can name a leaf suffix that occurs inside every block. Asking
-    ``format_for`` per leaf is the rule the sharded path already applies, so the
-    two agree by construction, and a leaf belongs to exactly one format so the
-    walks cannot collide.
+Each walk starts where ``walk_roots`` says -- the subtrees that format owns,
+    widened only when it has a carve-out with no subtree of its own -- and asks
+    ``format_for`` per leaf, which is the rule the sharded path applies too. A
+    leaf belongs to exactly one format, so the walks cannot collide.
     """
 
     plan = loader.quantization_plan.gemm_plan
@@ -164,10 +94,10 @@ def setup_gemm_quantization(
 
     model = loader.model
     ledger = loader.quantization_ledger
-    roots = plan.declared_roots()
     formats = tuple(dict.fromkeys(name for name in (plan.low, plan.high) if name))
 
     for format_name in formats:
+        roots = plan.walk_roots(format_name)
         adapter = loader.backends.adapter_for(format_name)
         if adapter is None:
             continue
@@ -211,230 +141,3 @@ def setup_gemm_quantization(
             )
 
 
-def setup_mxfp4_gemms(loader, local_rank) -> None:
-    """Apply the selected ROCm MXFP4 conversion plan."""
-    _setup_format_gemms(loader, local_rank, stream_quant=True)
-
-
-def setup_mxfp6_gemms(loader, local_rank) -> None:
-    """Quantize the selected ROCm targets to MXFP6."""
-    _setup_format_gemms(loader, local_rank, stream_quant=True)
-
-
-def setup_nvfp4_gemms(loader, local_rank) -> None:
-    """Quantize the FP4 modules to NVFP4, the format CUDA runs."""
-    _setup_format_gemms(loader, local_rank, stream_quant=False)
-
-
-def _setup_format_gemms(loader, local_rank, *, stream_quant) -> None:
-    model = loader.model
-    adapter = loader.backends.format
-    format_entries = getattr(loader.backends, "format_entries", None)
-    module_names = (
-        format_entries()
-        if callable(format_entries)
-        else tuple(model.settings.fp4_gemm_module_list or ())
-    )
-    use_fp6 = bool(getattr(model.config, "use_fp6_gemms", False))
-    pure_fp6 = use_fp6 and not model.config.use_fp4_gemms
-    mixed_fp6 = use_fp6 and model.config.use_fp4_gemms
-    offload_requested = any(
-        getattr(model.config, name, False)
-        for name in (
-            "enable_model_cpu_offload",
-            "enable_sequential_cpu_offload",
-            "enable_group_cpu_offload",
-        )
-    )
-    for module_name in module_names:
-        component_name = module_name.partition(".")[0]
-        convert, filter_fn = conversion_filter(
-            module_name,
-            loader.quantization_ledger.streaming_targets,
-        )
-        if not convert:
-            continue
-        # Some models balance performance against quality better by keeping some blocks at FP8
-        # while the rest go to FP4, rather than quantizing uniformly.
-        if loader.quantization_ledger.claim_description(component_name):
-            descriptor = prepare_native_transformer_format_load(
-                adapter,
-                component_name=component_name,
-                targets=loader.backends.format_targets_for(component_name),
-                stream_quant=stream_quant,
-                precision_prefixes=(
-                    () if pure_fp6 else (model.settings.fp8_precision_overrides or ())
-                ),
-                precision_suffixes=(
-                    ()
-                    if pure_fp6
-                    else (model.settings.fp8_precision_override_suffixes or ())
-                ),
-                hybrid=(False if pure_fp6 else model.config.use_hybrid_gemm_schedule),
-            ).descriptor
-            log(descriptor.log_message())
-        convert_kwargs = {}
-        if filter_fn is not None:
-            convert_kwargs["filter_fn"] = filter_fn
-        if pure_fp6 and offload_requested:
-            convert_kwargs["offload_to_cpu"] = True
-        adapter.convert_module(
-            rgetattr(model.pipe, module_name),
-            fp8_layers=(None if pure_fp6 else model.settings.fp8_precision_overrides),
-            fp8_suffix_layers=(
-                None if pure_fp6 else model.settings.fp8_precision_override_suffixes
-            ),
-            hybrid=(False if pure_fp6 else model.config.use_hybrid_gemm_schedule),
-            device=f"cuda:{local_rank}",
-            **convert_kwargs,
-        )
-    if not pure_fp6:
-        setup_high_tier_gemms(loader, local_rank)
-
-
-def setup_high_tier_gemms(loader, local_rank) -> None:
-    """Quantize the targets the model asked to hold at the better format.
-
-    MoE models such as Wan2.2 rely on this: the low-noise transformer generates the fine detail and
-    needs more precision, while the rest of the model can take FP4. FLUX.2-dev
-    holds its text encoder here. Neither format is fixed -- the run names both,
-    and the converter follows whichever it named.
-    """
-
-    model = loader.model
-    config = getattr(model, "config", None)
-    gemm_plan = loader.quantization_plan.gemm_plan
-    if gemm_plan is not None:
-        high_format = gemm_plan.high
-        low_modules = set(gemm_plan.roots(gemm_plan.low)) if gemm_plan.low else set()
-        high_modules = list(gemm_plan.roots(high_format)) if high_format else []
-    else:
-        # Unmigrated model: the high tier is what the fp8 list holds and the
-        # fp4 list does not.
-        high_format = "fp6" if (
-            getattr(config, "use_fp6_gemms", False)
-            and getattr(config, "use_fp4_gemms", False)
-        ) else "fp8"
-        low_modules = set(loader.quantization_plan.module_list("fp4"))
-        high_modules = [
-            name
-            for name in loader.quantization_plan.module_list()
-            if not any(
-                module_path_is_covered(name, low_module)
-                for low_module in low_modules
-            )
-        ]
-    if not high_modules:
-        return
-    adapter = loader.backends.adapter_for(high_format)
-    for module_name in high_modules:
-        # The ledger tracks one streaming pass per format; fp8's is separate.
-        excluded_paths = low_modules | loader.quantization_ledger.already_quantized(
-            fp8=high_format == "fp8"
-        )
-        convert, filter_fn = conversion_filter(
-            module_name,
-            excluded_paths,
-            include_suffixes=model.settings.fp8_gemm_include_suffixes,
-        )
-        if not convert:
-            continue
-        convert_kwargs = {}
-        if filter_fn is not None:
-            convert_kwargs["filter_fn"] = filter_fn
-        adapter.convert_module(
-            rgetattr(model.pipe, module_name),
-            device=f"cuda:{local_rank}",
-            **convert_kwargs,
-        )
-
-
-def _convert_fp8_on_host(loader, adapter, local_rank, offload_requested) -> None:
-    model = loader.model
-    for module_name in loader.quantization_plan.module_list():
-        convert, filter_fn = conversion_filter(
-            module_name,
-            loader.quantization_ledger.fp8_streaming_targets,
-            include_suffixes=model.settings.fp8_gemm_include_suffixes,
-        )
-        if not convert:
-            continue
-        convert_kwargs = {}
-        if filter_fn is not None:
-            convert_kwargs["filter_fn"] = filter_fn
-        replaced = adapter.convert_module(
-            rgetattr(model.pipe, module_name),
-            device=f"cuda:{local_rank}",
-            offload_to_cpu=offload_requested,
-            **convert_kwargs,
-        )
-        if replaced:
-            log(
-                f"Quantized {replaced} layers in {module_name} "
-                f"to FP8 ({adapter.storage_semantics})."
-            )
-        else:
-            log(
-                f"{module_name} already FP8 (streamed quantize-on-load); "
-                "post-load walk no-op."
-            )
-
-
-def _convert_fp8_on_device(loader, adapter, local_rank) -> None:
-    model = loader.model
-    for module_name in loader.quantization_plan.module_list():
-        component_name = module_name.partition(".")[0]
-        convert, filter_fn = conversion_filter(
-            module_name,
-            loader.quantization_ledger.fp8_streaming_targets,
-            include_suffixes=model.settings.fp8_gemm_include_suffixes,
-        )
-        if not convert:
-            continue
-        if component_name.startswith(
-            "transformer"
-        ) and loader.quantization_ledger.claim_description(component_name, fp8=True):
-            log(
-                "Transformer quantization: requested=fp8, "
-                f"backend={adapter.backend.value}, "
-                f"storage={adapter.storage_semantics}, "
-                "materialization=post_load; fallback=runner did "
-                "not use the transformer construction seam"
-            )
-        convert_kwargs = {}
-        if filter_fn is not None:
-            convert_kwargs["filter_fn"] = filter_fn
-        adapter.convert_module(
-            rgetattr(model.pipe, module_name),
-            device=f"cuda:{local_rank}",
-            **convert_kwargs,
-        )
-
-
-def _convert_int8_on_device(loader, local_rank) -> None:
-    model = loader.model
-    adapter = loader.backends.format
-    for module_name in model.settings.int8_gemm_module_list:
-        component_name = module_name.partition(".")[0]
-        convert, filter_fn = conversion_filter(
-            module_name,
-            loader.quantization_ledger.streaming_targets,
-        )
-        if not convert:
-            continue
-        if loader.quantization_ledger.claim_description(component_name):
-            descriptor = prepare_native_transformer_format_load(
-                adapter,
-                component_name=component_name,
-                targets=loader.backends.format_targets_for(component_name),
-                stream_quant=False,
-            ).descriptor
-            log(descriptor.log_message())
-        convert_kwargs = {}
-        if filter_fn is not None:
-            convert_kwargs["filter_fn"] = filter_fn
-        adapter.convert_module(
-            rgetattr(model.pipe, module_name),
-            device=f"cuda:{local_rank}",
-            **convert_kwargs,
-        )

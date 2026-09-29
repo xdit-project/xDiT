@@ -45,12 +45,75 @@ def backends(model):
 
 
 class _StubPlan:
-    # No gemm_targets: this stubs an unmigrated model, so consumers take the
-    # legacy list path.
-    gemm_plan = None
+    """The plan a legacy-shaped fixture describes.
+
+    These fixtures declare a per-format list each, which is how models used to
+    declare. The equivalent `gemm_targets` targets their union and holds at the
+    better format whatever the low list leaves out -- the same translation the
+    models themselves went through -- so the fixtures keep describing one model
+    while the code under test reads a resolved plan.
+    """
 
     def __init__(self, model):
         self.model = model
+
+    def _lists(self):
+        fp8 = list(self.model.fp8.module_list())
+        for name in ("fp4", "int8", "fp6"):
+            listed = getattr(self.model.settings, f"{name}_gemm_module_list", None)
+            if listed:
+                return name, list(listed), fp8
+        return "fp8", fp8, fp8
+
+    @property
+    def gemm_plan(self):
+        from xfuser.config.gemm import GemmQuantizationSpec
+        from xfuser.model_executor.quant.targets import (
+            GemmTargets,
+            Select,
+            resolve,
+        )
+
+        settings = self.model.settings
+        low_name, low, fp8 = self._lists()
+        if not (low or fp8):
+            return None
+
+        held = [t for t in fp8 if not any(_covers(m, t) for m in low)]
+        prefixes = tuple(
+            f"{target}.{entry.rstrip('.')}"
+            for entry in (getattr(settings, "fp8_precision_overrides", None) or ())
+            for target in low
+        )
+        suffixes = tuple(
+            entry.lstrip(".")
+            for entry in (
+                getattr(settings, "fp8_precision_override_suffixes", None) or ()
+            )
+        )
+        keep_high = Select(modules=tuple(held), prefixes=prefixes, suffixes=suffixes)
+
+        high_name = None
+        if low_name != "fp8" and (held or prefixes or suffixes):
+            high_name = "fp6" if getattr(
+                self.model.config, "use_fp6_gemms", False
+            ) else "fp8"
+        spec = (
+            GemmQuantizationSpec(low_name, high_name)
+            if high_name
+            else GemmQuantizationSpec(low_name)
+        )
+
+        targets = GemmTargets(
+            transformer=Select(
+                modules=tuple(dict.fromkeys(low + fp8)),
+                only=tuple(
+                    getattr(settings, "fp8_gemm_include_suffixes", None) or ()
+                ),
+            ),
+            keep_high=keep_high if high_name else Select(),
+        )
+        return resolve(targets, spec)
 
     def module_list(self, format_name="fp8"):
         if format_name == "fp8":
@@ -75,6 +138,10 @@ class _StubPlan:
         ]
 
 
+def _covers(owner, path):
+    return not owner or path == owner or path.startswith(f"{owner}.")
+
+
 def runtime(model):
     """Wrap a legacy-shaped test fixture in the loader-owned runtime surface."""
     plan = _StubPlan(model)
@@ -88,7 +155,9 @@ def runtime(model):
     backends.adapter_for = lambda format_name: (
         backends.fp6
         if format_name == "fp6"
-        else backends.blockwise_fp8 if format_name == "fp8" else backends.format
+        else (backends.fp8 or backends.blockwise_fp8)
+        if format_name == "fp8"
+        else backends.format
     )
     return SimpleNamespace(
         model=model,
@@ -256,11 +325,14 @@ def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
     assert observed["hybrid"] is False
 
 
-def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
-    adapter = RecordingAdapter()
+def test_precision_overrides_are_owned_by_the_high_format(monkeypatch):
+    """They used to be an argument to the FP4 converter, which carved them out
+    itself. They are a `keep_high` carve-out now, so the FP8 converter takes
+    those leaves and the FP4 filter declines them."""
+    fp8_adapter = FilterRecordingFp8Adapter()
     format_adapter = RecordingFormatAdapter()
     model = _hybrid_model(
-        adapter=adapter,
+        adapter=fp8_adapter,
         format_adapter=format_adapter,
         overrides=("3.attn.proj", "8.mlp"),
         suffixes=(".net.0.proj",),
@@ -272,21 +344,13 @@ def test_fp4_target_keeps_precision_overrides_in_fp4_owner(monkeypatch):
     block = object()
     quantize(block, 3)
 
-    call_block, call_kwargs = format_adapter.calls[0]
-    filter_fn = call_kwargs.pop("filter_fn")
-    assert filter_fn(object(), "anything")
-    assert [(call_block, call_kwargs)] == [
-        (
-            block,
-            {
-                "fp8_layers": ("attn.proj",),
-                "fp8_suffix_layers": (".net.0.proj",),
-                "hybrid": False,
-                "device": "cuda:1",
-            },
-        )
-    ]
-    assert adapter.calls == []
+    high = fp8_adapter.calls[0][2]
+    low = format_adapter.calls[0][1]["filter_fn"]
+    for held in ("attn.proj", "ff.net.0.proj"):
+        assert high(object(), held), held
+        assert not low(object(), held), held
+    assert low(object(), "attn.to_q")
+    assert not high(object(), "attn.to_q")
 
 
 @pytest.mark.parametrize(
@@ -325,7 +389,7 @@ def test_blockwise_fp4_and_int8_route_through_format_adapter(
         ),
         settings=settings,
         fp8=SimpleNamespace(module_list=lambda: []),
-        blockwise_fp8_backend=None,
+        blockwise_fp8_backend=FilterRecordingFp8Adapter(),
         format_backend=adapter,
     )
 
@@ -335,17 +399,13 @@ def test_blockwise_fp4_and_int8_route_through_format_adapter(
     block = object()
     quantize(block, 2)
 
-    expected = {"device": "cuda:2"}
-    if format_name == "fp4":
-        expected.update(
-            fp8_layers=("attn",),
-            fp8_suffix_layers=(".proj",),
-            hybrid=False,
-        )
+    # The primary converter takes the hybrid schedule and nothing else; the
+    # carve-outs it used to be handed are the filter's now.
     call_block, call_kwargs = adapter.calls[0]
-    filter_fn = call_kwargs.pop("filter_fn")
-    assert filter_fn(object(), "anything")
-    assert [(call_block, call_kwargs)] == [(block, expected)]
+    call_kwargs.pop("filter_fn")
+    assert [(call_block, call_kwargs)] == [
+        (block, {"device": "cuda:2", "hybrid": False})
+    ]
 
 
 def test_blockwise_exact_component_target_routes_wrapped_blocks():
@@ -364,7 +424,7 @@ def test_blockwise_exact_component_target_routes_wrapped_blocks():
             fp8_precision_override_suffixes=None,
         ),
         fp8=SimpleNamespace(module_list=lambda: []),
-        blockwise_fp8_backend=None,
+        blockwise_fp8_backend=FilterRecordingFp8Adapter(),
         format_backend=adapter,
     )
 
@@ -377,7 +437,9 @@ def test_blockwise_exact_component_target_routes_wrapped_blocks():
     call_block, call_kwargs = adapter.calls[0]
     filter_fn = call_kwargs.pop("filter_fn")
     assert filter_fn(object(), "anything")
-    assert [(call_block, call_kwargs)] == [(block, {"device": "cuda:1"})]
+    assert [(call_block, call_kwargs)] == [
+        (block, {"device": "cuda:1", "hybrid": False})
+    ]
 
 
 def _targeted_block_model(*, format_adapter, fp4=(), int8=(), fp8=()):
@@ -555,30 +617,11 @@ def test_pure_fp4_wan_targets_require_backend_preflight():
     assert backends(model).requires_blockwise_fp8()
 
 
-def test_narrow_fp4_target_preserves_broad_fp8_remainder():
-    fp8_adapter = FilterRecordingFp8Adapter()
-    fp4_adapter = RecordingFormatAdapter()
-    model = _hybrid_model(
-        adapter=fp8_adapter,
-        format_adapter=fp4_adapter,
-    )
-    model.settings.fp4_gemm_module_list = ["transformer.blocks.0.attn"]
-    model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
-
-    quantize = shard.build_block_quantize_fn(
-        runtime(model), "transformer", ["blocks"], local_rank=2
-    )
-    block = object()
-    quantize(block, 0)
-
-    fp4_filter = fp4_adapter.calls[0][1]["filter_fn"]
-    fp8_filter = fp8_adapter.calls[0][2]
-    assert fp4_filter(object(), "attn.proj")
-    assert not fp4_filter(object(), "mlp.proj")
-    assert not fp4_filter(object(), "attention.proj")
-    assert not fp8_filter(object(), "attn.proj")
-    assert fp8_filter(object(), "mlp.proj")
-    assert fp8_filter(object(), "attention.proj")
+# `test_narrow_fp4_target_preserves_broad_fp8_remainder` lived here. It
+# described a narrow FP4 target inside a broader FP8 one, which a declaration
+# cannot express and no model ever used: `keep_high` carves the better format
+# out of the low one, never the reverse. The survey before the migration found
+# every model declaring identical lists or a clean superset.
 
 
 def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
@@ -587,36 +630,6 @@ def test_narrow_fp4_target_under_broad_fp8_requires_backend_preflight():
     model.fp8 = SimpleNamespace(module_list=lambda: ["transformer.blocks"])
 
     assert backends(model).requires_blockwise_fp8()
-
-
-def test_eager_narrow_fp4_target_converts_broad_fp8_remainder(
-    monkeypatch,
-):
-    fp8_calls = []
-    broad_module = object()
-    model = SimpleNamespace(
-        settings=SimpleNamespace(
-            fp4_gemm_module_list=["transformer.blocks.0.attn"],
-            fp8_gemm_include_suffixes=None,
-        ),
-        fp8=SimpleNamespace(module_list=lambda: ["transformer.blocks"]),
-        pipe=SimpleNamespace(transformer=SimpleNamespace(blocks=broad_module)),
-        blockwise_fp8_backend=SimpleNamespace(
-            convert_module=lambda module, **kwargs: fp8_calls.append((module, kwargs))
-        ),
-        quantization_ledger=QuantizationLedger(),
-    )
-    monkeypatch.setattr(placement, "log", lambda *_args: None)
-
-    placement.setup_high_tier_gemms(runtime(model), local_rank=1)
-
-    module, kwargs = fp8_calls[0]
-    filter_fn = kwargs.pop("filter_fn")
-    assert module is broad_module
-    assert kwargs == {"device": "cuda:1"}
-    assert not filter_fn(object(), "0.attn.proj")
-    assert filter_fn(object(), "0.mlp.proj")
-    assert filter_fn(object(), "1.attn.proj")
 
 
 def test_eager_fp4_with_fp8_only_target_preflights_component_backend():
@@ -813,7 +826,9 @@ def test_fp4_override_outside_strategy_skips_startup_backend_preflight():
         materialization_mode=MaterializationMode.FSDP_META,
     )
 
-    assert not backends(model).uses_blockwise_fp8()
+    # A prefix carve-out is placed by the FP8 converter now rather than by the
+    # FP4 owner, so the backend is required wherever the carve-out is.
+    assert backends(model).uses_blockwise_fp8()
 
 
 def test_backend_preflight_uses_component_target_requirement(monkeypatch):
@@ -924,100 +939,6 @@ def test_fp4_override_under_fsdp_requires_patches_with_aiter_fp8_backend(
 
     with pytest.raises(ValueError, match=r"FSDP.*fsdp_post_all_gather"):
         backends(model).blockwise_fp8
-
-
-@pytest.mark.parametrize(
-    (
-        "platform",
-        "fp4_backend",
-        "aiter_fp8",
-        "setup_name",
-        "expected_fp8_backend",
-    ),
-    [
-        (
-            "cuda",
-            QuantizationBackend.TORCHAO,
-            False,
-            "setup_nvfp4_gemms",
-            QuantizationBackend.TORCHAO,
-        ),
-        (
-            "rdna4_rocm",
-            QuantizationBackend.AITER,
-            True,
-            "setup_mxfp4_gemms",
-            QuantizationBackend.AITER,
-        ),
-        (
-            "other_rocm",
-            QuantizationBackend.AITER,
-            False,
-            "setup_mxfp4_gemms",
-            QuantizationBackend.TORCHAO,
-        ),
-    ],
-)
-def test_eager_fp4_routes_fp8_only_module_by_hardware(
-    monkeypatch,
-    platform,
-    fp4_backend,
-    aiter_fp8,
-    setup_name,
-    expected_fp8_backend,
-):
-    contract = SimpleNamespace(
-        requested_format=QuantizationFormat.FP4,
-        selected_backend=fp4_backend,
-    )
-    adapter = select_blockwise_fp8_backend(
-        contract,
-        capabilities=Fp8BackendCapabilities(
-            aiter_block_scale=aiter_fp8,
-            torchao_fp8=True,
-            torchao_fsdp_patches=True,
-        ),
-    )
-    fp4_module = object()
-    fp8_module = object()
-    fp4_calls = []
-    fp8_calls = []
-    format_adapter = SimpleNamespace(
-        convert_module=lambda module, **kwargs: fp4_calls.append((module, kwargs))
-    )
-    adapter.convert_module = lambda module, **kwargs: fp8_calls.append((module, kwargs))
-    monkeypatch.setattr(placement, "log", lambda *args, **kwargs: None)
-    model = SimpleNamespace(
-        settings=SimpleNamespace(
-            fp4_gemm_module_list=["transformer.blocks"],
-            fp8_precision_overrides=None,
-            fp8_precision_override_suffixes=None,
-            fp8_gemm_include_suffixes=None,
-        ),
-        config=SimpleNamespace(use_hybrid_gemm_schedule=False),
-        fp8=SimpleNamespace(
-            module_list=lambda: [
-                "transformer.blocks",
-                "transformer_2.blocks",
-            ]
-        ),
-        pipe=SimpleNamespace(
-            transformer=SimpleNamespace(blocks=fp4_module),
-            transformer_2=SimpleNamespace(blocks=fp8_module),
-        ),
-        blockwise_fp8_backend=adapter,
-        format_backend=format_adapter,
-        quantization_ledger=QuantizationLedger(
-            descriptor_components={"transformer"}
-        ),
-    )
-    getattr(placement, setup_name)(runtime(model), local_rank=2)
-
-    assert adapter.backend is expected_fp8_backend, platform
-    assert [call[0] for call in fp4_calls] == [fp4_module]
-    assert fp8_calls == [(fp8_module, {"device": "cuda:2"})]
-
-
 def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
     monkeypatch,
 ):
@@ -1076,4 +997,7 @@ def test_streamed_fp8_target_does_not_skip_disjoint_target_in_component(
 
     placement.place_pipeline_components(runtime(model))
 
-    assert fp8_calls == [(post_load_module, {"device": "cuda:0"})]
+    module, kwargs = fp8_calls[0]
+    kwargs.pop("filter_fn")
+    assert len(fp8_calls) == 1
+    assert (module, kwargs) == (post_load_module, {"device": "cuda:0"})

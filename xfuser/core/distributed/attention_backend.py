@@ -1246,17 +1246,19 @@ def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs, qk_for
     read per batch; the padding is never visited, so its contents do not reach the softmax.
 
     ``valid_kv_len`` is a producer's promise that the pad is one trailing block, which a slice
-    serves without the two copies gathering costs. Gathering is the general case and stays
-    correct for a mask with interior gaps, which a slice would silently mis-serve. Q is left
-    alone either way: it is never packed, and a key-side length would be wrong for cross
-    attention, where the two sequences differ.
+    serves without the two copies gathering costs. It is one length for the whole call, so it
+    can only describe a single sequence; a batch of several is gathered even when it declares
+    one, because the shorter rows would otherwise be sliced to the longest row's length.
+    Gathering is the general case and stays correct for a mask with interior gaps, which a
+    slice would silently mis-serve. Q is left alone either way: it is never packed, and a
+    key-side length would be wrong for cross attention, where the two sequences differ.
     """
     kwargs = attention_kwargs or {}
     if kwargs.get("indices_k") is None:
         return query, key, value, None
 
     valid_kv_len = kwargs.get("valid_kv_len")
-    if valid_kv_len is not None:
+    if valid_kv_len is not None and key.shape[0] == 1:
         if not 0 < valid_kv_len <= key.shape[1]:
             raise ValueError(
                 f"valid_kv_len must be in [1, {key.shape[1]}], got {valid_kv_len}."

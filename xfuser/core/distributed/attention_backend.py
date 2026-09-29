@@ -1269,7 +1269,8 @@ def _aiter_mha_v4_gather_padded_keys(query, key, value, attention_kwargs, qk_for
                 "A trailing K/V pad has as many valid keys as its longest segment, "
                 f"got valid_kv_len={valid_kv_len} and max_seqlen_k={max_seqlen_k}."
             )
-        # Already contiguous for the single packed row this declares; a no-op copy otherwise.
+        # A size-1 batch hides the padded pitch from is_contiguous(), so this never copies; the
+        # rows are dense from the base pointer regardless, and stride(0) is never applied.
         return (
             query,
             key[:, :valid_kv_len].contiguous(),

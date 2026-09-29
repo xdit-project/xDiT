@@ -895,43 +895,43 @@ def test_first_of_composes_with_and():
     assert combined.satisfied()
 
 
-def test_every_kernel_using_hadamard_prepares_it_at_import():
-    """hadamard.matrix() walks importlib on a cold cache, and Dynamo refuses
-    to trace that -- so a kernel reaching it per call must warm it at import,
-    which is backend selection and outside every compiled region.
+def test_every_backend_that_can_reach_hadamard_declares_an_initializer():
+    """hadamard.matrix() walks importlib on a cold cache, and Dynamo refuses to
+    trace that -- so any backend reaching it per call must resolve it at
+    selection, which is what `initializers` is for.
 
-    lru_cache is what makes this worth pinning: a warm cache hides the import,
-    so whether a model compiles otherwise depends on what ran before it. That
-    is how it stayed latent until Ideogram 4's head dim 256 was the first to
-    reach the rotation under fullgraph."""
-    import ast
-    from pathlib import Path
-    import xfuser.core.attention as package
+    Which backends those are is read off the specs rather than listed here: a
+    row reaches hadamard exactly when it rotates with it, and it says so by
+    naming CREATE_HADAMARD in `requires` or hadamard.rotate_qk in
+    `prequant_rotate`. Sage v1 declares neither and does not rotate; v2
+    declares the first; the fp8 rows declare the second.
 
-    root = Path(package.__file__).parent / "backends"
-    for path in sorted(root.glob("*/kernel.py")):
-        source = path.read_text()
-        tree = ast.parse(source)
-        reaches = any(
-            isinstance(n, ast.Attribute)
-            and n.attr in {"matrix", "rotate_qk"}
-            and getattr(n.value, "id", "") == "hadamard"
-            for n in ast.walk(tree)
+    That is the whole point of moving the preparation onto the spec.
+    AITER_FLYDSL_FP8 declared the rotation and prepared nothing, because the
+    fact and the remedy lived in different files; now one implies the other
+    and this test can check it without knowing any backend's name."""
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.numerics import hadamard
+
+    def names_hadamard(requirement):
+        if requirement is hadamard.CREATE_HADAMARD:
+            return True
+        return any(names_hadamard(p) for p in getattr(requirement, "parts", ()))
+
+    checked = 0
+    for spec in registry.REGISTRY.values():
+        rotates = (
+            spec.prequant_rotate is hadamard.rotate_qk
+            or names_hadamard(spec.requires)
         )
-        if not reaches:
+        if not rotates:
             continue
-        prepares = any(
-            isinstance(n, ast.Call)
-            and getattr(n.func, "attr", "") == "prepare"
-            and getattr(n.func.value, "id", "") == "hadamard"
-            for n in tree.body            # module level only
-            if isinstance(n, ast.Expr)
-            for n in ast.walk(n)
+        assert spec.initializers, (
+            f"{spec.type.name} rotates with hadamard but declares no "
+            "initializer to resolve it at selection"
         )
-        assert prepares, (
-            f"{path.parent.name}/kernel.py reaches hadamard per call but does "
-            "not call hadamard.prepare() at import"
-        )
+        checked += 1
+    assert checked >= 5, f"expected at least 5 rotating backends, found {checked}"
 
 
 def test_hadamard_declares_its_symbol_once():

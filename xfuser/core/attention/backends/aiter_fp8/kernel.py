@@ -21,10 +21,6 @@ from xfuser.core.attention.requirements import ARCH, SYMBOL, resolve
 from xfuser.core.attention.spec import AttnCall
 from xfuser.envs import environment_variables
 
-# Resolve the Hadamard symbol and build its matrix now, while we are outside
-# every compiled region.
-hadamard.prepare()
-
 
 def _static_scale() -> Optional[float]:
     """AITER_FP8_STATIC_SCALE_WITH_DESCALE, when set above 1."""

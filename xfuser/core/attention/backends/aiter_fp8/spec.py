@@ -24,6 +24,7 @@ SPECS = [
         ring=NEVER,
         accepts_prequantized=True,
         prequant_rotate=hadamard.rotate_qk,
+        initializers=(hadamard.prepare,),
         requires=SYMBOL("aiter:flash_attn_fp8_pertensor_func")
                & SYMBOL("aiter:per_tensor_quant")
                & hadamard.CREATE_HADAMARD,

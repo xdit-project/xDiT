@@ -39,10 +39,6 @@ from xfuser.core.distributed.ssta import (
 
 from .spec import BLOCK_R, TRITON_SSTA_BLOCK
 
-# See aiter_fp8/kernel.py: the v2 rotation reaches hadamard.matrix per call,
-# so its symbol and matrix are resolved here, at backend selection.
-hadamard.prepare(block_sizes=(BLOCK_R,))
-
 
 # ---------------------------------------------------------------------------
 # shared by both versions

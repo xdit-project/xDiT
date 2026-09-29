@@ -9,6 +9,8 @@ behavioural respect -- v2 rotates Q/K, wants contiguous inputs and is passed
 `causal`; v1 does none of those. One flag, `v2`, carries all of it.
 """
 
+import functools
+
 from xfuser.core.attention.numerics import hadamard
 from xfuser.core.attention.constraints import (
     HEAD_DIM,
@@ -45,6 +47,11 @@ BLOCK_R = _block_r()
 
 V1 = SYMBOL(_SAGE_V1)
 V2 = SYMBOL(_SAGE_V2) & hadamard.CREATE_HADAMARD
+
+# v2 rotates inside the kernel, reaching hadamard.matrix per call -- from
+# inside the traced region, where resolving it would walk importlib. Prepared
+# at selection instead, for the one block width this kernel ever asks for.
+PREPARE_ROTATION = functools.partial(hadamard.prepare, block_sizes=(BLOCK_R,))
 LUT = SYMBOL(_RAGGED_LUT)
 
 # The rotation matrix is BLOCK_R wide and the kernel reads a full block per
@@ -90,6 +97,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SAGE_V2,
         impl=Impl("kernel:sage_v2"),
+        initializers=(PREPARE_ROTATION,),
         ring=ALWAYS,
         low_precision=True,
         accepts=V2_CALLS & NO_VARLEN,
@@ -98,6 +106,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARSE_SAGE_V2,
         impl=Impl("kernel:sparse_sage_v2"),
+        initializers=(PREPARE_ROTATION,),
         ring=NEVER,
         sparsity=Sparsity.SSTA,
         low_precision=True,
@@ -107,6 +116,7 @@ SPECS = [
     Spec(
         AttentionBackendType.AITER_SPARGE_V2,
         impl=Impl("kernel:sparge_v2"),
+        initializers=(PREPARE_ROTATION,),
         ring=NEVER,
         sparsity=Sparsity.SPARGE,
         head_balanced=True,

@@ -9,7 +9,7 @@ import functools
 import importlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 
@@ -169,7 +169,7 @@ class Spec:
 
     # When this backend may take part in ring attention, which merges per-rank
     # partials on a softmax log-sumexp. NEVER for a kernel that returns none at
-    # all. Runtime_state reports the unmet reason, so a refusal explains
+    # all. runtime_state reports the unmet reason, so a refusal explains
     # itself rather than saying only that ring is unavailable.
     ring: Requirement = field(kw_only=True)
 
@@ -218,6 +218,19 @@ class Spec:
     # install() therefore refuses a fallback on a spec declaring any of those,
     # rather than let a call route around a fact something else acted on.
     fallback: Optional[AttentionBackendType] = None
+
+    # Run once, when the backend is selected, before the kernel is resolved.
+    #
+    # For a vendor symbol the backend reaches *per call* rather than at import:
+    # resolving one walks importlib, which Dynamo refuses to trace, so the
+    # first call to reach it from inside a compiled region is a hard failure.
+    # Something has to resolve it earlier, and this is the last point outside a
+    # graph.
+    #
+    # Declared rather than run at kernel import, so that a dependency the spec
+    # already states is not restated in another file: one place to read, and
+    # one place to forget.
+    initializers: Tuple[Callable[[], None], ...] = ()
 
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
@@ -271,8 +284,9 @@ class Spec:
 
         The chain is walked after the cache check, not before, so a warm spec
         costs one attribute read. That is safe because ``_resolved`` is only
-        ever set below, after the fallback has been resolved: a spec being
-        warm therefore implies the whole chain behind it is.
+        ever set below, after the fallback has been resolved and the
+        initializers have run: a spec being warm therefore implies everything
+        behind it is ready too.
         """
         fn = self._resolved
         if fn is not None:
@@ -280,6 +294,11 @@ class Spec:
         if self._fallback is not None:
             self._fallback.resolved()
         fn = self.impl.resolve(self.package) if isinstance(self.impl, Impl) else self.impl
+        # After the kernel module, so an initializer may rely on the vendor
+        # library having imported; before _resolved is set, so a spec is never
+        # marked ready while something it needs is not.
+        for initialize in self.initializers:
+            initialize()
         object.__setattr__(self, "_resolved", fn)
         return fn
 

@@ -19,6 +19,7 @@ SPECS = [
          ring=NEVER,
          accepts_prequantized=True,
          prequant_rotate=hadamard.rotate_qk,
+         initializers=(hadamard.prepare,),
          requires=SYMBOL(_FLYDSL) & SYMBOL("aiter.ops.flydsl:flydsl_fp8_quant")
-                & ARCH("gfx1201")),
+                & hadamard.CREATE_HADAMARD & ARCH("gfx1201")),
 ]

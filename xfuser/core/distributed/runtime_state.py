@@ -277,12 +277,25 @@ class RuntimeState(metaclass=ABCMeta):
             # Ring merges per-rank partials on a softmax log-sumexp. Whether a
             # backend has one can depend on the build and the device, so the
             # spec answers with a predicate and its reason is the message.
-            no_ring = spec.ring.unmet()
-            if no_ring is not None:
-                raise RuntimeError(
-                    f"{attention_backend.value} cannot be used with ring "
-                    f"parallelism: {no_ring}"
-                )
+            #
+            # The fallback has to answer too. On a model that mixes head
+            # widths the merge would otherwise receive a partial from the
+            # blocks the selection serves and nothing from the ones it hands
+            # on -- and a missing LSE cannot be seen in the output, because O
+            # never reads it.
+            link = spec
+            while link is not None:
+                no_ring = link.ring.unmet()
+                if no_ring is not None:
+                    through = (
+                        "" if link is spec
+                        else f" serves other shapes through {link.type.value}, which"
+                    )
+                    raise RuntimeError(
+                        f"{attention_backend.value}{through} cannot be used "
+                        f"with ring parallelism: {no_ring}"
+                    )
+                link = link._fallback
 
         # Import the kernel module now, while we are outside any compiled
         # region. This is the single choke point: it runs for the attention

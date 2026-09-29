@@ -374,6 +374,45 @@ def test_a_warm_spec_does_not_rewalk_its_fallback_chain():
         assert walked == ["AITER_BF16", "SDPA", "AITER_BF16"]
 
 
+def test_the_mha_v4_dense_rows_ring_only_where_the_lse_is_measured():
+    """AITER refuses the LSE on gfx942 until its value has been checked
+    against a reference, and a wrong one is invisible to every output test
+    because O never reads it. Stated as gfx950 rather than "not gfx942" so a
+    new architecture opts in rather than inheriting the claim."""
+    from xfuser.core.attention import registry
+    from xfuser.core.attention.backends.aiter_mha_v4.spec import DENSE_BACKENDS
+
+    for backend in DENSE_BACKENDS:
+        spec = registry.get(backend)
+        assert spec.ring is not NEVER, f"{backend.name}: dense rows can ring"
+        reason = spec.ring.unmet()
+        # On a machine without AITER or a GPU this is unmet, and saying why is
+        # the whole point -- it must not raise while working that out.
+        assert reason is None or isinstance(reason, str)
+
+    # The sparse rows export no LSE at all, whatever the device.
+    sparge = registry.get(AttentionBackendType.AITER_FP8_SPARGE)
+    assert sparge.ring is NEVER
+
+
+def test_a_fallback_must_ring_wherever_the_backend_it_serves_does():
+    """A mixed-width model on a ring run sends some blocks to the fallback.
+    If that one returns no LSE the merge gets a partial from the blocks the
+    selection served and nothing from the rest -- and no output check can see
+    it, because O never reads the LSE."""
+    primary = _spec(AttentionBackendType.AITER_BF16, ring=ALWAYS,
+                    accepts=HEAD_DIM(128),
+                    fallback=AttentionBackendType.SDPA)
+    fallback = _spec(AttentionBackendType.SDPA, ring=NEVER)
+
+    with registry.using([primary, fallback]):
+        spec = registry.get(AttentionBackendType.AITER_BF16)
+        assert spec.ring.unmet() is None, "the selection itself can ring"
+        assert spec._fallback.ring.unmet() is not None, (
+            "but the fallback cannot, which runtime_state must refuse"
+        )
+
+
 def test_a_fallback_must_name_a_registered_backend():
     spec = _spec(AttentionBackendType.AITER_BF16,
                  fallback=AttentionBackendType.AITER_F4F4)

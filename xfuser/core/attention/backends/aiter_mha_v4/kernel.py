@@ -50,8 +50,9 @@ KV_TILE = _read_kv_tile()
 HAS_SEQLENS_K = PARAM("aiter.ops.mha_v4:mha_v4", "seqlens_k").satisfied()
 
 
-def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None):
-    """One MHA v4 launch. Tensors are BSHD."""
+def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None,
+            return_lse=False):
+    """One MHA v4 launch. Tensors are BSHD. Returns (output, lse-or-None)."""
     kwargs = {}
     if fmt.qk_scale is not None:
         kwargs = {
@@ -61,9 +62,12 @@ def _launch(q, k, v, fmt: MhaV4Format, block_mask=None, seqlens_k=None):
         }
     if seqlens_k is not None:
         kwargs["seqlens_k"] = seqlens_k
+    if return_lse:
+        kwargs["return_lse"] = True
     qk = FORMAT[fmt.qk]
-    return mha_v4(q, k, v, qk, qk, FORMAT[fmt.v],
-                  block_mask=block_mask, **kwargs)
+    result = mha_v4(q, k, v, qk, qk, FORMAT[fmt.v],
+                    block_mask=block_mask, **kwargs)
+    return result if return_lse else (result, None)
 
 
 def _shorten_keys(key, value, call: AttnCall, fmt: MhaV4Format):
@@ -145,7 +149,18 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
         k, v, seqlens_k = _shorten_keys(k, v, call, fmt)
     else:
         k, v = make_contiguous(k, v)
-    return from_bshd(_launch(q, k, v, fmt, seqlens_k=seqlens_k)), None
+
+    # Only ring needs the log-sumexp; asking for it otherwise buys a write the
+    # caller discards. The degree comes off the call rather than the process
+    # group, so this stays traceable and testable without one.
+    output, softmax_lse = _launch(
+        q, k, v, fmt,
+        seqlens_k=seqlens_k,
+        return_lse=call.ctx.ring_world_size > 1,
+    )
+    # The kernel writes LSE as [batch, heads, Sq], already the layout the ring
+    # merge expects, so only O is permuted back.
+    return from_bshd(output), softmax_lse
 
 
 def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
@@ -159,7 +174,9 @@ def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
         pad_block_divisible=True,
     )
     q, k, v = to_bshd(q, k, v, contiguous=True)
-    output = _launch(q, k, v, fmt, block_mask=block_mask)
+    # No LSE: the sorted-sparse launch exports none, which is why the sparge
+    # rows declare ring=NEVER.
+    output, _ = _launch(q, k, v, fmt, block_mask=block_mask)
     return restore_sparge_output(from_bshd(output), state), None
 
 

@@ -27,9 +27,23 @@ from xfuser.core.attention.constraints import (
 from xfuser.core.attention.spec import AttentionBackendType, Impl, Sparsity, Spec
 
 _MHA_V4 = "aiter.ops.mha_v4:mha_v4"
+_MHA_V4_PACKED = "aiter.ops.mha_v4:mha_v4_packed"
 
 GFX950 = ARCH("gfx950")
 GFX950_OR_GFX942 = ARCH("gfx950", "gfx942")
+
+# When the dense rows may take part in ring attention.
+#
+# The lse output buffer rather than the return_lse argument: return_lse has
+# always been accepted and always raised, so its presence proves nothing,
+# whereas the buffer only exists once the kernels write one.
+#
+# Stated as gfx950 rather than "not gfx942" -- the same set, since requires
+# already pins these rows to one of the two -- because AITER refuses the LSE on
+# gfx942 until its value has been measured against a reference. Be conservative
+# here: a wrong LSE is invisible to every output check, because O never reads
+# it, so a new architecture should have to opt in rather than inherit this.
+DENSE_RING = PARAM(_MHA_V4_PACKED, "lse") & GFX950
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +145,7 @@ def _dense_spec(fmt: MhaV4Format) -> Spec:
     return Spec(
         AttentionBackendType[f"AITER_{fmt.name}"],
         impl=Impl("kernel:mha_v4_dense", {"fmt": fmt}),
-        ring=NEVER,
+        ring=DENSE_RING,
         low_precision=fmt.qk is not Fmt.BF16,
         accepts=DENSE_CALLS,
         # Every row here is head dim 128, which makes the family unselectable

@@ -190,7 +190,9 @@ class _Never(Requirement):
     """
 
     def unmet(self) -> Optional[str]:
-        return "is not supported by this backend"
+        # Phrased to complete a sentence, as every reason here is: the caller
+        # supplies "X cannot be used with Y: " and this finishes it.
+        return "the backend does not provide it"
 
 
 NEVER = _Never()

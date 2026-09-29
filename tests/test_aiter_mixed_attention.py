@@ -374,19 +374,18 @@ def _available(backends):
     [
         ("causal masking", AttnCall(is_causal=True)),
         ("dropout", AttnCall(dropout_p=0.1)),
-        ("varlen packed keys", AttnCall(varlen=VarlenPacking(
-            indices_k=torch.zeros(1, dtype=torch.int64),
-            cu_seqlens_k=torch.tensor([0, 1], dtype=torch.int32),
-            max_seqlen_k=1,
-        ))),
     ],
-    ids=["causal", "dropout", "varlen"],
+    ids=["causal", "dropout"],
 )
 def test_mha_v4_refuses_calls_it_cannot_serve(case, call):
-    """Dense MHA v4 has no causal mask, no dropout and no key-padding mask.
-    Each refusal is declared in `accepts`, so it happens before the kernel
-    runs -- silently dropping the packing would let padded keys contribute to
-    the softmax denominator, which is wrong rather than approximate."""
+    """Dense MHA v4 has no causal mask and no dropout. Each refusal is
+    declared in `accepts`, so it happens before the kernel runs.
+
+    Packed keys are no longer among them: the kernel shortens K/V instead --
+    slicing a declared trailing pad or gathering the valid rows -- so the
+    padding is not there to reach the softmax denominator. The one packed
+    shape it still cannot serve is raised by the kernel rather than declared
+    here; see test_mha_v4_refuses_several_packed_sequences for why."""
     tensor = torch.empty((1, 1, 1, 128))
     checked = 0
     for backend in _available(_MHA_V4_BACKENDS):
@@ -394,6 +393,55 @@ def test_mha_v4_refuses_calls_it_cannot_serve(case, call):
         assert reason is not None, f"{backend.name} accepts {case}"
         checked += 1
     assert checked, "no MHA v4 backend was available to check"
+
+
+def test_mha_v4_refuses_several_packed_sequences():
+    """A batch of several packed sequences needs AITER's per-batch key
+    lengths, which only the BF16 Q/K rows consume -- the others would attend
+    over the padding, so AITER rejects them.
+
+    Raised from the kernel rather than declared in `accepts` on purpose: a
+    declared refusal sends the call to the v3 fallback, which would serve it
+    correctly while leaving the chosen backend applied to only part of the
+    run. A raise says which backends do work instead.
+
+    F8F6 rather than BF16 so the assertion holds on either AITER: an older
+    build has no seqlens_k at all and refuses every row, a newer one refuses
+    this row specifically. Both messages name per-batch key lengths.
+    """
+    _require_mha_v4_aiter("AITER_F8F6")
+    _require_mha_v4_recipe("AITER_F8F6")
+
+    batch, heads, seq_len, head_dim = 2, 4, 128, 128
+    shape = (batch, heads, seq_len, head_dim)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+    # Two sequences of different valid lengths, so there is no single trailing
+    # pad to slice and no valid_kv_len to declare.
+    lengths = (96, 64)
+    indices = torch.cat([
+        torch.arange(b * seq_len, b * seq_len + n, device="cuda")
+        for b, n in enumerate(lengths)
+    ])
+    call = AttnCall(
+        varlen=VarlenPacking(
+            indices_k=indices,
+            cu_seqlens_k=torch.tensor(
+                [0, lengths[0], sum(lengths)], dtype=torch.int32, device="cuda"
+            ),
+            max_seqlen_k=max(lengths),
+        ),
+    )
+
+    spec = registry.get(AttentionBackendType.AITER_F8F6)
+    spec.resolved()
+    assert spec.rejects(query, key, value, call) is None, (
+        "accepts must not refuse this -- that would route it to the fallback"
+    )
+    with pytest.raises(NotImplementedError, match="per-batch key lengths"):
+        spec.run(query, key, value, call)
 
 
 @pytest.mark.parametrize(
@@ -404,13 +452,19 @@ def test_mha_v4_refuses_calls_it_cannot_serve(case, call):
         "AITER_MXFP8",
         "AITER_F8F6",
         "AITER_F6F4",
-        "AITER_MXFP4",
-        pytest.param(
-            "AITER_F4F4",
-            marks=pytest.mark.skip(
-                reason="faults the GPU once allocations accumulate; fixed in newer AITER"
-            ),
-        ),
+        # MXFP4 and F4F4 are the same launch: AITER commented its separate
+        # f4f4 row out, so both resolve to fwd_hd128_f4f4, and the fault below
+        # reaches either name.
+        *[
+            pytest.param(
+                name,
+                marks=pytest.mark.skip(
+                    reason="faults the GPU once allocations accumulate; "
+                           "fixed in newer AITER"
+                ),
+            )
+            for name in ("AITER_MXFP4", "AITER_F4F4")
+        ],
     ],
 )
 def test_mha_v4_serves_a_declared_trailing_pad(backend_name, request):

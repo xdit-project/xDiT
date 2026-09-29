@@ -45,6 +45,7 @@ def build_registry(modules: Iterable) -> Mapping[AttentionBackendType, Spec]:
     for module in modules:
         for spec in module.SPECS:
             _place(built, spec, module.__name__)
+    _link_fallbacks(built)
     return MappingProxyType(built)
 
 
@@ -65,6 +66,58 @@ def install(modules: Iterable) -> None:
         )
     _REGISTRY.clear()
     _REGISTRY.update(built)
+
+
+def _link_fallbacks(built: Dict[AttentionBackendType, Spec]) -> None:
+    """Resolve every declared fallback to the spec it names, and refuse the
+    arrangements that would be wrong.
+
+    Stamped rather than looked up at dispatch, and stamped by mutation rather
+    than by ``replace``: every reference must be the same object the registry
+    holds, so that resolving one resolves the one that will actually run. A
+    copy would keep its own empty ``_resolved`` and import from inside the
+    traced region on first use.
+    """
+    # Facts a fallback would route around. base_model gates on sparsity, usp
+    # on head_balanced, fp8_comms quantises Q/K/V before the call on
+    # accepts_prequantized -- all read from the *selected* spec, none of which
+    # the fallback's kernel would honour.
+    exclusive = ("sparsity", "head_balanced", "accepts_prequantized")
+
+    for spec in built.values():
+        if spec.fallback is None:
+            continue
+        declared = [f for f in exclusive if getattr(spec, f)]
+        if declared:
+            raise ValueError(
+                f"{spec.type.name} declares both a fallback and "
+                f"{', '.join(declared)}. Those are read from the selected "
+                "backend by other subsystems, which the fallback's kernel "
+                "would not honour."
+            )
+        target = built.get(spec.fallback)
+        if target is None:
+            raise ValueError(
+                f"{spec.type.name} falls back to {spec.fallback.name}, which "
+                "no module registers"
+            )
+        object.__setattr__(spec, "_fallback", target)
+
+    for spec in built.values():
+        _refuse_fallback_cycle(spec)
+
+
+def _refuse_fallback_cycle(start: Spec) -> None:
+    """A cycle would make resolved() recurse forever and run() loop."""
+    seen = [start.type.name]
+    spec = start._fallback
+    while spec is not None:
+        if spec.type.name in seen:
+            raise ValueError(
+                "fallback cycle: " + " -> ".join(seen + [spec.type.name])
+            )
+        seen.append(spec.type.name)
+        spec = spec._fallback
 
 
 def _place(built: Dict[AttentionBackendType, Spec], spec: Spec, package: str) -> None:
@@ -92,6 +145,7 @@ def using(specs: Iterable[Spec], package: str = ""):
     built: Dict[AttentionBackendType, Spec] = {}
     for spec in specs:
         _place(built, spec, package)
+    _link_fallbacks(built)
     _REGISTRY.clear()
     _REGISTRY.update(built)
     try:
@@ -165,9 +219,12 @@ def manifest() -> str:
         return "registry is empty"
 
     width = max(len(s.type.name) for s in rows)
+    fb_width = max([len(s.fallback.name) for s in rows if s.fallback] + [8])
     header = (
         "BACKEND".ljust(width)
-        + "  RING  SPARSE  HEADBAL  LOWPREC  REQUIRES"
+        + "  RING  SPARSE  HEADBAL  LOWPREC  "
+        + "FALLBACK".ljust(fb_width)
+        + "  REQUIRES"
     )
     lines = [header, "-" * len(header)]
     for spec in rows:
@@ -179,6 +236,7 @@ def manifest() -> str:
             + "  " + ("y" if spec.is_sparse else "-").center(6)
             + "  " + ("y" if spec.head_balanced else "-").center(7)
             + "  " + ("y" if spec.low_precision else "-").center(7)
+            + "  " + (spec.fallback.name if spec.fallback else "-").ljust(fb_width)
             + "  " + _describe_requirement(spec)
         )
     return "\n".join(lines)

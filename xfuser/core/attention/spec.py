@@ -225,6 +225,18 @@ class Spec:
     # says ANY_CALL.
     accepts: CallConstraint = field(kw_only=True)
 
+    # Where a call this backend cannot serve goes instead of raising. For a
+    # kernel that covers part of a model's shapes and wants the rest served
+    # rather than refused: MHA v4 runs head dim 128, and LTX-2 pairs 128-wide
+    # video blocks with 64-wide audio ones under one backend choice.
+    #
+    # The fallback is a whole backend, so it answers with its own accepts and
+    # its own kernel -- but the *selected* spec is still what base_model, usp
+    # and fp8_comms read for sparsity, head balancing and pre-quantization.
+    # install() therefore refuses a fallback on a spec declaring any of those,
+    # rather than let a call route around a fact something else acted on.
+    fallback: Optional[AttentionBackendType] = None
+
     # Filled in by the registry from the module the spec came from, so Impl
     # targets can be written relative to the backend package.
     package: str = ""
@@ -236,6 +248,16 @@ class Spec:
     # Out of repr because a bound impl is a functools.partial, which prints the
     # whole table row it was bound with.
     _resolved: Optional[AttnFn] = field(default=None, compare=False, repr=False)
+
+    # The spec ``fallback`` names, stamped by the registry once every spec is
+    # placed. Out of compare and repr for the reason above and one more: a Spec
+    # inside a Spec would otherwise recurse through __eq__ and __hash__.
+    #
+    # Holding the object rather than looking it up at dispatch is deliberate.
+    # run() is traced, and this way the lookup never happens there; resolved()
+    # walks this reference, so the instance we import for is the instance we
+    # dispatch to.
+    _fallback: Optional["Spec"] = field(default=None, compare=False, repr=False)
 
     @property
     def is_sparse(self) -> bool:
@@ -260,7 +282,14 @@ class Spec:
         resolving twice would hand out two callables that compare unequal and
         make Dynamo treat the second as a different function. Plain callables
         are cached too, so run() takes the same fast path for them.
+
+        Resolves the fallback chain too, through ``_fallback`` rather than the
+        registry: a fallback dispatch must not be the first thing to import a
+        kernel module, because by then we are inside the traced region and
+        Dynamo refuses importlib.
         """
+        if self._fallback is not None:
+            self._fallback.resolved()
         fn = self._resolved
         if fn is not None:
             return fn
@@ -269,11 +298,17 @@ class Spec:
         return fn
 
     def run(self, query, key, value, call: AttnCall):
-        """Enforce ``accepts``, then dispatch. Callers use this rather than
-        ``impl`` so the constraint is declared once and checked in one place;
-        a kernel function stays pure kernel code."""
+        """Enforce ``accepts``, then dispatch -- to the fallback when there is
+        one and the call is outside what this kernel serves.
+
+        Callers use this rather than ``impl`` so the constraint is declared
+        once and checked in one place; a kernel function stays pure kernel
+        code."""
         reason = self.rejects(query, key, value, call)
         if reason is not None:
+            fallback = self._fallback
+            if fallback is not None:
+                return fallback.run(query, key, value, call)
             # Raised from inside the traced region this surfaces as
             # torch._dynamo.exc.Unsupported; the message survives in the debug
             # context. Only reachable on a misconfigured run.

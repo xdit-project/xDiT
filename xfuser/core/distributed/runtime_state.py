@@ -259,6 +259,20 @@ class RuntimeState(metaclass=ABCMeta):
                 f"{attention_backend.value} attention is unavailable: {unavailable}"
             )
 
+        # A backend that hands the shapes it cannot serve to another one needs
+        # that one present too, and a missing fallback would otherwise surface
+        # mid-denoising on whichever block happened to be the wrong width.
+        link = spec._fallback
+        while link is not None:
+            unavailable = link.unavailable()
+            if unavailable is not None:
+                raise RuntimeError(
+                    f"{attention_backend.value} attention serves other shapes "
+                    f"through {link.type.value}, which is unavailable: "
+                    f"{unavailable}"
+                )
+            link = link._fallback
+
         if self.parallel_config.ring_degree > 1:
             # Ring merges per-rank partials on a softmax log-sumexp. Whether a
             # backend has one can depend on the build and the device, so the
@@ -273,7 +287,8 @@ class RuntimeState(metaclass=ABCMeta):
         # Import the kernel module now, while we are outside any compiled
         # region. This is the single choke point: it runs for the attention
         # backend, the cross-attention backend, and every backend in a hybrid
-        # schedule.
+        # schedule. Resolving walks the fallback chain, so a call that lands on
+        # a fallback mid-graph finds it already imported.
         spec.resolved()
 
 

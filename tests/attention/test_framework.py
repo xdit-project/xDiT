@@ -290,6 +290,92 @@ def test_install_refuses_a_registry_missing_a_backend():
     assert registry.missing_specs() == [], "a refused install must not be applied"
 
 
+# --------------------------------------------------------------------------
+# fallback
+# --------------------------------------------------------------------------
+
+def _pair(**kwargs):
+    """A spec that falls back to SDPA, and the SDPA spec it falls back to."""
+    served = []
+
+    def fallback_impl(q, k, v, c):
+        served.append("fallback")
+        return q, None
+
+    primary = _spec(
+        AttentionBackendType.AITER_BF16,
+        accepts=HEAD_DIM(128),
+        fallback=AttentionBackendType.SDPA,
+        **kwargs,
+    )
+    return primary, _spec(AttentionBackendType.SDPA, impl=fallback_impl), served
+
+
+def test_a_rejected_call_goes_to_the_fallback_rather_than_raising():
+    """MHA v4 runs head dim 128, and LTX-2 pairs 128-wide video blocks with
+    64-wide audio ones under one backend choice. Raising would make the
+    backend unselectable for that model."""
+    primary, fallback, served = _pair()
+    with registry.using([primary, fallback]):
+        spec = registry.get(AttentionBackendType.AITER_BF16)
+        spec.run(*_qkv(head_dim=128), AttnCall())
+        assert served == [], "a call it serves must not reach the fallback"
+        spec.run(*_qkv(head_dim=64), AttnCall())
+        assert served == ["fallback"]
+
+
+def test_a_rejected_call_still_raises_without_a_fallback():
+    spec = _spec(AttentionBackendType.SDPA, accepts=HEAD_DIM(128))
+    with pytest.raises(NotImplementedError, match="head dimension"):
+        spec.run(*_qkv(head_dim=64), AttnCall())
+
+
+def test_resolving_a_spec_resolves_its_fallback():
+    """The fallback must be imported at selection, not on the first call that
+    needs it: by then we are inside the traced region, where Dynamo refuses
+    importlib. Resolving through _fallback rather than the registry is what
+    makes the instance we import for the instance we dispatch to."""
+    primary, fallback, _ = _pair()
+    with registry.using([primary, fallback]):
+        spec = registry.get(AttentionBackendType.AITER_BF16)
+        assert spec._fallback is registry.get(AttentionBackendType.SDPA), (
+            "the stamped fallback must be the registry's own object"
+        )
+        spec.resolved()
+        assert spec._fallback._resolved is not None
+
+
+def test_a_fallback_must_name_a_registered_backend():
+    spec = _spec(AttentionBackendType.AITER_BF16,
+                 fallback=AttentionBackendType.AITER_F4F4)
+    with pytest.raises(ValueError, match="AITER_F4F4"):
+        registry.build_registry([_module("pkg.a", spec)])
+
+
+def test_a_fallback_cycle_is_refused():
+    """resolved() walks the chain and run() dispatches down it, so a cycle is
+    an infinite recursion rather than a wrong answer."""
+    a = _spec(AttentionBackendType.SDPA, fallback=AttentionBackendType.FLASH)
+    b = _spec(AttentionBackendType.FLASH, fallback=AttentionBackendType.SDPA)
+    with pytest.raises(ValueError, match="fallback cycle"):
+        registry.build_registry([_module("pkg.a", a, b)])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("sparsity", Sparsity.SPARGE), ("head_balanced", True),
+     ("accepts_prequantized", True)],
+)
+def test_a_fallback_cannot_sit_beside_a_fact_it_would_route_around(field, value):
+    """These are read from the *selected* spec elsewhere -- base_model gates on
+    sparsity, usp on head_balanced, fp8_comms hands the kernel pre-quantized
+    Q/K/V on accepts_prequantized. A fallback kernel honours none of them, so
+    the combination is refused rather than documented."""
+    primary, fallback, _ = _pair(**{field: value})
+    with pytest.raises(ValueError, match=field):
+        registry.build_registry([_module("pkg.a", primary, fallback)])
+
+
 def test_get_unregistered_names_the_backend():
     with registry.using([_spec(AttentionBackendType.SDPA)]):
         with pytest.raises(KeyError, match="AITER_F4F4"):

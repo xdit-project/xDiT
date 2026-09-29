@@ -114,6 +114,13 @@ def _require_mha_v4_recipe(backend_name):
         pytest.skip(f"Installed AITER has no kernel row for {backend_name}: {exc}")
 
 
+def _require_mha_v4_seqlens_k():
+    from xfuser.core.distributed.attention_backend import _AITER_MHA_V4
+
+    if not _AITER_MHA_V4.seqlens_k:
+        pytest.skip("Installed AITER MHA v4 cannot express per-batch key lengths.")
+
+
 @pytest.mark.parametrize(
     "backend_name",
     [
@@ -435,6 +442,7 @@ def test_aiter_mha_v4_serves_multi_sequence_varlen_packed_keys():
     )
 
     _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
+    _require_mha_v4_seqlens_k()
 
     torch.manual_seed(7)
     batch, heads, head_dim = 2, 4, 128
@@ -483,6 +491,7 @@ def test_aiter_mha_v4_gathers_a_multi_sequence_batch_that_declares_valid_kv_len(
 
     _require_mha_v4_aiter(AttentionBackendType.AITER_BF16.name)
     _require_mha_v4_recipe(AttentionBackendType.AITER_BF16.name)
+    _require_mha_v4_seqlens_k()
 
     torch.manual_seed(7)
     heads, padded, valid = 4, 384, (300, 137)
@@ -555,6 +564,7 @@ def test_aiter_mha_v4_rejects_multi_sequence_padding_off_the_bf16_rows(backend_n
     output, _ = run(1, (300,))
     assert torch.isfinite(output.float()).all()
 
+    _require_mha_v4_seqlens_k()
     with pytest.raises(NotImplementedError, match="BF16 Q/K rows"):
         run(2, (300, 137))
 

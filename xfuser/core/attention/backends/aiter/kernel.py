@@ -53,7 +53,7 @@ def _dense(
 
 
 @_dense.register_fake
-def _(query, key, value, dropout_p, is_causal):
+def _dense_fake(query, key, value, dropout_p, is_causal):
     batch, seq_len, heads, _ = query.shape
     return (
         torch.empty_like(query),
@@ -92,7 +92,9 @@ def _varlen(
 
 
 @_varlen.register_fake
-def _(query, key, value, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale, dropout_p, is_causal):
+def _varlen_fake(
+    query, key, value, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale, dropout_p, is_causal
+):
     total_q, heads, _ = query.shape
     return (
         torch.empty_like(query),

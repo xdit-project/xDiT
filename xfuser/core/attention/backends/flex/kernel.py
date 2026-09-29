@@ -40,7 +40,7 @@ if _FLEX_BLOCK_ATTN_FUNC is not None:
         return _FLEX_BLOCK_ATTN_FUNC(q, k, v, block_m, block_n, block_mask)
 
     @flex_block_attn.register_fake
-    def _(q, k, v, block_m, block_n, block_mask):
+    def _flex_block_attn_fake(q, k, v, block_m, block_n, block_mask):
         return torch.empty_like(q)
 
 

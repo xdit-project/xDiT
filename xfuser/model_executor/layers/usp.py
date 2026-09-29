@@ -1,6 +1,7 @@
 # This file implements USP with torch version >= '2.5.0'
 import torch
 import functools
+from typing import Tuple
 
 import torch.distributed._functional_collectives as ft_c
 
@@ -27,7 +28,7 @@ from xfuser.core.cache_manager.cache_manager import get_cache_manager
 from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
-from xfuser.core.attention.spec import AttnCall, ParallelContext
+from xfuser.core.attention.spec import AttnCall
 from xfuser.core.attention.spec import AttentionBackendType
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
@@ -414,8 +415,8 @@ def _get_attention_function(backend=None):
     return concat_joint_tensors_decorator(_spec_adapter(spec))
 
 
-def _parallel_context() -> ParallelContext:
-    """The sequence-parallel degrees, or the single-rank default.
+def _parallel_degrees() -> Tuple[int, int]:
+    """(ulysses, ring) sequence-parallel degrees, or the single-rank default.
 
     `attention()` is the entry point for calls that need no sequence
     parallelism, and it is reached before -- or entirely without -- an
@@ -423,11 +424,8 @@ def _parallel_context() -> ParallelContext:
     fails.
     """
     if not model_parallel_is_initialized():
-        return ParallelContext()
-    return ParallelContext(
-        ulysses_world_size=get_ulysses_parallel_world_size(),
-        ring_world_size=get_ring_parallel_world_size(),
-    )
+        return 1, 1
+    return get_ulysses_parallel_world_size(), get_ring_parallel_world_size()
 
 
 def _spec_adapter(spec):
@@ -443,13 +441,15 @@ def _spec_adapter(spec):
 
     def call(query, key, value, dropout_p=0.0, is_causal=False, attention_kwargs=None):
         kwargs = attention_kwargs if attention_kwargs is not None else {}
+        ulysses_world_size, ring_world_size = _parallel_degrees()
         return spec.run(
             query, key, value,
             AttnCall(
                 dropout_p=dropout_p,
                 is_causal=is_causal,
                 varlen=VarlenPacking.from_kwargs(kwargs),
-                ctx=_parallel_context(),
+                ulysses_world_size=ulysses_world_size,
+                ring_world_size=ring_world_size,
                 attention_kwargs=kwargs,
             ),
         )

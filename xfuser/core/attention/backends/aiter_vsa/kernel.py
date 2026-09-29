@@ -39,7 +39,7 @@ def vsa_attention(query, key, value, call: AttnCall):
     output, density = aiter_vsa_attention(
         query, key, value,
         thw=tuple(thw),
-        sp_size=call.ctx.ulysses_world_size,
+        sp_size=call.ulysses_world_size,
         block_size=int(kwargs.get("vsa_block_size", 128)),
         top_k=int(kwargs.get("vsa_top_k", 1)),
         top_k_ratio=float(kwargs.get("vsa_top_k_ratio", 0.0)),

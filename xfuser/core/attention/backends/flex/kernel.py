@@ -47,7 +47,7 @@ if _FLEX_BLOCK_ATTN_FUNC is not None:
 def flex_block(query, key, value, call: AttnCall):
     """SSTA tile mask through FlexAttention."""
     kwargs = call.attention_kwargs
-    kwargs["sp_size"] = call.ctx.ulysses_world_size
+    kwargs["sp_size"] = call.ulysses_world_size
     block_size = math.prod(kwargs["tile_size"])
 
     q, k, v, mask_config, state = setup_ssta(query, key, value, kwargs)
@@ -67,7 +67,7 @@ def flex_sparge(query, key, value, call: AttnCall):
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
         block_m=block, block_n=block,
-        ulysses_world_size=call.ctx.ulysses_world_size,
+        ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
         pad_block_divisible=True,
     )

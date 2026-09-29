@@ -107,18 +107,6 @@ class VarlenPacking:
         )
 
 
-@dataclass(frozen=True)
-class ParallelContext:
-    """Sequence-parallel degrees, passed in rather than read from globals.
-
-    A backend that called get_ulysses_parallel_world_size() directly could not
-    be exercised without an initialised process group.
-    """
-
-    ulysses_world_size: int = 1
-    ring_world_size: int = 1
-
-
 @dataclass
 class AttnCall:
     """Everything a backend needs about one call that is not q/k/v."""
@@ -126,10 +114,26 @@ class AttnCall:
     dropout_p: float = 0.0
     is_causal: bool = False
     varlen: Optional[VarlenPacking] = None
-    ctx: ParallelContext = field(default_factory=ParallelContext)
+
+    # Sequence-parallel degrees, passed in rather than read from globals: a
+    # backend calling get_ulysses_parallel_world_size() directly could not be
+    # exercised without an initialised process group.
+    #
+    # Flat integers rather than a ParallelContext holding them, because Dynamo
+    # cannot trace a read of a user-defined object that a default_factory
+    # produced. It has no source for one it did not watch being built, and its
+    # sourceless builder fails on it -- with "AttributeError: 'NoneType'
+    # object has no attribute 'name'", which says nothing about the cause.
+    # Two AttnCalls that compare equal would then compile differently,
+    # depending only on whether the caller spelled the default out.
+    ulysses_world_size: int = 1
+    ring_world_size: int = 1
 
     # The untyped dict the model passes through. Each sparsity strategy digs
     # out its own keys; a typed config per strategy would be better.
+    #
+    # A default_factory is safe here where it is not above: dict is a builtin
+    # Dynamo constructs natively, so there is no user-defined class to wrap.
     attention_kwargs: dict = field(default_factory=dict)
 
 
@@ -145,7 +149,8 @@ class Impl:
     be imported once that library is known present. Resolving here rather than
     on first dispatch keeps the import out of any compiled region: Dynamo
     refuses to trace importlib, which makes a lazy import a hard failure under
-    fullgraph=True (tests/attention/test_lazy_op_registration.py pins this).
+    fullgraph=True. Pinned by the compile cases in tests/test_aiter_mixed_
+    attention.py and tests/test_minimax_h3.py, both -k compiles_fullgraph.
 
     ``target`` is "module:function" relative to the backend package. ``bound``
     is applied with functools.partial, which is how the generated families bind

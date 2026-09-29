@@ -47,7 +47,7 @@ from .spec import BLOCK_R, TRITON_SSTA_BLOCK
 def _ssta_mask(query, key, value, call: AttnCall):
     """Tile Q/K/V against the model's static sparse config and build the LUT."""
     kwargs = call.attention_kwargs
-    kwargs["sp_size"] = call.ctx.ulysses_world_size
+    kwargs["sp_size"] = call.ulysses_world_size
     block_size = math.prod(kwargs["tile_size"])
 
     q, k, v, mask_config, state = setup_ssta(query, key, value, kwargs)
@@ -80,7 +80,7 @@ def _sparge_mask(query, key, value, call: AttnCall, config: dict):
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
         block_m=config["BLOCK_M"], block_n=config["BLOCK_N"],
-        ulysses_world_size=call.ctx.ulysses_world_size,
+        ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
     )
     return q, k, v, RAGGED_LUT(block_mask, num_heads=q.shape[1]), state
@@ -98,7 +98,7 @@ def _rotation(query) -> dict:
 def sage(query, key, value, call: AttnCall):
     """No mask. The only cell that can join a ring, and only then is there an
     LSE to merge."""
-    if call.ctx.ring_world_size > 1:
+    if call.ring_world_size > 1:
         return SAGE_V1(query, key, value, layout="bhsd", return_lse=True, smooth_k=True)
     return SAGE_V1(query, key, value, layout="bhsd"), None
 
@@ -128,7 +128,7 @@ def sage_v2(query, key, value, call: AttnCall):
     LSE to merge."""
     q, k, v = make_contiguous(query, key, value)
     rotation = _rotation(q)
-    if call.ctx.ring_world_size > 1:
+    if call.ring_world_size > 1:
         return SAGE_V2(q, k, v, layout="bhsd", **rotation,
                        return_lse=True, causal=call.is_causal)
     return SAGE_V2(q, k, v, layout="bhsd", **rotation, causal=call.is_causal), None

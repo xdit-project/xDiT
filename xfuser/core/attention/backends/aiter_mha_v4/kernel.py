@@ -156,7 +156,7 @@ def mha_v4_dense(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
     output, softmax_lse = _launch(
         q, k, v, fmt,
         seqlens_k=seqlens_k,
-        return_lse=call.ctx.ring_world_size > 1,
+        return_lse=call.ring_world_size > 1,
     )
     # The kernel writes LSE as [batch, heads, Sq], already the layout the ring
     # merge expects, so only O is permuted back.
@@ -169,7 +169,7 @@ def mha_v4_sparge(query, key, value, call: AttnCall, *, fmt: MhaV4Format):
         is_causal=call.is_causal,
         config=SpargeConfig.from_kwargs(call.attention_kwargs),
         block_m=256, block_n=KV_TILE,
-        ulysses_world_size=call.ctx.ulysses_world_size,
+        ulysses_world_size=call.ulysses_world_size,
         cost_sink=cost_sink_from(call.attention_kwargs),
         pad_block_divisible=True,
     )

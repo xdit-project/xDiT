@@ -169,6 +169,27 @@ def _qkv(batch=1, heads=4, q_len=16, kv_len=16, head_dim=128):
     )
 
 
+def test_an_attn_call_built_inside_a_graph_can_have_its_degrees_read():
+    """usp builds the AttnCall inside the traced region and kernels read the
+    parallel degrees off it -- aiter_sage and MHA v4 both branch on
+    ring_world_size.
+
+    Held flat rather than in a nested dataclass for this reason alone: Dynamo
+    has no source for an object a default_factory produced, and its sourceless
+    builder fails on a user-defined class with "AttributeError: 'NoneType'
+    object has no attribute 'name'". Two AttnCalls comparing equal would then
+    compile differently depending only on whether the caller spelled out a
+    value identical to the default."""
+    def read_degrees(x):
+        call = AttnCall(dropout_p=0.0, is_causal=False, attention_kwargs={})
+        if call.ring_world_size > 1 or call.ulysses_world_size > 1:
+            return x + 1.0
+        return x * 2.0
+
+    compiled = torch.compile(read_degrees, fullgraph=True)
+    assert torch.allclose(compiled(torch.ones(4)), torch.full((4,), 2.0))
+
+
 def test_any_shape_accepts_everything():
     q, k, v = _qkv(head_dim=64)
     assert ANY_CALL.unmet(q, k, v, AttnCall(is_causal=True)) is None

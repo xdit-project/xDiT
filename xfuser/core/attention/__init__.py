@@ -10,7 +10,6 @@ kernel-specific lives in the backend module that owns it.
 from xfuser.core.attention.spec import (
     AttentionBackendType,
     AttnCall,
-    ParallelContext,
     Sparsity,
     Spec,
 )
@@ -22,7 +21,6 @@ registry.install(_BACKEND_MODULES)
 __all__ = [
     "AttentionBackendType",
     "AttnCall",
-    "ParallelContext",
     "Sparsity",
     "Spec",
     "registry",

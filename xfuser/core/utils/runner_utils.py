@@ -350,23 +350,70 @@ def _weight_is_torchao_quantized(module) -> bool:
     return isinstance(getattr(module, "weight", None), TorchAOBaseTensor)
 
 
-def quantize_linear_layers_to_int8(
-    module_or_module_list: torch.nn.Module | torch.nn.ModuleList,
+def replace_linears(
+    module: torch.nn.Module,
+    make_layer: Callable[[torch.nn.Linear], torch.nn.Module],
+    *,
+    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
+    offload_to_cpu: bool = False,
+    parent_name: str = "",
+) -> int:
+    """Swap every selected ``nn.Linear`` for whatever ``make_layer`` builds.
+
+    The walk is the same whatever the replacement is, so it lives here once and
+    each implementation supplies only the four lines that build its own layer.
+    ``fqn`` reaches ``filter_fn`` relative to the module this was called on,
+    which is what the plan's filters expect.
+
+    The source layer stays intact until its replacement is installed, and the
+    replacement is evicted immediately under ``offload_to_cpu`` so peak VRAM is
+    one layer rather than the whole component.
+    """
+
+    replaced = 0
+    for name, child in list(module.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+        if isinstance(child, torch.nn.Linear):
+            if filter_fn is not None and not filter_fn(child, full_name):
+                continue
+            layer = make_layer(child)
+            if layer is None:
+                continue
+            if offload_to_cpu:
+                layer.to("cpu")
+            setattr(module, name, layer)
+            replaced += 1
+        elif next(child.children(), None) is not None:
+            replaced += replace_linears(
+                child,
+                make_layer,
+                filter_fn=filter_fn,
+                offload_to_cpu=offload_to_cpu,
+                parent_name=full_name,
+            )
+    return replaced
+
+
+def quantize_with_torchao(
+    module_or_module_list,
+    config,
+    *,
     filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
     device: Optional[torch.device] = None,
     min_layer_size: int = 0,
 ) -> None:
-    from torchao.quantization.granularity import PerRow
-    from torchao.quantization.quant_primitives import MappingType
-    from torchao.quantization.quant_api import (
-        Int8DynamicActivationInt8WeightConfig,
-        quantize_,
-        _is_linear,
-    )
+    """Hand torchao a config and let it do its own traversal.
+
+    The guards are the same for every torchao config: skip anything that is not
+    a linear, skip what is already quantized, honour the caller's filter, and
+    honour the implementation's minimum size.
+    """
+
+    from torchao.quantization.quant_api import quantize_, _is_linear
 
     requested_filter = filter_fn
 
-    def filter_fn(mod, fqn):
+    def accepts(mod, fqn):
         if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
             return False
         if requested_filter is not None and not requested_filter(mod, fqn):
@@ -376,114 +423,10 @@ def quantize_linear_layers_to_int8(
             or min(mod.out_features, mod.in_features) >= min_layer_size
         )
 
-    config = Int8DynamicActivationInt8WeightConfig(
-        granularity=PerRow(),
-        act_mapping_type=MappingType.SYMMETRIC,
-        set_inductor_config=False,
-    )
-
     if isinstance(module_or_module_list, torch.nn.Module):
         module_or_module_list = [module_or_module_list]
-
     for module in module_or_module_list:
-        quantize_(
-            module,
-            config=config,
-            filter_fn=filter_fn,
-            device=device,
-        )
-
-def quantize_linear_layers_to_fp8(module_or_module_list_to_quantize: torch.nn.Module | torch.nn.ModuleList,
-    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
-    include_suffixes: Optional[Tuple[str, ...]] = None,
-    device: Optional[torch.device] = None) -> None:
-    """Quantize all linear layers in the given module or module list to FP8."""
-    from torchao.quantization.granularity import PerTensor
-    from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig, quantize_, _is_linear
-
-    requested_filter = filter_fn
-
-    def filter_fn(mod, fqn):
-        if not _is_linear(mod, fqn) or _weight_is_torchao_quantized(mod):
-            return False
-        if requested_filter is not None:
-            return requested_filter(mod, fqn)
-        return not include_suffixes or fqn.endswith(include_suffixes)
-    config = Float8DynamicActivationFloat8WeightConfig(
-                granularity=PerTensor(),
-                set_inductor_config=False,
-                kernel_preference=_get_fp8_kernel_preference(),
-                activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
-        )
-    if isinstance(module_or_module_list_to_quantize, torch.nn.Module):
-        module_or_module_list_to_quantize = [module_or_module_list_to_quantize]
-    for module in module_or_module_list_to_quantize:
-        quantize_(
-            module,
-            config=config,
-            filter_fn=filter_fn,
-            device=device
-        )
-
-
-def quantize_linear_layers_to_fp8_blockscale(
-    model: torch.nn.Module,
-    parent_name: str = "",
-    include_suffixes: Optional[Tuple[str, ...]] = None,
-    device: Optional[torch.device] = None,
-    offload_to_cpu: bool = False,
-    filter_fn: Optional[Callable[[torch.nn.Module, str], bool]] = None,
-) -> int:
-    """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
-
-    Mirrors quantize_linear_layers_to_fp4 structure: recursive tree walk, in-place
-    setattr replacement. Pre-quantizes weights to FP8 block-128 at call time.
-    Returns the number of nn.Linear leaves replaced (0 when leaves are already FP8, e.g.
-    after streaming quantize-on-load).
-    """
-    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
-
-    replaced = 0
-    for name, module in list(model.named_children()):
-        full_name = f"{parent_name}.{name}" if parent_name else name
-        if isinstance(module, torch.nn.Linear):
-            if filter_fn is not None:
-                if not filter_fn(module, full_name):
-                    continue
-            elif include_suffixes and not full_name.endswith(include_suffixes):
-                continue
-            weight = module.weight.data
-            bias = module.bias.data if module.bias is not None else None
-            fp8_layer = xFuserFP8BlockScaleLinear(
-                module.in_features,
-                module.out_features,
-                bias=(bias is not None),
-                device=weight.device,
-                dtype=weight.dtype,
-            )
-            # Free BF16 weight before quantization to avoid holding two copies on GPU
-            module.weight = None
-            if module.bias is not None:
-                module.bias = None
-            fp8_layer.load_and_quantize_weights(weight, bias, device=device)
-            del weight, bias
-            # Under offload, quantize on GPU then evict to CPU immediately so peak VRAM
-            # during quantization stays at one layer, not the whole component. The offload
-            # manager streams these fp8 leaves back on demand.
-            if offload_to_cpu:
-                fp8_layer.to("cpu")
-            setattr(model, name, fp8_layer)
-            replaced += 1
-        elif next(module.children(), None) is not None:
-            replaced += quantize_linear_layers_to_fp8_blockscale(
-                module,
-                parent_name=full_name,
-                include_suffixes=include_suffixes,
-                device=device,
-                offload_to_cpu=offload_to_cpu,
-                filter_fn=filter_fn,
-            )
-    return replaced
+        quantize_(module, config=config, filter_fn=accepts, device=device)
 
 
 def load_dataset_prompts(dataset_path: str) -> list[str]:
@@ -517,54 +460,138 @@ def _layer_uses_fp8_override(
     return False
 
 
+def quantize_linear_layers_to_int8(
+    module_or_module_list,
+    filter_fn=None,
+    device: Optional[torch.device] = None,
+    min_layer_size: int = 0,
+) -> None:
+    from torchao.quantization.granularity import PerRow
+    from torchao.quantization.quant_primitives import MappingType
+    from torchao.quantization.quant_api import Int8DynamicActivationInt8WeightConfig
+
+    quantize_with_torchao(
+        module_or_module_list,
+        Int8DynamicActivationInt8WeightConfig(
+            granularity=PerRow(),
+            act_mapping_type=MappingType.SYMMETRIC,
+            set_inductor_config=False,
+        ),
+        filter_fn=filter_fn,
+        device=device,
+        min_layer_size=min_layer_size,
+    )
+
+
+def quantize_linear_layers_to_fp8(
+    module_or_module_list_to_quantize,
+    filter_fn=None,
+    include_suffixes: Optional[Tuple[str, ...]] = None,
+    device: Optional[torch.device] = None,
+) -> None:
+    """Quantize the selected linear layers to torchao per-tensor FP8."""
+
+    from torchao.quantization.granularity import PerTensor
+    from torchao.quantization.quant_api import (
+        Float8DynamicActivationFloat8WeightConfig,
+    )
+
+    if filter_fn is None and include_suffixes:
+        def filter_fn(_mod, fqn):
+            return fqn.endswith(tuple(include_suffixes))
+
+    quantize_with_torchao(
+        module_or_module_list_to_quantize,
+        Float8DynamicActivationFloat8WeightConfig(
+            granularity=PerTensor(),
+            set_inductor_config=False,
+            kernel_preference=_get_fp8_kernel_preference(),
+            activation_value_lb=FP8_ACTIVATION_SCALE_FLOOR,
+        ),
+        filter_fn=filter_fn,
+        device=device,
+    )
+
+
+def _packed_layer_factory(layer_cls, device):
+    """Build a packed replacement for one Linear, freeing its source weight.
+
+    Two differences the duplicated walks carried, settled rather than averaged:
+
+    * The BF16 weight is detached from the source before packing, so peak VRAM
+      is one layer rather than two copies of it. The FP8 block-scale path did
+      this and the MXFP6 path did not, for no reason either could state.
+    * The layer is built on meta. Neither class allocates its weight in
+      ``__init__`` -- block-scale registers ``weight`` as None and
+      ``load_and_quantize_weights`` replaces the bias outright -- so building on
+      the source device only allocated a bias that was immediately thrown away.
+
+    ``train(linear.training)`` follows the source, which MXFP6 did and the
+    others did not; preserving the mode is the defensible half.
+    """
+
+    def make_layer(linear):
+        weight = linear.weight.data
+        bias = linear.bias.data if linear.bias is not None else None
+        layer = layer_cls(
+            linear.in_features,
+            linear.out_features,
+            bias=bias is not None,
+            device="meta",
+            dtype=weight.dtype,
+        )
+        layer.train(linear.training)
+        linear.weight = None
+        if linear.bias is not None:
+            linear.bias = None
+        layer.load_and_quantize_weights(weight, bias, device=device)
+        return layer
+
+    return make_layer
+
+
 def quantize_linear_layers_to_fp6(
     model: torch.nn.Module,
     parent_name: str = "",
-    filter_fn: Callable[[torch.nn.Module, str], bool] | None = None,
-    device: torch.device | None = None,
+    filter_fn=None,
+    device: Optional[torch.device] = None,
     offload_to_cpu: bool = False,
 ) -> int:
-    """Replace selected ``nn.Linear`` leaves with AITER MXFP6 linears.
-
-    The source module remains fully intact until the packed replacement is
-    installed. ``device`` is the transient packing/final device;
-    ``offload_to_cpu`` evicts each converted leaf immediately after packing.
-    Returns the number of leaves replaced.
-    """
+    """Replace selected ``nn.Linear`` leaves with AITER MXFP6 linears."""
 
     from xfuser.model_executor.layers.mxfp6_linear import xFuserMXFP6Linear
 
-    replaced = 0
-    for name, module in list(model.named_children()):
-        full_name = f"{parent_name}.{name}" if parent_name else name
-        if isinstance(module, torch.nn.Linear):
-            if filter_fn is not None and not filter_fn(module, full_name):
-                continue
+    return replace_linears(
+        model,
+        _packed_layer_factory(xFuserMXFP6Linear, device),
+        filter_fn=filter_fn,
+        offload_to_cpu=offload_to_cpu,
+        parent_name=parent_name,
+    )
 
-            weight = module.weight.detach()
-            bias = module.bias.detach() if module.bias is not None else None
-            fp6_layer = xFuserMXFP6Linear(
-                module.in_features,
-                module.out_features,
-                bias=module.bias is not None,
-                device="meta",
-                dtype=weight.dtype,
-            )
-            fp6_layer.train(module.training)
-            fp6_layer.load_and_quantize_weights(weight, bias, device=device)
-            if offload_to_cpu:
-                fp6_layer.to("cpu")
-            setattr(model, name, fp6_layer)
-            replaced += 1
-        elif next(module.children(), None) is not None:
-            replaced += quantize_linear_layers_to_fp6(
-                module,
-                parent_name=full_name,
-                filter_fn=filter_fn,
-                device=device,
-                offload_to_cpu=offload_to_cpu,
-            )
-    return replaced
+
+def quantize_linear_layers_to_fp8_blockscale(
+    model: torch.nn.Module,
+    parent_name: str = "",
+    device: Optional[torch.device] = None,
+    offload_to_cpu: bool = False,
+    filter_fn=None,
+) -> int:
+    """Replace nn.Linear layers with xFuserFP8BlockScaleLinear (AITER gemm_a8w8_blockscale).
+
+    Weights are pre-quantized to FP8 block-128 at call time. Returns the number
+    of leaves replaced (0 when they are already FP8, e.g. after a streamed load).
+    """
+
+    from xfuser.model_executor.layers.fp8_linear import xFuserFP8BlockScaleLinear
+
+    return replace_linears(
+        model,
+        _packed_layer_factory(xFuserFP8BlockScaleLinear, device),
+        filter_fn=filter_fn,
+        offload_to_cpu=offload_to_cpu,
+        parent_name=parent_name,
+    )
 
 
 def quantize_linear_layers_to_fp4(

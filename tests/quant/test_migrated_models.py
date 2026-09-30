@@ -48,6 +48,12 @@ def _checkable():
         yield cls, entry
 
 
+#: Runners that used to list text-encoder targets they could never reach:
+#: they do not declare the quantize_text_encoder capability, so the flag is
+#: refused and the targets were dead. Dropped deliberately, recorded here so
+#: the oracle still checks every other model against the snapshot.
+_ENCODER_TARGET_DROPPED = {"xFuserWan21T2VModel", "xFuserWan22T2VModel"}
+
 CHECKABLE = list(_checkable())
 IDS = [cls.__name__ for cls, _ in CHECKABLE]
 
@@ -81,9 +87,15 @@ def test_a_migrated_model_targets_what_it_used_to(cls, entry):
         )
     )
     assert sorted(targets.transformer.roots()) == sorted(declared)
-    assert sorted(targets.text_encoder.roots()) == sorted(
-        entry["fp8_text_encoder_module_list"] or ()
-    )
+
+    encoder = list(entry["fp8_text_encoder_module_list"] or ())
+    if cls.__name__ in _ENCODER_TARGET_DROPPED:
+        assert targets.text_encoder.roots() == (), (
+            f"{cls.__name__} is recorded as dropping its unreachable encoder "
+            "targets; remove it from _ENCODER_TARGET_DROPPED to declare them again"
+        )
+    else:
+        assert sorted(targets.text_encoder.roots()) == sorted(encoder)
 
 
 def test_a_migrated_model_carries_no_legacy_fields():

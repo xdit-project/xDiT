@@ -630,14 +630,14 @@ class xFuserWan21T2VModel(xFuserWanModel):
         output_name="wan2.1_t2v",
         gemm_targets=GemmTargets(
             transformer=Select(modules=("transformer.blocks",)),
-            text_encoder=Select(modules=("text_encoder.encoder.block",)),
+            # No text-encoder target: this runner does not declare the
+            # quantize_text_encoder capability, so the flag is refused and a
+            # declared encoder target could never be reached.
             # The first and last ten blocks carry more of the output quality
-            # than the middle ones, and the text encoder is quantized to save
-            # host RAM rather than to chase the smallest format; a tiered run
-            # holds all of them at the better one. Absolute paths, matched on
-            # segment boundaries, so blocks.3 cannot take blocks.30 with it.
+            # than the middle ones, so a tiered run holds them at the better
+            # format. Absolute paths, matched on segment boundaries, so
+            # blocks.3 cannot take blocks.30 with it.
             keep_high=Select(
-                modules=("text_encoder.encoder.block",),
                 prefixes=tuple(
                     f"transformer.blocks.{index}"
                     for index in (*range(10), *range(30, 40))
@@ -730,13 +730,8 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
             transformer=Select(
                 modules=("transformer.blocks", "transformer_2.blocks")
             ),
-            text_encoder=Select(modules=("text_encoder.encoder.block",)),
-            keep_high=Select(
-                modules=(
-                    "transformer_2.blocks",
-                    "text_encoder.encoder.block",
-                )
-            ),
+            # No text-encoder target: see xFuserWan21T2VModel.
+            keep_high=Select(modules=("transformer_2.blocks",)),
         )
         self.settings.transformer_attr_names = ["transformer", "transformer_2"]
         self.settings.step_cache_config = {

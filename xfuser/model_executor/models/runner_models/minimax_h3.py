@@ -739,6 +739,16 @@ class xFuserFastH3Model(xFuserMiniMaxH3Model):
     other MiniMax-H3 backends stay dense when selected explicitly.
     """
 
+    #: Same as MiniMax-H3's, declared rather than inherited: a registered
+    #: runner states its own load paths so a change to the parent cannot move
+    #: them silently.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     default_input_values = DefaultInputValues(
         height=768,
         width=1344,
@@ -797,6 +807,16 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
     backend.
     """
 
+    #: Same as MiniMax-H3's, declared rather than inherited: a registered
+    #: runner states its own load paths so a change to the parent cannot move
+    #: them silently.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
+
     settings = copy.deepcopy(xFuserFastH3Model.settings)
     settings.model_name = FASTH3_V1_DENSE_DATAFREE_MODEL_ID
     settings.output_name = "fasth3_dense"
@@ -815,6 +835,16 @@ class xFuserFastH3DenseModel(xFuserFastH3Model):
 class xFuserFastH3V2Model(xFuserFastH3Model):
     """FastH3 V2 runner. Same VSA-H3 attention backend as V1 but trained for 9
     scheduler points (8 transformer forwards)."""
+
+    #: Same as MiniMax-H3's, declared rather than inherited: a registered
+    #: runner states its own load paths so a change to the parent cannot move
+    #: them silently.
+    load_support = LoadSupport(
+        meta_transformers=(),
+        meta_text_encoders=(),
+        replicated_meta=False,
+        routes=LoadRoute.NONE,
+    )
 
     default_input_values = DefaultInputValues(
         height=768,

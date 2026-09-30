@@ -92,6 +92,16 @@ def dit_model():
 
 
 @pytest.fixture
+def simple_transformer_model(dit_model):
+    """A transformer whose `blocks` are what these tests wrap.
+
+    The shard_component tests only need a module list called `blocks` at the
+    dim they feed it, which is what `dit_model` already is.
+    """
+    return dit_model
+
+
+@pytest.fixture
 def t5_encoder_model():
     """Create a mock T5 encoder model."""
     class T5Block(nn.Module):

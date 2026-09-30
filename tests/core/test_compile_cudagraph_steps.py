@@ -29,8 +29,17 @@ def _model(mode: str, *, fully_shard_degree: int):
     transformer = torch.nn.Module()
     transformer.blocks = blocks
     model = object.__new__(_Runner)
-    model.config = SimpleNamespace(fully_shard_degree=fully_shard_degree)
-    model.pipe = SimpleNamespace(transformer=transformer)
+    model.config = SimpleNamespace(
+        fully_shard_degree=fully_shard_degree,
+        # The warmup asks whether to profile the capture phase before it does
+        # anything these tests are about.
+        profile_capture_phase=False,
+        cache_method=None,
+    )
+    model.pipe = SimpleNamespace(
+        transformer=transformer,
+        scheduler=SimpleNamespace(config=SimpleNamespace(shift_terminal=None)),
+    )
     model.settings = SimpleNamespace(
         fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
     )

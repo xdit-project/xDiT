@@ -1,3 +1,4 @@
+import importlib.util
 import inspect
 import math
 
@@ -206,6 +207,10 @@ def test_existing_sparge_paths_keep_padded_mask_allocation(reorder_sequence):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires AITER GPU")
+@pytest.mark.skipif(
+    importlib.util.find_spec("aiter.ops.jenga_sparse_attention") is None,
+    reason="AITER jenga sparse attention kernels are not installed",
+)
 def test_vsa_density_collection_is_opt_in():
     query = torch.randn(
         1, 4, 256, 128, device="cuda", dtype=torch.bfloat16

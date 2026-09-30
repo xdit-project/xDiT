@@ -47,6 +47,10 @@ def _model(*, local_rank, monkeypatch, **offload_flags):
         config=SimpleNamespace(**flags),
         pipe=pipe,
         _get_compiled_pipe_components=lambda: [],
+        # `_enable_options` hands the decoding VAEs to their manager before it
+        # reaches the offload branches these tests are about.
+        _vae_manager=SimpleNamespace(enable_options=lambda vaes: None),
+        _decoding_vaes=lambda: [],
     )
     model._local_onload_device = lambda: xFuserModel._local_onload_device(model)
     return model, calls

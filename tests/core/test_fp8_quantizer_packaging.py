@@ -74,14 +74,20 @@ def test_text_encoder_config_registers_the_transformers_side():
 
 @pytest.mark.slow
 def test_importing_the_torchao_policy_registers_nothing():
-    """Swapping diffusers' torchao quantizer is global, so only a streaming load may do it."""
+    """Swapping diffusers' torchao quantizer is global, so only a streaming load may do it.
+
+    Asked as "is the installed quantizer still diffusers' own" rather than by
+    reading `use_keep_in_fp32_modules`: diffusers opted into that flag upstream
+    (0.41), which is the case `register_torchao_fp32_policy` already no-ops on,
+    so the flag no longer distinguishes our registration from theirs.
+    """
     assert probe_registration("""
         import xfuser.model_executor.quant.torchao_quantizer  # noqa: F401
         from diffusers.quantizers.auto import AUTO_QUANTIZER_MAPPING as d
         from diffusers.quantizers.quantization_config import QuantizationMethod
         installed = d[QuantizationMethod.TORCHAO]
-        print(getattr(installed, "use_keep_in_fp32_modules", False))
-    """) == "False"
+        print(installed.__module__.startswith("diffusers."))
+    """) == "True"
 
 
 @pytest.mark.slow

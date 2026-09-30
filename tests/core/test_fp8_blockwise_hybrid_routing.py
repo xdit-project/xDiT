@@ -58,7 +58,8 @@ class _StubPlan:
         self.model = model
 
     def _lists(self):
-        fp8 = list(self.model.fp8.module_list())
+        listed = getattr(getattr(self.model, "fp8", None), "module_list", None)
+        fp8 = list(listed()) if listed is not None else []
         for name in ("fp4", "int8", "fp6"):
             listed = getattr(self.model.settings, f"{name}_gemm_module_list", None)
             if listed:

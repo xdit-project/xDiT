@@ -182,6 +182,22 @@ class GemmPlan:
             selects = [self.targeted[component]] if component in self.targeted else []
         return tuple(dict.fromkeys(r for select in selects for r in select.roots()))
 
+    def relative_to(
+        self, component_name: str, roots: Iterable[str]
+    ) -> Tuple[str, ...]:
+        """`roots` rewritten as paths under `component_name`, others dropped.
+
+        A converter is handed one component and walks paths relative to it,
+        while the declaration names them from the pipeline root. The component
+        itself becomes "", which every consumer reads as "all of it".
+        """
+        prefix = f"{component_name}."
+        return tuple(
+            "" if root == component_name else root[len(prefix) :]
+            for root in roots
+            if root == component_name or root.startswith(prefix)
+        )
+
     def walk_roots(self, format_name: str) -> Tuple[str, ...]:
         """Where a converter for `format_name` should start walking.
 

@@ -47,23 +47,26 @@ def test_wan22_reuses_existing_fp4_and_quality_targets_for_mxfp6():
     model = object.__new__(xFuserWan22T2VModel)
     model.settings = copy.deepcopy(xFuserWan22T2VModel.settings)
     model._customize_settings(SimpleNamespace())
+    model.settings.gemm_targets = model.settings.gemm_targets
     # An MXFP6 run always carries a spec: args refuses --use_fp6_gemms on its
     # own, so the mixed mode is only reachable as low=fp4,high=fp6.
     model.config = SimpleNamespace(
         quantize_text_encoder=False,
         use_fp6_gemms=True,
         gemm_quantization_spec=GemmQuantizationSpec("fp4", "fp6"),
+        ulysses_degree=1,
+        ring_degree=1,
     )
     plan = QuantizationPlan(model)
 
-    assert plan.module_list("fp4") == ["transformer.blocks"]
-    assert plan.module_list("fp6") == [
+    gemm_plan = plan.gemm_plan
+    # The primary format owns the high-noise pass; the refiner is held back.
+    assert list(gemm_plan.roots(gemm_plan.low)) == ["transformer.blocks"]
+    assert list(gemm_plan.roots(gemm_plan.high)) == ["transformer_2.blocks"]
+    assert gemm_plan.declared_roots() == (
         "transformer.blocks",
         "transformer_2.blocks",
-    ]
-    assert set(plan.module_list("fp8")) - set(plan.module_list("fp4")) == {
-        "transformer_2.blocks"
-    }
+    )
 
 
 def test_wan22_logs_explicit_fp4_fp6_mapping(monkeypatch):

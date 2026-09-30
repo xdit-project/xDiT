@@ -45,18 +45,27 @@ def make_plan(
 
 
 # ============================================================================
-# module_list: the --quantize_text_encoder opt-in
+# the --quantize_text_encoder opt-in
 # ============================================================================
 
 
+def _targeted(plan):
+    """The components this run quantizes, and what it quantizes in each."""
+    gemm_plan = plan.gemm_plan
+    return {
+        name: sorted(select.roots())
+        for name, select in gemm_plan.targeted.items()
+    }
+
+
 def test_text_encoder_targets_excluded_by_default(monkeypatch):
-    """Quantizing a text encoder is an output-quality trade-off, so it takes an explicit flag."""
+    """Quantizing a text encoder trades output quality, so it takes a flag."""
     plan = make_plan(
         monkeypatch,
         transformer_targets=["transformer.blocks"],
         te_targets=["text_encoder.encoder.block"],
     )
-    assert plan.module_list() == ["transformer.blocks"]
+    assert _targeted(plan) == {"transformer": ["transformer.blocks"]}
 
 
 def test_text_encoder_targets_included_when_flag_set(monkeypatch):
@@ -66,36 +75,34 @@ def test_text_encoder_targets_included_when_flag_set(monkeypatch):
         te_targets=["text_encoder.encoder.block"],
         quantize_text_encoder=True,
     )
-    assert plan.module_list() == ["transformer.blocks", "text_encoder.encoder.block"]
+    assert _targeted(plan) == {
+        "transformer": ["transformer.blocks"],
+        "text_encoder": ["text_encoder.encoder.block"],
+    }
 
 
 def test_flag_without_declared_targets_is_inert(monkeypatch):
-    """A model that declares no text-encoder targets is unaffected by the flag."""
+    """A model declaring no encoder targets is unaffected by the flag."""
     plan = make_plan(
         monkeypatch,
         transformer_targets=["transformer.blocks"],
         quantize_text_encoder=True,
     )
-    assert plan.module_list() == ["transformer.blocks"]
+    assert _targeted(plan) == {"transformer": ["transformer.blocks"]}
 
 
-def test_module_list_empty_when_model_declares_nothing(monkeypatch):
-    assert make_plan(monkeypatch).module_list() == []
-
-
-def test_module_list_does_not_alias_the_declaration(monkeypatch):
-    """Consumers mutating the returned list must not edit the declared targets."""
-    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
-    plan.module_list().append("transformer.extra")
-    assert plan.module_list() == ["transformer.blocks"]
+def test_nothing_is_targeted_when_the_model_declares_nothing(monkeypatch):
+    assert _targeted(make_plan(monkeypatch)) == {}
 
 
 def test_every_format_sees_the_same_declared_targets(monkeypatch):
     """A model declares which modules, never which modules per format."""
-    plan = make_plan(monkeypatch, transformer_targets=["transformer.blocks"])
-
-    for format_name in ("fp8", "fp4", "fp6", "int8"):
-        assert plan.targets_for("transformer", format_name) == ["blocks"]
+    for raw in ("fp8", "fp4", "fp6", "int8"):
+        plan = make_plan(
+            monkeypatch, transformer_targets=["transformer.blocks"], raw=raw
+        )
+        gemm_plan = plan.gemm_plan
+        assert gemm_plan.roots(raw) == ("transformer.blocks",), raw
 
 
 def test_model_loader_materialization_uses_current_shard_degree(monkeypatch):
@@ -127,27 +134,30 @@ def test_model_loader_materialization_uses_current_shard_degree(monkeypatch):
 
 
 # ============================================================================
-# targets_for: per-component prefix matching
+# relative_to: per-component prefix matching
 # ============================================================================
 
 
 def test_targets_are_stripped_of_the_component_prefix(monkeypatch):
-    """Loaders take component-relative paths, while the model declares pipe-level ones."""
+    """Loaders take component-relative paths; the model declares pipe-level ones."""
     plan = make_plan(
         monkeypatch,
         te_targets=["text_encoder.model.language_model.layers"],
         quantize_text_encoder=True,
-    )
-    assert plan.targets_for("text_encoder") == ["model.language_model.layers"]
+    ).gemm_plan
+    assert plan.relative_to(
+        "text_encoder", plan.declared_roots(component="text_encoder")
+    ) == ("model.language_model.layers",)
 
 
 def test_prefix_match_does_not_leak_across_sibling_components(monkeypatch):
     """ "transformer_2.blocks" must not count as a target of "transformer"."""
     plan = make_plan(
         monkeypatch, transformer_targets=["transformer.blocks", "transformer_2.blocks"]
-    )
-    assert plan.targets_for("transformer") == ["blocks"]
-    assert plan.targets_for("transformer_2") == ["blocks"]
+    ).gemm_plan
+    roots = plan.declared_roots()
+    assert plan.relative_to("transformer", roots) == ("blocks",)
+    assert plan.relative_to("transformer_2", roots) == ("blocks",)
 
 
 # ============================================================================

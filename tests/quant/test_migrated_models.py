@@ -61,71 +61,29 @@ def _profiles(entry):
     return profiles
 
 
-def _legacy_module_list(entry, spec, format_name, *, text_encoder):
-    """What `module_list` returned before the migration, spelled out.
-
-    The old implementation has been deleted, so the oracle states its rule
-    rather than calling it. That is what an oracle is for: a specification
-    written down once cannot drift with the code it checks.
-    """
-    fp8 = list(entry["fp8_gemm_module_list"] or ())
-    fp4 = list(entry["fp4_gemm_module_list"] or ())
-    if spec.is_pure("fp4"):
-        # apply_fp8_override_cli_to_settings folded the fp8 targets into the
-        # fp4 list and emptied the fp8 one.
-        fp4 = list(dict.fromkeys(fp4 + fp8))
-        fp8 = []
-
-    if format_name == "fp8":
-        encoder = list(entry["fp8_text_encoder_module_list"] or ())
-        return fp8 + (encoder if text_encoder else [])
-    if format_name == "fp4":
-        return fp4
-    if format_name == "fp6":
-        return list(dict.fromkeys(fp4 + fp8))
-    if format_name == "int8":
-        return list(entry["int8_gemm_module_list"] or ())
-    raise ValueError(format_name)
-
-
-def _plan(cls, raw, *, text_encoder):
-    spec = GemmQuantizationSpec.parse(raw)
-    config = SimpleNamespace(
-        gemm_quantization_spec=spec,
-        _gemm_config_loaded=False,
-        quantize_text_encoder=text_encoder,
-        use_hybrid_gemm_schedule=False,
-        gemm_high_precision_targets="model",
-        ulysses_degree=1,
-        ring_degree=1,
-    )
-    return QuantizationPlan(
-        SimpleNamespace(
-            settings=copy.deepcopy(cls.settings),
-            config=config,
-            capabilities=cls.capabilities,
-        )
-    )
-
-
 @pytest.mark.skipif(not CHECKABLE, reason="no migrated models recorded yet")
 @pytest.mark.parametrize("cls, entry", CHECKABLE, ids=IDS)
 def test_a_migrated_model_targets_what_it_used_to(cls, entry):
-    for raw in _profiles(entry):
-        for text_encoder in (False, True):
-            if text_encoder and not entry["quantize_text_encoder"]:
-                continue
-            new = _plan(cls, raw, text_encoder=text_encoder)
-            spec = GemmQuantizationSpec.parse(raw)
-            for fmt in spec.formats:
-                if fmt == "none":
-                    continue
-                expected = _legacy_module_list(
-                    entry, spec, fmt, text_encoder=text_encoder
-                )
-                assert sorted(new.module_list(fmt)) == sorted(expected), (
-                    f"{cls.__name__} {raw} te={text_encoder} {fmt}"
-                )
+    """The declaration names exactly the modules the old lists named.
+
+    `module_list` and its per-format dialect are gone, so this compares
+    declarations rather than the lists a shim used to hand consumers. The union
+    of the old per-format lists is the target set -- the split was never really
+    by format, which is what the whole migration rests on -- and the old
+    text-encoder list is the encoder's.
+    """
+    targets = cls.settings.gemm_targets
+    declared = list(
+        dict.fromkeys(
+            list(entry["fp8_gemm_module_list"] or ())
+            + list(entry["fp4_gemm_module_list"] or ())
+            + list(entry["int8_gemm_module_list"] or ())
+        )
+    )
+    assert sorted(targets.transformer.roots()) == sorted(declared)
+    assert sorted(targets.text_encoder.roots()) == sorted(
+        entry["fp8_text_encoder_module_list"] or ()
+    )
 
 
 def test_a_migrated_model_carries_no_legacy_fields():

@@ -48,7 +48,7 @@ def _with_config_overrides(targets, config):
 
 
 class QuantizationPlan:
-    """Resolve declared FP8, FP4, FP6, and INT8 targets from one runner."""
+    """Resolve one runner's declared GEMM targets against this run."""
 
     def __init__(self, model) -> None:
         self.model = model
@@ -80,49 +80,6 @@ class QuantizationPlan:
             enable=tuple(enable),
             sp_world_size=sp_world_size,
         )
-
-    def _declared_targets(self, targets, format_name: str) -> list[str]:
-        """The per-format list that one `gemm_targets` declaration stands in for.
-
-        Temporary scaffolding, in the old dialect on purpose: consumers
-        recover the high tier by subtracting one list from another, and read a
-        list before the run gates it. Until they are rewritten onto GemmPlan,
-        handing them a narrower list would change what they compute.
-
-        A format the model cannot run never reaches here -- `_validate_config`
-        refuses it against ModelCapabilities first.
-        """
-        entries = list(targets.transformer.roots())
-        spec = getattr(self.model.config, "gemm_quantization_spec", None)
-        tiered = spec is not None and spec.is_tiered
-
-        if tiered and format_name == spec.low:
-            # Held-high modules are absent from the low list, so the
-            # subtraction the consumers do recovers exactly keep_high.
-            entries = [e for e in entries if not targets.keep_high.matches(e)]
-        if format_name != "fp8":
-            return entries
-
-        if spec is not None and spec.is_pure("fp4"):
-            # A pure fp4 run folds the fp8 targets into fp4 and empties fp8.
-            entries = []
-        if self.model.config.quantize_text_encoder:
-            entries += list(targets.text_encoder.roots())
-        return entries
-
-    def module_list(self, format_name: str = "fp8") -> list[str]:
-        targets = self.model.settings.gemm_targets
-        if format_name not in ("fp8", "fp4", "fp6", "int8"):
-            raise ValueError(f"unsupported quantization target format: {format_name}")
-        return self._declared_targets(targets, format_name)
-
-    def targets_for(self, component_name: str, format_name: str = "fp8") -> list[str]:
-        prefix = f"{component_name}."
-        return [
-            "" if target == component_name else target[len(prefix) :]
-            for target in self.module_list(format_name)
-            if target == component_name or target.startswith(prefix)
-        ]
 
     def _log_resolved_plan(self, plan) -> None:
         """Say what each declared target becomes, straight from the plan.

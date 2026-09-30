@@ -264,7 +264,7 @@ class QuantizationBackends:
         if not fsdp_target_paths or not self._uses_mxfp6_contract():
             return False
         if self._format_value() == "fp6":
-            fp6_targets = set(self.loader.quantization_plan.module_list("fp6"))
+            fp6_targets = set(self._format_entries())
         else:
             fp6_targets = self.high_tier_targets()
             if self._high_tier_scattered():
@@ -331,15 +331,18 @@ class QuantizationBackends:
         )
 
     def _format_entries(self):
-        """This run's primary-format targets."""
+        """The transformer targets this run's primary format owns.
+
+        The text encoder is excluded: it is loaded and quantized by its own
+        route, which the format backends never touch.
+        """
         format_value = self.loader.load_contract.requested_format.value
-        if format_value in {"fp4", "fp8_fp4", "fp4_fp6"}:
-            return self.loader.quantization_plan.module_list("fp4")
-        if format_value == "fp6":
-            return self.loader.quantization_plan.module_list("fp6")
-        if format_value == "int8":
-            return self.loader.quantization_plan.module_list("int8")
-        return ()
+        if format_value not in {"fp4", "fp4_fp6", "fp6", "int8"}:
+            return ()
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is None or plan.low is None:
+            return ()
+        return plan.roots(plan.low, component="transformer")
 
     def format_entries(self):
         """Public stable view used by eager placement."""
@@ -348,12 +351,10 @@ class QuantizationBackends:
 
     def format_targets_for(self, component_name: str) -> tuple:
         """Primary-format targets under one component, with its prefix stripped."""
-        prefix = f"{component_name}."
-        return tuple(
-            "" if entry == component_name else entry[len(prefix) :]
-            for entry in self._format_entries()
-            if entry == component_name or entry.startswith(prefix)
-        )
+        plan = self.loader.quantization_plan.gemm_plan
+        if plan is None:
+            return ()
+        return plan.relative_to(component_name, self._format_entries())
 
     def transformer_adapter(self, component_name: str):
         """The adapter and component-relative targets owning one transformer.
@@ -364,8 +365,11 @@ class QuantizationBackends:
         format_targets = self.format_targets_for(component_name)
         if format_targets:
             return self.format, format_targets
-        fp8_targets = tuple(
-            self.loader.quantization_plan.targets_for(component_name)
+        plan = self.loader.quantization_plan.gemm_plan
+        fp8_targets = (
+            plan.relative_to(component_name, plan.roots("fp8"))
+            if plan is not None
+            else ()
         )
         if not fp8_targets:
             return None, ()

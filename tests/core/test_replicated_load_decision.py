@@ -20,6 +20,13 @@ torch = pytest.importorskip("torch")
 from xfuser.config.gemm import GemmQuantizationSpec
 from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
 
+#: Two transformer targets, both held at the better format, so an FP4 block
+#: fill is handed them as its remainder.
+_REMAINDER = GemmTargets(
+    transformer=Select(modules=("transformer.blocks", "transformer.encoder")),
+    keep_high=Select(modules=("transformer.blocks", "transformer.encoder")),
+)
+
 #: One block-local leaf held at the better format, the rest streamed.
 _CARVED = GemmTargets(
     transformer=Select(modules=("transformer.blocks",)),
@@ -87,9 +94,19 @@ def loader_for(runner):
         runner.settings.gemm_targets = None
     plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
     if not hasattr(plan, "gemm_plan"):
-        # An unmigrated model is what these stubs describe; the routes ask the
-        # plan whether one was declared before they ask it anything else.
-        plan.gemm_plan = None
+        # The routes ask the plan before they ask anything else. A fixture that
+        # declares targets gets a resolved one, with every declared component
+        # enabled -- these fixtures exist to drive those routes.
+        declared = getattr(runner.settings, "gemm_targets", None)
+        plan.gemm_plan = (
+            resolve(
+                declared,
+                GemmQuantizationSpec.parse("fp8"),
+                enable=tuple(declared.components),
+            )
+            if declared is not None
+            else None
+        )
     backends = getattr(runner, "backends", SimpleNamespace())
     transformer_adapter = getattr(
         runner,
@@ -939,9 +956,17 @@ def test_blockwise_fp4_marks_only_wrapped_fp8_remainder_as_streamed(
             adapter,
             ("blocks",),
         ),
-        fp8=SimpleNamespace(targets_for=lambda name: ["blocks", "encoder"]),
+        fp8=SimpleNamespace(
+            targets_for=lambda name: ["blocks", "encoder"],
+            # A tiered run, so the FP4 block fill has an FP8 remainder to be
+            # told about; only the wrapped target is recorded as streamed.
+            gemm_plan=resolve(
+                _REMAINDER, GemmQuantizationSpec.parse("low=fp4,high=fp8")
+            ),
+        ),
         settings=SimpleNamespace(
-            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}}
+            fsdp_strategy={"transformer": {"wrap_attrs": ["blocks"]}},
+            gemm_targets=_REMAINDER,
         ),
         config=SimpleNamespace(use_fp4_gemms=True),
         _loader=SimpleNamespace(build_meta_transformer=lambda *args, **kwargs: "meta"),

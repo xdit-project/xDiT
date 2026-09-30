@@ -150,10 +150,13 @@ def _fp4_remainder(loader, component_name):
         if getattr(loader.model.config, "use_fp6_gemms", False)
         else "fp8_targets"
     )
-    return {
-        "fp4_gemms": True,
-        remainder_key: tuple(loader.quantization_plan.targets_for(component_name)),
-    }
+    plan = loader.quantization_plan.gemm_plan
+    remainder = (
+        plan.relative_to(component_name, plan.roots(plan.high))
+        if plan is not None and plan.high is not None
+        else ()
+    )
+    return {"fp4_gemms": True, remainder_key: remainder}
 
 
 def _record_native_quantization(ledger, adapter, component_name, prepared, targets):

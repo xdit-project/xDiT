@@ -175,53 +175,30 @@ def _plan_for(raw: str, *, text_encoder: bool) -> QuantizationPlan:
     )
 
 
-@pytest.mark.parametrize("raw, text_encoder", CASES)
-@pytest.mark.parametrize("format_name", FORMATS)
-def test_the_shim_hands_consumers_the_legacy_lists(raw, text_encoder, format_name):
-    """The lists a consumer receives are the ones the legacy fields gave it."""
-    spec = GemmQuantizationSpec.parse(raw)
-    plan = _plan_for(raw, text_encoder=text_encoder)
-    expected = _legacy_listed(spec, format_name, text_encoder=text_encoder)
-    assert sorted(plan.module_list(format_name)) == sorted(expected)
-
-
-@pytest.mark.parametrize("raw, text_encoder", CASES)
-@pytest.mark.parametrize("component", ["transformer", "text_encoder"])
-def test_targets_for_follows(raw, text_encoder, component):
-    """The same lists, with the component's own prefix stripped."""
-    spec = GemmQuantizationSpec.parse(raw)
-    plan = _plan_for(raw, text_encoder=text_encoder)
-    prefix = f"{component}."
-    expected = [
-        target[len(prefix) :]
-        for target in _legacy_listed(spec, "fp8", text_encoder=text_encoder)
-        if target.startswith(prefix)
-    ]
-    assert sorted(plan.targets_for(component)) == sorted(expected)
+# The per-format shim is gone: consumers ask the plan directly, so there
+# is no list-handing to compare. What each format owns is checked by
+# test_the_resolver_agrees_with_the_legacy_fields above.
 
 
 def test_the_high_tier_is_what_consumers_recover_by_subtracting():
-    """`setup_high_tier_gemms` and `shard` both do fp8_list - fp4_list."""
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=True)
-    fp4 = set(plan.module_list("fp4"))
-    fp8_only = [m for m in plan.module_list("fp8") if m not in fp4]
-    assert fp8_only == [TEXT_ENCODER]
-    assert set(TRANSFORMER) == fp4
+    """What the consumers' fp8_list - fp4_list used to recover, read off the plan."""
+    plan = _plan_for("low=fp4,high=fp8", text_encoder=True).gemm_plan
+    assert list(plan.roots(plan.high)) == [TEXT_ENCODER]
+    assert set(plan.roots(plan.low)) == set(TRANSFORMER)
 
 
 def test_keep_high_on_a_transformer_module_survives_the_subtraction():
     """FLUX.2 holds only its text encoder high; a DiT carve-out must work too."""
     from xfuser.model_executor.quant.targets import GemmTargets, Select
 
-    plan = _plan_for("low=fp4,high=fp8", text_encoder=False)
-    plan.model.settings.gemm_targets = GemmTargets(
+    holder = _plan_for("low=fp4,high=fp8", text_encoder=False)
+    holder.model.settings.gemm_targets = GemmTargets(
         transformer=Select(modules=TRANSFORMER),
         keep_high=Select(modules=(TRANSFORMER[1],)),
     )
-    fp4 = set(plan.module_list("fp4"))
-    fp8_only = [m for m in plan.module_list("fp8") if m not in fp4]
-    assert fp4 == {TRANSFORMER[0]}
-    assert fp8_only == [TRANSFORMER[1]]
+    plan = holder.gemm_plan
+    assert set(plan.roots(plan.low)) == {TRANSFORMER[0]}
+    assert list(plan.roots(plan.high)) == [TRANSFORMER[1]]
 
 
 def test_an_unsupported_format_is_refused_before_any_list_is_read():

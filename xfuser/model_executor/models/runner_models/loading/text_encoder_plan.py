@@ -51,7 +51,17 @@ def plan_text_encoders(loader, existing_quantization_config=None):
         from .fp8_backends import prepare_text_encoder_fp8_load
 
         for component_name in _declared_components(model):
-            targets = tuple(loader.quantization_plan.targets_for(component_name))
+            # The declared encoder targets, not "this run's FP8 targets":
+            # this route is the only one that quantizes an encoder and it only
+            # knows FP8, so a run whose format is FP4 still gets FP8 here.
+            plan = loader.quantization_plan.gemm_plan
+            targets = (
+                plan.relative_to(
+                    component_name, plan.declared_roots(component="text_encoder")
+                )
+                if plan is not None
+                else ()
+            )
             if not targets:
                 continue
             # A blockwise-filled encoder is quantized per block on the way in from disk, before

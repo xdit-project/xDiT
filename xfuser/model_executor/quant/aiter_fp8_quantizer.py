@@ -126,7 +126,7 @@ class AiterFp8BlockScaleConfig(DiffusersQuantizationConfigMixin):
 
     target_modules: transformer-relative sub-module names whose nn.Linear leaves get quantized
     (e.g. ["transformer_blocks"], Wan ["blocks"], VACE ["blocks","vace_blocks"]). Must match the
-    post-load fp8_gemm_module_list targets with the pipe prefix stripped.
+    post-load gemm_targets entries with the pipe prefix stripped.
     """
 
     def __init__(self, target_modules: Optional[list[str]] = None, **kwargs):
@@ -245,7 +245,7 @@ class AiterFp8BlockScaleTEConfig(TransformersQuantizationConfigMixin):
     """Config for streaming AITER FP8 block-128 w8a8 quantize-on-load of a transformers model.
 
     target_modules: model-relative sub-module names whose nn.Linear leaves get quantized
-    (e.g. ["model.language_model.layers"]). Must match the fp8_gemm_module_list targets with the
+    (e.g. ["model.language_model.layers"]). Must match the declared gemm_targets entries with the
     pipe-component prefix stripped. Targeting decoder LAYERS structurally excludes the tied
     lm_head / embed_tokens.
     """

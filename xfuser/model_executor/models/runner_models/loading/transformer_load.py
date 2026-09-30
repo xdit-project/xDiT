@@ -104,11 +104,7 @@ def _prepare_native_load(
     # A declaration that names its leaves narrows the same way the legacy
     # setting did, and a native config that cannot express the narrowing has to
     # stay a post-load conversion either way.
-    narrowed = bool(
-        plan.only_suffixes
-        if plan is not None
-        else getattr(model.settings, "fp8_gemm_include_suffixes", None)
-    )
+    narrowed = bool(plan.only_suffixes) if plan is not None else False
 
     if adapter.format.value == "fp8":
         from .fp8_backends import prepare_native_transformer_fp8_load
@@ -126,28 +122,17 @@ def _prepare_native_load(
     from .format_backends import prepare_native_transformer_format_load
 
     is_fp4 = adapter.format.value in {"fp4", "fp8_fp4", "fp4_fp6"}
-    legacy = plan is None
     return prepare_native_transformer_format_load(
         adapter,
         component_name=component_name,
         targets=targets,
         stream_quant=stream_quant and not narrowed,
-        precision_prefixes=(
-            (model.settings.fp8_precision_overrides or ())
-            if is_fp4 and legacy
-            else ()
-        ),
-        precision_suffixes=(
-            (model.settings.fp8_precision_override_suffixes or ())
-            if is_fp4 and legacy
-            else ()
-        ),
         # A declared run keeps its high tier out of the stream the same way the
         # post-load walks keep it out of the primary converter: by asking the
         # plan, rather than by re-deriving it from patterns.
         residual_match=(
             _plan_residual_match(plan, component_name, plan.high)
-            if is_fp4 and not legacy and plan.high is not None
+            if is_fp4 and plan is not None and plan.high is not None
             else None
         ),
         hybrid=(model.config.use_hybrid_gemm_schedule if is_fp4 else False),

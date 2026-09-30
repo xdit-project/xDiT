@@ -148,9 +148,13 @@ def test_supported_runner_logs_when_text_encoder_targets_remain_bf16(
 ):
     messages = []
     model = object.__new__(runtime.model_cls)
+    from xfuser.model_executor.quant.targets import GemmTargets, Select
+
     model.settings = SimpleNamespace(
-        gemm_targets=None,  # unmigrated: the legacy list is the declaration
-        fp8_text_encoder_module_list=["text_encoder.layers"],
+        gemm_targets=GemmTargets(
+            transformer=Select(modules=("transformer.blocks",)),
+            text_encoder=Select(modules=("text_encoder.layers",)),
+        ),
     )
     config = _args(runtime, use_fp8_gemms=True)
     monkeypatch.setattr(runtime.base, "log", messages.append)

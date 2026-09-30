@@ -159,11 +159,9 @@ def test_registered_runner_text_encoder_capability_matches_declared_targets():
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
     def declared(cls):
-        """Text-encoder targets, from gemm_targets or the legacy list."""
+        """This runner's text-encoder targets."""
         targets = cls.settings.gemm_targets
-        if targets is not None:
-            return list(targets.text_encoder.roots())
-        return cls.settings.fp8_text_encoder_module_list
+        return list(targets.text_encoder.roots()) if targets is not None else []
 
     mismatches = {
         cls.__name__: {
@@ -178,29 +176,30 @@ def test_registered_runner_text_encoder_capability_matches_declared_targets():
 
 
 def test_no_runner_hides_a_text_encoder_in_the_always_on_list():
-    """A text-encoder path left in fp8_gemm_module_list is quantized unconditionally, which breaks
-    two ways: on CUDA the torchao walk silently quantizes a text encoder the user never opted into,
-    and on the replicated broadcast path the generic FP8 target plan can claim coverage while the
-    text-encoder load remains bf16, so peers swap a different layout and hang on mismatched tensor
-    counts. Checked over the registry because the split is per-runner and easy to miss (flux was
-    missed once, in the exact configuration the feature targets).
-
-    A denoiser is not always the component literally named "transformer": Ideogram 4 carries a second
-    unconditional_transformer and MiniMax-H3-Ref2VA names its own transformer_ref, so the component
-    is matched on containing "transformer" rather than starting with it."""
+    """A text-encoder path declared as a transformer target is quantized
+    unconditionally, which breaks two ways: on CUDA the walk silently quantizes
+    an encoder the user never opted into, and on the replicated broadcast path
+    the plan can claim coverage while the encoder load stays bf16, so peers swap
+    a different layout and hang on mismatched tensor counts. Checked over the
+    registry because the split is per-runner and easy to miss (flux was missed
+    once, in the exact configuration the feature targets).
+    """
     from xfuser.model_executor.models.runner_models.base_model import MODEL_REGISTRY
 
     leaks = {}
     for cls in dict.fromkeys(MODEL_REGISTRY.values()):
+        targets = cls.settings.gemm_targets
+        if targets is None:
+            continue
         stray = [
             entry
-            for entry in (cls.settings.fp8_gemm_module_list or [])
-            if "transformer" not in entry.partition(".")[0]
+            for entry in targets.transformer.roots()
+            if "text_encoder" in entry.partition(".")[0]
         ]
         if stray:
             leaks[cls.__name__] = stray
 
     assert not leaks, (
-        "these runners list non-transformer targets in fp8_gemm_module_list; move them to "
-        f"fp8_text_encoder_module_list so --quantize_text_encoder gates them: {leaks}"
+        "these runners declare a text encoder among their transformer targets; "
+        f"move it to gemm_targets.text_encoder so --quantize_text_encoder gates it: {leaks}"
     )

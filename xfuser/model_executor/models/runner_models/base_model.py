@@ -179,16 +179,9 @@ class ModelSettings:
     model_output_type: Optional[str] = None
     mod_value: Optional[int] = None
     fps: Optional[int] = None
-    # Format-agnostic GEMM targets. Supersedes the per-format lists below,
-    # which stay until every model has been migrated.
+    #: Which modules this model quantizes, and which of them stay at the better
+    #: precision. Never a format: the run supplies those.
     gemm_targets: Optional[GemmTargets] = None
-    int8_gemm_module_list: List[str] = None
-    fp8_gemm_module_list: List[str] = None
-    fp8_text_encoder_module_list: List[str] = None
-    fp8_gemm_include_suffixes: Optional[Tuple[str, ...]] = None
-    fp4_gemm_module_list: List[str] = None
-    fp8_precision_overrides: Tuple[str] = None
-    fp8_precision_override_suffixes: Tuple[str] = None
     fbcache_thresh: float = 0.12
     step_cache_config: Optional[ModelCacheConfig] = None
     # FSDP strategy is just for the components to be sharded - other components will be moved to correct device automatically
@@ -310,11 +303,7 @@ class xFuserModel(abc.ABC):
     def _update_model_settings(self, config: xFuserArgs) -> None:
         targets = self.settings.gemm_targets
 
-        te_targets = (
-            targets.text_encoder.roots()
-            if targets is not None
-            else self.settings.fp8_text_encoder_module_list
-        )
+        te_targets = targets.text_encoder.roots() if targets is not None else ()
         spec = getattr(config, "gemm_quantization_spec", None)
         quantizing = (
             not spec.is_pure("none") if spec is not None else config.use_fp8_gemms

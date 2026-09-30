@@ -272,19 +272,26 @@ def test_native_fp8_streaming_is_disabled_for_suffix_restricted_targets(
         "prepare_native_transformer_fp8_load",
         lambda _adapter, **kwargs: observed.update(kwargs),
     )
-    model = SimpleNamespace(
-        settings=SimpleNamespace(
-            fp8_gemm_include_suffixes=("attn.to_qkv",),
-        )
+    from xfuser.config.gemm import GemmQuantizationSpec
+    from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
+
+    narrowed = resolve(
+        GemmTargets(
+            transformer=Select(
+                modules=("transformer.blocks",), only=("attn.to_qkv",)
+            )
+        ),
+        GemmQuantizationSpec.parse("fp8"),
     )
 
     transformer_load._prepare_native_load(
-        model,
+        SimpleNamespace(settings=SimpleNamespace(gemm_targets=None)),
         SimpleNamespace(format=QuantizationFormat.FP8),
         "transformer",
         ("blocks",),
         True,
         lambda: object(),
+        plan=narrowed,
     )
 
     assert observed["stream_quant"] is False
@@ -304,10 +311,7 @@ def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
         prepare,
     )
     model = SimpleNamespace(
-        settings=SimpleNamespace(
-            fp8_precision_overrides=("0.",),
-            fp8_precision_override_suffixes=(".ff.net.2",),
-        ),
+        settings=SimpleNamespace(gemm_targets=None),
         config=SimpleNamespace(use_hybrid_gemm_schedule=True),
     )
 
@@ -320,8 +324,10 @@ def test_native_int8_does_not_receive_fp4_precision_overrides(monkeypatch):
         lambda: object(),
     )
 
-    assert observed["precision_prefixes"] == ()
-    assert observed["precision_suffixes"] == ()
+    # Carve-out patterns are not a native-load argument at all any more, and
+    # the hybrid schedule belongs to the FP4 family alone.
+    assert "precision_prefixes" not in observed
+    assert "precision_suffixes" not in observed
     assert observed["hybrid"] is False
 
 

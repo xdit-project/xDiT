@@ -17,6 +17,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from xfuser.config.gemm import GemmQuantizationSpec
+from xfuser.model_executor.quant.targets import GemmTargets, Select, resolve
+
+#: One block-local leaf held at the better format, the rest streamed.
+_CARVED = GemmTargets(
+    transformer=Select(modules=("transformer.blocks",)),
+    keep_high=Select(prefixes=("transformer.blocks.0.override",)),
+)
 from xfuser.model_executor.models.runner_models.loading import (
     fp8_backends,
     meta_load,
@@ -75,6 +83,8 @@ def loader_for(runner):
 
     ledger = getattr(runner, "quantization_ledger", QuantizationLedger())
     runner.quantization_ledger = ledger
+    if not hasattr(runner.settings, "gemm_targets"):
+        runner.settings.gemm_targets = None
     plan = getattr(runner, "fp8", SimpleNamespace(targets_for=lambda name: ()))
     if not hasattr(plan, "gemm_plan"):
         # An unmigrated model is what these stubs describe; the routes ask the
@@ -127,16 +137,10 @@ def loader_for(runner):
 
 def preflight_loader(runner):
     """Build only the loader-owned runtime state needed by preflight tests."""
-    for name in (
-        "fp8_gemm_module_list",
-        "fp8_text_encoder_module_list",
-        "fp4_gemm_module_list",
-        "int8_gemm_module_list",
-        "fp8_precision_overrides",
-        "fp8_precision_override_suffixes",
-    ):
-        if not hasattr(runner.settings, name):
-            setattr(runner.settings, name, None)
+    if not hasattr(runner.settings, "gemm_targets"):
+        # These stubs describe a model that declares nothing; the routes ask
+        # for the declaration before they ask it anything.
+        runner.settings.gemm_targets = None
     if not hasattr(runner.config, "quantize_text_encoder"):
         runner.config.quantize_text_encoder = False
     if not hasattr(runner.config, "use_hybrid_gemm_schedule"):
@@ -1277,13 +1281,17 @@ def test_build_transformer_records_only_streamed_nvfp4_leaves(monkeypatch):
             adapter,
             ("blocks",),
         ),
-        settings=SimpleNamespace(
-            fsdp_strategy={},
-            fp8_precision_overrides=("0.override",),
-            fp8_precision_override_suffixes=None,
-        ),
+        settings=SimpleNamespace(fsdp_strategy={}, gemm_targets=_CARVED),
         config=SimpleNamespace(use_hybrid_gemm_schedule=False),
         _checkpoint_request=lambda name: CheckpointRequest("org/repo", subfolder=name),
+    )
+    # The stream plan asks the resolved plan which leaves the high format keeps,
+    # so the fixture has to carry one rather than a pattern on settings.
+    runner.fp8 = SimpleNamespace(
+        targets_for=lambda name: ("blocks",),
+        gemm_plan=resolve(
+            _CARVED, GemmQuantizationSpec.parse("low=fp4,high=fp8")
+        ),
     )
 
     result = transformer_load.load_transformer(loader_for(runner), Wrapper)
@@ -1326,10 +1334,14 @@ def test_eager_te_adapter_maps_multiple_components_and_logs_each(monkeypatch):
             }[name]
         ),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=[
-                "text_encoder.encoder.block",
-                "text_encoder_2.model.layers",
-            ]
+            gemm_targets=GemmTargets(
+                text_encoder=Select(
+                    modules=(
+                        "text_encoder.encoder.block",
+                        "text_encoder_2.model.layers",
+                    )
+                )
+            )
         ),
         _loader=SimpleNamespace(
             build_meta_component=lambda name, fp8=False: (name, fp8)
@@ -1427,7 +1439,9 @@ def test_hybrid_meta_te_uses_blockwise_fp8_backend(monkeypatch):
         _memory_efficient_fsdp_load=lambda: True,
         fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=["text_encoder.encoder.block"]
+            gemm_targets=GemmTargets(
+                text_encoder=Select(modules=("text_encoder.encoder.block",))
+            )
         ),
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
@@ -1472,7 +1486,9 @@ def test_meta_te_placement_disables_torchao_native_pipeline_streaming(
         fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="torchao")),
         fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=["text_encoder.encoder.block"]
+            gemm_targets=GemmTargets(
+                text_encoder=Select(modules=("text_encoder.encoder.block",))
+            )
         ),
         _loader=SimpleNamespace(
             meta_te_kwargs=lambda: ({"text_encoder": "meta"}, None),
@@ -1528,7 +1544,9 @@ def test_a_blockwise_filled_text_encoder_needs_no_post_load_fallback(monkeypatch
         config=SimpleNamespace(use_fp4_gemms=False),
         fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=["text_encoder.encoder.block"],
+            gemm_targets=GemmTargets(
+                text_encoder=Select(modules=("text_encoder.encoder.block",))
+            ),
             fsdp_strategy={"text_encoder": {"wrap_attrs": ["encoder.block"]}},
         ),
         _loader=SimpleNamespace(
@@ -1565,7 +1583,9 @@ def test_meta_fsdp_rejects_text_encoder_post_load_fallback(monkeypatch):
         fp8_backend=SimpleNamespace(backend=SimpleNamespace(value="aiter")),
         fp8=SimpleNamespace(targets_for=lambda name: ["encoder.block"]),
         settings=SimpleNamespace(
-            fp8_text_encoder_module_list=["text_encoder.encoder.block"]
+            gemm_targets=GemmTargets(
+                text_encoder=Select(modules=("text_encoder.encoder.block",))
+            )
         ),
         _loader=SimpleNamespace(
             build_meta_component=lambda name, fp8=False: object(),

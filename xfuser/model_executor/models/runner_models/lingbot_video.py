@@ -235,7 +235,6 @@ class xFuserLingBotVideoMoEModel(xFuserModel):
                 log("Quantizing refiner blocks to FP4...")
                 quantize_linear_layers_to_fp4(
                     refiner_transformer.blocks,
-                    fp8_layers=self.settings.fp8_precision_overrides,
                     use_hybrid_schedule=self.config.use_hybrid_gemm_schedule,
                     device=device,
                 )
